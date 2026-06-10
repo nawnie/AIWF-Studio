@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+import json
+import shlex
+import sys
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from aiwf.core.config.settings import RuntimeFlags
+
+LAUNCH_FILENAME = "launch.json"
+WEBUI_SETTINGS_BAT = "webui.settings.bat"
+
+
+class LaunchSettings(BaseSettings):
+    """User-editable options applied on the next app start."""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    listen: bool = False
+    port: int = Field(default=7860, ge=1024, le=65535)
+    autolaunch: bool = False
+    theme: str = "dark"
+    gradio_auth: str = ""
+    share: bool = False
+    medvram: bool = False
+    lowvram: bool = False
+    xformers: bool = False
+    opt_sdp_attention: bool = False
+    opt_split_attention: bool = False
+    no_half: bool = False
+    cpu: bool = False
+    api: bool = False
+    nowebui: bool = False
+    models_dir: str = ""
+    ckpt_dir: str = ""
+    output_dir: str = ""
+
+    @field_validator("theme")
+    @classmethod
+    def validate_theme(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"dark", "light"}:
+            raise ValueError("theme must be dark or light")
+        return normalized
+
+    @field_validator("gradio_auth")
+    @classmethod
+    def validate_gradio_auth(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            return ""
+        if ":" not in cleaned:
+            raise ValueError("gradio_auth must be username:password")
+        return cleaned
+
+    @classmethod
+    def from_runtime_flags(cls, flags: RuntimeFlags) -> LaunchSettings:
+        return cls(
+            listen=flags.listen,
+            port=flags.port,
+            autolaunch=flags.autolaunch,
+            theme=flags.theme,
+            gradio_auth=flags.gradio_auth or "",
+            share=flags.share,
+            medvram=flags.medvram,
+            lowvram=flags.lowvram,
+            xformers=flags.xformers,
+            opt_sdp_attention=flags.opt_sdp_attention,
+            opt_split_attention=flags.opt_split_attention,
+            no_half=flags.no_half,
+            cpu=flags.cpu,
+            api=flags.api,
+            nowebui=flags.nowebui,
+            models_dir=str(flags.models_dir) if flags.models_dir else "",
+            ckpt_dir=str(flags.ckpt_dir) if flags.ckpt_dir else "",
+            output_dir=str(flags.output_dir) if flags.output_dir else "",
+        )
+
+    def to_runtime_flags(self, base: RuntimeFlags) -> RuntimeFlags:
+        payload = base.model_dump()
+        payload.update(
+            {
+                "listen": self.listen,
+                "port": self.port,
+                "autolaunch": self.autolaunch,
+                "theme": self.theme,
+                "gradio_auth": self.gradio_auth or None,
+                "share": self.share,
+                "medvram": self.medvram,
+                "lowvram": self.lowvram,
+                "xformers": self.xformers,
+                "opt_sdp_attention": self.opt_sdp_attention,
+                "opt_split_attention": self.opt_split_attention,
+                "no_half": self.no_half,
+                "cpu": self.cpu,
+                "api": self.api,
+                "nowebui": self.nowebui,
+                "models_dir": Path(self.models_dir).resolve() if self.models_dir.strip() else None,
+                "ckpt_dir": Path(self.ckpt_dir).resolve() if self.ckpt_dir.strip() else None,
+                "output_dir": Path(self.output_dir).resolve() if self.output_dir.strip() else None,
+            }
+        )
+        return RuntimeFlags.model_validate(payload)
+
+    def argv(self) -> list[str]:
+        args: list[str] = []
+        if self.listen:
+            args.append("--listen")
+        if self.port != 7860:
+            args.extend(["--port", str(self.port)])
+        if self.autolaunch:
+            args.append("--autolaunch")
+        if self.theme != "dark":
+            args.extend(["--theme", self.theme])
+        if self.gradio_auth:
+            args.extend(["--gradio-auth", self.gradio_auth])
+        if self.share:
+            args.append("--share")
+        if self.medvram:
+            args.append("--medvram")
+        if self.lowvram:
+            args.append("--lowvram")
+        if self.xformers:
+            args.append("--xformers")
+        if self.opt_sdp_attention:
+            args.append("--opt-sdp-attention")
+        if self.opt_split_attention:
+            args.append("--opt-split-attention")
+        if self.no_half:
+            args.append("--no-half")
+        if self.cpu:
+            args.append("--cpu")
+        if self.api:
+            args.append("--api")
+        if self.nowebui:
+            args.append("--nowebui")
+        if self.models_dir.strip():
+            args.extend(["--models-dir", self.models_dir.strip()])
+        if self.ckpt_dir.strip():
+            args.extend(["--ckpt-dir", self.ckpt_dir.strip()])
+        if self.output_dir.strip():
+            args.extend(["--output-dir", self.output_dir.strip()])
+        return args
+
+    def command_preview(self) -> str:
+        argv = self.argv()
+        if not argv:
+            return "python -m aiwf.app"
+        return f"python -m aiwf.app {shlex.join(argv)}"
+
+
+def launch_settings_path(data_dir: Path) -> Path:
+    return data_dir / LAUNCH_FILENAME
+
+
+def explicit_cli_flags(argv: list[str] | None = None) -> set[str]:
+    flags: set[str] = set()
+    for arg in argv or sys.argv[1:]:
+        if arg.startswith("--"):
+            flags.add(arg.split("=", 1)[0])
+    return flags
+
+
+def load_launch_settings(path: Path) -> LaunchSettings | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return LaunchSettings.model_validate(data)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def save_launch_settings(path: Path, settings: LaunchSettings) -> None:
+    path.write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+
+
+def merge_launch_settings(
+    cli_flags: RuntimeFlags,
+    saved: LaunchSettings | None,
+    *,
+    explicit: set[str] | None = None,
+) -> RuntimeFlags:
+    if saved is None:
+        return cli_flags
+
+    explicit = explicit or explicit_cli_flags()
+    merged = saved.to_runtime_flags(cli_flags)
+
+    field_to_flag = {
+        "listen": "--listen",
+        "port": "--port",
+        "autolaunch": "--autolaunch",
+        "theme": "--theme",
+        "gradio_auth": "--gradio-auth",
+        "share": "--share",
+        "medvram": "--medvram",
+        "lowvram": "--lowvram",
+        "xformers": "--xformers",
+        "opt_sdp_attention": "--opt-sdp-attention",
+        "opt_split_attention": "--opt-split-attention",
+        "no_half": "--no-half",
+        "cpu": "--cpu",
+        "api": "--api",
+        "nowebui": "--nowebui",
+        "models_dir": "--models-dir",
+        "ckpt_dir": "--ckpt-dir",
+        "output_dir": "--output-dir",
+    }
+
+    cli_dump = cli_flags.model_dump()
+    merged_dump = merged.model_dump()
+
+    for field, flag in field_to_flag.items():
+        if flag in explicit:
+            merged_dump[field] = cli_dump[field]
+
+    return RuntimeFlags.model_validate(merged_dump)
+
+
+def _quote_for_cmd(arg: str) -> str:
+    if any(ch in arg for ch in (' ', '\t', '"')):
+        return '"' + arg.replace('"', '\\"') + '"'
+    return arg
+
+
+def write_webui_settings_bat(project_root: Path, settings: LaunchSettings) -> Path:
+    bat_path = project_root / WEBUI_SETTINGS_BAT
+    argv = settings.argv()
+    args_line = " ".join(_quote_for_cmd(arg) for arg in argv)
+    content = (
+        "@echo off\n"
+        "rem Auto-generated by AIWF Studio Settings — edit Launch options in the app instead.\n"
+        f"set COMMANDLINE_ARGS={args_line}\n"
+    )
+    bat_path.write_text(content, encoding="utf-8")
+    return bat_path
+
+
+def format_launch_status(current: LaunchSettings, saved: LaunchSettings | None) -> str:
+    if saved is None:
+        return "_No saved launch profile yet. Adjust options below and click **Save launch options**._"
+    if current.model_dump() == saved.model_dump():
+        return "**Saved profile matches this session.** Restart anytime to re-apply the same options."
+    return (
+        "**Saved profile differs from this session.** "
+        "Command-line overrides may be in effect, or you need to restart after saving."
+    )

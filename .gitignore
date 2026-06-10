@@ -1,0 +1,14 @@
+venv/
+models/
+outputs/
+terminals/
+.pytest_cache/
+__pycache__/
+*.pyc
+.env
+config.json
+*.log
+.idea/
+.vscode/
+launch.json
+webui.settings.bat

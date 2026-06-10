@@ -1,0 +1,17 @@
+[project]
+name = "aiwf-studio"
+version = "0.1.0"
+description = "AIWF Studio — a structured rebuild of Stable Diffusion WebUI"
+requires-python = ">=3.10,<3.13"
+readme = "README.md"
+
+[project.scripts]
+aiwf = "aiwf.app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aiwf*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
