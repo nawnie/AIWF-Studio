@@ -1,9 +1,9 @@
 """Guard against misalignment between the generate event's inputs list and run()'s signature.
 
-This is an AST-level test so it runs without torch/gradio installed. A one-position
-shift here is what caused the "No checkpoint available. Refresh models." bug:
-inpaint_source was inserted mid-list while run() expected it third-from-last,
-so ckpt_map received the mask editor's value (None).
+AST-level test — runs without torch/gradio installed. A one-position shift here
+is what caused the "No checkpoint available. Refresh models." bug: an input was
+inserted mid-list while run() expected it near the end, so every parameter
+after it received the wrong component's value.
 """
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ STUDIO = Path(__file__).resolve().parents[1] / "aiwf" / "web" / "studio.py"
 ANCHORS = [
     ("mode_toggle", "mode_label"),
     ("checkpoint", "ckpt_title"),
+    ("sampler", "sampler_label"),
+    ("scheduler", "scheduler_label"),
     ("workspace_image", "source_image"),
     ("mask_editor", "editor_value"),
     ("state", "ckpt_map"),

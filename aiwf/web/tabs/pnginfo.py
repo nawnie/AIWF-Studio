@@ -52,20 +52,4 @@ def register_pnginfo(registry: WebRegistry) -> None:
 
         read_btn.click(do_read, inputs=[source], outputs=[parameters, status])
         source.change(do_read, inputs=[source], outputs=[parameters, status])
-        send_btn.click(
-            do_send,
-            inputs=[parameters],
-            outputs=[status],
-            js="""
-            (text) => {
-                setTimeout(() => {
-                    const studioTab = [...document.querySelectorAll(".aiwf-nav-tabs .tab-nav button")]
-                        .find((button) => button.textContent.trim() === "Studio");
-                    if (studioTab) {
-                        studioTab.click();
-                    }
-                }, 120);
-                return [text];
-            }
-            """,
-        )
+        send_btn.click(do_send, inputs=[parameters], outputs=[status])

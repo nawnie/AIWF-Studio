@@ -10,5 +10,3 @@ config.json
 *.log
 .idea/
 .vscode/
-launch.json
-webui.settings.bat

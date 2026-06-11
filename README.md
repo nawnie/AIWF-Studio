@@ -146,4 +146,3 @@ python -m aiwf.app
 - `venv/` is local only and should not ship in the public repo.
 - `models/` and `outputs/` are user-local runtime data.
 - `AGENTS.md` is for local build sessions, not end-user repo content.
-"# AIWF-Studio" 

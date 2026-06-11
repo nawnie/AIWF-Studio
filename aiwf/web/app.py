@@ -21,7 +21,7 @@ from aiwf.web.tabs.pnginfo import register_pnginfo
 from aiwf.web.tabs.segment import register_segment
 from aiwf.web.tabs.settings import register_settings
 from aiwf.web.tabs.workflows import register_workflows
-from aiwf.web.theme import build_theme, theme_css_overrides
+from aiwf.web.theme import build_theme
 
 logger = logging.getLogger(__name__)
 _STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
@@ -108,9 +108,8 @@ def create_web_ui(ctx: AppContext) -> tuple[gr.Blocks, object, str, str]:
             elem_classes=["aiwf-viewport-meta"],
             visible=False,
         )
-        gr.HTML(theme_css_overrides(preset=ctx.settings.accent_preset), visible=False)
         gr.HTML(
-            f"""
+            """
             <header class="aiwf-topbar" aria-label="Application header">
                 <div class="aiwf-topbar-start">
                     <div class="aiwf-brand-lockup">
@@ -161,9 +160,4 @@ def create_web_ui(ctx: AppContext) -> tuple[gr.Blocks, object, str, str]:
 
         demo.load(fn=startup, inputs=None, outputs=None, show_progress=False)
 
-    return (
-        demo,
-        build_theme(dark=ctx.flags.theme == "dark", accent_preset=ctx.settings.accent_preset),
-        _static_text("style.css"),
-        _static_text("studio.js"),
-    )
+    return demo, build_theme(dark=ctx.flags.theme == "dark"), _static_text("style.css"), _static_text("studio.js")

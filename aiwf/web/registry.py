@@ -9,7 +9,6 @@ if TYPE_CHECKING:
     from aiwf.bootstrap import AppContext
 
 TabBuilder = Callable[["AppContext", "gr.Tab | None"], None]
-PINNED_TABS = {"Studio", "Settings"}
 
 
 @dataclass
@@ -24,16 +23,8 @@ class WebRegistry:
 
         return decorator
 
-    def visible_tabs(self, ctx: AppContext) -> list[tuple[str, TabBuilder, int]]:
-        hidden = set(getattr(ctx.settings, "hidden_tabs", []))
-        return [
-            (name, builder, order)
-            for name, builder, order in self.tabs
-            if name not in hidden or name in PINNED_TABS
-        ]
-
     def mount(self, ctx: AppContext) -> None:
         with gr.Tabs(elem_classes=["aiwf-nav-tabs"]):
-            for name, builder, _order in self.visible_tabs(ctx):
+            for name, builder, _order in self.tabs:
                 with gr.Tab(name, elem_classes=["aiwf-nav-tab"]) as tab:
                     builder(ctx, tab)

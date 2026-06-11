@@ -176,8 +176,6 @@ def register_studio(registry: WebRegistry) -> None:
 
         sampler_map = {s.label: s.id for s in samplers}
         sampler_id_to_label = {s.id: s.label for s in samplers}
-        _fallback_sampler = samplers[1].label if len(samplers) > 1 else (samplers[0].label if samplers else None)
-        default_sampler_label = sampler_id_to_label.get(ctx.settings.default_sampler, _fallback_sampler)
 
         studio_root = gr.Column(elem_classes=["aiwf-studio", "aiwf-mode-txt2img"])
         with studio_root:
@@ -325,11 +323,11 @@ def register_studio(registry: WebRegistry) -> None:
                             sampler = gr.Dropdown(
                                 label="Sampler",
                                 choices=[s.label for s in samplers],
-                                value=default_sampler_label,
+                                value=samplers[1].label if len(samplers) > 1 else None,
                             )
-                            steps = gr.Slider(1, 150, value=ctx.settings.default_steps, step=1, label="Steps")
+                            steps = gr.Slider(1, 150, value=20, step=1, label="Steps")
                         with gr.Row():
-                            cfg = gr.Slider(1, 30, value=ctx.settings.default_cfg_scale, step=0.5, label="CFG scale")
+                            cfg = gr.Slider(1, 30, value=7, step=0.5, label="CFG scale")
                             seed = gr.Number(value=-1, precision=0, label="Seed (-1 = random)")
                         with gr.Row():
                             reuse_seed = gr.Button("Reuse last seed", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
@@ -338,8 +336,8 @@ def register_studio(registry: WebRegistry) -> None:
                         txt2img_panel = gr.Column(elem_classes=["aiwf-mode-panel"])
                         with txt2img_panel:
                             with gr.Row():
-                                width = gr.Slider(64, 2048, value=ctx.settings.default_width, step=8, label="Width")
-                                height = gr.Slider(64, 2048, value=ctx.settings.default_height, step=8, label="Height")
+                                width = gr.Slider(64, 2048, value=512, step=8, label="Width")
+                                height = gr.Slider(64, 2048, value=512, step=8, label="Height")
                             with gr.Row():
                                 batch_size = gr.Slider(1, 8, value=1, step=1, label="Batch")
                                 batch_count = gr.Slider(1, 8, value=1, step=1, label="Count")
@@ -354,7 +352,7 @@ def register_studio(registry: WebRegistry) -> None:
                             label="Wait between runs (seconds)",
                             info="Pause between continuous generations to reduce heat on mobile GPUs",
                         )
-                        clip_skip = gr.Slider(1, 12, value=ctx.settings.default_clip_skip, step=1, label="Clip skip")
+                        clip_skip = gr.Slider(1, 12, value=1, step=1, label="Clip skip")
                         with gr.Row():
                             vae = gr.Dropdown(label="VAE", choices=vae_choices, value=None, scale=4)
                             vae_refresh = gr.Button("Refresh VAEs", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"], scale=1)
@@ -1820,6 +1818,7 @@ def register_studio(registry: WebRegistry) -> None:
             denoise,
             inpaint_denoise,
             mask_blur,
+            inpaint_source,
             workspace_image,
             mask_editor,
             state,
@@ -1838,7 +1837,6 @@ def register_studio(registry: WebRegistry) -> None:
             cn_guidance_end,
             cn_threshold_a,
             cn_threshold_b,
-            inpaint_source,
             continuous_toggle,
             cooldown_seconds,
         ]

@@ -9,13 +9,13 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
     # Checkpoints (Hugging Face)
     CatalogEntry(
         key="hf-sd15-pruned",
-        title="Stable Diffusion 1.5 (fp16 pruned)",
+        title="Stable Diffusion 1.5 Pruned",
         category="checkpoint",
         source="huggingface",
-        repo_id="Comfy-Org/stable-diffusion-v1-5-archive",
-        filename="v1-5-pruned-emaonly-fp16.safetensors",
-        size_mb=2034,
-        notes="Classic SD1.5 base — fp16 pruned single file, half the download of fp32.",
+        repo_id="runwayml/stable-diffusion-v1-5",
+        filename="v1-5-pruned-emaonly.safetensors",
+        size_mb=4067,
+        notes="Classic SD1.5 base model.",
     ),
     CatalogEntry(
         key="hf-sdxl-base",
@@ -24,7 +24,7 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         source="huggingface",
         repo_id="stabilityai/stable-diffusion-xl-base-1.0",
         filename="sd_xl_base_1.0.safetensors",
-        size_mb=6617,
+        size_mb=6600,
         notes="SDXL base — pair with a refiner for best results.",
     ),
     # Checkpoints (CivitAI — resolved via API at download time)
@@ -57,20 +57,31 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
     ),
     # LoRAs
     CatalogEntry(
+        key="hf-lora-detail-tweaker",
+        title="Detail Tweaker LoRA (SD1.5)",
+        category="lora",
+        source="huggingface",
+        repo_id="goofyai/SDXL_Crystal_clear_4K",
+        filename="add_detail.safetensors",
+        size_mb=144,
+        notes="Adds detail — works on SD1.5 pipelines.",
+    ),
+    CatalogEntry(
+        key="hf-lora-xl-detail",
+        title="SDXL Detail LoRA",
+        category="lora",
+        source="huggingface",
+        repo_id="goofyai/SDXL_Crystal_clear_4K",
+        filename="SDXLrender_v2.0.safetensors",
+        size_mb=218,
+    ),
+    CatalogEntry(
         key="civit-lora-add-detail",
-        title="Add More Details (SD1.5 LoRA)",
+        title="Add More Details (LoRA)",
         category="lora",
         source="civitai",
         civitai_model_id=82098,
-        notes="Detail enhancer for SD1.5 — small download.",
-    ),
-    CatalogEntry(
-        key="civit-lora-detail-xl",
-        title="Detail Tweaker XL (SDXL LoRA)",
-        category="lora",
-        source="civitai",
-        civitai_model_id=122359,
-        notes="Detail enhancer for SDXL — small download.",
+        size_mb=144,
     ),
     # VAE
     CatalogEntry(
@@ -79,7 +90,7 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         category="vae",
         source="huggingface",
         repo_id="stabilityai/sd-vae-ft-mse-original",
-        filename="vae-ft-mse-840000-ema-pruned.safetensors",
+        filename="diffusion_pytorch_model.safetensors",
         size_mb=319,
         notes="Fixes washed-out SD1.5 colors.",
     ),
@@ -152,20 +163,11 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
     ),
     # Face swap
     CatalogEntry(
-        key="fs-inswapper-fp16",
-        title="inswapper_128 fp16 (ReActor)",
-        category="faceswap",
-        source="direct",
-        url="https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128_fp16.onnx",
-        size_mb=264,
-        notes="Half-size fp16 build — recommended.",
-    ),
-    CatalogEntry(
         key="fs-inswapper",
         title="inswapper_128 (ReActor)",
         category="faceswap",
         source="direct",
         url="https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx",
-        size_mb=529,
+        size_mb=554,
     ),
 ]

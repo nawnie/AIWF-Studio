@@ -69,12 +69,7 @@ class AppContext:
             if data.get("show_progress_every_n_steps", 1) == 0:
                 data["enable_live_preview"] = False
                 data["show_progress_every_n_steps"] = 1
-            loaded = UserSettings.model_validate(data)
-            # Update in place: services hold a reference to this settings object,
-            # so replacing it would leave them reading stale defaults.
-            for name in UserSettings.model_fields:
-                setattr(self.settings, name, getattr(loaded, name))
-            self.settings.apply_token_env()
+            self.settings = UserSettings.model_validate(data)
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -130,11 +125,11 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     devices = DeviceManager(flags)
     devices.log_status()
     backend = DiffusersBackend(flags, devices)
+    store = FilesystemImageStore(flags.resolved_output_dir())
     metadata = MetadataService()
     queue = JobQueue(events)
     settings_path = flags.data_dir / "config.json"
     settings = UserSettings()
-    store = FilesystemImageStore(flags.resolved_output_dir(), settings=settings)
 
     generation = GenerationService(backend, store, metadata, queue, events, settings)
     enhance = EnhanceService(flags, settings, devices, store)

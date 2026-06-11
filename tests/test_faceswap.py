@@ -31,17 +31,16 @@ def test_model_info_from_path(tmp_path: Path):
 def test_catalog_and_install_state(tmp_path: Path):
     svc = _svc(tmp_path)
     assert svc.models_dir().name == "insightface"
-    assert [d.key for d in svc.list_downloadable()] == ["inswapper_128_fp16", "inswapper_128"]
+    assert [d.key for d in svc.list_downloadable()] == ["inswapper_128"]
     item = DOWNLOADABLE_FACESWAP[0]
-    assert item.key == "inswapper_128_fp16"
     assert not svc.is_installed(item)
-    assert svc.find_downloadable("inswapper_128_fp16").url.startswith("https://huggingface.co/")
+    assert svc.find_downloadable("inswapper_128").url.startswith("https://huggingface.co/")
     assert svc.available() is False
 
-    (svc.models_dir() / "inswapper_128_fp16.onnx").write_bytes(b"x")
+    (svc.models_dir() / "inswapper_128.onnx").write_bytes(b"x")
     assert svc.is_installed(item)
     assert svc.available() is True
-    assert [m.id for m in svc.list_models()] == ["inswapper_128_fp16"]
+    assert [m.id for m in svc.list_models()] == ["inswapper_128"]
 
 
 def test_swap_without_model_raises(tmp_path: Path):
