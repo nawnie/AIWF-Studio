@@ -355,10 +355,6 @@ footer {
     transition: color 0.18s var(--aiwf-ease), background 0.18s var(--aiwf-ease), border-color 0.18s var(--aiwf-ease);
 }
 
-.aiwf-nav-tabs > .tabitem:not(.selected) {
-    content-visibility: auto;
-    contain-intrinsic-size: auto 600px;
-}
 
 .aiwf-nav-tabs .tab-nav button:hover {
     color: var(--aiwf-text) !important;
@@ -389,8 +385,8 @@ footer {
 }
 
 @keyframes aiwf-tab-in {
-    from { opacity: 0; transform: translateY(4px); }
-    to { opacity: 1; transform: translateY(0); }
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 /* ── Secondary pages (Models, Segment, Workflows, etc.) ──────────── */
@@ -611,7 +607,6 @@ footer {
     padding: 0 !important;
     background: transparent !important;
     border: none !important;
-    contain: layout style;
 }
 
 .aiwf-panel {
@@ -1002,7 +997,6 @@ footer {
     padding: 0.85rem !important;
     min-height: 0;
     flex: 0 0 auto;
-    contain: layout paint;
     transition: border-color 0.25s var(--aiwf-ease), box-shadow 0.25s var(--aiwf-ease);
     box-shadow: var(--aiwf-shadow-soft), var(--aiwf-shadow-inset);
     position: relative;
@@ -1309,6 +1303,102 @@ footer {
 
 .aiwf-status-bar[data-state="error"] strong {
     color: var(--aiwf-danger) !important;
+}
+
+.aiwf-progress-host {
+    margin-top: 0.45rem !important;
+}
+
+.aiwf-progress-wrap {
+    padding: 0.55rem 0.85rem;
+    border: 1px solid var(--aiwf-border);
+    border-radius: var(--aiwf-radius-lg);
+    background: var(--aiwf-surface);
+}
+
+.aiwf-progress-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.aiwf-progress-track {
+    flex: 1;
+    height: 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--aiwf-border) 70%, transparent);
+    overflow: hidden;
+}
+
+.aiwf-progress-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #e8b84a, #5dceaa);
+    transition: width 0.25s var(--aiwf-ease);
+}
+
+.aiwf-progress-step,
+.aiwf-progress-elapsed {
+    font-family: var(--aiwf-mono);
+    font-size: 0.72rem;
+    color: var(--aiwf-text-muted);
+    white-space: nowrap;
+}
+
+.aiwf-upload-resolution {
+    min-width: 7.5rem;
+}
+
+.aiwf-inpaint-panel {
+    margin-top: 0.35rem;
+}
+
+.aiwf-client-error-wrap {
+    margin-top: 0.5rem !important;
+}
+
+.aiwf-client-error-tray {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.55rem 0.75rem;
+    border-radius: var(--aiwf-radius);
+    border: 1px solid color-mix(in srgb, var(--aiwf-danger) 45%, var(--aiwf-border));
+    background: var(--aiwf-danger-soft);
+    color: var(--aiwf-text);
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+
+.aiwf-client-error-tray[hidden] {
+    display: none !important;
+}
+
+.aiwf-client-error-tray strong {
+    color: var(--aiwf-danger);
+    white-space: nowrap;
+}
+
+.aiwf-client-error-text {
+    flex: 1;
+    font-family: var(--aiwf-mono);
+    word-break: break-word;
+}
+
+.aiwf-client-error-copy {
+    border: 1px solid var(--aiwf-border);
+    background: var(--aiwf-surface);
+    color: var(--aiwf-text-muted);
+    border-radius: var(--aiwf-radius-sm);
+    padding: 0.15rem 0.45rem;
+    font-size: 0.72rem;
+    cursor: pointer;
+}
+
+.aiwf-client-error-copy:hover {
+    color: var(--aiwf-text);
+    border-color: var(--aiwf-accent);
 }
 
 /* Galleries (unified) */
@@ -1775,11 +1865,9 @@ footer {
 @keyframes aiwf-rise {
     from {
         opacity: 0;
-        transform: translateY(8px);
     }
     to {
         opacity: 1;
-        transform: translateY(0);
     }
 }
 
@@ -2012,4 +2100,177 @@ footer {
         white-space: normal;
         display: block;
     }
+}
+
+/* Dropdown option lists (gradio renders these position:fixed): cap the height
+   so long lists (samplers, checkpoints, LoRAs) scroll instead of overflowing
+   the viewport. */
+ul.options {
+    max-height: min(42vh, 420px) !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--aiwf-border-strong, #3a4150) transparent;
+}
+
+ul.options::-webkit-scrollbar {
+    width: 8px;
+}
+
+ul.options::-webkit-scrollbar-thumb {
+    background: var(--aiwf-border-strong, #3a4150);
+    border-radius: 4px;
+}
+
+ul.options::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* Accordion blocks: stray horizontal scrollbar strips are never useful */
+.aiwf-prompt-tools,
+.aiwf-prompt-tools > .label-wrap,
+.aiwf-advanced,
+.aiwf-meta-accordion,
+.aiwf-launch-group {
+    overflow-x: hidden !important;
+}
+
+.aiwf-prompt-tools::-webkit-scrollbar,
+.aiwf-prompt-tools > .label-wrap::-webkit-scrollbar {
+    display: none;
+}
+
+/* Prompt tool tabs (Styles | LoRAs | Embeddings | Files) */
+.aiwf-tool-tabs {
+    background: transparent !important;
+    border: none !important;
+}
+
+.aiwf-tool-tabs > .tab-nav {
+    display: flex;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--aiwf-border) !important;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.3rem;
+}
+
+.aiwf-tool-tabs > .tab-nav button {
+    font-family: var(--aiwf-font-display) !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.03em;
+    padding: 0.3rem 0.65rem !important;
+    border-radius: var(--aiwf-radius) !important;
+    border: 1px solid transparent !important;
+    background: transparent !important;
+    color: var(--aiwf-text-muted) !important;
+}
+
+.aiwf-tool-tabs > .tab-nav button:hover {
+    color: var(--aiwf-text) !important;
+    background: var(--aiwf-surface-hover) !important;
+}
+
+.aiwf-tool-tabs > .tab-nav button.selected {
+    color: var(--aiwf-accent-bright) !important;
+    background: var(--aiwf-accent-soft) !important;
+    border-color: color-mix(in srgb, var(--aiwf-accent) 35%, transparent) !important;
+}
+
+.aiwf-tool-tabs > .tabitem {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+}
+
+/* Architecture-aware resolution hint */
+.aiwf-size-hint {
+    padding: 0.45rem 0.65rem !important;
+    border: 1px solid color-mix(in srgb, #d39a4f 45%, transparent);
+    border-radius: var(--aiwf-radius);
+    background: rgba(211, 154, 79, 0.08);
+    color: #e9c27f !important;
+    font-size: 0.76rem !important;
+}
+
+.aiwf-size-hint p {
+    margin: 0 !important;
+}
+
+/* Generate button busy state */
+.aiwf-generate-btn button.aiwf-btn-busy,
+button.aiwf-generate-btn.aiwf-btn-busy {
+    opacity: 0.85;
+    background-image: linear-gradient(
+        110deg,
+        transparent 0%,
+        rgba(255, 255, 255, 0.08) 45%,
+        transparent 90%
+    ) !important;
+    background-size: 220% 100% !important;
+    animation: aiwf-busy-sweep 1.6s linear infinite;
+    cursor: progress !important;
+}
+
+@keyframes aiwf-busy-sweep {
+    from { background-position: 120% 0; }
+    to { background-position: -120% 0; }
+}
+
+/* Toasts */
+#aiwf-toasts {
+    position: fixed;
+    right: 1.1rem;
+    bottom: 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    z-index: 2000;
+    pointer-events: none;
+}
+
+.aiwf-toast {
+    min-width: 200px;
+    max-width: 340px;
+    padding: 0.6rem 0.9rem;
+    border-radius: var(--aiwf-radius);
+    border: 1px solid var(--aiwf-border-strong, #3a4150);
+    background: var(--aiwf-surface, #161a22);
+    color: var(--aiwf-text, #e6e9ef);
+    font-size: 0.8rem;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    opacity: 0;
+    translate: 0 8px;
+    transition: opacity 0.3s ease, translate 0.3s ease;
+}
+
+.aiwf-toast.aiwf-toast-show {
+    opacity: 1;
+    translate: 0 0;
+}
+
+.aiwf-toast[data-state="done"] { border-left: 3px solid var(--aiwf-accent, #68c3aa); }
+.aiwf-toast[data-state="error"] { border-left: 3px solid #d96a6a; }
+.aiwf-toast[data-state="warning"] { border-left: 3px solid #d39a4f; }
+.aiwf-toast[data-state="info"] { border-left: 3px solid #62a6c8; }
+
+/* Keyboard shortcut legend */
+.aiwf-shortcut-help {
+    display: flex;
+    gap: 1.1rem;
+    justify-content: flex-end;
+    padding: 0.15rem 0.2rem 0;
+    color: var(--aiwf-text-muted);
+    font-size: 0.68rem;
+}
+
+.aiwf-shortcut-help kbd {
+    display: inline-block;
+    padding: 0.05rem 0.32rem;
+    border: 1px solid var(--aiwf-border-strong, #3a4150);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: var(--aiwf-surface, #161a22);
+    font-family: inherit;
+    font-size: 0.66rem;
 }

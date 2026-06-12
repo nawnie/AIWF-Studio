@@ -163,6 +163,32 @@ class ControlNetService:
                 return model
         return None
 
+    def validate_enabled(
+        self,
+        *,
+        enabled: bool,
+        mode: str,
+        model_id: str | None,
+        control_image: Image.Image | None,
+    ) -> None:
+        """Raise ValueError when ControlNet is enabled but the request cannot run."""
+        if not enabled:
+            return
+        if mode not in ("txt2img", "img2img"):
+            raise ValueError(
+                "ControlNet is only available in Text and Image2Image modes. "
+                "Disable ControlNet or switch mode."
+            )
+        if not model_id:
+            raise ValueError("Select a ControlNet model or disable ControlNet.")
+        if self.resolve_model(model_id) is None:
+            raise ValueError(
+                f"ControlNet model '{model_id}' was not found. "
+                "Refresh models or download one in Models → ControlNet."
+            )
+        if control_image is None:
+            raise ValueError("Upload a control image or disable ControlNet.")
+
     def preprocess(
         self,
         image: Image.Image,

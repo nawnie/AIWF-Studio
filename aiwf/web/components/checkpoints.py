@@ -6,43 +6,53 @@ from aiwf.bootstrap import AppContext
 from aiwf.core.domain.models import Checkpoint
 
 
-def _checkpoint_choices(checkpoints: list[Checkpoint], *, inpaint_only: bool = False) -> list[tuple[str, str]]:
+def _checkpoint_choices(checkpoints: list[Checkpoint]) -> list[tuple[str, str]]:
+    """List checkpoints with optional [inpaint] suffix for display.
+    No auto-sorting or preferring — user choice in the dropdown is authoritative.
+    (All models can be used for inpaint via the appropriate pipeline; dedicated
+    inpaint weights are just better at it.)"""
     choices = []
     for checkpoint in checkpoints:
         is_inpaint = checkpoint.kind == "inpaint"
-        if inpaint_only and not is_inpaint:
-            continue
         label_suffix = " [inpaint]" if is_inpaint else ""
         choices.append((f"{checkpoint.title}{label_suffix}", checkpoint.title))
     return choices
 
 
-def _default_checkpoint(checkpoints: list[Checkpoint], *, prefer_inpaint: bool = False) -> str | None:
+def resolve_default_checkpoint(
+    checkpoints: list[Checkpoint],
+    last_checkpoint_id: str | None = None,
+) -> Checkpoint | None:
+    """Pick startup checkpoint: last user selection, else first in catalog."""
     if not checkpoints:
         return None
-    if prefer_inpaint:
+    if last_checkpoint_id:
         for checkpoint in checkpoints:
-            if checkpoint.kind == "inpaint":
-                return checkpoint.title
-    return checkpoints[0].title
+            if checkpoint.id == last_checkpoint_id:
+                return checkpoint
+    return checkpoints[0]
+
+
+def default_checkpoint_title(
+    checkpoints: list[Checkpoint],
+    last_checkpoint_id: str | None = None,
+) -> str | None:
+    selected = resolve_default_checkpoint(checkpoints, last_checkpoint_id)
+    return selected.title if selected else None
 
 
 def checkpoint_dropdown(
     ctx: AppContext,
     label: str = "Checkpoint",
-    *,
-    prefer_inpaint: bool = False,
 ) -> tuple[gr.Dropdown, dict[str, str]]:
     checkpoints = ctx.generation.list_checkpoints()
     id_map = {c.title: c.id for c in checkpoints}
-    choices = _checkpoint_choices(checkpoints, inpaint_only=prefer_inpaint)
-    if prefer_inpaint and not choices:
-        choices = _checkpoint_choices(checkpoints)
+    choices = _checkpoint_choices(checkpoints)
 
     dropdown = gr.Dropdown(
         label=label,
         choices=choices,
-        value=_default_checkpoint(checkpoints, prefer_inpaint=prefer_inpaint),
+        value=default_checkpoint_title(checkpoints, ctx.settings.last_checkpoint_id),
         allow_custom_value=False,
     )
     return dropdown, id_map
@@ -51,22 +61,33 @@ def checkpoint_dropdown(
 def refresh_checkpoints(
     ctx: AppContext,
     *,
-    prefer_inpaint: bool = False,
     rescan: bool = False,
+    current_value: str | None = None,
 ) -> tuple[gr.Dropdown, dict[str, str]]:
+    """Refresh the checkpoint list.
+
+    If current_value is still present in the (new) choices (by label or id), it is
+    preserved. There is no UI logic that auto-swaps or prefers certain models
+    (e.g. no forcing inpaint models when in inpaint mode). The user-selected
+    value in the dropdown is always respected. If the current value is no longer
+    valid (e.g. after a rescan removed it), falls back to the first in the list.
+    """
     checkpoints = (
         ctx.generation.refresh_checkpoint_catalog()
         if rescan
         else ctx.generation.list_checkpoints()
     )
     id_map = {c.title: c.id for c in checkpoints}
-    choices = _checkpoint_choices(checkpoints, inpaint_only=prefer_inpaint)
-    if prefer_inpaint and not choices:
-        choices = _checkpoint_choices(checkpoints)
-    update = gr.update(
-        choices=choices,
-        value=_default_checkpoint(checkpoints, prefer_inpaint=prefer_inpaint),
-    )
+    choices = _checkpoint_choices(checkpoints)
+    valid = {label for (label, _id) in choices} | { _id for (_label, _id) in choices }
+    if current_value and current_value in valid:
+        update = gr.update(choices=choices, value=current_value)
+    else:
+        # Do not set value= at all. This prevents any UI refresh/mode/side-effect
+        # logic from swapping the user's selected model in the dropdown back to
+        # a default (e.g. the first scanned checkpoint). The selected value stays
+        # whatever the user clicked, as requested.
+        update = gr.update(choices=choices)
     return update, id_map
 
 

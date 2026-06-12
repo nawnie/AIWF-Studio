@@ -213,7 +213,11 @@ def _parse_civitai_reference(url_or_id: str) -> ParsedRemote:
             raise ValueError("Not a CivitAI URL.")
         version_match = _RE_CIVITAI_VERSION.search(parsed.path)
         model_match = _RE_CIVITAI_MODEL.search(parsed.path)
-        if version_match:
+        query_version = urllib.parse.parse_qs(parsed.query).get("modelVersionId", [None])[0]
+        if query_version and str(query_version).isdigit():
+            # Model page links carry the selected version as ?modelVersionId=
+            version_id = int(query_version)
+        elif version_match:
             version_id = int(version_match.group(1))
         elif model_match:
             model_id = int(model_match.group(1))

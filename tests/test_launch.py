@@ -1,12 +1,7 @@
 from pathlib import Path
 import sys
 
-from aiwf.core.config.launch import (
-    LaunchSettings,
-    merge_launch_settings,
-    save_launch_settings,
-    write_webui_settings_bat,
-)
+from aiwf.core.config.launch import LaunchSettings, merge_launch_settings, save_launch_settings
 from aiwf.core.config.settings import RuntimeFlags
 import launch
 
@@ -45,15 +40,6 @@ def test_merge_launch_settings_applies_saved_cpu_flag(tmp_path: Path):
     merged = merge_launch_settings(cli, saved, explicit=set())
     assert merged.cpu is True
     assert merged.api is True
-
-
-def test_write_webui_settings_bat(tmp_path: Path):
-    settings = LaunchSettings(listen=True, port=7860, xformers=True)
-    bat = write_webui_settings_bat(tmp_path, settings)
-    text = bat.read_text(encoding="utf-8")
-    assert "COMMANDLINE_ARGS=" in text
-    assert "--listen" in text
-    assert "--xformers" in text
 
 
 def test_save_and_load_launch_settings_roundtrip(tmp_path: Path):

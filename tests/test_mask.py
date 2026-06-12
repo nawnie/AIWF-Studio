@@ -2,6 +2,7 @@ from PIL import Image
 
 from aiwf.infrastructure.diffusers.mask import (
     align_to_multiple_of_8,
+    crop_to_masked,
     editor_from_mask,
     inpaint_session_background,
     mask_from_editor,
@@ -102,3 +103,30 @@ def test_resize_for_inpaint_aligns_dimensions():
     assert (width, height) == align_to_multiple_of_8(515, 515)
     assert resized_image.size == (width, height)
     assert resized_mask.size == (width, height)
+
+
+def test_crop_to_masked_aligns_non_multiple_of_8_image():
+    image = Image.new("RGB", (986, 904), (128, 128, 128))
+    mask = Image.new("L", (986, 904), 0)
+    mask.paste(255, (200, 150, 800, 700))
+
+    cropped_image, cropped_mask, crop_box = crop_to_masked(image, mask, padding=32)
+    crop_w = crop_box[2] - crop_box[0]
+    crop_h = crop_box[3] - crop_box[1]
+
+    assert crop_w % 8 == 0
+    assert crop_h % 8 == 0
+    assert cropped_image.size == (crop_w, crop_h)
+    assert cropped_mask.size == (crop_w, crop_h)
+
+
+def test_crop_to_masked_aligns_full_image_degenerate_case():
+    image = Image.new("RGB", (986, 904), (128, 128, 128))
+    mask = Image.new("L", (986, 904), 0)
+
+    cropped_image, cropped_mask, crop_box = crop_to_masked(image, mask)
+    expected_w, expected_h = align_to_multiple_of_8(986, 904)
+
+    assert crop_box == (0, 0, expected_w, expected_h)
+    assert cropped_image.size == (expected_w, expected_h)
+    assert cropped_mask.size == (expected_w, expected_h)

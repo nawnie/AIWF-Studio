@@ -12,11 +12,18 @@ VAE_EXTENSIONS = {".safetensors", ".pt", ".ckpt"}
 
 
 def resolve_vae_roots(flags: RuntimeFlags) -> list[Path]:
+    """Only dedicated VAE folders — scanning the models root would list
+    checkpoints with "VAE" in their filename as VAEs."""
+    import os
+
     models_dir = flags.resolved_models_dir()
     roots: list[Path] = []
-    for candidate in (models_dir / "VAE", models_dir / "vae", models_dir):
+    seen: set[str] = set()
+    for candidate in (models_dir / "VAE", models_dir / "vae", models_dir / "vae-approx"):
         resolved = candidate.resolve()
-        if resolved.exists() and resolved not in roots:
+        key = os.path.normcase(str(resolved))
+        if resolved.exists() and key not in seen:
+            seen.add(key)
             roots.append(resolved)
     return roots
 

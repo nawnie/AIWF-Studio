@@ -32,11 +32,18 @@ class DownloadableFaceSwap:
 
 DOWNLOADABLE_FACESWAP: list[DownloadableFaceSwap] = [
     DownloadableFaceSwap(
+        key="inswapper_128_fp16",
+        title="inswapper_128 fp16 (ReActor) — half size",
+        filename="inswapper_128_fp16.onnx",
+        url=f"{_REACTOR_BASE}/inswapper_128_fp16.onnx",
+        size_mb=264,
+    ),
+    DownloadableFaceSwap(
         key="inswapper_128",
         title="inswapper_128 (ReActor)",
         filename="inswapper_128.onnx",
         url=f"{_REACTOR_BASE}/inswapper_128.onnx",
-        size_mb=554,
+        size_mb=529,
     ),
 ]
 

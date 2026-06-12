@@ -501,7 +501,7 @@ def register_model_manager(registry: WebRegistry) -> None:
             return (
                 gr.update(choices=choices, value=default),
                 catalog.lora_details(lora),
-                _lora_form_values(catalog, lora),
+                *_lora_form_values(catalog, lora),
             )
 
         def _lora_form_values(catalog_svc, lora):

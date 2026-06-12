@@ -23,6 +23,7 @@ class SegmentRequest(BaseModel):
     box: SegmentBox | None = None
     mask_index: int = Field(default=0, ge=0)
     dilation: int = Field(default=0, ge=0, le=128)
+    mask_blur: int = Field(default=4, ge=0, le=64)
     multimask_output: bool = True
 
 

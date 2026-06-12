@@ -4,9 +4,16 @@
     const PROMPT_ID = "aiwf-prompt";
     const GENERATE_ID = "aiwf-generate";
     const TOPBAR_STATUS_ID = "aiwf-topbar-status";
+    const CLIENT_ERROR_TRAY_ID = "aiwf-client-error-tray";
+    const CLIENT_ERROR_STORE_KEY = "aiwf-client-errors";
+    const CLIENT_EVENT_STORE_KEY = "aiwf-client-events";
+    const DEV_SESSION_KEY = "aiwf-dev-session";
+    const CLIENT_ERROR_MAX = 20;
+    const CLIENT_EVENT_MAX = 80;
+    const ACTION_RING_MAX = 12;
     const HANDHELD_QUERY = "(max-width: 900px), (hover: none) and (pointer: coarse) and (max-width: 1100px)";
 
-    const BUSY_RE = /\*\*(generating|working|loading|running|stepping|step\s*\d|processing)\*\*/i;
+    const BUSY_RE = /\*\*(generating|working|loading|running|stepping|step\s*\d|processing|saving|queued)\*\*/i;
     const DONE_RE = /\*\*(done|complete|saved|loaded|finished)\*\*/i;
     const ERROR_RE = /\*\*(error|failed|cancelled|canceled|stopped)\*\*/i;
 
@@ -60,7 +67,7 @@
 
     function onPromptKeydown(event) {
         const isEnter = event.key === "Enter" || event.code === "NumpadEnter";
-        if (!isEnter || !event.shiftKey || event.repeat) {
+        if (!isEnter || !(event.shiftKey || event.ctrlKey) || event.repeat) {
             return;
         }
         if (!isPromptTarget(event.target)) {
@@ -188,12 +195,125 @@
         return Boolean(primaryBusy);
     }
 
+    let stepProgressStartedAt = 0;
+
+    function parseStepProgress(text) {
+        const match = (text || "").match(/step\s*(\d+)\s*\/\s*(\d+)/i);
+        if (!match) {
+            return null;
+        }
+        const step = parseInt(match[1], 10);
+        const total = parseInt(match[2], 10);
+        if (!total || total < 1) {
+            return null;
+        }
+        return { step, total, ratio: Math.min(1, Math.max(0, step / total)) };
+    }
+
+    function formatElapsed(ms) {
+        const seconds = Math.max(0, Math.floor(ms / 1000));
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        if (mins > 0) {
+            return `${mins}:${String(secs).padStart(2, "0")}`;
+        }
+        return `${secs}s`;
+    }
+
+    function syncStepProgressBar(text, state) {
+        const wrap = document.getElementById("aiwf-progress-wrap");
+        const fill = document.getElementById("aiwf-progress-fill");
+        const stepEl = document.getElementById("aiwf-progress-step");
+        const elapsedEl = document.getElementById("aiwf-progress-elapsed");
+        if (!wrap || !fill || !stepEl || !elapsedEl) {
+            return;
+        }
+
+        const progress = parseStepProgress(text);
+        const busy = state === "busy" && progress;
+        if (!busy) {
+            wrap.hidden = true;
+            stepProgressStartedAt = 0;
+            fill.style.width = "0%";
+            stepEl.textContent = "";
+            elapsedEl.textContent = "";
+            return;
+        }
+
+        if (!stepProgressStartedAt) {
+            stepProgressStartedAt = Date.now();
+        }
+        wrap.hidden = false;
+        fill.style.width = `${Math.round(progress.ratio * 100)}%`;
+        stepEl.textContent = `Step ${progress.step}/${progress.total}`;
+        const elapsed = Date.now() - stepProgressStartedAt;
+        const etaMs =
+            progress.step > 0
+                ? (elapsed / progress.step) * (progress.total - progress.step)
+                : 0;
+        elapsedEl.textContent = `${formatElapsed(elapsed)} · ETA ${formatElapsed(etaMs)}`;
+    }
+
     function syncStatusBars() {
         document.querySelectorAll(".aiwf-status-bar").forEach((bar) => {
             const text = statusTextFromBar(bar);
             const state = inferStatusState(text);
             bar.dataset.state = state;
+            syncStepProgressBar(text, state);
         });
+    }
+
+    let lastObservedState = "ready";
+
+    function showToast(message, state) {
+        let host = document.getElementById("aiwf-toasts");
+        if (!host) {
+            host = document.createElement("div");
+            host.id = "aiwf-toasts";
+            document.body.appendChild(host);
+        }
+        const toast = document.createElement("div");
+        toast.className = "aiwf-toast";
+        toast.dataset.state = state || "info";
+        toast.textContent = message;
+        host.appendChild(toast);
+        requestAnimationFrame(() => toast.classList.add("aiwf-toast-show"));
+        window.setTimeout(() => {
+            toast.classList.remove("aiwf-toast-show");
+            window.setTimeout(() => toast.remove(), 350);
+        }, 4200);
+        while (host.children.length > 4) {
+            host.removeChild(host.firstChild);
+        }
+    }
+
+    function syncGenerateButton(state) {
+        const button = generateButton();
+        if (!button) {
+            return;
+        }
+        if (!button.dataset.aiwfLabel) {
+            button.dataset.aiwfLabel = (button.textContent || "Generate").trim() || "Generate";
+        }
+        const busy = state === "busy";
+        const wanted = busy ? "Generating…  Esc stops" : button.dataset.aiwfLabel;
+        if ((button.textContent || "").trim() !== wanted) {
+            button.textContent = wanted;
+        }
+        button.classList.toggle("aiwf-btn-busy", busy);
+    }
+
+    function toastForCompletion(state, text) {
+        if (state === "error") {
+            showToast("Generation failed — see status for details", "error");
+            return;
+        }
+        const seconds = text.match(/in\s+([\d.]+)s/i);
+        if (/stopp?ed|cancell?ed/i.test(text)) {
+            showToast("Generation stopped", "warning");
+        } else {
+            showToast(seconds ? `Done in ${seconds[1]}s` : "Done", "done");
+        }
     }
 
     function syncTopbarFromContext() {
@@ -210,6 +330,12 @@
 
         const label = shortLabelForState(state, text);
         setTopbarStatus(state, label);
+        syncGenerateButton(state);
+
+        if (lastObservedState === "busy" && state !== "busy") {
+            toastForCompletion(state, text);
+        }
+        lastObservedState = state;
 
         const app = document.querySelector(APP);
         if (app) {
@@ -300,10 +426,361 @@
         });
     }
 
+    function devSessionId() {
+        try {
+            let id = sessionStorage.getItem(DEV_SESSION_KEY);
+            if (!id) {
+                id = `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+                sessionStorage.setItem(DEV_SESSION_KEY, id);
+            }
+            return id;
+        } catch (_err) {
+            return "sess-unknown";
+        }
+    }
+
+    const actionRing = [];
+
+    function recordAction(name, detail) {
+        actionRing.push({
+            time: new Date().toISOString(),
+            name,
+            detail: detail || "",
+        });
+        if (actionRing.length > ACTION_RING_MAX) {
+            actionRing.shift();
+        }
+    }
+
+    function studioContext() {
+        const app = document.querySelector(APP);
+        const panel = activeTabPanel();
+        const modeBtn = document.querySelector(`${STUDIO} .aiwf-mode-toggle button.selected`);
+        const statusBar = panel ? panel.querySelector(".aiwf-status-bar") : null;
+        const genBtn = generateButton();
+        return {
+            session_id: devSessionId(),
+            tab: panel ? (panel.id || "studio") : "unknown",
+            mode: modeBtn ? (modeBtn.textContent || "").trim() : "",
+            status: statusBar ? statusTextFromBar(statusBar) : "",
+            busy: isAppBusy(),
+            generate_disabled: Boolean(genBtn && genBtn.disabled),
+            url: window.location.href,
+            recent_actions: actionRing.slice(-ACTION_RING_MAX),
+        };
+    }
+
+    function clientErrorTray() {
+        return document.getElementById(CLIENT_ERROR_TRAY_ID);
+    }
+
+    function formatClientError(entry) {
+        const lines = [
+            `[${entry.time}] ${entry.kind}: ${entry.message}`,
+            entry.source ? `source: ${entry.source}` : "",
+            entry.url ? `page: ${entry.url}` : "",
+            entry.stack || "",
+        ].filter(Boolean);
+        return lines.join("\n");
+    }
+
+    function loadClientErrors() {
+        try {
+            const raw = sessionStorage.getItem(CLIENT_ERROR_STORE_KEY);
+            return raw ? JSON.parse(raw) : [];
+        } catch (_err) {
+            return [];
+        }
+    }
+
+    function saveClientErrors(entries) {
+        try {
+            sessionStorage.setItem(CLIENT_ERROR_STORE_KEY, JSON.stringify(entries.slice(-CLIENT_ERROR_MAX)));
+        } catch (_err) {
+            /* ignore quota */
+        }
+    }
+
+    function showClientErrorTray(entry) {
+        const tray = clientErrorTray();
+        if (!tray) {
+            return;
+        }
+        const text = tray.querySelector(".aiwf-client-error-text");
+        if (text) {
+            text.textContent = entry.message;
+            text.title = formatClientError(entry);
+        }
+        tray.hidden = false;
+        setTopbarStatus("error", "Browser error");
+    }
+
+    function loadClientEvents() {
+        try {
+            const raw = sessionStorage.getItem(CLIENT_EVENT_STORE_KEY);
+            return raw ? JSON.parse(raw) : [];
+        } catch (_err) {
+            return [];
+        }
+    }
+
+    function saveClientEvents(entries) {
+        try {
+            sessionStorage.setItem(CLIENT_EVENT_STORE_KEY, JSON.stringify(entries.slice(-CLIENT_EVENT_MAX)));
+        } catch (_err) {
+            /* ignore quota */
+        }
+    }
+
+    function postDevJson(path, payload) {
+        const body = JSON.stringify(payload);
+        try {
+            if (navigator.sendBeacon) {
+                const blob = new Blob([body], { type: "application/json" });
+                navigator.sendBeacon(path, blob);
+                return;
+            }
+        } catch (_err) {
+            /* fall through */
+        }
+        fetch(path, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+            keepalive: true,
+        }).catch(() => {});
+    }
+
+    function reportClientEvent(action, detail, extraContext) {
+        const entry = {
+            time: new Date().toISOString(),
+            action,
+            detail: detail || "",
+            context: { ...studioContext(), ...(extraContext || {}) },
+        };
+        const entries = loadClientEvents();
+        entries.push(entry);
+        saveClientEvents(entries);
+        postDevJson("/api/v1/client-events", {
+            action: entry.action,
+            detail: entry.detail,
+            url: entry.context.url,
+            session_id: entry.context.session_id,
+            context: entry.context,
+        });
+    }
+
+    function reportClientError(payload) {
+        const context = { ...studioContext(), ...(payload.context || {}) };
+        const entry = {
+            time: new Date().toISOString(),
+            kind: payload.kind || "error",
+            message: String(payload.message || "Unknown browser error"),
+            stack: payload.stack || "",
+            source: payload.source || "",
+            url: payload.url || window.location.href,
+            context,
+        };
+        const entries = loadClientErrors();
+        entries.push(entry);
+        saveClientErrors(entries);
+        showClientErrorTray(entry);
+        reportClientEvent("client_error_reported", entry.message, { kind: entry.kind, source: entry.source });
+
+        const body = JSON.stringify({
+            kind: entry.kind,
+            message: entry.message,
+            stack: entry.stack,
+            source: entry.source,
+            url: entry.url,
+            user_agent: navigator.userAgent,
+            session_id: context.session_id,
+            context,
+        });
+
+        postDevJson("/api/v1/client-errors", JSON.parse(body));
+    }
+
+    function initClientErrorHooks() {
+        window.addEventListener(
+            "error",
+            (event) => {
+                if (!event || !event.message) {
+                    return;
+                }
+                reportClientError({
+                    kind: "error",
+                    message: event.message,
+                    stack: event.error && event.error.stack ? event.error.stack : "",
+                    source: event.filename ? `${event.filename}:${event.lineno || 0}` : "",
+                });
+            },
+            true
+        );
+
+        window.addEventListener("unhandledrejection", (event) => {
+            const reason = event && event.reason ? event.reason : "Unhandled promise rejection";
+            const message = reason && reason.message ? reason.message : String(reason);
+            const stack = reason && reason.stack ? reason.stack : "";
+            reportClientError({
+                kind: "unhandledrejection",
+                message,
+                stack,
+                source: "promise",
+            });
+        });
+
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = async function patchedFetch(input, init) {
+            const url = typeof input === "string" ? input : input && input.url ? input.url : "";
+            const isGradio = /gradio_api|\/queue\/|\/call\//i.test(url);
+            const method = (init && init.method) || "GET";
+            if (isGradio) {
+                recordAction("fetch_start", `${method} ${url}`);
+            }
+            let response;
+            try {
+                response = await nativeFetch(input, init);
+            } catch (err) {
+                if (isGradio) {
+                    const message = err && err.message ? err.message : String(err);
+                    reportClientError({
+                        kind: "fetch_network",
+                        message: `Gradio fetch failed: ${message}`,
+                        source: url,
+                    });
+                }
+                throw err;
+            }
+            if (isGradio) {
+                recordAction("fetch_done", `${response.status} ${url}`);
+                if (!response.ok) {
+                    let bodySnippet = "";
+                    try {
+                        const clone = response.clone();
+                        bodySnippet = (await clone.text()).slice(0, 600);
+                    } catch (_err) {
+                        bodySnippet = "";
+                    }
+                    reportClientError({
+                        kind: "fetch",
+                        message: `Gradio request failed (${response.status}) ${url}`,
+                        source: url,
+                        context: { method, body_snippet: bodySnippet },
+                    });
+                } else if (/\/queue\/join|\/queue\/data|\/call\//i.test(url)) {
+                    reportClientEvent("gradio_queue", `${response.status} ${url}`, { method });
+                }
+            }
+            return response;
+        };
+
+        const nativeConsoleError = console.error.bind(console);
+        console.error = function patchedConsoleError(...args) {
+            const text = args
+                .map((arg) => {
+                    if (arg && arg.message) {
+                        return arg.message;
+                    }
+                    return String(arg);
+                })
+                .join(" ");
+            if (/gradio|get_data|Blocks-/i.test(text)) {
+                reportClientError({
+                    kind: "console.error",
+                    message: text.slice(0, 2000),
+                    source: "console.error",
+                });
+            }
+            nativeConsoleError(...args);
+        };
+
+        document.addEventListener("click", (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) {
+                return;
+            }
+            const button = target.closest(".aiwf-client-error-copy");
+            if (button) {
+                const entries = loadClientErrors();
+                const events = loadClientEvents();
+                const text = [
+                    entries.map(formatClientError).join("\n\n---\n\n"),
+                    events.length ? "\n\n=== DEV EVENTS ===\n\n" : "",
+                    events.map((e) => `[${e.time}] ${e.action}: ${e.detail}`).join("\n"),
+                ].join("");
+                if (navigator.clipboard && text) {
+                    navigator.clipboard.writeText(text).catch(() => {});
+                }
+                return;
+            }
+            const generate = target.closest("#aiwf-generate button, .aiwf-generate-btn button");
+            if (generate) {
+                recordAction("generate_click", studioContext().mode);
+                reportClientEvent("generate_click", studioContext().mode, studioContext());
+                return;
+            }
+            const stop = target.closest(".aiwf-btn-stop button, button.aiwf-btn-stop");
+            if (stop) {
+                recordAction("stop_click", "");
+                reportClientEvent("stop_click", "", studioContext());
+                return;
+            }
+            const modeToggle = target.closest(".aiwf-mode-toggle button");
+            if (modeToggle) {
+                recordAction("mode_click", (modeToggle.textContent || "").trim());
+                reportClientEvent("mode_change", (modeToggle.textContent || "").trim(), studioContext());
+            }
+        }, true);
+
+        window.addEventListener("visibilitychange", () => {
+            reportClientEvent("visibility", document.visibilityState, studioContext());
+        });
+        window.addEventListener("pagehide", () => {
+            reportClientEvent("pagehide", "", studioContext());
+        });
+        window.addEventListener("online", () => reportClientEvent("network", "online", studioContext()));
+        window.addEventListener("offline", () => reportClientEvent("network", "offline", studioContext()));
+    }
+
+    function initGenerateWatchdog() {
+        let lastGenerateAt = 0;
+        setInterval(() => {
+            const genBtn = generateButton();
+            if (!genBtn || !genBtn.disabled) {
+                return;
+            }
+            const now = Date.now();
+            if (now - lastGenerateAt < 120000) {
+                return;
+            }
+            if (lastGenerateAt === 0) {
+                lastGenerateAt = now;
+                return;
+            }
+            if (isAppBusy()) {
+                reportClientEvent("generate_stuck_watchdog", "Generate disabled >120s while busy", studioContext());
+                lastGenerateAt = now;
+            }
+        }, 15000);
+
+        const root = document.querySelector(APP) || document.body;
+        const observer = new MutationObserver(() => {
+            const genBtn = generateButton();
+            if (genBtn && genBtn.disabled) {
+                lastGenerateAt = Date.now();
+            }
+        });
+        observer.observe(root, { subtree: true, attributes: true, attributeFilter: ["disabled", "class"] });
+    }
+
     function boot() {
         markUiReady();
         initDeviceWatchers();
         initHotkeys();
+        initClientErrorHooks();
+        initGenerateWatchdog();
+        reportClientEvent("studio_boot", "Studio JS initialized", studioContext());
         syncTopbarFromContext();
         setInterval(syncTopbarFromContext, 800);
     }

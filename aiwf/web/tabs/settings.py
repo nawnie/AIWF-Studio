@@ -8,7 +8,19 @@ import gradio as gr
 from aiwf.bootstrap import AppContext
 from aiwf.core.config.launch import LaunchSettings, format_launch_status
 from aiwf.core.util.access import build_network_access_info, format_remote_access_markdown
-from aiwf.web.registry import WebRegistry
+from aiwf.web.registry import PINNED_TABS, WebRegistry
+from aiwf.web.theme import accent_preset_names
+
+TAB_VISIBILITY_CHOICES = [
+    "Models",
+    "Segment",
+    "Enhance",
+    "Workflows",
+    "Face Swap",
+    "Library",
+    "PNG Info",
+    "History",
+]
 
 
 def _remote_access_markdown(ctx: AppContext) -> str:
@@ -65,6 +77,30 @@ def _session_snapshot_markdown(ctx: AppContext) -> str:
     )
 
 
+def _connect_qr(ctx: AppContext):
+    info = build_network_access_info(listen=ctx.flags.listen, port=ctx.runtime_port or ctx.flags.port)
+    url = info.recommended_phone_url
+    if not url:
+        return None, (
+            "**QR connect unavailable**  \n"
+            "Enable `--listen` or connect Tailscale so AIWF has a phone-ready URL to encode."
+        )
+
+    try:
+        import qrcode
+    except Exception:
+        return None, (
+            f"**QR target ready**  \n`{url}`  \n"
+            "Install the `qrcode` package to render a scannable code in Settings."
+        )
+
+    qr = qrcode.QRCode(border=2, box_size=6, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(url)
+    qr.make(fit=True)
+    image = qr.make_image(fill_color="#0c0e14", back_color="white").convert("RGB")
+    return image, f"**Scan to connect**  \n`{url}`"
+
+
 def _security_markdown() -> str:
     return (
         "**Security notes**  \n"
@@ -80,6 +116,19 @@ def register_settings(registry: WebRegistry) -> None:
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         launch = _launch_form_values(ctx)
         saved_launch = ctx.load_launch_settings()
+        from aiwf.core.domain.models import SCHEDULE_TYPES
+
+        samplers = ctx.generation.list_samplers()
+        schedule_label_to_id = {s.label: s.id for s in SCHEDULE_TYPES}
+        schedule_id_to_label = {s.id: s.label for s in SCHEDULE_TYPES}
+        default_schedule_label = schedule_id_to_label.get(ctx.settings.default_scheduler, "Automatic")
+        sampler_label_to_id = {s.label: s.id for s in samplers}
+        sampler_id_to_label = {s.id: s.label for s in samplers}
+        default_sampler_label = sampler_id_to_label.get(
+            ctx.settings.default_sampler, samplers[0].label if samplers else None
+        )
+
+        initial_qr, initial_qr_status = _connect_qr(ctx)
 
         with gr.Column(elem_classes=["aiwf-settings", "aiwf-settings-redesign"]):
             with gr.Column(elem_classes=["aiwf-page-header"]):
@@ -111,6 +160,15 @@ def register_settings(registry: WebRegistry) -> None:
                             "Refresh UI",
                             elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
                         )
+                    connect_qr = gr.Image(
+                        label="Phone connect QR",
+                        value=initial_qr,
+                        type="pil",
+                        interactive=False,
+                        visible=initial_qr is not None,
+                        elem_classes=["aiwf-settings-qr"],
+                    )
+                    qr_status = gr.Markdown(initial_qr_status, elem_classes=["aiwf-settings-hint"])
 
                 with gr.Column(scale=1, min_width=280, elem_classes=["aiwf-panel", "aiwf-settings-snapshot"]):
                     gr.Markdown("Session snapshot", elem_classes=["aiwf-section-label"])
@@ -156,6 +214,26 @@ def register_settings(registry: WebRegistry) -> None:
                             )
 
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
+                            gr.Markdown("Appearance & navigation", elem_classes=["aiwf-section-label"])
+                            gr.Markdown(
+                                "Pick the accent mood and choose which secondary tabs stay visible. "
+                                f"`{', '.join(sorted(PINNED_TABS))}` always stay on.",
+                                elem_classes=["aiwf-settings-paths"],
+                            )
+                            accent_preset = gr.Radio(
+                                label="Accent palette",
+                                choices=accent_preset_names(),
+                                value=ctx.settings.accent_preset,
+                                info="Save, then use Refresh UI to apply the new accent immediately.",
+                            )
+                            visible_tabs = gr.CheckboxGroup(
+                                label="Visible secondary tabs",
+                                choices=TAB_VISIBILITY_CHOICES,
+                                value=[tab_name for tab_name in TAB_VISIBILITY_CHOICES if tab_name not in ctx.settings.hidden_tabs],
+                                info="Hide duplicate or rarely used tools without removing the feature from the project.",
+                            )
+
+                        with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
                             gr.Markdown("Output behavior", elem_classes=["aiwf-section-label"])
                             gr.Markdown(
                                 "Choose what gets saved and where the core generation modes write their files.",
@@ -178,12 +256,51 @@ def register_settings(registry: WebRegistry) -> None:
                                 label="inpaint output folder",
                                 value=ctx.settings.inpaint_output_subdir,
                             )
+                            image_format = gr.Radio(
+                                label="Image file format",
+                                choices=["png", "jpg", "webp"],
+                                value=ctx.settings.image_format,
+                                info="PNG keeps generation metadata inside the file; jpg/webp save smaller files.",
+                            )
+                            image_quality = gr.Slider(
+                                label="jpg/webp quality",
+                                minimum=10,
+                                maximum=100,
+                                step=1,
+                                value=ctx.settings.image_quality,
+                            )
                             save_btn = gr.Button("Save workspace settings", variant="primary")
                             status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
 
+                    with gr.Row(equal_height=False, elem_classes=["aiwf-settings-grid"]):
+                        with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
+                            gr.Markdown("Generation defaults", elem_classes=["aiwf-section-label"])
+                            gr.Markdown(
+                                "Starting values for the Studio tab. Save, then use Refresh UI (or restart) to apply.",
+                                elem_classes=["aiwf-settings-paths"],
+                            )
+                            with gr.Row():
+                                default_sampler = gr.Dropdown(
+                                    label="Default sampler",
+                                    choices=[s.label for s in samplers],
+                                    value=default_sampler_label,
+                                )
+                                default_schedule = gr.Dropdown(
+                                    label="Default schedule type",
+                                    choices=[s.label for s in SCHEDULE_TYPES],
+                                    value=default_schedule_label,
+                                )
+                            with gr.Row():
+                                default_steps = gr.Slider(1, 150, value=ctx.settings.default_steps, step=1, label="Steps")
+                                default_cfg = gr.Slider(1, 30, value=ctx.settings.default_cfg_scale, step=0.5, label="CFG scale")
+                            with gr.Row():
+                                default_width = gr.Slider(64, 2048, value=ctx.settings.default_width, step=8, label="Width")
+                                default_height = gr.Slider(64, 2048, value=ctx.settings.default_height, step=8, label="Height")
+                            default_clip_skip = gr.Slider(1, 12, value=ctx.settings.default_clip_skip, step=1, label="Clip skip")
+
                 with gr.Tab("Launch profile"):
                     gr.Markdown(
-                        "These options apply on the next app start. Saving writes `launch.json` and syncs `webui.settings.bat`.",
+                        "These options apply on the next app start. Saving writes `launch.json` (read automatically when you run `webui-user.bat` or `python launch.py`).",
                         elem_classes=["aiwf-page-intro"],
                     )
 
@@ -266,6 +383,16 @@ def register_settings(registry: WebRegistry) -> None:
                                 label="Disable half precision (FP32)",
                                 value=launch.no_half,
                             )
+                            launch_fp8 = gr.Checkbox(
+                                label="FP8 UNet weights (experimental)",
+                                value=launch.fp8,
+                                info="Halves UNet VRAM — recommended for SDXL on 8GB cards. Tiny quality cost.",
+                            )
+                            launch_directml = gr.Checkbox(
+                                label="DirectML — AMD/Intel GPU on Windows",
+                                value=launch.directml,
+                                info="Requires `pip install torch-directml`. NVIDIA cards should leave this off.",
+                            )
 
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
                             gr.Markdown("Folders", elem_classes=["aiwf-section-label"])
@@ -314,6 +441,27 @@ def register_settings(registry: WebRegistry) -> None:
                                 "They are not presented here as finished until the workflows around them are ready.",
                                 elem_classes=["aiwf-settings-hint"],
                             )
+                        with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
+                            gr.Markdown("API keys", elem_classes=["aiwf-section-label"])
+                            gr.Markdown(
+                                "Used by the Models tab for downloads. Stored locally in `config.json` — keep that file private.",
+                                elem_classes=["aiwf-settings-paths"],
+                            )
+                            hf_token = gr.Textbox(
+                                label="Hugging Face token",
+                                type="password",
+                                value=ctx.settings.huggingface_token,
+                                placeholder="hf_...",
+                                info="Needed for gated or private Hugging Face repos.",
+                            )
+                            civitai_token = gr.Textbox(
+                                label="CivitAI API key",
+                                type="password",
+                                value=ctx.settings.civitai_token,
+                                info="Needed for CivitAI models that require login to download.",
+                            )
+                            save_keys_btn = gr.Button("Save API keys", variant="primary")
+                            keys_status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
 
         launch_inputs = [
             launch_listen,
@@ -329,6 +477,8 @@ def register_settings(registry: WebRegistry) -> None:
             launch_medvram,
             launch_lowvram,
             launch_no_half,
+            launch_fp8,
+            launch_directml,
             launch_api,
             launch_nowebui,
             launch_models_dir,
@@ -337,11 +487,17 @@ def register_settings(registry: WebRegistry) -> None:
         ]
 
         def refresh_access():
-            return _remote_access_markdown(ctx), _session_snapshot_markdown(ctx)
+            qr_image, qr_text = _connect_qr(ctx)
+            return (
+                _remote_access_markdown(ctx),
+                _session_snapshot_markdown(ctx),
+                gr.update(value=qr_image, visible=qr_image is not None),
+                qr_text,
+            )
 
         refresh_network.click(
             refresh_access,
-            outputs=[remote_access, session_snapshot],
+            outputs=[remote_access, session_snapshot, connect_qr, qr_status],
             show_progress=False,
         )
         refresh_ui_btn.click(
@@ -349,6 +505,20 @@ def register_settings(registry: WebRegistry) -> None:
             js="() => window.location.reload()",
             inputs=None,
             outputs=None,
+            show_progress=False,
+        )
+
+        def save_api_keys(hf_value, civitai_value):
+            ctx.settings.huggingface_token = (hf_value or "").strip()
+            ctx.settings.civitai_token = (civitai_value or "").strip()
+            ctx.save_settings()
+            ctx.settings.apply_token_env()
+            return "**API keys saved.** They apply to new downloads immediately."
+
+        save_keys_btn.click(
+            save_api_keys,
+            inputs=[hf_token, civitai_token],
+            outputs=[keys_status],
             show_progress=False,
         )
 
@@ -403,6 +573,8 @@ def register_settings(registry: WebRegistry) -> None:
                 medvram,
                 lowvram,
                 no_half,
+                fp8,
+                directml,
                 api,
                 nowebui,
                 models_dir,
@@ -423,6 +595,8 @@ def register_settings(registry: WebRegistry) -> None:
                 medvram=bool(medvram),
                 lowvram=bool(lowvram),
                 no_half=bool(no_half),
+                fp8=bool(fp8),
+                directml=bool(directml),
                 api=bool(api),
                 nowebui=bool(nowebui),
                 models_dir=(models_dir or "").strip(),
@@ -444,10 +618,10 @@ def register_settings(registry: WebRegistry) -> None:
             except ValueError as exc:
                 return f"**Error** — {exc}", gr.update(), gr.update()
 
-            ctx.save_launch_settings(settings, project_root=Path(ctx.flags.data_dir))
+            ctx.save_launch_settings(settings)
             status_text = (
                 "**Launch profile saved.** Restart AIWF Studio to apply it. "
-                f"Saved to `{ctx.launch_settings_path.name}` and `webui.settings.bat`."
+                f"Saved to `{ctx.launch_settings_path.name}`."
             )
             return (
                 status_text,
@@ -470,6 +644,17 @@ def register_settings(registry: WebRegistry) -> None:
             t2i,
             i2i,
             inpaint,
+            fmt,
+            quality,
+            sampler_label,
+            schedule_label,
+            d_steps,
+            d_cfg,
+            d_width,
+            d_height,
+            d_clip,
+            accent,
+            selected_tabs,
         ):
             ctx.settings.enable_live_preview = bool(preview_enabled)
             ctx.settings.show_progress_every_n_steps = int(preview_steps)
@@ -478,9 +663,23 @@ def register_settings(registry: WebRegistry) -> None:
             ctx.settings.txt2img_output_subdir = t2i
             ctx.settings.img2img_output_subdir = i2i
             ctx.settings.inpaint_output_subdir = inpaint
+            ctx.settings.image_format = (fmt or "png").lower()
+            ctx.settings.image_quality = int(quality or 95)
+            ctx.settings.default_sampler = sampler_label_to_id.get(sampler_label, ctx.settings.default_sampler)
+            ctx.settings.default_scheduler = schedule_label_to_id.get(schedule_label, "automatic")
+            ctx.settings.default_steps = int(d_steps or 20)
+            ctx.settings.default_cfg_scale = float(d_cfg or 7.0)
+            ctx.settings.default_width = int(d_width or 512)
+            ctx.settings.default_height = int(d_height or 512)
+            ctx.settings.default_clip_skip = int(d_clip or 1)
+            ctx.settings.accent_preset = accent or "mint"
+            selected = set(selected_tabs or [])
+            ctx.settings.hidden_tabs = [tab_name for tab_name in TAB_VISIBILITY_CHOICES if tab_name not in selected]
             ctx.save_settings()
             return (
-                f"Workspace settings saved. {ctx.settings.live_preview_summary()}.",
+                "Workspace settings saved. "
+                f"{ctx.settings.live_preview_summary()}. "
+                "Use Refresh UI to apply accent or tab visibility changes immediately.",
                 ctx.settings.live_preview_summary(),
             )
 
@@ -494,6 +693,17 @@ def register_settings(registry: WebRegistry) -> None:
                 txt2img_dir,
                 img2img_dir,
                 inpaint_dir,
+                image_format,
+                image_quality,
+                default_sampler,
+                default_schedule,
+                default_steps,
+                default_cfg,
+                default_width,
+                default_height,
+                default_clip_skip,
+                accent_preset,
+                visible_tabs,
             ],
             outputs=[status, preview_hint],
             show_progress=False,
@@ -502,6 +712,6 @@ def register_settings(registry: WebRegistry) -> None:
         if tab is not None:
             tab.select(
                 refresh_access,
-                outputs=[remote_access, session_snapshot],
+                outputs=[remote_access, session_snapshot, connect_qr, qr_status],
                 show_progress=False,
             )

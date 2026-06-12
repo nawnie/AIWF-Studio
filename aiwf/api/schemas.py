@@ -14,6 +14,7 @@ class Txt2ImgPayload(BaseModel):
     height: int = 512
     seed: int = -1
     sampler: str = "euler_a"
+    scheduler: str = "automatic"
     batch_size: int = 1
     batch_count: int = 1
     clip_skip: int = 1

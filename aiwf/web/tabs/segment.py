@@ -60,6 +60,7 @@ def register_segment(registry: WebRegistry) -> None:
                         point_label = gr.Radio(["Include", "Exclude"], value="Include", label="Point type")
                     mask_index = gr.Slider(0, 2, value=0, step=1, label="Mask candidate", info="SAM multimask index")
                     dilation = gr.Slider(0, 64, value=0, step=1, label="Mask dilation")
+                    mask_blur = gr.Slider(0, 64, value=4, step=1, label="Mask blur")
                     refresh_models = gr.Button("Refresh models", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
                     run_segment = gr.Button("Generate mask", variant="primary", elem_classes=["aiwf-generate-btn"])
 
@@ -86,7 +87,7 @@ def register_segment(registry: WebRegistry) -> None:
             show_progress=False,
         )
 
-        def _segment(image, model_id, preset_id, custom_text, threshold, px, py, p_label, m_index, dilate):
+        def _segment(image, model_id, preset_id, custom_text, threshold, px, py, p_label, m_index, dilate, mask_blur_val):
             if image is None:
                 raise gr.Error("Upload an image first.")
             if not model_id and not service.list_models():
@@ -107,6 +108,7 @@ def register_segment(registry: WebRegistry) -> None:
                 else [],
                 mask_index=int(m_index),
                 dilation=int(dilate),
+                mask_blur=int(mask_blur_val),
             )
 
             mask, preview, candidates, message = service.segment(image, request, model_id=model_id)
@@ -127,6 +129,7 @@ def register_segment(registry: WebRegistry) -> None:
                 point_label,
                 mask_index,
                 dilation,
+                mask_blur,
             ],
             outputs=[mask_output, preview_output, mask_gallery, status, editor_export],
             show_progress="minimal",

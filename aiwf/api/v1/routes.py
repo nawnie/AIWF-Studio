@@ -69,6 +69,7 @@ def _a1111_generation_request(data: dict[str, Any], mode: GenerationMode) -> Gen
         "height": data.get("height", 512),
         "seed": data.get("seed", -1),
         "sampler": data.get("sampler_name") or data.get("sampler", "euler_a"),
+        "scheduler": (data.get("scheduler") or "automatic").lower(),
         "batch_size": data.get("batch_size", 1),
         "batch_count": data.get("n_iter", data.get("batch_count", 1)),
         "denoising_strength": data.get("denoising_strength", 0.75),

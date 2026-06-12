@@ -15,3 +15,6 @@ include = ["aiwf*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "dev: development-only diagnostics and client logging tests",
+]

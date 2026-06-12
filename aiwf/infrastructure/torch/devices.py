@@ -14,10 +14,24 @@ logger = logging.getLogger(__name__)
 class DeviceManager:
     def __init__(self, flags: RuntimeFlags | None = None) -> None:
         self._force_cpu = bool(flags.cpu) if flags is not None else False
+        self._use_directml = bool(getattr(flags, "directml", False)) if flags is not None else False
+        self._dml_device = None
+        if self._use_directml and not self._force_cpu:
+            try:
+                import torch_directml
+
+                self._dml_device = torch_directml.device()
+            except Exception:
+                logger.warning(
+                    "--directml requested but torch-directml is not installed. "
+                    "Run: pip install torch-directml  (falling back to CUDA/CPU)"
+                )
 
     def device(self) -> torch.device:
         if self._force_cpu:
             return torch.device("cpu")
+        if self._dml_device is not None:
+            return self._dml_device
         if torch.cuda.is_available():
             return torch.device("cuda")
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -27,6 +41,8 @@ class DeviceManager:
     def dtype(self, no_half: bool = False) -> torch.dtype:
         if no_half:
             return torch.float32
+        if self._dml_device is not None:
+            return torch.float16
         if self.device().type == "cuda":
             return torch.float16
         return torch.float32
@@ -34,6 +50,14 @@ class DeviceManager:
     def describe(self) -> str:
         if self._force_cpu:
             return "CPU (forced by --cpu)"
+        if self._dml_device is not None:
+            try:
+                import torch_directml
+
+                name = torch_directml.device_name(0)
+            except Exception:
+                name = "adapter"
+            return f"DirectML ({name})"
         if torch.cuda.is_available():
             index = torch.cuda.current_device()
             name = torch.cuda.get_device_name(index)
@@ -52,6 +76,12 @@ class DeviceManager:
                 "PyTorch CPU-only build detected. Re-run webui.bat to install the CUDA build, "
                 "or set TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124"
             )
+
+    def total_vram_gb(self) -> float:
+        if self._force_cpu or not torch.cuda.is_available():
+            return 0.0
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        return props.total_memory / (1024**3)
 
     def empty_cache(self) -> None:
         if torch.cuda.is_available():

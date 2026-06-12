@@ -12,6 +12,16 @@ def apply_attention_optimizations(pipe, flags) -> str:
     if pipe is None:
         return "none"
 
+    try:
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+        unet = getattr(pipe, "unet", None)
+        if unet is not None:
+            unet.to(memory_format=torch.channels_last)
+            logger.info("UNet memory format: channels_last (faster convolutions)")
+    except Exception:
+        logger.debug("channels_last / cudnn tuning failed", exc_info=True)
+
     if flags.xformers:
         try:
             pipe.enable_xformers_memory_efficient_attention()

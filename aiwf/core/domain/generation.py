@@ -34,10 +34,20 @@ class GenerationRequest(BaseModel):
     height: int = Field(default=512, ge=64, le=2048)
     seed: int = Field(default=-1)
     sampler: str = "euler_a"
+    scheduler: str = "automatic"
     batch_size: int = Field(default=1, ge=1, le=8)
     batch_count: int = Field(default=1, ge=1, le=8)
     denoising_strength: float = Field(default=0.75, ge=0.0, le=1.0)
     mask_blur: int = Field(default=4, ge=0, le=64)
+    seam_erode: int = Field(
+        default=1,
+        ge=0,
+        le=32,
+        description="Shrink composite mask inward to reduce edge halos after inpaint",
+    )
+    inpaint_only_masked: bool = False
+    inpaint_masked_padding: int = Field(default=32, ge=0, le=256)
+    inpaint_mask_content: str = Field(default="original")  # fill | original | latent noise | latent nothing
     clip_skip: int = Field(default=1, ge=1, le=12)
     enable_hr: bool = False
     hr_scale: float = Field(default=2.0, ge=1.0, le=4.0)

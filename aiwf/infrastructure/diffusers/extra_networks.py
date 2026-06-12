@@ -18,6 +18,10 @@ def apply_loras(pipe, loras: list[LoraRef], catalog: list[LoraInfo]) -> list[str
     adapter_names: list[str] = []
     adapter_weights: list[float] = []
 
+    # Pipelines share their UNet (txt2img/img2img/hires), so an adapter loaded
+    # via one pipe is already registered when the next pipe asks for it.
+    existing = set(getattr(getattr(pipe, "unet", None), "peft_config", None) or {})
+
     for index, ref in enumerate(loras):
         match = resolve_lora(catalog, ref.name)
         if match is None:
@@ -26,6 +30,11 @@ def apply_loras(pipe, loras: list[LoraRef], catalog: list[LoraInfo]) -> list[str
 
         adapter_name = f"aiwf_lora_{index}"
         path = Path(match.path)
+        if adapter_name in existing:
+            adapter_names.append(adapter_name)
+            adapter_weights.append(ref.weight)
+            logger.debug("LoRA adapter %s already registered; reusing", adapter_name)
+            continue
         try:
             if path.is_file():
                 pipe.load_lora_weights(str(path.parent), weight_name=path.name, adapter_name=adapter_name)

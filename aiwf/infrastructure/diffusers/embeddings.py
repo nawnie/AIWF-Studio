@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags
@@ -55,3 +56,33 @@ def scan_embeddings(flags: RuntimeFlags) -> list[EmbeddingInfo]:
     results.sort(key=lambda item: item.title.lower())
     logger.info("Found %d embedding(s)", len(results))
     return results
+
+
+# Matches an embedding id as a whole token (not substring of a larger word).
+# Embedding names may contain -, _, digits (e.g. "AS-YoungV2"); we treat those as part of the token.
+_BOUNDARY = re.compile(r"(?i)(?<![A-Za-z0-9_-])({})(?![A-Za-z0-9_-])")
+
+
+def find_referenced_embeddings(
+    prompt: str | None, negative: str | None, catalog: list[EmbeddingInfo]
+) -> list[EmbeddingInfo]:
+    """Return catalog entries for embeddings referenced by bare name in the prompt texts.
+
+    Used for on-demand loading instead of pre-loading every embedding file at
+    checkpoint load time. Only embeddings the user actually types (or inserts via
+    the picker) into the prompt/negative are loaded into the text encoders.
+    """
+    if not catalog:
+        return []
+    text = f"{prompt or ''} {negative or ''}"
+    if not text.strip():
+        return []
+    found: list[EmbeddingInfo] = []
+    seen: set[str] = set()
+    for item in catalog:
+        pat = _BOUNDARY.pattern.format(re.escape(item.id))
+        if re.search(pat, text):
+            if item.id not in seen:
+                seen.add(item.id)
+                found.append(item)
+    return found

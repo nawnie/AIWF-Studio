@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from PIL import Image
@@ -20,6 +21,7 @@ from aiwf.core.interfaces.backend import InferenceBackend
 from aiwf.core.interfaces.storage import ImageStore
 from aiwf.core.config.settings import UserSettings
 from aiwf.services.metadata import MetadataService
+from aiwf.dev.diagnostics import trace_exception_safe, trace_safe
 from aiwf.services.queue import JobQueue
 
 if TYPE_CHECKING:
@@ -38,6 +40,7 @@ class GenerationService:
         events: EventBus,
         settings: UserSettings,
         prompts: PromptProcessorService | None = None,
+        settings_path: Path | None = None,
     ) -> None:
         self.backend = backend
         self.store = store
@@ -46,6 +49,19 @@ class GenerationService:
         self.events = events
         self.settings = settings
         self.prompts = prompts
+        self._settings_path = settings_path
+
+    def _persist_last_checkpoint(self, checkpoint_id: str) -> None:
+        """Remember the last model used so the next launch restores it."""
+        if not checkpoint_id or self.settings.last_checkpoint_id == checkpoint_id:
+            return
+        self.settings.last_checkpoint_id = checkpoint_id
+        if self._settings_path is None:
+            return
+        self._settings_path.write_text(
+            self.settings.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
 
     def _resolve_prompts(self, request: GenerationRequest) -> GenerationRequest:
         if self.prompts is None:
@@ -82,6 +98,15 @@ class GenerationService:
             invalidate()
         return self.backend.list_checkpoints()
 
+    def list_embeddings(self):
+        return self.backend.list_embeddings()
+
+    def refresh_embedding_catalog(self):
+        invalidate = getattr(self.backend, "invalidate_embeddings", None)
+        if callable(invalidate):
+            invalidate()
+        return self.backend.list_embeddings()
+
     def refresh_vae_catalog(self):
         invalidate = getattr(self.backend, "invalidate_vaes", None)
         if callable(invalidate):
@@ -101,7 +126,9 @@ class GenerationService:
         return self.backend.resolve_checkpoint(checkpoint_id)
 
     def load_checkpoint(self, checkpoint_id: str | None = None):
-        return self.backend.load_checkpoint(checkpoint_id)
+        checkpoint = self.backend.load_checkpoint(checkpoint_id)
+        self._persist_last_checkpoint(checkpoint.id)
+        return checkpoint
 
     def submit(
         self,
@@ -116,6 +143,8 @@ class GenerationService:
         def worker(job: JobRecord) -> GenerationResult:
             job.request = self._resolve_prompts(job.request)
             self.events.publish(BeforeGenerate(job.id, job.request))
+            active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
+            self._persist_last_checkpoint(active.id)
 
             def on_progress(
                 step: int,
@@ -173,11 +202,20 @@ class GenerationService:
         """Run generation on a worker thread and yield progress for Gradio streaming."""
         record = JobRecord(request=request)
         self.queue.enqueue(record)
+        trace_safe(
+            "generation.submit_streaming",
+            "Streaming job enqueued",
+            job_id=str(record.id),
+            mode=request.mode.value,
+            checkpoint_id=request.checkpoint_id,
+        )
         progress_q: queue.Queue = queue.Queue()
 
         def worker(job: JobRecord) -> GenerationResult:
             job.request = self._resolve_prompts(job.request)
             self.events.publish(BeforeGenerate(job.id, job.request))
+            active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
+            self._persist_last_checkpoint(active.id)
             preview_every = self.settings.live_preview_interval()
 
             def on_progress(
@@ -201,12 +239,13 @@ class GenerationService:
             )
 
             if self.settings.save_images and job.request.save_images:
+                total = max(1, int(job.request.steps))
+                on_progress(total, total, "Saving output", None)
                 subdir = {
                     GenerationMode.TXT2IMG: self.settings.txt2img_output_subdir,
                     GenerationMode.IMG2IMG: self.settings.img2img_output_subdir,
                     GenerationMode.INPAINT: self.settings.inpaint_output_subdir,
                 }[job.request.mode]
-                checkpoint = self.backend.resolve_checkpoint(job.request.checkpoint_id)
                 artifacts = []
                 for index, image in enumerate(result.images):
                     infotext = result.infotexts[index] if index < len(result.infotexts) else ""
@@ -219,15 +258,33 @@ class GenerationService:
             self.events.publish(AfterGenerate(job.id, result))
             return result
 
-        thread = threading.Thread(target=lambda: self.queue.run_next(worker), daemon=True)
+        done = threading.Event()
+
+        def _run_worker() -> None:
+            try:
+                self.queue.run_next(worker, block=True)
+            except Exception as exc:
+                trace_exception_safe(
+                    "generation.streaming_worker",
+                    exc,
+                    job_id=str(record.id),
+                    mode=request.mode.value,
+                )
+                raise
+            finally:
+                done.set()
+
+        thread = threading.Thread(target=_run_worker, daemon=True)
         thread.start()
 
-        while thread.is_alive():
+        while not done.is_set() or not progress_q.empty():
             try:
                 item = progress_q.get(timeout=0.15)
             except queue.Empty:
                 continue
             yield item
+
+        thread.join(timeout=1.0)
 
         finished = self.queue.get(record.id)
         if finished is not None:

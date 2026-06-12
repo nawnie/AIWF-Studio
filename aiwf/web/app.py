@@ -10,6 +10,7 @@ from pathlib import Path
 import gradio as gr
 
 from aiwf.bootstrap import AppContext
+from aiwf.web.components.checkpoints import resolve_default_checkpoint
 from aiwf.web.registry import WebRegistry
 from aiwf.web.studio import register_studio
 from aiwf.web.tabs.enhance import register_enhance
@@ -21,7 +22,7 @@ from aiwf.web.tabs.pnginfo import register_pnginfo
 from aiwf.web.tabs.segment import register_segment
 from aiwf.web.tabs.settings import register_settings
 from aiwf.web.tabs.workflows import register_workflows
-from aiwf.web.theme import build_theme
+from aiwf.web.theme import build_theme, theme_css_overrides
 
 logger = logging.getLogger(__name__)
 _STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
@@ -36,10 +37,11 @@ def _static_text(name: str) -> str:
 def _preload_default_checkpoint(ctx: AppContext) -> None:
     try:
         checkpoints = ctx.generation.list_checkpoints()
-        if not checkpoints:
+        target = resolve_default_checkpoint(checkpoints, ctx.settings.last_checkpoint_id)
+        if target is None:
             return
-        ctx.generation.load_checkpoint(checkpoints[0].id)
-        logger.info("Preloaded checkpoint: %s", checkpoints[0].title)
+        ctx.generation.load_checkpoint(target.id)
+        logger.info("Preloaded checkpoint: %s", target.title)
     except Exception:
         logger.exception("Background checkpoint preload failed")
 
@@ -108,8 +110,9 @@ def create_web_ui(ctx: AppContext) -> tuple[gr.Blocks, object, str, str]:
             elem_classes=["aiwf-viewport-meta"],
             visible=False,
         )
+        gr.HTML(theme_css_overrides(preset=ctx.settings.accent_preset), visible=False)
         gr.HTML(
-            """
+            f"""
             <header class="aiwf-topbar" aria-label="Application header">
                 <div class="aiwf-topbar-start">
                     <div class="aiwf-brand-lockup">
@@ -160,4 +163,9 @@ def create_web_ui(ctx: AppContext) -> tuple[gr.Blocks, object, str, str]:
 
         demo.load(fn=startup, inputs=None, outputs=None, show_progress=False)
 
-    return demo, build_theme(dark=ctx.flags.theme == "dark"), _static_text("style.css"), _static_text("studio.js")
+    return (
+        demo,
+        build_theme(dark=ctx.flags.theme == "dark", accent_preset=ctx.settings.accent_preset),
+        _static_text("style.css"),
+        _static_text("studio.js"),
+    )

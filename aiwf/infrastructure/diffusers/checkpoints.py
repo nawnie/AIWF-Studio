@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags
@@ -40,9 +41,13 @@ def resolve_search_roots(flags: RuntimeFlags) -> list[Path]:
     ckpt_dir = flags.resolved_ckpt_dir()
     roots: list[Path] = []
 
+    seen_keys: set[str] = set()
+
     def add_root(path: Path) -> None:
         resolved = path.resolve()
-        if resolved.exists() and resolved not in roots:
+        key = os.path.normcase(str(resolved))
+        if resolved.exists() and key not in seen_keys:
+            seen_keys.add(key)
             roots.append(resolved)
 
     for candidate in (ckpt_dir, models_dir / "Stable-diffusion", models_dir / "stable-diffusion", models_dir):
@@ -111,12 +116,13 @@ def scan_checkpoints(roots: list[Path]) -> list[Checkpoint]:
 
         for path in _iter_checkpoint_files(root):
             resolved = str(path.resolve())
-            if resolved in seen_paths:
+            dedup_key = os.path.normcase(resolved)
+            if dedup_key in seen_paths:
                 continue
             if looks_like_lora_weights(path):
                 logger.debug("Skipping LoRA weights in checkpoint scan: %s", path)
                 continue
-            seen_paths.add(resolved)
+            seen_paths.add(dedup_key)
 
             short_hash = _fast_fingerprint(path)
             checkpoint_id = path.stem

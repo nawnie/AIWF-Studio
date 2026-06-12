@@ -30,6 +30,37 @@ logger = logging.getLogger(__name__)
 _SD15_CONTROLNET_CONFIG = "lllyasviel/sd-controlnet-canny"
 
 
+def infer_controlnet_architecture(path: str | Path) -> str:
+    """Best-effort ControlNet weight family from filename (sd15 vs sdxl)."""
+    name = Path(path).name.lower()
+    if "sdxl" in name or "controlnet-xl" in name or "xl_control" in name:
+        return "sdxl"
+    if is_control_lora_checkpoint(path) or "sd15" in name or "v11" in name:
+        return "sd15"
+    return "sd15"
+
+
+def assert_controlnet_checkpoint_compatible(
+    controlnet_path: str | Path,
+    checkpoint_architecture: str,
+) -> None:
+    """Raise ValueError when a ControlNet weight cannot pair with the base checkpoint."""
+    from aiwf.infrastructure.diffusers.model_arch import is_sdxl_architecture
+
+    cn_arch = infer_controlnet_architecture(controlnet_path)
+    ckpt_sdxl = is_sdxl_architecture(checkpoint_architecture)
+    if ckpt_sdxl and cn_arch == "sd15":
+        raise ValueError(
+            "SD1.5 ControlNet models cannot be used with SDXL checkpoints. "
+            "Switch to an SD1.5 checkpoint or install an SDXL ControlNet model."
+        )
+    if not ckpt_sdxl and cn_arch == "sdxl":
+        raise ValueError(
+            "SDXL ControlNet models cannot be used with SD1.5 checkpoints. "
+            "Switch to an SDXL checkpoint or an SD1.5 ControlNet model."
+        )
+
+
 def is_control_lora_checkpoint(path: str | Path) -> bool:
     """True when the file is a SAI-style SD1.5 Control LoRA (rank128) checkpoint."""
     name = Path(path).name.lower()

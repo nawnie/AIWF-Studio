@@ -1,10 +1,10 @@
 from PIL import Image
 
-from aiwf.web.studio import _paste_control_values, _segment_source_image
+from aiwf.web.studio.helpers import paste_control_values, segment_source_image
 
 
 def test_paste_control_values_syncs_img2img_and_inpaint_denoise():
-    values = _paste_control_values(
+    values = paste_control_values(
         {
             "prompt": "portrait",
             "negative_prompt": "blur",
@@ -26,10 +26,10 @@ def test_segment_source_prefers_inpaint_editor_background():
     workspace = Image.new("RGB", (4, 4), "red")
     editor_background = Image.new("RGB", (8, 8), "blue")
 
-    assert _segment_source_image(workspace, {"background": editor_background}) is editor_background
+    assert segment_source_image(workspace, {"background": editor_background}) is editor_background
 
 
 def test_segment_source_falls_back_to_workspace_image():
     workspace = Image.new("RGB", (4, 4), "red")
 
-    assert _segment_source_image(workspace, None) is workspace
+    assert segment_source_image(workspace, None) is workspace

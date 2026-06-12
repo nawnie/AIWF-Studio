@@ -14,9 +14,21 @@ RE_IMAGE_SIZE = re.compile(r"^(\d+)x(\d+)$")
 SAMPLER_ALIASES: dict[str, str] = {
     "euler a": "euler_a",
     "euler": "euler",
+    "heun": "heun",
     "lms": "lms",
+    "ddim": "ddim",
+    "unipc": "unipc",
+    "dpm2": "dpm2",
+    "dpm2 a": "dpm2_a",
+    "deis": "deis",
     "dpm++ 2m": "dpmpp_2m",
+    "dpm++ 2m sde": "dpmpp_2m_sde",
+    "dpm++ 3m sde": "dpmpp_3m_sde",
+    "dpm++ sde": "dpmpp_sde",
     "dpm++ 2m karras": "dpmpp_2m_karras",
+    "sa-solver": "sa_solver",
+    "lcm": "lcm",
+    "tcd": "tcd",
 }
 
 
@@ -99,6 +111,10 @@ def infotext_to_request_updates(params: dict[str, Any], mode: GenerationMode) ->
     if sampler:
         updates["sampler"] = sampler
 
+    schedule = str(params.get("Schedule type", "")).strip().lower().replace(" ", "_")
+    if schedule:
+        updates["scheduler"] = schedule
+
     width = params.get("Size-1") or params.get("Hires resize-1")
     height = params.get("Size-2") or params.get("Hires resize-2")
     if width and height:
@@ -150,9 +166,21 @@ def format_infotext(
     sampler_labels = {
         "euler_a": "Euler a",
         "euler": "Euler",
+        "heun": "Heun",
         "lms": "LMS",
+        "ddim": "DDIM",
+        "unipc": "UniPC",
+        "dpm2": "DPM2",
+        "dpm2_a": "DPM2 a",
+        "deis": "DEIS",
         "dpmpp_2m": "DPM++ 2M",
+        "dpmpp_2m_sde": "DPM++ 2M SDE",
+        "dpmpp_3m_sde": "DPM++ 3M SDE",
+        "dpmpp_sde": "DPM++ SDE",
         "dpmpp_2m_karras": "DPM++ 2M Karras",
+        "sa_solver": "SA-Solver",
+        "lcm": "LCM",
+        "tcd": "TCD",
     }
     sampler_label = sampler_labels.get(request.sampler, request.sampler)
     parts = [
@@ -163,6 +191,17 @@ def format_infotext(
         f"Size: {width}x{height}",
         f"Model: {checkpoint.title}",
     ]
+
+    schedule_labels = {
+        "uniform": "Uniform",
+        "karras": "Karras",
+        "exponential": "Exponential",
+        "sgm_uniform": "SGM Uniform",
+        "beta": "Beta",
+    }
+    schedule = getattr(request, "scheduler", "automatic")
+    if schedule and schedule != "automatic":
+        parts.append(f"Schedule type: {schedule_labels.get(schedule, schedule.title())}")
 
     if request.clip_skip > 1:
         parts.append(f"Clip skip: {request.clip_skip}")

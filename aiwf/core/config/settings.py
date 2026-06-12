@@ -20,6 +20,8 @@ class RuntimeFlags(BaseSettings):
     theme: str = "dark"
     gradio_auth: str | None = None
     no_half: bool = False
+    fp8: bool = False
+    directml: bool = False
     medvram: bool = False
     lowvram: bool = False
     xformers: bool = False
@@ -69,6 +71,40 @@ class UserSettings(BaseSettings):
     prompts_dir: str = "prompts"
     wildcards_dir: str = "wildcards"
     prompt_styles: list[PromptStyle] = Field(default_factory=list)
+    accent_preset: str = "mint"
+    hidden_tabs: list[str] = Field(default_factory=list)
+
+    # Generation defaults — applied as the Studio tab's initial values.
+    default_sampler: str = "euler_a"
+    default_scheduler: str = "automatic"
+    default_steps: int = Field(default=20, ge=1, le=150)
+    default_cfg_scale: float = Field(default=7.0, ge=1.0, le=30.0)
+    default_width: int = Field(default=512, ge=64, le=2048)
+    default_height: int = Field(default=512, ge=64, le=2048)
+    default_clip_skip: int = Field(default=1, ge=1, le=12)
+
+    # Last checkpoint the user loaded in Studio — restored on next launch.
+    last_checkpoint_id: str | None = None
+
+    # Saved image format — "png" keeps infotext metadata; jpg/webp are smaller files.
+    image_format: str = "png"
+    image_quality: int = Field(default=95, ge=10, le=100)
+
+    # API keys for model downloads (stored locally in config.json).
+    huggingface_token: str = ""
+    civitai_token: str = ""
+
+    def apply_token_env(self) -> None:
+        """Expose saved API keys to download helpers via environment variables."""
+        import os
+
+        hf = self.huggingface_token.strip()
+        if hf:
+            os.environ["HF_TOKEN"] = hf
+            os.environ["HUGGINGFACE_TOKEN"] = hf
+        civitai = self.civitai_token.strip()
+        if civitai:
+            os.environ["CIVITAI_API_TOKEN"] = civitai
 
     def live_preview_interval(self) -> int:
         """Steps between latent decode previews during streaming generation (0 = off)."""

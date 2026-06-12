@@ -9,6 +9,7 @@ from aiwf.bootstrap import AppContext
 from aiwf.core.domain.enhance import RestoreOptions
 from aiwf.core.domain.faceswap import FaceSwapOptions
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest, JobState
+from aiwf.core.domain.models import SCHEDULE_TYPES
 from aiwf.core.infotext import infotext_to_request_updates, parse_infotext
 from aiwf.core.tags import format_tags_display, parse_tags
 from aiwf.core.domain.controlnet import ControlNetUnit
@@ -88,6 +89,56 @@ def _mode_from_label(label: str) -> str:
     return "txt2img"
 
 
+RESOLUTION_PRESETS: dict[str, tuple[int, int]] = {
+    "SD1.5 — 512 × 512": (512, 512),
+    "SD1.5 — 512 × 768 portrait": (512, 768),
+    "SD1.5 — 768 × 512 landscape": (768, 512),
+    "SD1.5 — 640 × 960 portrait": (640, 960),
+    "SD1.5 — 960 × 640 landscape": (960, 640),
+    "SDXL — 1024 × 1024": (1024, 1024),
+    "SDXL — 832 × 1216 portrait": (832, 1216),
+    "SDXL — 1216 × 832 landscape": (1216, 832),
+    "SDXL — 896 × 1152 portrait": (896, 1152),
+    "SDXL — 1152 × 896 landscape": (1152, 896),
+}
+CUSTOM_RESOLUTION = "Custom"
+
+
+def _preset_for_size(width: int, height: int) -> str:
+    for label, (w, h) in RESOLUTION_PRESETS.items():
+        if (w, h) == (int(width), int(height)):
+            return label
+    return CUSTOM_RESOLUTION
+
+
+def _arch_from_checkpoint_title(title: str | None) -> str | None:
+    lowered = (title or "").lower()
+    if "[sdxl" in lowered:
+        return "sdxl"
+    if "[sd1.5]" in lowered or "[inpaint]" in lowered:
+        return "sd15"
+    return None
+
+
+def _resolution_hint(ckpt_title: str | None, width: int, height: int) -> "gr.update":
+    arch = _arch_from_checkpoint_title(ckpt_title)
+    w, h = int(width or 0), int(height or 0)
+    text = ""
+    if arch == "sdxl" and max(w, h) < 832:
+        text = (
+            f"⚠ SDXL checkpoints work best around **1024 px** — current size is {w}×{h}. "
+            "Try an SDXL preset above."
+        )
+    elif arch == "sd15" and min(w, h) >= 960:
+        text = (
+            f"⚠ SD 1.5 checkpoints work best at **512–768 px** — current size is {w}×{h}. "
+            "Large sizes tend to duplicate subjects; use Hires fix instead."
+        )
+    if text:
+        return gr.update(value=text, visible=True)
+    return gr.update(value="", visible=False)
+
+
 def _paste_control_values(
     updates: dict,
     *,
@@ -95,11 +146,13 @@ def _paste_control_values(
     default_sampler_label: str,
 ) -> dict[str, object]:
     sampler_label = sampler_id_to_label.get(updates.get("sampler", "euler_a"), default_sampler_label)
+    schedule_labels = {s.id: s.label for s in SCHEDULE_TYPES}
     denoise_strength = updates.get("denoising_strength", 0.75)
     return {
         "prompt": updates.get("prompt", ""),
         "negative_prompt": updates.get("negative_prompt", ""),
         "sampler": sampler_label,
+        "scheduler": schedule_labels.get(updates.get("scheduler", "automatic"), "Automatic"),
         "steps": updates.get("steps", 20),
         "cfg_scale": updates.get("cfg_scale", 7.0),
         "width": updates.get("width", 512),
@@ -176,6 +229,13 @@ def register_studio(registry: WebRegistry) -> None:
 
         sampler_map = {s.label: s.id for s in samplers}
         sampler_id_to_label = {s.id: s.label for s in samplers}
+        _fallback_sampler = samplers[1].label if len(samplers) > 1 else (samplers[0].label if samplers else None)
+        default_sampler_label = sampler_id_to_label.get(ctx.settings.default_sampler, _fallback_sampler)
+        schedule_map = {s.label: s.id for s in SCHEDULE_TYPES}
+        schedule_id_to_label = {s.id: s.label for s in SCHEDULE_TYPES}
+        default_schedule_label = schedule_id_to_label.get(
+            getattr(ctx.settings, "default_scheduler", "automatic"), "Automatic"
+        )
 
         studio_root = gr.Column(elem_classes=["aiwf-studio", "aiwf-mode-txt2img"])
         with studio_root:
@@ -235,71 +295,143 @@ def register_studio(registry: WebRegistry) -> None:
                             placeholder="Optional — elements to exclude",
                             elem_classes=["aiwf-negative-input"],
                         )
-                        with gr.Accordion("Style presets", open=False, elem_classes=["aiwf-prompt-tools"]):
-                            gr.Markdown(
-                                "Presets wrap your prompt with `{prompt}` — some lead in "
-                                "(e.g. *a high quality photo of …*), others add detail tags after. "
-                                "Select a preset to read or edit its templates, then **Save preset**.",
-                                elem_classes=["aiwf-settings-paths"],
-                            )
-                            with gr.Row():
-                                style_select = gr.Dropdown(
-                                    label="Style preset",
-                                    choices=ctx.prompts.style_choices(),
-                                    value=None,
-                                    allow_custom_value=False,
-                                    scale=3,
-                                )
-                                apply_style_btn = gr.Button(
-                                    "Apply to prompt",
-                                    elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
-                                    scale=1,
-                                )
-                            style_name_input = gr.Textbox(
-                                label="Preset name",
-                                placeholder="e.g. Quality — Standard",
-                                info="Used when saving a new preset or renaming on save",
-                            )
-                            style_template_prompt = gr.Textbox(
-                                label="Style template (positive)",
-                                lines=3,
-                                placeholder="a high quality photo of {prompt}, masterpiece, best quality, highly detailed",
-                            )
-                            style_template_negative = gr.Textbox(
-                                label="Style template (negative)",
-                                lines=2,
-                                placeholder="{prompt}, worst quality, low quality, blurry",
-                            )
-                            style_preview = gr.Markdown("", visible=False, elem_classes=["aiwf-settings-paths"])
-                            with gr.Row():
-                                save_style_btn = gr.Button("Save preset", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
-                                reset_style_btn = gr.Button(
-                                    "Reset to default",
-                                    elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
-                                    interactive=False,
-                                )
-                                delete_style_btn = gr.Button("Delete preset", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
-                        with gr.Accordion("Prompt file & wildcards", open=False, elem_classes=["aiwf-prompt-tools"]):
-                            gr.Markdown(
-                                "Load prompts from `prompts/` (random line per run). "
-                                "Use `wildcards/name.txt` via `__name__`.",
-                                elem_classes=["aiwf-settings-paths"],
-                            )
-                            gr.Markdown(ctx.prompts.folder_help(), elem_classes=["aiwf-settings-paths"])
-                            use_prompt_file = gr.Checkbox(label="Load from prompt file", value=False)
-                            with gr.Row():
-                                prompt_file = gr.Dropdown(
-                                    label="Prompt file",
-                                    choices=ctx.prompts.list_prompt_files(),
-                                    value=None,
-                                    allow_custom_value=False,
-                                    scale=4,
-                                )
-                                refresh_prompt_files = gr.Button("Refresh", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"], scale=1)
-                            prompt_file_preview = gr.Markdown(
-                                "_Select a prompt file to preview._",
-                                elem_classes=["aiwf-prompt-preview"],
-                            )
+                        with gr.Accordion("Prompt tools", open=False, elem_classes=["aiwf-prompt-tools"]):
+                            with gr.Tabs(elem_classes=["aiwf-tool-tabs"]):
+                                with gr.Tab("Styles"):
+                                    gr.Markdown(
+                                        "Presets wrap your prompt with `{prompt}` — some lead in "
+                                        "(e.g. *a high quality photo of …*), others add detail tags after. "
+                                        "Select a preset to read or edit its templates, then **Save preset**.",
+                                        elem_classes=["aiwf-settings-paths"],
+                                    )
+                                    with gr.Row():
+                                        style_select = gr.Dropdown(
+                                            label="Style preset",
+                                            choices=ctx.prompts.style_choices(),
+                                            value=None,
+                                            allow_custom_value=False,
+                                            scale=3,
+                                        )
+                                        apply_style_btn = gr.Button(
+                                            "Apply to prompt",
+                                            elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                                            scale=1,
+                                        )
+                                    style_name_input = gr.Textbox(
+                                        label="Preset name",
+                                        placeholder="e.g. Quality — Standard",
+                                        info="Used when saving a new preset or renaming on save",
+                                    )
+                                    style_template_prompt = gr.Textbox(
+                                        label="Style template (positive)",
+                                        lines=3,
+                                        placeholder="a high quality photo of {prompt}, masterpiece, best quality, highly detailed",
+                                    )
+                                    style_template_negative = gr.Textbox(
+                                        label="Style template (negative)",
+                                        lines=2,
+                                        placeholder="{prompt}, worst quality, low quality, blurry",
+                                    )
+                                    style_preview = gr.Markdown("", visible=False, elem_classes=["aiwf-settings-paths"])
+                                    with gr.Row():
+                                        save_style_btn = gr.Button("Save preset", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
+                                        reset_style_btn = gr.Button(
+                                            "Reset to default",
+                                            elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                                            interactive=False,
+                                        )
+                                        delete_style_btn = gr.Button("Delete preset", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
+
+                                with gr.Tab("LoRAs"):
+                                    gr.Markdown(
+                                        "Pick a LoRA and **Add to prompt** — inserts the `<lora:name:strength>` tag "
+                                        "plus any saved trigger words. Set aliases, default strength, and trigger "
+                                        "words in the **Models** tab.",
+                                        elem_classes=["aiwf-settings-paths"],
+                                    )
+                                    _lora_choices_init = ctx.models.lora_choices()
+                                    with gr.Row():
+                                        lora_pick = gr.Dropdown(
+                                            label="LoRA",
+                                            choices=_lora_choices_init,
+                                            value=None,
+                                            scale=4,
+                                            info=(
+                                                None
+                                                if _lora_choices_init
+                                                else "No LoRAs found — drop .safetensors files into models/Lora, then Refresh. The Models tab can download popular ones."
+                                            ),
+                                        )
+                                        lora_pick_refresh = gr.Button(
+                                            "Refresh",
+                                            elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                                            scale=1,
+                                        )
+                                    lora_pick_strength = gr.Slider(
+                                        0.0, 2.0, value=0.8, step=0.05, label="Strength"
+                                    )
+                                    add_lora_btn = gr.Button("Add to prompt", elem_classes=["aiwf-btn-ghost"])
+
+                                with gr.Tab("Embeddings"):
+                                    gr.Markdown(
+                                        "Textual-inversion embeddings from `models/embeddings` load automatically "
+                                        "with each checkpoint. Negative-prompt embeddings are a clean way to keep "
+                                        "generations on the rails.",
+                                        elem_classes=["aiwf-settings-paths"],
+                                    )
+                                    _embedding_choices_init = [(e.title, e.id) for e in ctx.generation.list_embeddings()]
+                                    with gr.Row():
+                                        embedding_pick = gr.Dropdown(
+                                            label="Embedding",
+                                            choices=_embedding_choices_init,
+                                            value=None,
+                                            scale=3,
+                                            info=(
+                                                None
+                                                if _embedding_choices_init
+                                                else "No embeddings found — drop .pt/.safetensors files into models/embeddings, then Refresh."
+                                            ),
+                                        )
+                                        embedding_refresh = gr.Button(
+                                            "Refresh",
+                                            elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                                            scale=1,
+                                        )
+                                    with gr.Row():
+                                        add_embedding_btn = gr.Button(
+                                            "Add to prompt", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"]
+                                        )
+                                        add_embedding_neg_btn = gr.Button(
+                                            "Add to negative", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"]
+                                        )
+
+                                with gr.Tab("Files"):
+                                    gr.Markdown(
+                                        "Load prompts from `prompts/` (random line per run). "
+                                        "Use `wildcards/name.txt` via `__name__`.",
+                                        elem_classes=["aiwf-settings-paths"],
+                                    )
+                                    gr.Markdown(ctx.prompts.folder_help(), elem_classes=["aiwf-settings-paths"])
+                                    use_prompt_file = gr.Checkbox(label="Load from prompt file", value=False)
+                                    _prompt_files_init = ctx.prompts.list_prompt_files()
+                                    with gr.Row():
+                                        prompt_file = gr.Dropdown(
+                                            label="Prompt file",
+                                            choices=_prompt_files_init,
+                                            value=None,
+                                            allow_custom_value=False,
+                                            scale=4,
+                                            info=(
+                                                None
+                                                if _prompt_files_init
+                                                else "No prompt files yet — add .txt files to the prompts folder, then Refresh."
+                                            ),
+                                        )
+                                        refresh_prompt_files = gr.Button("Refresh", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"], scale=1)
+                                    prompt_file_preview = gr.Markdown(
+                                        "_Select a prompt file to preview._",
+                                        elem_classes=["aiwf-prompt-preview"],
+                                    )
 
                         tags_input = gr.Textbox(
                             label="Tags",
@@ -323,11 +455,16 @@ def register_studio(registry: WebRegistry) -> None:
                             sampler = gr.Dropdown(
                                 label="Sampler",
                                 choices=[s.label for s in samplers],
-                                value=samplers[1].label if len(samplers) > 1 else None,
+                                value=default_sampler_label,
                             )
-                            steps = gr.Slider(1, 150, value=20, step=1, label="Steps")
+                            steps = gr.Slider(1, 150, value=ctx.settings.default_steps, step=1, label="Steps")
                         with gr.Row():
-                            cfg = gr.Slider(1, 30, value=7, step=0.5, label="CFG scale")
+                            scheduler = gr.Dropdown(
+                                label="Schedule type",
+                                choices=[s.label for s in SCHEDULE_TYPES],
+                                value=default_schedule_label,
+                            )
+                            cfg = gr.Slider(1, 30, value=ctx.settings.default_cfg_scale, step=0.5, label="CFG scale")
                             seed = gr.Number(value=-1, precision=0, label="Seed (-1 = random)")
                         with gr.Row():
                             reuse_seed = gr.Button("Reuse last seed", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
@@ -336,8 +473,22 @@ def register_studio(registry: WebRegistry) -> None:
                         txt2img_panel = gr.Column(elem_classes=["aiwf-mode-panel"])
                         with txt2img_panel:
                             with gr.Row():
-                                width = gr.Slider(64, 2048, value=512, step=8, label="Width")
-                                height = gr.Slider(64, 2048, value=512, step=8, label="Height")
+                                size_preset = gr.Dropdown(
+                                    label="Resolution",
+                                    choices=[CUSTOM_RESOLUTION, *RESOLUTION_PRESETS],
+                                    value=_preset_for_size(ctx.settings.default_width, ctx.settings.default_height),
+                                    scale=5,
+                                )
+                                swap_size_btn = gr.Button(
+                                    "Swap W/H",
+                                    elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                                    scale=1,
+                                    min_width=60,
+                                )
+                            with gr.Row():
+                                width = gr.Slider(64, 2048, value=ctx.settings.default_width, step=8, label="Width")
+                                height = gr.Slider(64, 2048, value=ctx.settings.default_height, step=8, label="Height")
+                            size_hint = gr.Markdown("", visible=False, elem_classes=["aiwf-size-hint"])
                             with gr.Row():
                                 batch_size = gr.Slider(1, 8, value=1, step=1, label="Batch")
                                 batch_count = gr.Slider(1, 8, value=1, step=1, label="Count")
@@ -352,7 +503,7 @@ def register_studio(registry: WebRegistry) -> None:
                             label="Wait between runs (seconds)",
                             info="Pause between continuous generations to reduce heat on mobile GPUs",
                         )
-                        clip_skip = gr.Slider(1, 12, value=1, step=1, label="Clip skip")
+                        clip_skip = gr.Slider(1, 12, value=ctx.settings.default_clip_skip, step=1, label="Clip skip")
                         with gr.Row():
                             vae = gr.Dropdown(label="VAE", choices=vae_choices, value=None, scale=4)
                             vae_refresh = gr.Button("Refresh VAEs", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"], scale=1)
@@ -360,7 +511,7 @@ def register_studio(registry: WebRegistry) -> None:
                         with gr.Accordion("ControlNet", open=False, elem_classes=["aiwf-prompt-tools"]):
                             gr.Markdown(
                                 "Guide txt2img / img2img with a control image (edges, pose, depth…). "
-                                "Download models in **Settings → ControlNet**.",
+                                "Download models in **Models → ControlNet**. SD1.5 ControlNet pairs with SD1.5 checkpoints only.",
                                 elem_classes=["aiwf-settings-paths"],
                             )
                             cn_enable = gr.Checkbox(label="Enable ControlNet", value=False)
@@ -429,6 +580,35 @@ def register_studio(registry: WebRegistry) -> None:
                                 label="Mask blur",
                                 info="Softens mask edges for smoother blends with the original image",
                             )
+                            inpaint_area = gr.Radio(
+                                ["Whole picture", "Only masked"],
+                                value="Whole picture",
+                                label="Inpaint area",
+                                info="Only masked crops to the mask (+padding) and runs diffusion at region resolution before pasting back.",
+                            )
+                            inpaint_padding = gr.Slider(
+                                0,
+                                128,
+                                value=32,
+                                step=4,
+                                label="Only masked padding",
+                                info="Context pixels around the mask bbox (only used for 'Only masked').",
+                                visible=False,
+                            )
+                            masked_content = gr.Dropdown(
+                                choices=["fill", "original", "latent noise", "latent nothing"],
+                                value="original",
+                                label="Masked content",
+                                info="Initialization of the area under the mask before generation (like A1111).",
+                            )
+
+                            inpaint_area.change(
+                                lambda area: gr.update(visible=(area == "Only masked")),
+                                inputs=[inpaint_area],
+                                outputs=[inpaint_padding],
+                                show_progress=False,
+                            )
+
                             inpaint_source = gr.Radio(
                                 label="Inpaint source",
                                 choices=[
@@ -517,6 +697,7 @@ def register_studio(registry: WebRegistry) -> None:
                         with gr.Row():
                             paste_btn = gr.Button("Apply infotext", elem_classes=["aiwf-btn-ghost"])
                             paste_bridge_btn = gr.Button("From PNG Info", elem_classes=["aiwf-btn-ghost"])
+                            reuse_last_btn = gr.Button("Reuse last generation", elem_classes=["aiwf-btn-ghost"])
 
                 with gr.Column(scale=8, elem_classes=["aiwf-canvas-column"]):
                     workspace_shell = gr.Column(elem_classes=["aiwf-workspace", "aiwf-mode-txt2img"])
@@ -648,6 +829,12 @@ def register_studio(registry: WebRegistry) -> None:
                             elem_classes=["aiwf-generate-btn", "aiwf-btn-sm"],
                         )
                     status = gr.Markdown("**Ready** — configure parameters and generate", elem_classes=["aiwf-status-bar"])
+                    gr.HTML(
+                        '<div class="aiwf-shortcut-help" aria-label="Keyboard shortcuts">'
+                        "<span><kbd>Shift</kbd>+<kbd>Enter</kbd> or <kbd>Ctrl</kbd>+<kbd>Enter</kbd> Generate</span>"
+                        "<span><kbd>Esc</kbd> Stop</span>"
+                        "</div>"
+                    )
 
         state = gr.State(checkpoint_map)
         last_seed = gr.State(-1)
@@ -673,14 +860,16 @@ def register_studio(registry: WebRegistry) -> None:
                 path = path.get("path") or path.get("name")
             return PILImage.open(path).convert("RGB")
 
-        def apply_mode_ui(mode_label, editing_mask, *, hide_empty: bool = False):
+        def apply_mode_ui(mode_label, editing_mask, current_ckpt=None, *, hide_empty: bool = False):
             mode = _mode_from_label(mode_label)
             is_txt = mode == "txt2img"
             is_img = mode == "img2img"
             is_inpaint = mode == "inpaint"
             inpaint_editing = is_inpaint and editing_mask
 
-            ckpt_update, new_map = refresh_checkpoints(ctx, prefer_inpaint=is_inpaint)
+            ckpt_update, new_map = refresh_checkpoints(
+                ctx, current_value=current_ckpt
+            )
 
             if is_txt:
                 hint = TOOLBAR_HINTS["txt2img"]
@@ -741,14 +930,14 @@ def register_studio(registry: WebRegistry) -> None:
             checkpoint,
             state,
         ]
-        def on_mode_change(mode_label, editing_mask):
+        def on_mode_change(mode_label, editing_mask, current_ckpt=None):
             mode = _mode_from_label(mode_label)
             if mode == "inpaint":
                 editing_mask = True
             else:
                 editing_mask = False
             return (
-                *apply_mode_ui(mode_label, editing_mask),
+                *apply_mode_ui(mode_label, editing_mask, current_ckpt=current_ckpt),
                 editing_mask,
                 False,
                 gr.update(visible=False),
@@ -757,21 +946,49 @@ def register_studio(registry: WebRegistry) -> None:
 
         mode_toggle.change(
             on_mode_change,
-            inputs=[mode_toggle, show_editor],
+            inputs=[mode_toggle, show_editor, checkpoint],
             outputs=[*mode_outputs, show_editor, show_compare, compare_slider, compare_btn],
             show_progress=False,
         )
 
-        def do_refresh(mode_label):
+        def do_refresh(mode_label, current_ckpt):
             mode = _mode_from_label(mode_label)
-            update, new_map = refresh_checkpoints(ctx, prefer_inpaint=mode == "inpaint", rescan=True)
+            update, new_map = refresh_checkpoints(
+                ctx, rescan=True, current_value=current_ckpt
+            )
             return update, format_model_status(ctx), new_map
 
         refresh.click(
             do_refresh,
-            inputs=[mode_toggle],
+            inputs=[mode_toggle, checkpoint],
             outputs=[checkpoint, model_status, state],
             show_progress=False,
+        )
+
+        def _on_checkpoint_change(ckpt_title, ckpt_map):
+            """Load the selected checkpoint immediately when the user clicks a model in the dropdown.
+
+            This gives instant feedback (logs + progress) instead of lazy-loading only on Generate.
+            The actual heavy work (from_single_file, attention opts, VAE, embeddings, etc.) happens here.
+            """
+            if not ckpt_title or not ckpt_map:
+                return gr.update()
+            ckpt_id = ckpt_map.get(ckpt_title)
+            if ckpt_id is None:
+                return gr.update(value=f"**Error:** unknown checkpoint {ckpt_title}")
+            try:
+                ctx.generation.load_checkpoint(ckpt_id)
+                base_status = format_model_status(ctx)
+                return gr.update(value=f"**Loaded:** {ckpt_title}\n\n{base_status}")
+            except Exception as exc:
+                # Inner load_checkpoint already logged details; just surface to UI status.
+                return gr.update(value=f"**Load failed:** {ckpt_title} — {exc}")
+
+        checkpoint.change(
+            _on_checkpoint_change,
+            inputs=[checkpoint, state],
+            outputs=[model_status],
+            show_progress=True,
         )
 
         def stop_generation():
@@ -797,6 +1014,51 @@ def register_studio(registry: WebRegistry) -> None:
             return gr.update(choices=choices, value=value)
 
         vae_refresh.click(_refresh_vaes, inputs=[vae], outputs=[vae], show_progress=False)
+
+        def _apply_size_preset(preset_label, current_w, current_h, ckpt_title):
+            size = RESOLUTION_PRESETS.get(preset_label)
+            if size is None:
+                return gr.update(), gr.update(), _resolution_hint(ckpt_title, current_w, current_h)
+            w, h = size
+            return w, h, _resolution_hint(ckpt_title, w, h)
+
+        size_preset.change(
+            _apply_size_preset,
+            inputs=[size_preset, width, height, checkpoint],
+            outputs=[width, height, size_hint],
+            show_progress=False,
+        )
+
+        def _swap_size(current_w, current_h, ckpt_title):
+            w, h = int(current_h), int(current_w)
+            return w, h, _preset_for_size(w, h), _resolution_hint(ckpt_title, w, h)
+
+        swap_size_btn.click(
+            _swap_size,
+            inputs=[width, height, checkpoint],
+            outputs=[width, height, size_preset, size_hint],
+            show_progress=False,
+        )
+
+        def _sync_size_preset(current_w, current_h, preset_label, ckpt_title):
+            matched = _preset_for_size(current_w, current_h)
+            preset_update = gr.update() if matched == preset_label else gr.update(value=matched)
+            return preset_update, _resolution_hint(ckpt_title, current_w, current_h)
+
+        for _size_slider in (width, height):
+            _size_slider.change(
+                _sync_size_preset,
+                inputs=[width, height, size_preset, checkpoint],
+                outputs=[size_preset, size_hint],
+                show_progress=False,
+            )
+
+        checkpoint.change(
+            lambda ckpt_title, w, h: _resolution_hint(ckpt_title, w, h),
+            inputs=[checkpoint, width, height],
+            outputs=[size_hint],
+            show_progress=False,
+        )
 
         def _refresh_sam_models(current=None):
             models = ctx.segment.refresh_models()
@@ -835,6 +1097,7 @@ def register_studio(registry: WebRegistry) -> None:
                 controls["prompt"],
                 controls["negative_prompt"],
                 gr.update(value=controls["sampler"]),
+                gr.update(value=controls["scheduler"]),
                 controls["steps"],
                 controls["cfg_scale"],
                 controls["width"],
@@ -852,12 +1115,85 @@ def register_studio(registry: WebRegistry) -> None:
             )
 
         paste_outputs = [
-            prompt, negative, sampler, steps, cfg,
+            prompt, negative, sampler, scheduler, steps, cfg,
             width, height, seed, clip_skip,
             enable_hr, hr_scale, hr_steps, hr_denoise,
             denoise, inpaint_denoise, mask_blur, tags_input,
         ]
         paste_btn.click(apply_paste, inputs=[paste_text, mode_toggle], outputs=paste_outputs)
+
+        def _on_lora_pick(lora_id):
+            if not lora_id:
+                return gr.update()
+            return gr.update(value=ctx.models.lora_strength(lora_id))
+
+        lora_pick.change(_on_lora_pick, inputs=[lora_pick], outputs=[lora_pick_strength], show_progress=False)
+
+        def _refresh_lora_picker(current):
+            ctx.models.refresh_loras()
+            choices = ctx.models.lora_choices()
+            ids = {value for _, value in choices}
+            return gr.update(choices=choices, value=current if current in ids else None)
+
+        lora_pick_refresh.click(
+            _refresh_lora_picker, inputs=[lora_pick], outputs=[lora_pick], show_progress=False
+        )
+
+        def add_lora_to_prompt(current_prompt, lora_id, strength):
+            lora = ctx.models.find_lora(lora_id)
+            if lora is None:
+                raise gr.Error("Pick a LoRA first (hit Refresh if the list is empty).")
+            if f"<lora:{lora.id}:" in (current_prompt or ""):
+                raise gr.Error("That LoRA is already in the prompt — edit its strength there.")
+            tag = f"<lora:{lora.id}:{float(strength):g}>"
+            keywords = (ctx.models.lora_keywords(lora.id) or "").strip()
+            addition = f"{tag}, {keywords}" if keywords else tag
+            text = (current_prompt or "").rstrip().rstrip(",")
+            return f"{text}, {addition}" if text else addition
+
+        add_lora_btn.click(
+            add_lora_to_prompt,
+            inputs=[prompt, lora_pick, lora_pick_strength],
+            outputs=[prompt],
+            show_progress=False,
+        )
+
+        def _refresh_embedding_picker(current):
+            items = ctx.generation.refresh_embedding_catalog()
+            choices = [(e.title, e.id) for e in items]
+            ids = {value for _, value in choices}
+            return gr.update(choices=choices, value=current if current in ids else None)
+
+        embedding_refresh.click(
+            _refresh_embedding_picker,
+            inputs=[embedding_pick],
+            outputs=[embedding_pick],
+            show_progress=False,
+        )
+
+        def _append_token(text, token):
+            base = (text or "").rstrip().rstrip(",")
+            return f"{base}, {token}" if base else token
+
+        def add_embedding_to(field_value, embedding_id):
+            if not embedding_id:
+                raise gr.Error("Pick an embedding first (hit Refresh if the list is empty).")
+            if embedding_id in (field_value or ""):
+                raise gr.Error("That embedding is already in the prompt.")
+            return _append_token(field_value, embedding_id)
+
+        add_embedding_btn.click(
+            add_embedding_to,
+            inputs=[prompt, embedding_pick],
+            outputs=[prompt],
+            show_progress=False,
+        )
+        add_embedding_neg_btn.click(
+            add_embedding_to,
+            inputs=[negative, embedding_pick],
+            outputs=[negative],
+            show_progress=False,
+        )
 
         def _pnginfo_pending_hint():
             if ctx.infotext_bridge.pending_text:
@@ -880,10 +1216,51 @@ def register_studio(registry: WebRegistry) -> None:
             outputs=[paste_text, *paste_outputs, pnginfo_hint],
         )
 
-        def handle_upload(file_obj, mode_label, editing_mask):
+        def _last_generation_infotext() -> str | None:
+            for job in ctx.generation.recent_jobs(10):
+                result = getattr(job, "result", None)
+                if result is not None and getattr(result, "infotexts", None):
+                    return result.infotexts[-1]
+            # Fall back to the newest saved image's embedded parameters
+            # (covers reuse across app restarts).
+            try:
+                root = ctx.flags.resolved_output_dir()
+                candidates = sorted(
+                    root.rglob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True
+                )[:20]
+                for path in candidates:
+                    try:
+                        with PILImage.open(path) as img:
+                            text = (getattr(img, "text", None) or {}).get("parameters")
+                        if text:
+                            return text
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return None
+
+        def reuse_last_generation(mode_label):
+            text = _last_generation_infotext()
+            if not text:
+                raise gr.Error(
+                    "No previous generation found — generate once first "
+                    "(or enable PNG metadata embedding in Settings)."
+                )
+            applied = apply_paste(text, mode_label)
+            return (text, *applied)
+
+        reuse_last_btn.click(
+            reuse_last_generation,
+            inputs=[mode_toggle],
+            outputs=[paste_text, *paste_outputs],
+            show_progress=False,
+        )
+
+        def handle_upload(file_obj, mode_label, editing_mask, current_ckpt=None):
             image = _load_uploaded_image(file_obj)
             if image is None:
-                return gr.update(), gr.update(), editing_mask, *apply_mode_ui(mode_label, editing_mask)
+                return gr.update(), gr.update(), editing_mask, *apply_mode_ui(mode_label, editing_mask, current_ckpt=current_ckpt)
 
             mode = _mode_from_label(mode_label)
             if mode == "inpaint":
@@ -891,7 +1268,7 @@ def register_studio(registry: WebRegistry) -> None:
                 sam_state["mask"] = None
                 inpaint_session["original"] = image.copy()
                 inpaint_session["mask"] = None
-                mode_ui = apply_mode_ui(mode_label, True)
+                mode_ui = apply_mode_ui(mode_label, True, current_ckpt=current_ckpt)
                 return (
                     gr.update(value=editor_val),
                     gr.update(value=None),
@@ -899,18 +1276,18 @@ def register_studio(registry: WebRegistry) -> None:
                     *mode_ui,
                 )
             if mode == "img2img":
-                mode_ui = apply_mode_ui(mode_label, False)
+                mode_ui = apply_mode_ui(mode_label, False, current_ckpt=current_ckpt)
                 return gr.update(), gr.update(value=image), False, *mode_ui
-            return gr.update(), gr.update(), editing_mask, *apply_mode_ui(mode_label, editing_mask)
+            return gr.update(), gr.update(), editing_mask, *apply_mode_ui(mode_label, editing_mask, current_ckpt=current_ckpt)
 
         upload_btn.upload(
             handle_upload,
-            inputs=[upload_btn, mode_toggle, show_editor],
+            inputs=[upload_btn, mode_toggle, show_editor, checkpoint],
             outputs=[mask_editor, workspace_image, show_editor, *mode_outputs],
             show_progress=False,
         )
 
-        def start_mask_edit(mode_label, workspace_img, source_choice, editor_value):
+        def start_mask_edit(mode_label, workspace_img, source_choice, editor_value, current_ckpt=None):
             background = inpaint_session_background(source_choice, workspace_img, editor_value, inpaint_session)
             if background is None:
                 raise gr.Error("Upload an image first.")
@@ -918,12 +1295,12 @@ def register_studio(registry: WebRegistry) -> None:
             if inpaint_session.get("mask") is not None:
                 editor_val = editor_from_mask(background, inpaint_session["mask"])
             sam_state["mask"] = inpaint_session.get("mask")
-            mode_ui = apply_mode_ui(mode_label, True)
+            mode_ui = apply_mode_ui(mode_label, True, current_ckpt=current_ckpt)
             return gr.update(value=editor_val), True, *mode_ui
 
         edit_mask_btn.click(
             start_mask_edit,
-            inputs=[mode_toggle, workspace_image, inpaint_source, mask_editor],
+            inputs=[mode_toggle, workspace_image, inpaint_source, mask_editor, checkpoint],
             outputs=[mask_editor, show_editor, *mode_outputs],
         )
 
@@ -937,10 +1314,17 @@ def register_studio(registry: WebRegistry) -> None:
             show_progress=False,
         )
 
-        def _run_sam(preset_id, custom_prompt, model_id, threshold, mask_index, dilation, source_image, editor_value, mode_label):
+        def _run_sam(preset_id, custom_prompt, model_id, threshold, mask_index, dilation, source_image, editor_value, mode_label, current_ckpt=None):
             segment_source = _segment_source_image(source_image, editor_value)
             if segment_source is None:
-                raise gr.Error("Upload or generate an image first.")
+                # Robust fallback for the embedded Segment accordion inside Inpaint mode.
+                # In inpaint flows the current working image may live in inpaint_session["original"]
+                # (set by upload, start mask edit, use result, outpaint, etc.) rather than the
+                # top-level workspace_image or the current mask_editor dict.
+                if inpaint_session.get("original") is not None:
+                    segment_source = inpaint_session["original"]
+                else:
+                    raise gr.Error("Upload or generate an image first.")
             prompt = resolve_segment_text_prompt(preset_id, custom_prompt)
             if not prompt:
                 raise gr.Error("Choose what to mask, or select Custom and enter a prompt.")
@@ -960,8 +1344,20 @@ def register_studio(registry: WebRegistry) -> None:
             inpaint_session["mask"] = mask.copy()
             editor_val = editor_from_mask(segment_source, mask)
             gallery = gr.update(value=[preview, *candidates], visible=True)
-            mode_ui = apply_mode_ui(mode_label, True)
-            return gr.update(value=editor_val), True, gallery, f"**SAM:** {message}", *mode_ui
+            mode_ui = apply_mode_ui(mode_label, True, current_ckpt=current_ckpt)
+            # Auto-configure the inpaint controls for good results with auto-generated
+            # segment masks (GroundingDINO + SAM). "Only masked" + "latent noise" (or fill)
+            # makes the masked region actually get replaced instead of looking like no-op.
+            return (
+                gr.update(value=editor_val),
+                True,
+                gallery,
+                f"**SAM:** {message}",
+                gr.update(value="Only masked"),
+                gr.update(value=32),
+                gr.update(value="latent noise"),
+                *mode_ui,
+            )
 
         _sam_inputs = [
             sam_mask_preset,
@@ -973,8 +1369,22 @@ def register_studio(registry: WebRegistry) -> None:
             workspace_image,
             mask_editor,
             mode_toggle,
+            checkpoint,
         ]
-        _sam_outputs = [mask_editor, show_editor, sam_candidates, status, *mode_outputs]
+        # When sending a segment/grounding mask into inpaint, we also configure the
+        # new inpaint options to sensible values so the mask actually produces visible
+        # changes (instead of the old "original content + whole picture" behavior that
+        # often looked like "nothing happened").
+        _sam_outputs = [
+            mask_editor,
+            show_editor,
+            sam_candidates,
+            status,
+            inpaint_area,
+            inpaint_padding,
+            masked_content,
+            *mode_outputs,
+        ]
         sam_mask_btn.click(_run_sam, inputs=_sam_inputs, outputs=_sam_outputs, show_progress="minimal")
         sam_preview_btn.click(_run_sam, inputs=_sam_inputs, outputs=_sam_outputs, show_progress="minimal")
 
@@ -1214,6 +1624,7 @@ def register_studio(registry: WebRegistry) -> None:
             negative_text,
             ckpt_title,
             sampler_label,
+            scheduler_label,
             step_count,
             cfg_scale,
             clip_skip_value,
@@ -1230,6 +1641,9 @@ def register_studio(registry: WebRegistry) -> None:
             img2img_denoise,
             inpaint_denoise_value,
             mask_blur_value,
+            inpaint_area_value,
+            inpaint_padding_value,
+            masked_content_value,
             source_image,
             editor_value,
             ckpt_map,
@@ -1281,6 +1695,7 @@ def register_studio(registry: WebRegistry) -> None:
                     height=int(h),
                     seed=int(seed_value),
                     sampler=sampler_map.get(sampler_label, "euler_a"),
+                    scheduler=schedule_map.get(scheduler_label, "automatic"),
                     batch_size=int(bs),
                     batch_count=int(bc),
                     clip_skip=int(clip_skip_value),
@@ -1309,6 +1724,7 @@ def register_studio(registry: WebRegistry) -> None:
                     cfg_scale=float(cfg_scale),
                     seed=int(seed_value),
                     sampler=sampler_map.get(sampler_label, "euler_a"),
+                    scheduler=schedule_map.get(scheduler_label, "automatic"),
                     denoising_strength=float(img2img_denoise),
                     clip_skip=int(clip_skip_value),
                     checkpoint_id=ckpt_id,
@@ -1355,8 +1771,12 @@ def register_studio(registry: WebRegistry) -> None:
                     cfg_scale=float(cfg_scale),
                     seed=int(seed_value),
                     sampler=sampler_map.get(sampler_label, "euler_a"),
+                    scheduler=schedule_map.get(scheduler_label, "automatic"),
                     denoising_strength=float(inpaint_denoise_value),
                     mask_blur=int(mask_blur_value),
+                    inpaint_only_masked=(inpaint_area_value == "Only masked"),
+                    inpaint_masked_padding=int(inpaint_padding_value),
+                    inpaint_mask_content=str(masked_content_value or "original"),
                     clip_skip=int(clip_skip_value),
                     checkpoint_id=ckpt_id,
                 )
@@ -1503,6 +1923,7 @@ def register_studio(registry: WebRegistry) -> None:
             negative_text,
             ckpt_title,
             sampler_label,
+            scheduler_label,
             step_count,
             cfg_scale,
             clip_skip_value,
@@ -1519,6 +1940,9 @@ def register_studio(registry: WebRegistry) -> None:
             img2img_denoise,
             inpaint_denoise_value,
             mask_blur_value,
+            inpaint_area_value,
+            inpaint_padding_value,
+            masked_content_value,
             source_image,
             editor_value,
             ckpt_map,
@@ -1545,83 +1969,90 @@ def register_studio(registry: WebRegistry) -> None:
             ctx.settings.generation_cooldown_seconds = float(cooldown_wait or 0)
             ctx.save_settings()
 
-            run_number = 0
-            while loop_ctrl["active"]:
-                run_number += 1
-                if continuous_enabled and run_number > 1:
-                    yield _progress_outputs(mode_label, f"Run {run_number}")
+            try:
+                run_number = 0
+                while loop_ctrl["active"]:
+                    run_number += 1
+                    if continuous_enabled and run_number > 1:
+                        yield _progress_outputs(mode_label, f"Run {run_number}")
 
-                base_seed = int(seed_value)
-                if base_seed < 0:
-                    dynamic_seed = None
-                elif continuous_enabled:
-                    dynamic_seed = base_seed + run_number - 1
-                else:
-                    dynamic_seed = base_seed
+                    base_seed = int(seed_value)
+                    if base_seed < 0:
+                        dynamic_seed = None
+                    elif continuous_enabled:
+                        dynamic_seed = base_seed + run_number - 1
+                    else:
+                        dynamic_seed = base_seed
 
-                request_inputs = (
-                    mode_label,
-                    editing_mask,
-                    prompt_text,
-                    negative_text,
-                    ckpt_title,
-                    sampler_label,
-                    step_count,
-                    cfg_scale,
-                    clip_skip_value,
-                    w,
-                    h,
-                    bs,
-                    bc,
-                    seed_value,
-                    vae_id,
-                    hires_enabled,
-                    hires_scale,
-                    hires_steps,
-                    hires_denoise,
-                    img2img_denoise,
-                    inpaint_denoise_value,
-                    mask_blur_value,
-                    source_image,
-                    editor_value,
-                    ckpt_map,
-                    tags_text,
-                    use_file,
-                    prompt_file_path,
-                    dynamic_seed,
-                    style_name,
-                    style_template_prompt,
-                    style_template_negative,
-                    cn_enable,
-                    cn_model,
-                    cn_module,
-                    cn_image,
-                    cn_weight,
-                    cn_guidance_start,
-                    cn_guidance_end,
-                    cn_threshold_a,
-                    cn_threshold_b,
-                    inpaint_source,
-                )
+                    request_inputs = (
+                        mode_label,
+                        editing_mask,
+                        prompt_text,
+                        negative_text,
+                        ckpt_title,
+                        sampler_label,
+                        scheduler_label,
+                        step_count,
+                        cfg_scale,
+                        clip_skip_value,
+                        w,
+                        h,
+                        bs,
+                        bc,
+                        seed_value,
+                        vae_id,
+                        hires_enabled,
+                        hires_scale,
+                        hires_steps,
+                        hires_denoise,
+                        img2img_denoise,
+                        inpaint_denoise_value,
+                        mask_blur_value,
+                        inpaint_area_value,
+                        inpaint_padding_value,
+                        masked_content_value,
+                        source_image,
+                        editor_value,
+                        ckpt_map,
+                        tags_text,
+                        use_file,
+                        prompt_file_path,
+                        dynamic_seed,
+                        style_name,
+                        style_template_prompt,
+                        style_template_negative,
+                        cn_enable,
+                        cn_model,
+                        cn_module,
+                        cn_image,
+                        cn_weight,
+                        cn_guidance_start,
+                        cn_guidance_end,
+                        cn_threshold_a,
+                        cn_threshold_b,
+                        inpaint_source,
+                    )
 
-                for update in _run_once(
-                    mode_label,
-                    request_inputs,
-                    keep_continuous_toggle=continuous_enabled and loop_ctrl["active"],
-                ):
-                    yield update
+                    for update in _run_once(
+                        mode_label,
+                        request_inputs,
+                        keep_continuous_toggle=continuous_enabled and loop_ctrl["active"],
+                    ):
+                        yield update
 
-                if not loop_ctrl["active"]:
-                    break
-                if not continuous_enabled:
-                    break
-
-                wait_s = max(0, int(cooldown_wait or 0))
-                for remaining in range(wait_s, 0, -1):
                     if not loop_ctrl["active"]:
                         break
-                    yield _progress_outputs(mode_label, f"Cooling — next run in {remaining}s")
-                    time.sleep(1)
+                    if not continuous_enabled:
+                        break
+
+                    wait_s = max(0, int(cooldown_wait or 0))
+                    for remaining in range(wait_s, 0, -1):
+                        if not loop_ctrl["active"]:
+                            break
+                        yield _progress_outputs(mode_label, f"Cooling — next run in {remaining}s")
+                        time.sleep(1)
+            finally:
+                loop_ctrl["active"] = False
 
         def _run_reactor(
             workspace_result,
@@ -1802,6 +2233,7 @@ def register_studio(registry: WebRegistry) -> None:
             negative,
             checkpoint,
             sampler,
+            scheduler,
             steps,
             cfg,
             clip_skip,
@@ -1818,7 +2250,9 @@ def register_studio(registry: WebRegistry) -> None:
             denoise,
             inpaint_denoise,
             mask_blur,
-            inpaint_source,
+            inpaint_area,
+            inpaint_padding,
+            masked_content,
             workspace_image,
             mask_editor,
             state,
@@ -1837,6 +2271,7 @@ def register_studio(registry: WebRegistry) -> None:
             cn_guidance_end,
             cn_threshold_a,
             cn_threshold_b,
+            inpaint_source,
             continuous_toggle,
             cooldown_seconds,
         ]
@@ -1854,9 +2289,11 @@ def register_studio(registry: WebRegistry) -> None:
             show_progress="minimal",
         )
 
-        def _on_studio_tab_select(mode_label, cn_current):
+        def _on_studio_tab_select(mode_label, cn_current, current_ckpt):
             mode = _mode_from_label(mode_label)
-            ckpt_update, new_map = refresh_checkpoints(ctx, prefer_inpaint=mode == "inpaint", rescan=True)
+            ckpt_update, new_map = refresh_checkpoints(
+                ctx, rescan=True, current_value=current_ckpt
+            )
             return (
                 ckpt_update,
                 format_model_status(ctx),
@@ -1868,7 +2305,7 @@ def register_studio(registry: WebRegistry) -> None:
         if tab is not None:
             tab.select(
                 _on_studio_tab_select,
-                inputs=[mode_toggle, cn_model],
+                inputs=[mode_toggle, cn_model, checkpoint],
                 outputs=[checkpoint, model_status, state, cn_model, pnginfo_hint],
                 show_progress=False,
             )

@@ -41,6 +41,16 @@ def _parse_cli() -> RuntimeFlags:
     parser.add_argument("--gradio-auth", type=str, default=None)
     parser.add_argument("--no-half", action="store_true")
     parser.add_argument(
+        "--directml",
+        action="store_true",
+        help="Use DirectML for AMD/Intel GPUs on Windows (requires the torch-directml package)",
+    )
+    parser.add_argument(
+        "--fp8",
+        action="store_true",
+        help="Store UNet weights in FP8 (halves UNet VRAM; tiny quality cost; great for SDXL on 8GB)",
+    )
+    parser.add_argument(
         "--cpu",
         action="store_true",
         help="Force CPU inference even when a GPU is available (useful for testing)",
@@ -77,6 +87,8 @@ def _parse_cli() -> RuntimeFlags:
         theme=args.theme,
         gradio_auth=args.gradio_auth,
         no_half=args.no_half,
+        fp8=args.fp8,
+        directml=args.directml,
         cpu=args.cpu,
         medvram=args.medvram,
         lowvram=args.lowvram,
@@ -87,6 +99,13 @@ def _parse_cli() -> RuntimeFlags:
         skip_prepare_environment=args.skip_prepare_environment,
         default_checkpoint=args.default_checkpoint,
     )
+
+
+def _mount_gradio_extensions(app, ctx) -> None:
+    """Routes that should exist whenever the Gradio UI is served."""
+    from aiwf.api.v1.client_log import build_client_log_router
+
+    app.include_router(build_client_log_router(ctx), prefix="/api/v1")
 
 
 def _auth_pairs(auth: str | None):
@@ -151,14 +170,13 @@ def run() -> None:
     elif not flags.listen:
         logger.info("Remote access: restart with --listen, then open Settings → Phone & tablet access")
 
+    app, _, _ = demo.launch(**launch_kwargs)
+    _mount_gradio_extensions(app, ctx)
     if flags.api:
         from aiwf.api.v1.routes import build_router
 
-        app, _, _ = demo.launch(**launch_kwargs)
         app.include_router(build_router(ctx))
         logger.info("API mounted at /api/v1")
-    else:
-        demo.launch(**launch_kwargs)
 
     try:
         import time

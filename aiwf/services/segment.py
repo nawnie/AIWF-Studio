@@ -7,6 +7,7 @@ from PIL import Image
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.segment import SamModelInfo, SegmentBox, SegmentPoint, SegmentRequest
 from aiwf.infrastructure.segment.catalog import ensure_default_sam_model, scan_sam_models
+from aiwf.infrastructure.diffusers.mask import blur_mask
 from aiwf.infrastructure.segment.mask_ops import dilate_mask, overlay_masks
 from aiwf.infrastructure.segment.sam_backend import SamSegmenter
 from aiwf.infrastructure.segment.text_boxes import ensure_grounding_dino_model
@@ -103,6 +104,9 @@ class SegmentService:
         if request.dilation > 0:
             mask = dilate_mask(mask, request.dilation)
             status += f", dilation={request.dilation}"
+        if request.mask_blur > 0:
+            mask = blur_mask(mask, request.mask_blur)
+            status += f", blur={request.mask_blur}"
 
         preview = overlay_masks(image, mask)
         return mask, preview, candidates, status

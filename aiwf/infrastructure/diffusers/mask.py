@@ -97,6 +97,44 @@ def blur_mask(mask: Image.Image, radius: int) -> Image.Image:
     return mask.filter(ImageFilter.GaussianBlur(radius=radius))
 
 
+def erode_mask(mask: Image.Image, pixels: int) -> Image.Image:
+    """Shrink the white (inpaint) region — helps eat hard edges before composite."""
+    if pixels <= 0:
+        return mask
+    gray = mask.convert("L")
+    for _ in range(int(pixels)):
+        gray = gray.filter(ImageFilter.MinFilter(3))
+    return gray
+
+
+def composite_inpaint_result(
+    generated: Image.Image,
+    original: Image.Image,
+    mask: Image.Image,
+    *,
+    mask_blur: int = 0,
+    seam_erode: int = 0,
+) -> Image.Image:
+    """Crop-and-stitch / whole-picture paste with optional seam cleanup.
+
+    Blur softens the composite boundary; erode pulls the paste region slightly
+    inward so diffused edge pixels do not leave a visible halo (A1111-style seam control).
+    """
+    orig = original.convert("RGB")
+    gen = generated.convert("RGB")
+    if gen.size != orig.size:
+        gen = gen.resize(orig.size, Image.Resampling.LANCZOS)
+
+    paste_mask = prepare_inpaint_mask(mask, size=orig.size)
+    if paste_mask is None:
+        return gen
+    if seam_erode > 0:
+        paste_mask = erode_mask(paste_mask, seam_erode)
+    if mask_blur > 0:
+        paste_mask = blur_mask(paste_mask, mask_blur)
+    return Image.composite(gen, orig, paste_mask)
+
+
 def align_to_multiple_of_8(width: int, height: int) -> tuple[int, int]:
     return max(8, (width // 8) * 8), max(8, (height // 8) * 8)
 
@@ -260,3 +298,109 @@ def prepare_outpaint(
             mask[up:up + h, left + w - overlap:left + w] = 255
 
     return Image.fromarray(canvas, "RGB"), Image.fromarray(mask, "L")
+
+
+def apply_masked_content(
+    image: Image.Image, mask: Image.Image, content: str = "original"
+) -> Image.Image:
+    """Apply 'Masked content' prefill to the masked region of the init image.
+
+    Supported content values (A1111-style):
+      - "original": leave masked pixels as they are in the source (pipeline will noise them)
+      - "fill": replace masked pixels with the average color of the unmasked area
+      - "latent noise" / "latent_noise": replace with random noise (so latent starts noisy)
+      - "latent nothing" / "latent_nothing" / "nothing": replace with neutral gray (128)
+    """
+    if not content or content == "original":
+        return image.convert("RGB")
+
+    rgb = image.convert("RGB")
+    arr = np.asarray(rgb).copy()
+    m = np.asarray(prepare_inpaint_mask(mask, size=rgb.size)) > 127
+    if not np.any(m):
+        return rgb
+
+    c = content.lower().replace(" ", "_")
+    if c == "fill":
+        unmasked = ~m
+        if np.any(unmasked):
+            avg = arr[unmasked].mean(axis=0).astype(np.uint8)
+        else:
+            avg = np.array([128, 128, 128], dtype=np.uint8)
+        arr[m] = avg
+    elif c in ("latent_noise", "latentnoise"):
+        rng = np.random.default_rng()
+        noise = rng.integers(0, 256, size=arr.shape, dtype=np.uint8)
+        arr[m] = noise[m]
+    else:
+        # latent_nothing / nothing
+        arr[m] = 128
+    return Image.fromarray(arr, "RGB")
+
+
+def _expand_bbox_to_multiple_of_8(
+    box: tuple[int, int, int, int], max_w: int, max_h: int, padding: int
+) -> tuple[int, int, int, int]:
+    left, top, right, bot = [int(v) for v in box]
+    left = max(0, left - int(padding))
+    top = max(0, top - int(padding))
+    right = min(max_w, right + int(padding))
+    bot = min(max_h, bot + int(padding))
+    w = right - left
+    h = bot - top
+    target_w = max(8, ((w + 7) // 8) * 8)
+    target_h = max(8, ((h + 7) // 8) * 8)
+    # Expand, preferring right/bottom, then shift if needed.
+    dw = target_w - w
+    dh = target_h - h
+    right = min(max_w, right + dw)
+    bot = min(max_h, bot + dh)
+    if (right - left) < target_w:
+        left = max(0, right - target_w)
+    if (bot - top) < target_h:
+        top = max(0, bot - target_h)
+
+    w = right - left
+    h = bot - top
+    # Image bounds may not be multiples of 8 — shrink the crop to the largest aligned box.
+    aligned_w = max(8, (w // 8) * 8)
+    aligned_h = max(8, (h // 8) * 8)
+    if aligned_w < w or aligned_h < h:
+        right = left + aligned_w
+        bot = top + aligned_h
+        if right > max_w:
+            left = max(0, max_w - aligned_w)
+            right = left + aligned_w
+        if bot > max_h:
+            top = max(0, max_h - aligned_h)
+            bot = top + aligned_h
+
+    return left, top, right, bot
+
+
+def crop_to_masked(
+    image: Image.Image, mask: Image.Image, padding: int = 32
+) -> tuple[Image.Image, Image.Image, tuple[int, int, int, int]]:
+    """Crop image + mask to the mask's bounding box (+padding, 8-aligned).
+
+    Returns (cropped_rgb, cropped_mask_L_white_for_inpaint, crop_box).
+    If no mask region, returns full image (degenerate case).
+    """
+    img = image.convert("RGB")
+    m_full = prepare_inpaint_mask(mask, size=img.size)
+    if m_full is None:
+        m_full = Image.new("L", img.size, 255)
+    bbox = m_full.getbbox()
+    if bbox is None:
+        # Nothing to mask — treat as whole image, aligned for diffusers.
+        aligned_w, aligned_h = align_to_multiple_of_8(img.width, img.height)
+        if (aligned_w, aligned_h) != img.size:
+            img = img.resize((aligned_w, aligned_h), Image.Resampling.LANCZOS)
+            m_full = prepare_inpaint_mask(m_full, size=(aligned_w, aligned_h))
+        return img, m_full, (0, 0, aligned_w, aligned_h)
+    left, top, right, bot = _expand_bbox_to_multiple_of_8(bbox, img.width, img.height, padding)
+    crop_box = (left, top, right, bot)
+    cropped_img = img.crop(crop_box)
+    cropped_m = m_full.crop(crop_box)
+    cropped_m = prepare_inpaint_mask(cropped_m, size=cropped_img.size)
+    return cropped_img, cropped_m, crop_box

@@ -4,6 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,6 @@ from aiwf.services.tags import TagService
 from aiwf.services.segment import SegmentService
 from aiwf.services.workflow import WorkflowService
 
-
 @dataclass
 class AppContext:
     """Composition root — the only place that wires dependencies."""
@@ -54,6 +54,7 @@ class AppContext:
     settings_path: Path
     launch_settings_path: Path
     runtime_port: int | None = None
+    dev: Any = None  # DevDiagnostics when install_dev_diagnostics runs
 
     def save_settings(self) -> None:
         self.settings_path.write_text(
@@ -69,7 +70,12 @@ class AppContext:
             if data.get("show_progress_every_n_steps", 1) == 0:
                 data["enable_live_preview"] = False
                 data["show_progress_every_n_steps"] = 1
-            self.settings = UserSettings.model_validate(data)
+            loaded = UserSettings.model_validate(data)
+            # Update in place: services hold a reference to this settings object,
+            # so replacing it would leave them reading stale defaults.
+            for name in UserSettings.model_fields:
+                setattr(self.settings, name, getattr(loaded, name))
+            self.settings.apply_token_env()
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -78,10 +84,6 @@ class AppContext:
 
     def save_launch_settings(self, launch: LaunchSettings, *, project_root: Path | None = None) -> None:
         save_launch_settings(self.launch_settings_path, launch)
-        if project_root is not None:
-            from aiwf.core.config.launch import write_webui_settings_bat
-
-            write_webui_settings_bat(project_root, launch)
 
 
 def _check_transformers_compat() -> None:
@@ -125,13 +127,21 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     devices = DeviceManager(flags)
     devices.log_status()
     backend = DiffusersBackend(flags, devices)
-    store = FilesystemImageStore(flags.resolved_output_dir())
     metadata = MetadataService()
     queue = JobQueue(events)
     settings_path = flags.data_dir / "config.json"
     settings = UserSettings()
+    store = FilesystemImageStore(flags.resolved_output_dir(), settings=settings)
 
-    generation = GenerationService(backend, store, metadata, queue, events, settings)
+    generation = GenerationService(
+        backend,
+        store,
+        metadata,
+        queue,
+        events,
+        settings,
+        settings_path=settings_path,
+    )
     enhance = EnhanceService(flags, settings, devices, store)
     controlnet = ControlNetService(flags)
     controlnet.ensure_dir()
@@ -145,7 +155,13 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     prompts.ensure_dirs()
     generation.prompts = prompts
     segment = SegmentService(flags, settings, devices)
-    segment.ensure_default_models()
+    try:
+        segment.ensure_default_models()
+    except Exception:
+        # First-run convenience download (SAM + GroundingDINO). A network
+        # failure here must not prevent the app from starting — the Segment
+        # tab re-attempts the download when used.
+        logger.exception("Optional segmentation model download failed; continuing startup")
     workflows = WorkflowService(flags, settings, generation, enhance, segment)
     workflows.ensure_dir()
     ctx = AppContext(
@@ -172,5 +188,8 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     if ctx.prompts.ensure_default_styles():
         ctx.save_settings()
     ctx.plugins.discover(flags.data_dir / "plugins", ctx)
+    from aiwf.dev.diagnostics import install_dev_diagnostics
+
+    ctx.dev = install_dev_diagnostics(ctx)
     events.publish(AppStarted())
     return ctx

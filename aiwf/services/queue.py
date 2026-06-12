@@ -10,6 +10,7 @@ from aiwf.core.domain.errors import GenerationCancelledError
 from aiwf.core.domain.generation import JobProgress, JobRecord, JobState
 from aiwf.core.events.bus import EventBus
 from aiwf.core.events.types import JobCancelled, JobFailed, JobFinished, JobQueued, JobStarted
+from aiwf.dev.diagnostics import trace_exception_safe, trace_safe
 
 
 class JobQueue:
@@ -18,6 +19,7 @@ class JobQueue:
     def __init__(self, events: EventBus) -> None:
         self._events = events
         self._lock = threading.Lock()
+        self._slot_ready = threading.Condition(self._lock)
         self._jobs: dict[UUID, JobRecord] = {}
         self._order: deque[UUID] = deque()
         self._active: UUID | None = None
@@ -104,10 +106,12 @@ class JobQueue:
             if job:
                 job.state = JobState.CANCELLED
 
-    def run_next(self, worker) -> JobRecord | None:
+    def run_next(self, worker, *, block: bool = False) -> JobRecord | None:
         with self._lock:
-            if self._active is not None:
-                return None
+            while self._active is not None:
+                if not block:
+                    return None
+                self._slot_ready.wait()
             if not self._order:
                 return None
             job_id = self._order.popleft()
@@ -126,11 +130,19 @@ class JobQueue:
             return record
         except GenerationCancelledError:
             record.state = JobState.CANCELLED
+            trace_safe("queue.cancelled", "Worker cancelled", job_id=str(job_id))
             self._events.publish(JobCancelled(job_id))
             return record
         except Exception as exc:
             record.state = JobState.FAILED
             record.error = str(exc)
+            trace_exception_safe(
+                "queue.worker_failed",
+                exc,
+                job_id=str(job_id),
+                mode=record.request.mode.value,
+                checkpoint_id=record.request.checkpoint_id,
+            )
             self._events.publish(JobFailed(job_id, str(exc)))
             raise
         finally:
@@ -138,3 +150,4 @@ class JobQueue:
                 self._cancel_requested.discard(job_id)
                 if self._active == job_id:
                     self._active = None
+                self._slot_ready.notify_all()
