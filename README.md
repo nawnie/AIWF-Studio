@@ -1,30 +1,56 @@
 # AIWF Studio
 
-AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. The goal is not to port old internals forward. The goal is to ship a local-first creative tool with explicit wiring, typed models, predictable behavior, and room to grow.
+AIWF Studio is a local-first creative workspace for Stable Diffusion-style image generation and the next generation of local creative AI tooling.
 
-## What makes this different
+The project started as a clean-room rebuild of the AUTOMATIC1111-style web UI, but the goal is larger than cloning an old interface. AIWF Studio is being built as a structured, maintainable creative console: explicit services, typed requests, predictable folders, clean APIs, and isolated heavy engines instead of one fragile Python dependency soup.
+
+> Current status: active early development. The image-generation workspace is the current usable core. Video generation, local chat orchestration, LoRA training, and full-model training are being designed as isolated engine workers so they can become part of one app without forcing every dependency into one environment.
+
+## Why this exists
+
+Local AI tools are powerful, but many of them grew through extension stacks, monkey patches, global state, and dependency collisions. That makes them flexible, but it also makes them hard for normal users and painful for developers to maintain.
+
+AIWF Studio is trying a cleaner approach:
+
+- one stable user-facing app
+- explicit service boundaries
+- typed request/response models
+- local folders that are easy to understand
+- API routes that external tools can call reliably
+- heavy backends isolated behind worker processes when needed
+
+The aim is not to hide complexity with magic. The aim is to put the complexity in the architecture instead of dumping it on the user.
+
+## Core architecture principles
+
+AIWF Studio is built around a few non-negotiable rules:
 
 - No global `shared` state.
 - No mystery callbacks or monkey-patched extension hooks.
-- UI actions call services, not torch code directly.
-- Requests flow through typed domain models instead of ad-hoc dicts.
-- The app is designed to run from its own repo-local folders instead of silently leaning on a neighboring legacy install.
+- UI actions call services, not deep Torch code directly.
+- Requests flow through typed domain models instead of ad-hoc dictionaries.
+- Runtime data lives in predictable repo-local folders unless the user configures otherwise.
+- Heavy engines should be isolated when their dependencies or GPU usage would destabilize the main UI.
 
 ## Current feature set
 
-### Studio
+### Studio image workspace
+
+The current app focuses on a modern image-generation workflow:
 
 - txt2img, img2img, and inpaint
-- live preview, continuous generation, interrupt
-- hires fix, CFG, steps, sampler, clip skip, VAE selection
-- tags, PNG metadata, seed reuse, before/after compare
-- dynamic prompts, wildcards, prompt files, Compel support
+- live preview, continuous generation, and interrupt
+- hires fix, CFG, steps, sampler, clip skip, and VAE selection
+- tags, PNG metadata, seed reuse, and before/after compare
+- dynamic prompts, wildcards, prompt files, and Compel support
 - style presets with editable templates
 - single-unit ControlNet in Studio Advanced
 - SAM-assisted masking for inpaint
 - ReActor-style face swap on results
 
-### Extra tabs
+### Extra workspace tabs
+
+Current/active tabs include:
 
 - Models
 - Segment
@@ -36,10 +62,83 @@ AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion 
 - History
 - Settings
 
-### API
+### API surface
 
-- native `/api/v1`
-- A1111-style `/sdapi/v1` adapter
+AIWF Studio includes:
+
+- native `/api/v1` routes
+- A1111-style `/sdapi/v1` compatibility adapter
+- API/security controls for local and network usage
+
+## Engine isolation direction
+
+The planned architecture keeps AIWF Studio as one app for the user while allowing heavy tools to run in separate environments under the hood.
+
+```text
+AIWF Studio UI
+Python 3.10 main environment
+Gradio / routing / config / logs / model browser / phone companion
+        |
+        |-- Image + Wan + LTX generation engine
+        |       separate generation worker/venv when needed
+        |
+        |-- Ollama local chat
+        |       external local service / GPU tenant
+        |
+        |-- Kohya LoRA training engine
+        |       separate training venv
+        |
+        `-- EveryDream2-compatible full-training engine
+                separate Python 3.10 training venv
+```
+
+The UI should not reload into different Python environments when a tab is selected. The Gradio shell stays stable. Engines move underneath it.
+
+This makes the app easier to maintain because each backend can keep the dependency stack it needs:
+
+- generation can use its own Torch/CUDA/diffusers/video tooling
+- Kohya can use its own LoRA training stack
+- EveryDream2-compatible training can use its own full-training stack
+- Ollama can remain an external local model service
+
+The user still launches one program and works from one interface.
+
+## Video and advanced generation roadmap
+
+The next-generation design work is focused on making heavy video models practical in a local-first app without destabilizing the current image workspace.
+
+Planned/experimental targets include:
+
+- Wan video generation as an isolated GPU engine
+- LTX-Video support as part of the generation-engine roadmap
+- RIFE/RIF frame interpolation as an optional post-processing engine
+- NVIDIA NVENC-based video export
+- strict GPU tenant locking so training, video, and chat do not fight for VRAM
+- process-level cleanup so a failed video worker does not crash the main UI
+
+The first implementation target is not to make every backend live in the main app process. The target is supervised workers, structured logs, clean stop/cleanup, and result paths returned to the UI.
+
+## Training roadmap
+
+Training support is planned as an isolated service layer rather than a direct import into the main UI.
+
+Planned training modes:
+
+- Simple LoRA training through a Kohya/sd-scripts style backend
+- Advanced LoRA training with more exposed parameters
+- EveryDream2-compatible full-model training through a separate Python 3.10 worker environment
+
+AIWF Studio should own:
+
+- dataset validation
+- caption pairing checks
+- config generation
+- process launch
+- live log streaming
+- stop/cleanup controls
+- output registration in the model manager
+
+The training backend should own the actual training internals. This avoids turning the main app into a dependency battlefield.
 
 ## Quick start
 
@@ -52,6 +151,29 @@ Or:
 ```powershell
 python launch.py
 ```
+
+The launcher creates and uses a repo-local `venv/` when needed, installs the required Python packages, and starts the web UI.
+
+For development:
+
+```powershell
+python -m pytest tests/ -q
+python -m aiwf.app
+```
+
+## Requirements
+
+Current project baseline:
+
+- Python 3.10+
+- Windows-first local development path
+- NVIDIA CUDA path supported by the launcher
+- Torch CUDA wheels installed by `launch.py` using the configured PyTorch CUDA index
+- Gradio-based local web UI
+
+The project can expose remote access, but it is intended to be local-first by default.
+
+## Folder layout
 
 By default the app uses dedicated local folders inside this repo:
 
@@ -81,9 +203,11 @@ Put VAEs in:
 models/VAE/
 ```
 
+Runtime folders such as `models/`, `outputs/`, and `venv/` are local user data and should not be committed to the public repo.
+
 ## Remote access and security
 
-AIWF Studio includes Tailscale-aware connection info in Settings, which is the preferred remote path when you want phone or tablet access without exposing the app broadly.
+AIWF Studio includes Tailscale-aware connection info in Settings. Tailscale is the preferred remote path when you want phone or tablet access without broadly exposing the app.
 
 Security guidance:
 
@@ -94,18 +218,21 @@ Security guidance:
 
 ## Workflows status
 
-The Workflows tab is still a work in progress. It is useful, but it should be treated as experimental until it gets a deeper validation pass.
+The Workflows tab is useful but still experimental. Treat it as an active work area until it gets deeper validation, stronger schema checks, and better authoring tools.
 
-## Coming soon
+## Near-term priorities
 
-- training tools
-- extension management
-- broader theme and workspace customization
-- more mature workflow authoring
+- Stabilize the current image-generation workspace.
+- Harden model/library scanning and user setup flows.
+- Mature workflow authoring and validation.
+- Add engine-supervisor infrastructure for isolated workers.
+- Add training tabs without merging training dependencies into the main UI environment.
+- Add video-generation research paths behind safe process boundaries.
+- Improve docs, screenshots, and release examples for public testing.
 
 ## Credits and thanks
 
-This project is clean-room code, but it is absolutely standing in conversation with the wider local-image community.
+AIWF Studio is clean-room code, but it is absolutely standing in conversation with the wider local-image community.
 
 - [AUTOMATIC1111 / stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui)
 - [ControlNet](https://github.com/lllyasviel/ControlNet)
@@ -127,22 +254,15 @@ Allowed:
 - studying behavior
 - reading public docs
 - reimplementing compatible ideas
+- building compatibility layers where licenses allow it
 
 Not allowed:
 
 - copying incompatible source
 - importing abandoned plugin code wholesale
 - recreating legacy global-state architecture
+- hiding third-party licensing requirements from users
 
-## Development
+## Project note
 
-```powershell
-python -m pytest tests/ -q
-python -m aiwf.app
-```
-
-## Repo notes
-
-- `venv/` is local only and should not ship in the public repo.
-- `models/` and `outputs/` are user-local runtime data.
-- `AGENTS.md` is for local build sessions, not end-user repo content.
+This repo is moving quickly. The public goal is to make AIWF Studio useful early while keeping the architecture clean enough to grow into image generation, video generation, local chat, LoRA training, full-model training, and remote companion workflows without turning into one giant fragile plugin stack.
