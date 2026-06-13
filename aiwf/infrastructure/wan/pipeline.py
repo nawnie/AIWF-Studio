@@ -93,6 +93,24 @@ def _frames_from_wan_pipeline_output(output_frames: Any, *, pipe: Any, decode_la
     return _flatten_wan_video_frames(output_frames)
 
 
+def _new_wan_euler_simple_scheduler(base_scheduler: Any, *, flow_shift: float):
+    from diffusers import FlowMatchEulerDiscreteScheduler
+
+    config = getattr(base_scheduler, "config", base_scheduler)
+    shift = float(flow_shift or getattr(config, "flow_shift", getattr(config, "shift", 5.0)) or 5.0)
+    scheduler = FlowMatchEulerDiscreteScheduler(
+        num_train_timesteps=int(getattr(config, "num_train_timesteps", 1000) or 1000),
+        shift=shift,
+        use_dynamic_shifting=bool(getattr(config, "use_dynamic_shifting", False)),
+        time_shift_type=str(getattr(config, "time_shift_type", "exponential") or "exponential"),
+        use_karras_sigmas=False,
+        use_exponential_sigmas=False,
+        use_beta_sigmas=False,
+    )
+    logger.info("Wan scheduler: FlowMatch Euler + simple sigmas (shift=%s)", shift)
+    return scheduler
+
+
 class WanUnavailable(RuntimeError):
     """Raised when the Wan deps or model are missing/unloadable."""
 
@@ -1360,8 +1378,6 @@ class WanI2VBackend:
             self.unload()
 
         _require_wan()
-        from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
-
         logger.info(
             "Loading Wan I2V pipeline (dual high/low): high=%s low=%s boundary=%s vae=%s (offload=%s)",
             high_noise_model_id, low_noise_model_id, boundary_ratio, vae_id, offload,
@@ -1397,7 +1413,8 @@ class WanI2VBackend:
             flow_shift=flow_shift,
         )
 
-        pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=float(flow_shift))
+        pipe.scheduler = _new_wan_euler_simple_scheduler(pipe.scheduler, flow_shift=float(flow_shift))
+        _video_status(f"Using Wan sampler: Euler / simple (flow shift {float(flow_shift):g}).")
 
         if offload == "sequential":
             pipe.enable_sequential_cpu_offload()

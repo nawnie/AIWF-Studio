@@ -22,6 +22,7 @@ from aiwf.infrastructure.wan.pipeline import (
     _load_umt5_text_encoder,
     _load_wan_vae,
     _new_lazy_wan_transformer,
+    _new_wan_euler_simple_scheduler,
     _wan_cache_mode,
     estimate_gguf_expanded_gb,
 )
@@ -154,6 +155,27 @@ def test_wan_latent_pipeline_output_is_decoded_to_frames():
     assert len(frames) == 2
     assert frames[0].size == (8, 8)
     assert calls == [(pipe, (1, 16, 5, 4, 4), {"output_type": "pil"})]
+
+
+def test_wan_scheduler_defaults_to_euler_simple():
+    scheduler_mod = pytest.importorskip("diffusers.schedulers.scheduling_unipc_multistep")
+    from diffusers import FlowMatchEulerDiscreteScheduler
+
+    base = scheduler_mod.UniPCMultistepScheduler(
+        prediction_type="flow_prediction",
+        use_flow_sigmas=True,
+        flow_shift=8.0,
+        num_train_timesteps=1000,
+        time_shift_type="exponential",
+    )
+
+    scheduler = _new_wan_euler_simple_scheduler(base, flow_shift=5.0)
+
+    assert isinstance(scheduler, FlowMatchEulerDiscreteScheduler)
+    assert scheduler.config.shift == 5.0
+    assert scheduler.config.use_karras_sigmas is False
+    assert scheduler.config.use_exponential_sigmas is False
+    assert scheduler.config.use_beta_sigmas is False
 
 
 def test_ensure_wan_attention_processors_resets_generic_processor():
