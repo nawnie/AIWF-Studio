@@ -16,10 +16,14 @@ from aiwf.infrastructure.wan.pipeline import (
     _apply_wan_transformer_key_renames,
     _boundary_ratio_for_step_split,
     _dequantize_comfy_fp8_state_dict,
+    _ensure_wan_attention_processors,
+    _frames_from_wan_pipeline_output,
     _load_comfy_fp8_transformer_weights,
     _load_umt5_text_encoder,
     _load_wan_vae,
     _new_lazy_wan_transformer,
+    _wan_cache_mode,
+    estimate_gguf_expanded_gb,
 )
 from aiwf.services.wan import WanService
 
@@ -90,6 +94,83 @@ def test_boundary_ratio_for_step_split_maps_half_steps():
     ratio = _boundary_ratio_for_step_split(scheduler, total_steps=20, high_steps=10)
 
     assert 0.0 < ratio < 1.0
+
+
+def test_estimate_gguf_expanded_gb_scales_file_size(tmp_path: Path):
+    gguf_file = tmp_path / "tiny.gguf"
+    gguf_file.write_bytes(b"x" * (2 * 1024 * 1024 * 1024))  # 2 GiB
+    est = estimate_gguf_expanded_gb(gguf_file)
+    assert 8.0 < est < 12.0
+
+
+def test_detect_transformer_format_gguf(tmp_path: Path):
+    from aiwf.infrastructure.wan.transformer_runtime import (
+        WanTransformerFormat,
+        detect_transformer_format,
+    )
+
+    gguf_file = tmp_path / "wan_high.gguf"
+    gguf_file.write_bytes(b"fake")
+    assert detect_transformer_format(gguf_file) == WanTransformerFormat.GGUF_QUANTIZED
+
+
+def test_gguf_allowed_with_quantized_runtime(tmp_path: Path, monkeypatch):
+    gguf = pytest.importorskip("gguf")
+    from aiwf.infrastructure.wan.transformer_runtime import (
+        WanTransformerFormat,
+        require_diffusers_transformer_path,
+    )
+
+    gguf_file = tmp_path / "wan_high.gguf"
+    gguf_file.write_bytes(b"fake")
+    monkeypatch.delenv("AIWF_WAN_ALLOW_EXPENSIVE_DEQUANT", raising=False)
+    monkeypatch.delenv("AIWF_WAN_GGUF_RUNTIME", raising=False)
+
+    fmt = require_diffusers_transformer_path(gguf_file, label="High-noise transformer")
+    assert fmt == WanTransformerFormat.GGUF_QUANTIZED
+
+
+def test_wan_cache_mode_prefers_gpu_swap_for_model_offload_fp8():
+    assert _wan_cache_mode("sequential", fast_fp8_pair=True) == "none"
+    assert _wan_cache_mode("model", fast_fp8_pair=True) == "gpu_swap"
+    assert _wan_cache_mode("model", fast_fp8_pair=False) == "none"
+    assert _wan_cache_mode("none", fast_fp8_pair=False) == "full"
+
+
+def test_wan_latent_pipeline_output_is_decoded_to_frames():
+    torch = pytest.importorskip("torch")
+    from PIL import Image
+
+    latents = torch.zeros(1, 16, 5, 4, 4)
+    calls = []
+
+    def decode_latents(pipe, value, **kwargs):
+        calls.append((pipe, tuple(value.shape), kwargs))
+        return [[Image.new("RGB", (8, 8), "black"), Image.new("RGB", (8, 8), "white")]]
+
+    pipe = object()
+    frames = _frames_from_wan_pipeline_output(latents, pipe=pipe, decode_latents=decode_latents)
+
+    assert len(frames) == 2
+    assert frames[0].size == (8, 8)
+    assert calls == [(pipe, (1, 16, 5, 4, 4), {"output_type": "pil"})]
+
+
+def test_ensure_wan_attention_processors_resets_generic_processor():
+    torch = pytest.importorskip("torch")
+    diffusers = pytest.importorskip("diffusers")
+    from diffusers.models.attention_processor import AttnProcessor2_0
+    from diffusers.models.transformers.transformer_wan import WanAttention, WanAttnProcessor
+
+    attn = WanAttention(dim=16, heads=2, dim_head=8, processor=AttnProcessor2_0())
+    wrapper = torch.nn.Module()
+    wrapper.block = torch.nn.Module()
+    wrapper.block.attn1 = attn
+
+    _ensure_wan_attention_processors(wrapper, "test")
+
+    assert isinstance(wrapper.block.attn1.processor, WanAttnProcessor)
+    assert wrapper.block.attn1.spatial_norm is None
 
 
 def test_lazy_wan_transformer_has_offload_sentinel_parameter():

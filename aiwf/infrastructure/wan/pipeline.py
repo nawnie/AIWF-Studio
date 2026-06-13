@@ -59,6 +59,40 @@ def _is_native_comfy_fp8_transformer(path: str | None) -> bool:
     return pp.suffix.lower() == ".safetensors" and _safetensors_uses_comfy_fp8_quant(pp)
 
 
+def _is_wan_latent_output(value: Any) -> bool:
+    try:
+        import torch
+
+        return bool(torch.is_tensor(value) and value.ndim == 5)
+    except Exception:
+        return False
+
+
+def _flatten_wan_video_frames(value: Any) -> list:
+    if isinstance(value, list):
+        if value and isinstance(value[0], list):
+            return list(value[0])
+        return list(value)
+
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        return [value]
+
+    if len(shape) == 5:
+        value = value[0]
+        shape = getattr(value, "shape", None)
+    if shape is not None and len(shape) >= 1:
+        return [value[i] for i in range(int(shape[0]))]
+    return [value]
+
+
+def _frames_from_wan_pipeline_output(output_frames: Any, *, pipe: Any, decode_latents: Any) -> list:
+    if _is_wan_latent_output(output_frames):
+        decoded = decode_latents(pipe, output_frames, output_type="pil")
+        return _flatten_wan_video_frames(decoded)
+    return _flatten_wan_video_frames(output_frames)
+
+
 class WanUnavailable(RuntimeError):
     """Raised when the Wan deps or model are missing/unloadable."""
 
@@ -1827,17 +1861,8 @@ class WanI2VBackend:
             _video_status(f"Average step time (after warmup): {avg:.1f}s")
 
 
-        frames_tensor = output.frames[0]  # [T, H, W, 3] (uint8 or float)
-        frames: list
-        if isinstance(frames_tensor, list):
-            frames = frames_tensor
-        else:
-            frames = [frames_tensor[i] for i in range(frames_tensor.shape[0])]
-
-
-        # Final aggressive unload of all heavy Wan components right after the pipeline call
-        # (including any VAE decode). This gives headroom and follows "unload as soon as gen drops"
-        # so high (and low after use) are fully and completely offloaded before returning frames/save.
+        # Final aggressive unload of all heavy Wan transformers before explicit VAE decode.
+        # This keeps the latent-output path from saving VRAM during denoise only to spend it all at decode.
         # Uses the cache to evict to pinned CPU (no del, no disk reload on next gen).
         try:
             _video_status("Post-pipe: releasing heavy Wan transformers for headroom.")
@@ -1854,5 +1879,13 @@ class WanI2VBackend:
                             pass
         except Exception as exc:
             logger.debug("Post-pipe transformer release non-fatal: %s", exc)
+
+        if _is_wan_latent_output(output.frames):
+            _video_status("Decoding Wan latent video with VAE after transformer unload.")
+        frames = _frames_from_wan_pipeline_output(
+            output.frames,
+            pipe=pipe,
+            decode_latents=decode_wan_video_latents,
+        )
 
         return frames, width, height
