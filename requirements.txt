@@ -1,0 +1,35 @@
+# torch/torchvision installed by launch.py with CUDA wheels (cu124)
+diffusers>=0.35.0
+transformers>=4.44.0,<5.0.0
+accelerate>=0.27.0
+peft>=0.6.0
+safetensors>=0.4.0
+gradio>=4.19.0
+fastapi>=0.110.0
+uvicorn>=0.27.0
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+Pillow>=10.0.0
+qrcode>=7.4.2
+numpy>=1.24.0
+psutil>=5.9.0
+pytest>=8.0.0
+spandrel>=0.4.0
+spandrel-extra-arches>=0.1.0
+opencv-python-headless>=4.8.0
+facexlib>=0.3.0
+compel>=2.0.0
+ftfy>=6.1.0
+gguf>=0.19.0
+torchsde>=0.2.6
+segment-anything>=1.0
+scipy>=1.10.0
+
+# Optional — AMD/Intel GPU on Windows: pip install torch-directml, then
+# enable DirectML in Settings -> Launch profile. (Linux AMD: install the
+# ROCm torch build instead; it shows up as CUDA automatically.)
+
+# Optional — Face Swap (ReActor). Install to enable the Face Swap tab.
+# onnxruntime-gpu for NVIDIA; onnxruntime for CPU-only.
+insightface>=0.7.3
+onnxruntime>=1.17.0

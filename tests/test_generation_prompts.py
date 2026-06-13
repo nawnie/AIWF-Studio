@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock
+from uuid import uuid4
+
+from PIL import Image
+
+from aiwf.core.config.settings import RuntimeFlags, UserSettings
+from aiwf.core.domain.generation import GenerationMode, GenerationRequest, GenerationResult
+from aiwf.core.domain.models import Checkpoint, LoraInfo, VaeInfo
+from aiwf.core.events.bus import EventBus
+from aiwf.services.queue import JobQueue
+from aiwf.services.generation import GenerationService
+from aiwf.services.metadata import MetadataService
+from aiwf.services.prompt_processor import PromptProcessorService
+
+
+def test_generation_service_resolves_prompts(tmp_path: Path):
+    flags = RuntimeFlags(data_dir=tmp_path)
+    wildcards = tmp_path / "wildcards"
+    wildcards.mkdir()
+    (wildcards / "color.txt").write_text("blue\n", encoding="utf-8")
+
+    models = MagicMock()
+    models.expand_prompt_keywords.side_effect = lambda text: text
+    prompts = PromptProcessorService(flags, UserSettings(), models)
+
+    service = GenerationService(
+        backend=MagicMock(),
+        store=MagicMock(),
+        metadata=MagicMock(),
+        queue=MagicMock(),
+        events=MagicMock(),
+        settings=UserSettings(),
+        prompts=prompts,
+    )
+
+    request = GenerationRequest(
+        mode=GenerationMode.TXT2IMG,
+        prompt="sky __color__",
+        seed=7,
+    )
+    resolved = service._resolve_prompts(request)
+    assert resolved.prompt == "sky blue"
+
+
+def test_generation_service_enriches_saved_infotext(tmp_path: Path):
+    vae_path = tmp_path / "clear.vae.safetensors"
+    lora_path = tmp_path / "detail.safetensors"
+    vae_path.write_bytes(b"vae")
+    lora_path.write_bytes(b"lora")
+
+    backend = MagicMock()
+    backend.list_vaes.return_value = [
+        VaeInfo(id="clear", title="Clear VAE", filename=vae_path.name, path=str(vae_path))
+    ]
+    backend.list_loras.return_value = [
+        LoraInfo(id="detail", title="Detail", filename=lora_path.name, path=str(lora_path))
+    ]
+
+    service = GenerationService(
+        backend=backend,
+        store=MagicMock(),
+        metadata=MetadataService(),
+        queue=MagicMock(),
+        events=MagicMock(),
+        settings=UserSettings(),
+    )
+    request = GenerationRequest(prompt="<lora:detail:0.7> portrait", vae_id="clear")
+    checkpoint = Checkpoint(
+        id="model",
+        title="Model",
+        filename="model.safetensors",
+        path=str(tmp_path / "model.safetensors"),
+        hash="abc123",
+    )
+
+    enriched = service._enrich_saved_infotext("portrait\nSteps: 20, Model: Model", request, checkpoint)
+
+    assert "Model hash: abc123" in enriched
+    assert "VAE: Clear VAE" in enriched
+    assert "VAE hash:" in enriched
+    assert "Lora hashes: detail:" in enriched
+    assert "AIWF Studio:" in enriched
+
+
+def test_streaming_generation_reports_model_loading_before_backend_steps():
+    checkpoint = Checkpoint(
+        id="tiny",
+        title="Tiny Model",
+        filename="tiny.safetensors",
+        path="/models/tiny.safetensors",
+        hash="abc123",
+    )
+
+    backend = MagicMock()
+    backend.resolve_checkpoint.return_value = checkpoint
+
+    def generate(request, *, on_progress=None, **_kwargs):
+        if on_progress:
+            on_progress(1, request.steps, "Step 1/1", None)
+        return GenerationResult(
+            job_id=uuid4(),
+            images=[Image.new("RGB", (8, 8))],
+            seeds=[1],
+            infotexts=[""],
+            mode=request.mode,
+        )
+
+    backend.generate.side_effect = generate
+    events = EventBus()
+    service = GenerationService(
+        backend=backend,
+        store=MagicMock(),
+        metadata=MagicMock(),
+        queue=JobQueue(events),
+        events=events,
+        settings=UserSettings(save_images=False),
+    )
+
+    request = GenerationRequest(prompt="cat", steps=1)
+    output = list(service.submit_streaming(request))
+    progress = [item for item in output if item[0] == "progress"]
+
+    assert progress[0][1:4] == (0, 1, "Loading image model: Tiny Model")
+    assert progress[1][3] == "Step 1/1"

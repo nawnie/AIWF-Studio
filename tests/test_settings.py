@@ -1,0 +1,74 @@
+from aiwf.core.config.settings import UserSettings
+
+
+def test_live_preview_disabled_returns_zero_interval():
+    settings = UserSettings(enable_live_preview=False, show_progress_every_n_steps=3)
+    assert settings.live_preview_interval() == 0
+    assert settings.live_preview_summary() == "Live preview off"
+
+
+def test_live_preview_enabled_clamps_interval():
+    settings = UserSettings(enable_live_preview=True, show_progress_every_n_steps=5)
+    assert settings.live_preview_interval() == 5
+    assert settings.live_preview_summary() == "Live preview every 5 steps (VAE decode)"
+
+
+def test_live_preview_every_step_summary():
+    settings = UserSettings(enable_live_preview=True, show_progress_every_n_steps=1)
+    assert settings.live_preview_interval() == 1
+    assert settings.live_preview_summary() == "Live preview every step (VAE decode)"
+
+
+def test_live_preview_unsupported_decoder_disables_interval():
+    settings = UserSettings(enable_live_preview=True, live_preview_decoder="taesd")
+    assert settings.live_preview_interval() == 0
+    assert settings.live_preview_summary() == "Live preview off"
+
+
+def test_saving_output_defaults_preserve_legacy_behavior():
+    s = UserSettings()
+    assert s.save_grid is False
+    assert s.save_sidecar_txt is False
+    assert s.filename_pattern == "[datetime]"
+    assert s.save_before_hires is False
+    assert s.save_interrupted is False
+    assert s.live_preview_decoder == "vae"
+    assert s.live_preview_title_progress is True
+    assert s.metadata_include_model_hash is True
+    assert s.metadata_include_vae_hash is True
+    assert s.metadata_include_lora_hashes is True
+    assert s.metadata_include_app_version is True
+    assert s.pnginfo_send_to_studio is True
+    assert s.pnginfo_clear_after_apply is True
+
+
+def test_saving_output_settings_round_trip():
+    s = UserSettings(
+        save_grid=True,
+        save_sidecar_txt=True,
+        filename_pattern="[seed]-[seq]",
+        save_before_hires=True,
+        save_interrupted=True,
+        live_preview_decoder="vae",
+        live_preview_title_progress=False,
+        metadata_include_model_hash=False,
+        metadata_include_vae_hash=False,
+        metadata_include_lora_hashes=False,
+        metadata_include_app_version=False,
+        pnginfo_send_to_studio=False,
+        pnginfo_clear_after_apply=False,
+    )
+    restored = UserSettings(**s.model_dump())
+    assert restored.save_grid is True
+    assert restored.save_sidecar_txt is True
+    assert restored.filename_pattern == "[seed]-[seq]"
+    assert restored.save_before_hires is True
+    assert restored.save_interrupted is True
+    assert restored.live_preview_decoder == "vae"
+    assert restored.live_preview_title_progress is False
+    assert restored.metadata_include_model_hash is False
+    assert restored.metadata_include_vae_hash is False
+    assert restored.metadata_include_lora_hashes is False
+    assert restored.metadata_include_app_version is False
+    assert restored.pnginfo_send_to_studio is False
+    assert restored.pnginfo_clear_after_apply is False
