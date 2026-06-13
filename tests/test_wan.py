@@ -72,6 +72,7 @@ def test_request_defaults_and_helpers():
     r = WanI2VRequest()
     assert r.model_id == WAN_TI2V_5B
     assert r.fps == 16 and r.offload == "model"
+    assert r.guidance_scale == 1.0
     assert r.normalized_frames() == 49
     assert r.effective_steps() == 8
     assert r.effective_boundary_ratio() == 0.5

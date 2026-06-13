@@ -169,7 +169,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         duration_seconds = gr.Slider(1, 10, value=3, step=1, label="Duration (seconds)")
                     with gr.Row():
                         num_frames = gr.Number(value=49, precision=0, label="Frames", interactive=False)
-                        guidance = gr.Slider(1.0, 12.0, value=5.0, step=0.5, label="Guidance (CFG)")
+                        guidance = gr.Slider(1.0, 12.0, value=1.0, step=0.5, label="Guidance (CFG)")
                     frame_summary = gr.Markdown(
                         "**Frames:** 49 · **Duration:** 3.0s snapped for Wan",
                         elem_classes=["aiwf-settings-paths"],

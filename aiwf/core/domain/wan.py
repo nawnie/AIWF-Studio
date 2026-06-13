@@ -39,7 +39,7 @@ class WanI2VRequest(BaseModel):
     steps: int = Field(default=8, ge=1, le=100)
     high_noise_steps: int = Field(default=4, ge=1, le=60)
     low_noise_steps: int = Field(default=4, ge=1, le=60)
-    guidance_scale: float = Field(default=5.0, ge=1.0, le=20.0)
+    guidance_scale: float = Field(default=1.0, ge=1.0, le=20.0)
     width: int = Field(default=480, ge=128, le=1280)
     height: int = Field(default=480, ge=128, le=1280)
     fps: int = Field(default=16, ge=1, le=60)

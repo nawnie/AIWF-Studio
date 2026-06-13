@@ -45,6 +45,13 @@ def _torch_native_fp8_available() -> bool:
         return False
 
 
+def _is_native_comfy_fp8_transformer(path: str | None) -> bool:
+    if not path:
+        return False
+    pp = Path(path)
+    return pp.suffix.lower() == ".safetensors" and _safetensors_uses_comfy_fp8_quant(pp)
+
+
 class WanUnavailable(RuntimeError):
     """Raised when the Wan deps or model are missing/unloadable."""
 
@@ -171,9 +178,8 @@ def _new_fp8_scaled_linear(in_features: int, out_features: int, bias: bool):
             ):
                 original_shape = input.shape[:-1]
                 x = input.reshape(-1, input.shape[-1])
-                max_value = torch.finfo(torch.float8_e4m3fn).max
-                scale_a = (x.detach().abs().amax() / max_value).clamp(min=1e-12).to(torch.float32)
-                x8 = (x / scale_a).to(torch.float8_e4m3fn)
+                scale_a = torch.ones((), device=x.device, dtype=torch.float32)
+                x8 = x.clamp(-448, 448).to(torch.float8_e4m3fn).contiguous()
                 y = torch._scaled_mm(
                     x8,
                     self.weight.t(),
@@ -232,6 +238,7 @@ def _new_lazy_wan_transformer(config, *, dtype, load_model, before_load=None):
             self._load_model = load_model
             self._before_load = before_load
             self._loaded_model = None
+            self._target_device = None
             # Accelerate's model-offload hook assumes every module in the
             # offload sequence has at least one parameter. The real low stage
             # is intentionally loaded later, so this sentinel keeps the hook
@@ -247,20 +254,23 @@ def _new_lazy_wan_transformer(config, *, dtype, load_model, before_load=None):
             return self._dtype
 
         def _ensure_loaded(self, device=None):
+            target_device = device or self._target_device
             if self._loaded_model is None:
                 if self._before_load is not None:
                     self._before_load()
                 self._loaded_model = self._load_model()
-                if device is not None:
-                    self._loaded_model.to(device)
-            elif device is not None:
-                self._loaded_model.to(device)
+                if target_device is not None:
+                    self._loaded_model.to(target_device)
+            elif target_device is not None:
+                self._loaded_model.to(target_device)
             return self._loaded_model
 
         def to(self, *args, **kwargs):
+            result = super().to(*args, **kwargs)
+            self._target_device = self._aiwf_offload_sentinel.device
             if self._loaded_model is not None:
                 self._loaded_model.to(*args, **kwargs)
-            return self
+            return result
 
         @contextlib.contextmanager
         def cache_context(self, name):
@@ -759,7 +769,27 @@ class WanI2VBackend:
         if offload == "sequential":
             pipe.enable_sequential_cpu_offload()
         elif offload == "model":
-            pipe.enable_model_cpu_offload()
+            fast_fp8_pair = (
+                _torch_native_fp8_available()
+                and _is_native_comfy_fp8_transformer(high_noise_model_id)
+                and _is_native_comfy_fp8_transformer(low_noise_model_id)
+            )
+            if fast_fp8_pair:
+                _video_status(
+                    "Using fast FP8 placement: keeping the active Wan transformer on GPU while offloading text encoder/VAE."
+                )
+                original_seq = pipe.model_cpu_offload_seq
+                original_exclude = list(getattr(pipe, "_exclude_from_cpu_offload", []) or [])
+                pipe.model_cpu_offload_seq = "text_encoder->image_encoder->vae"
+                pipe._exclude_from_cpu_offload = sorted(
+                    set(original_exclude).union({"transformer", "transformer_2"})
+                )
+                try:
+                    pipe.enable_model_cpu_offload()
+                finally:
+                    pipe.model_cpu_offload_seq = original_seq
+            else:
+                pipe.enable_model_cpu_offload()
         else:
             pipe.to("cuda")
 
