@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from aiwf.infrastructure.video import VideoError, VideoProcessor
+from aiwf.infrastructure.video import VideoError, VideoProcessor, write_frames
 
 
 def _make_video(path: Path, frames: int = 6, size=(32, 24), fps: float = 8.0) -> None:
@@ -51,6 +51,35 @@ def test_process_transform_changes_dimensions(tmp_path: Path):
     out = tmp_path / "out.mp4"
     res = VideoProcessor().process(v, out, lambda img, idx: img.resize((16, 16)))
     assert res.width == 16 and res.height == 16
+    assert out.exists()
+
+
+def test_process_callback_can_return_tensor_frame(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    v = tmp_path / "in.mp4"
+    _make_video(v, frames=2)
+    out = tmp_path / "out.mp4"
+
+    def cb(_img: Image.Image, _idx: int):
+        return torch.rand(16, 16, 3)
+
+    res = VideoProcessor().process(v, out, cb)
+
+    assert res.width == 16 and res.height == 16
+    assert out.exists()
+
+
+def test_write_frames_accepts_tensor_frames_and_resizes(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    out = tmp_path / "tensor.mp4"
+    frames = [
+        torch.rand(12, 10, 3),
+        torch.rand(3, 8, 6),
+    ]
+
+    count = write_frames(frames, out, fps=8)
+
+    assert count == 2
     assert out.exists()
 
 
