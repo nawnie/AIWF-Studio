@@ -1,19 +1,21 @@
 # AIWF Studio
 
 <p align="center">
-  <strong>Local-first Stable Diffusion WebUI rebuild for creators, tinkerers, and local AI workflows.</strong>
+  <strong>Local-first creative AI workspace for image generation, inpainting, workflows, and native video experiments.</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Stable%20Diffusion-WebUI-00b894?style=for-the-badge" alt="Stable Diffusion WebUI" />
   <img src="https://img.shields.io/badge/Local%20AI-Creative%20Workspace-6750A4?style=for-the-badge" alt="Local AI Creative Workspace" />
   <img src="https://img.shields.io/badge/Gradio-Python%203.10-ff7c00?style=for-the-badge" alt="Gradio Python 3.10" />
-  <img src="https://img.shields.io/badge/A1111--style-Clean%20Room-blue?style=for-the-badge" alt="A1111 style clean-room rebuild" />
+  <img src="https://img.shields.io/badge/A1111-Compatible%20API-blue?style=for-the-badge" alt="A1111 compatible API" />
 </p>
 
 AIWF Studio is a local-first creative workspace for Stable Diffusion-style image generation and the next generation of local creative AI tooling.
 
-The project started as a clean-room rebuild of the AUTOMATIC1111-style web UI, but the goal is larger than cloning an old interface. AIWF Studio is being built as a structured, maintainable creative console: explicit services, typed requests, predictable folders, clean APIs, and isolated heavy engines instead of one fragile Python dependency soup.
+The original intent was to rebuild a familiar AUTOMATIC1111-style WebUI experience with cleaner code. The project has grown into its own identity: a service-routed creative console with explicit domain models, predictable folders, native API routes, isolated heavy engines, and an A1111-compatible bridge for users and tools that expect `/sdapi/v1` behavior.
+
+AIWF Studio is **inspired by AUTOMATIC1111**, but it is not a fork and not a source-code clone. The familiar pieces that remain are deliberate compatibility choices: Windows launch files like `webui.bat`, Stable Diffusion-style model folders, familiar generation terms, and optional A1111-style API routes.
 
 > Current status: active early development. The image-generation workspace is the current usable core. Video generation, local chat orchestration, LoRA training, and full-model training are being designed as isolated engine workers so they can become part of one app without forcing every dependency into one environment.
 
@@ -23,7 +25,7 @@ AIWF Studio is relevant to people searching for:
 
 - Stable Diffusion WebUI
 - Automatic1111 alternative
-- A1111-style web UI
+- A1111-compatible API
 - local Stable Diffusion UI
 - local AI image generation
 - Gradio Stable Diffusion app
@@ -31,10 +33,11 @@ AIWF Studio is relevant to people searching for:
 - img2img, txt2img, and inpaint UI
 - ControlNet workflow UI
 - LoRA training workspace
+- Wan video generation UI
 - local diffusion creative studio
 - self-hosted AI art tools
 - Windows CUDA Stable Diffusion launcher
-- clean-room Stable Diffusion WebUI rebuild
+- clean-room local diffusion workspace
 - ComfyUI / Forge / AUTOMATIC1111 adjacent local AI tooling
 
 ## What makes it different
@@ -44,11 +47,12 @@ AIWF Studio is not trying to be another pile of extensions glued onto global sta
 The current direction is a familiar image-generation workspace with a cleaner backend shape:
 
 - Stable Diffusion-style txt2img, img2img, and inpaint workflows.
-- A1111-style `/sdapi/v1` compatibility where useful.
+- A1111-compatible `/sdapi/v1` routes where useful.
 - Native `/api/v1` routes for cleaner integrations.
 - Gradio-based local UI.
 - Python 3.10+ Windows-first development path.
 - Local model folders for checkpoints, LoRAs, VAEs, prompts, wildcards, workflows, and outputs.
+- Native Wan image-to-video workspace for local video experiments.
 - Future isolated engines for video generation, LoRA training, full-model training, and local chat orchestration.
 
 ## Why this exists
@@ -93,6 +97,17 @@ The current app focuses on a modern image-generation workflow:
 - SAM-assisted masking for inpaint
 - ReActor-style face swap on results
 
+### Video workspace
+
+The Video tab is focused on native Wan image-to-video experimentation:
+
+- Wan image-to-video workflow
+- high-noise and low-noise model selection
+- separate high/low LoRA controls
+- local VAE selection
+- VRAM/offload controls
+- resolution, FPS, duration, frame count, CFG, flow shift, and seed controls
+
 ### Extra workspace tabs
 
 Current/active tabs include:
@@ -106,13 +121,14 @@ Current/active tabs include:
 - PNG Info
 - History
 - Settings
+- Video
 
 ### API surface
 
 AIWF Studio includes:
 
 - native `/api/v1` routes
-- A1111-style `/sdapi/v1` compatibility adapter
+- A1111-compatible `/sdapi/v1` adapter
 - API/security controls for local and network usage
 
 ## Engine isolation direction
@@ -277,7 +293,7 @@ The Workflows tab is useful but still experimental. Treat it as an active work a
 
 ## Credits and thanks
 
-AIWF Studio is clean-room code, but it is absolutely standing in conversation with the wider local-image community.
+AIWF Studio is original clean-room code, but it is inspired by the wider local-image community and the workflows users already know.
 
 - [AUTOMATIC1111 / stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui)
 - [ControlNet](https://github.com/lllyasviel/ControlNet)
@@ -300,6 +316,7 @@ Allowed:
 - reading public docs
 - reimplementing compatible ideas
 - building compatibility layers where licenses allow it
+- preserving familiar launch and folder conventions for user comfort
 
 Not allowed:
 
