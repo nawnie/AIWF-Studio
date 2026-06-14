@@ -1,10 +1,55 @@
 # AIWF Studio
 
+<p align="center">
+  <strong>Local-first Stable Diffusion WebUI rebuild for creators, tinkerers, and local AI workflows.</strong>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Stable%20Diffusion-WebUI-00b894?style=for-the-badge" alt="Stable Diffusion WebUI" />
+  <img src="https://img.shields.io/badge/Local%20AI-Creative%20Workspace-6750A4?style=for-the-badge" alt="Local AI Creative Workspace" />
+  <img src="https://img.shields.io/badge/Gradio-Python%203.10-ff7c00?style=for-the-badge" alt="Gradio Python 3.10" />
+  <img src="https://img.shields.io/badge/A1111--style-Clean%20Room-blue?style=for-the-badge" alt="A1111 style clean-room rebuild" />
+</p>
+
 AIWF Studio is a local-first creative workspace for Stable Diffusion-style image generation and the next generation of local creative AI tooling.
 
 The project started as a clean-room rebuild of the AUTOMATIC1111-style web UI, but the goal is larger than cloning an old interface. AIWF Studio is being built as a structured, maintainable creative console: explicit services, typed requests, predictable folders, clean APIs, and isolated heavy engines instead of one fragile Python dependency soup.
 
 > Current status: active early development. The image-generation workspace is the current usable core. Video generation, local chat orchestration, LoRA training, and full-model training are being designed as isolated engine workers so they can become part of one app without forcing every dependency into one environment.
+
+## Also known as / search terms
+
+AIWF Studio is relevant to people searching for:
+
+- Stable Diffusion WebUI
+- Automatic1111 alternative
+- A1111-style web UI
+- local Stable Diffusion UI
+- local AI image generation
+- Gradio Stable Diffusion app
+- Python Stable Diffusion interface
+- img2img, txt2img, and inpaint UI
+- ControlNet workflow UI
+- LoRA training workspace
+- local diffusion creative studio
+- self-hosted AI art tools
+- Windows CUDA Stable Diffusion launcher
+- clean-room Stable Diffusion WebUI rebuild
+- ComfyUI / Forge / AUTOMATIC1111 adjacent local AI tooling
+
+## What makes it different
+
+AIWF Studio is not trying to be another pile of extensions glued onto global state. It is a local creative AI console built around service boundaries, typed requests, repo-local folders, and isolated worker processes.
+
+The current direction is a familiar image-generation workspace with a cleaner backend shape:
+
+- Stable Diffusion-style txt2img, img2img, and inpaint workflows.
+- A1111-style `/sdapi/v1` compatibility where useful.
+- Native `/api/v1` routes for cleaner integrations.
+- Gradio-based local UI.
+- Python 3.10+ Windows-first development path.
+- Local model folders for checkpoints, LoRAs, VAEs, prompts, wildcards, workflows, and outputs.
+- Future isolated engines for video generation, LoRA training, full-model training, and local chat orchestration.
 
 ## Why this exists
 
