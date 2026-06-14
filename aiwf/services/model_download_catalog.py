@@ -1,0 +1,298 @@
+from __future__ import annotations
+
+from aiwf.core.domain.model_download import CatalogEntry
+
+_CN = "https://huggingface.co/comfyanonymous/ControlNet-v1-1_fp16_safetensors/resolve/main"
+_SAM = "https://dl.fbaipublicfiles.com/segment_anything"
+
+# Keys grouped by quick-start bundle — used by the Download tab bundle buttons.
+# Each value is an ordered list of catalog keys to download in sequence.
+QUICK_START_BUNDLES: dict[str, list[str]] = {
+    "video": [
+        "wan-gguf-high-q4km",
+        "wan-gguf-low-q4km",
+        "wan-vae-21",
+    ],
+    "rife": ["rife-47"],
+    "seg": ["sam-vit-b"],
+    "faceswap": ["fs-inswapper-fp16"],
+    "sd": ["hf-sd15-pruned", "hf-vae-mse"],
+    "sdxl": ["hf-sdxl-base", "hf-vae-sdxl"],
+}
+
+# Curated starter catalog — expand over time. Users can always paste custom HF/CivitAI URLs.
+MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
+    # --- Wan video ---
+    CatalogEntry(
+        key="wan-vae-21",
+        title="Wan 2.1 VAE",
+        category="wan_vae",
+        source="huggingface",
+        repo_id="Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        filename="split_files/vae/wan_2.1_vae.safetensors",
+        size_mb=780,
+        notes="Works with Wan 2.1 and 2.2 I2V. Saves to models/VAE/.",
+    ),
+    CatalogEntry(
+        key="wan-gguf-high-q4km",
+        title="Wan 2.2 I2V High Noise transformer Q4_K_M",
+        category="wan_gguf",
+        source="huggingface",
+        repo_id="city96/Wan2.2-I2V-A14B-480P-gguf",
+        filename="Wan2.2-I2V-A14B-480P-HighNoise-Q4_K_M.gguf",
+        size_mb=8600,
+        notes=(
+            "First half of the dual-transformer pair. Q4_K_M fits 16 GB VRAM with model offload. "
+            "If the exact filename differs, use Custom Download with the HF repo path."
+        ),
+    ),
+    CatalogEntry(
+        key="wan-gguf-low-q4km",
+        title="Wan 2.2 I2V Low Noise transformer Q4_K_M",
+        category="wan_gguf",
+        source="huggingface",
+        repo_id="city96/Wan2.2-I2V-A14B-480P-gguf",
+        filename="Wan2.2-I2V-A14B-480P-LowNoise-Q4_K_M.gguf",
+        size_mb=8600,
+        notes="Second half of the dual-transformer pair. Must match the High Noise model series.",
+    ),
+    # --- Checkpoints (Hugging Face) ---
+    CatalogEntry(
+        key="hf-sd15-pruned",
+        title="Stable Diffusion 1.5 (fp16 pruned)",
+        category="checkpoint",
+        source="huggingface",
+        repo_id="Comfy-Org/stable-diffusion-v1-5-archive",
+        filename="v1-5-pruned-emaonly-fp16.safetensors",
+        size_mb=2034,
+        notes="Classic SD1.5 base — fp16 pruned single file, half the download of fp32.",
+    ),
+    CatalogEntry(
+        key="hf-sdxl-base",
+        title="Stable Diffusion XL Base 1.0",
+        category="checkpoint",
+        source="huggingface",
+        repo_id="stabilityai/stable-diffusion-xl-base-1.0",
+        filename="sd_xl_base_1.0.safetensors",
+        size_mb=6617,
+        notes="SDXL base — pair with a refiner for best results.",
+    ),
+    # --- Checkpoints (CivitAI) ---
+    CatalogEntry(
+        key="civit-dreamshaper-8",
+        title="DreamShaper 8",
+        category="checkpoint",
+        source="civitai",
+        civitai_model_id=4384,
+        size_mb=2000,
+        notes="Popular SD1.5 checkpoint on CivitAI.",
+    ),
+    CatalogEntry(
+        key="civit-juggernaut-xl",
+        title="Juggernaut XL",
+        category="checkpoint",
+        source="civitai",
+        civitai_model_id=133005,
+        size_mb=6500,
+        notes="Strong general-purpose SDXL checkpoint.",
+    ),
+    CatalogEntry(
+        key="civit-realvisxl",
+        title="RealVisXL V4.0",
+        category="checkpoint",
+        source="civitai",
+        civitai_model_id=139562,
+        size_mb=6500,
+        notes="Photoreal SDXL checkpoint.",
+    ),
+    # --- LoRAs ---
+    CatalogEntry(
+        key="civit-lora-add-detail",
+        title="Add More Details (SD1.5 LoRA)",
+        category="lora",
+        source="civitai",
+        civitai_model_id=82098,
+        notes="Detail enhancer for SD1.5 — small download.",
+    ),
+    CatalogEntry(
+        key="hf-lora-hyper-sdxl-8step",
+        title="Hyper-SDXL 8-step LoRA (CFG)",
+        category="lora",
+        source="huggingface",
+        repo_id="ByteDance/Hyper-SD",
+        filename="Hyper-SDXL-8steps-CFG-lora.safetensors",
+        size_mb=751,
+        notes="Run SDXL at 8 steps, CFG 5-8. Use weight ~0.7.",
+    ),
+    CatalogEntry(
+        key="hf-lora-hyper-sd15-8step",
+        title="Hyper-SD1.5 8-step LoRA (CFG)",
+        category="lora",
+        source="huggingface",
+        repo_id="ByteDance/Hyper-SD",
+        filename="Hyper-SD15-8steps-CFG-lora.safetensors",
+        size_mb=257,
+        notes="Run SD1.5 at 8 steps with normal CFG.",
+    ),
+    CatalogEntry(
+        key="hf-lora-lcm-sdxl",
+        title="LCM-LoRA SDXL",
+        category="lora",
+        source="huggingface",
+        repo_id="latent-consistency/lcm-lora-sdxl",
+        filename="pytorch_lora_weights.safetensors",
+        size_mb=376,
+        notes="4-8 steps at CFG 1-2 with the LCM sampler.",
+    ),
+    CatalogEntry(
+        key="civit-lora-detail-xl",
+        title="Detail Tweaker XL (SDXL LoRA)",
+        category="lora",
+        source="civitai",
+        civitai_model_id=122359,
+        notes="Detail enhancer for SDXL — small download.",
+    ),
+    # --- VAE ---
+    CatalogEntry(
+        key="hf-vae-mse",
+        title="SD VAE FT MSE Original",
+        category="vae",
+        source="huggingface",
+        repo_id="stabilityai/sd-vae-ft-mse-original",
+        filename="vae-ft-mse-840000-ema-pruned.safetensors",
+        size_mb=319,
+        notes="Fixes washed-out SD1.5 colors.",
+    ),
+    CatalogEntry(
+        key="hf-vae-sdxl",
+        title="SDXL VAE (fp16 fix)",
+        category="vae",
+        source="huggingface",
+        repo_id="madebyollin/sdxl-vae-fp16-fix",
+        filename="sdxl_vae.safetensors",
+        size_mb=319,
+    ),
+    # --- ControlNet (light) ---
+    CatalogEntry(
+        key="cn-canny-light",
+        title="ControlNet Canny v1.1 Light",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN}/control_lora_rank128_v11p_sd15_canny_fp16.safetensors",
+        size_mb=129,
+    ),
+    CatalogEntry(
+        key="cn-depth-light",
+        title="ControlNet Depth v1.1 Light",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN}/control_lora_rank128_v11f1p_sd15_depth_fp16.safetensors",
+        size_mb=129,
+    ),
+    CatalogEntry(
+        key="cn-openpose-light",
+        title="ControlNet OpenPose v1.1 Light",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN}/control_lora_rank128_v11p_sd15_openpose_fp16.safetensors",
+        size_mb=129,
+    ),
+    CatalogEntry(
+        key="cn-tile-light",
+        title="ControlNet Tile v1.1 Light",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN}/control_lora_rank128_v11f1e_sd15_tile_fp16.safetensors",
+        size_mb=129,
+    ),
+    # --- Upscalers ---
+    CatalogEntry(
+        key="up-realesrgan-x4",
+        title="RealESRGAN 4x+",
+        category="upscaler",
+        source="direct",
+        url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        size_mb=64,
+    ),
+    CatalogEntry(
+        key="up-realesrgan-anime",
+        title="RealESRGAN 4x+ Anime6B",
+        category="upscaler",
+        source="direct",
+        url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
+        size_mb=18,
+    ),
+    CatalogEntry(
+        key="up-realesrgan-x2",
+        title="RealESRGAN 2x+",
+        category="upscaler",
+        source="direct",
+        url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+        size_mb=64,
+    ),
+    # --- RIFE (frame interpolation) ---
+    CatalogEntry(
+        key="rife-47",
+        title="RIFE 4.7",
+        category="rife",
+        source="direct",
+        url="https://github.com/hzwer/Practical-RIFE/releases/download/model4.7/rife47.pth",
+        size_mb=130,
+        notes="Recommended version — best quality/speed balance. Saves to models/rife/.",
+    ),
+    CatalogEntry(
+        key="rife-49",
+        title="RIFE 4.9",
+        category="rife",
+        source="direct",
+        url="https://github.com/hzwer/Practical-RIFE/releases/download/model4.9/rife49.pth",
+        size_mb=130,
+        notes="Latest stable RIFE version.",
+    ),
+    # --- SAM (segmentation) ---
+    CatalogEntry(
+        key="sam-vit-b",
+        title="SAM ViT-B (375 MB)",
+        category="sam",
+        source="direct",
+        url=f"{_SAM}/sam_vit_b_01ec64.pth",
+        size_mb=375,
+        notes="Fastest SAM model. Auto-downloaded on first Segment use.",
+    ),
+    CatalogEntry(
+        key="sam-vit-l",
+        title="SAM ViT-L (1.2 GB)",
+        category="sam",
+        source="direct",
+        url=f"{_SAM}/sam_vit_l_0b3195.pth",
+        size_mb=1250,
+        notes="Better accuracy than ViT-B with moderate VRAM cost.",
+    ),
+    CatalogEntry(
+        key="sam-vit-h",
+        title="SAM ViT-H (2.5 GB)",
+        category="sam",
+        source="direct",
+        url=f"{_SAM}/sam_vit_h_4b8939.pth",
+        size_mb=2560,
+        notes="Highest accuracy SAM model.",
+    ),
+    # --- Face swap ---
+    CatalogEntry(
+        key="fs-inswapper-fp16",
+        title="inswapper_128 fp16 (ReActor)",
+        category="faceswap",
+        source="direct",
+        url="https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128_fp16.onnx",
+        size_mb=264,
+        notes="Half-size fp16 build — recommended.",
+    ),
+    CatalogEntry(
+        key="fs-inswapper",
+        title="inswapper_128 (ReActor)",
+        category="faceswap",
+        source="direct",
+        url="https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx",
+        size_mb=529,
+    ),
+]

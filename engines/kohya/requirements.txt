@@ -1,0 +1,32 @@
+# Kohya LoRA engine requirements.
+# Installed into engines/kohya/.venv/ by launch.py when Kohya is enabled.
+#
+# SETUP:
+#   1. Clone kohya_ss into engines/kohya/kohya_ss/:
+#        git clone https://github.com/bmaltais/kohya_ss.git engines/kohya/kohya_ss
+#   2. Enable in engines.json:
+#        { "kohya": { "enabled": true } }
+#   3. Restart AIWF Studio — launch.py will create the venv and install deps.
+#
+# Kohya trains LoRA adapters for SD 1.x, SDXL, and Flux models.
+# Textual Inversion is deliberately excluded — use LoRA instead.
+
+torch>=2.1.0
+torchvision>=0.16.0
+# Kohya's own requirements (relative to its repo root):
+# These will be installed via: pip install -r engines/kohya/kohya_ss/requirements.txt
+# after cloning. The file below is the AIWF-specific overlay.
+
+accelerate>=0.26.0
+transformers>=4.36.0
+diffusers>=0.25.0
+peft>=0.7.0
+safetensors>=0.4.0
+Pillow>=10.0.0
+toml>=0.10.2
+voluptuous>=0.14.0
+lycoris-lora>=2.2.0
+prodigyopt>=1.0
+# Optional — faster attention on RTX 30/40-series:
+# sageattention>=2.1.1
+# xformers>=0.0.23

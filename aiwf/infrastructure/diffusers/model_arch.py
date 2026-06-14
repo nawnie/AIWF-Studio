@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+import json
+import logging
+import struct
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Key names aligned with diffusers single-file detection (A1111 sd_models_config.py logic).
+UNET_INPUT_KEY = "model.diffusion_model.input_blocks.0.0.weight"
+SDXL_OPENCLIP_KEY = "conditioner.embedders.1.model.ln_final.weight"
+SDXL_BASE_KEY = "conditioner.embedders.1.model.transformer.resblocks.9.mlp.c_proj.bias"
+
+ARCH_SD15 = "sd15"
+ARCH_INPAINT = "inpaint"
+ARCH_SDXL = "sdxl"
+ARCH_SDXL_INPAINT = "sdxl_inpaint"
+
+
+def _safetensors_tensor_shapes(path: Path) -> dict[str, list[int]]:
+    """Read tensor shapes from a safetensors header without loading weights."""
+    with path.open("rb") as handle:
+        header_size = struct.unpack("<Q", handle.read(8))[0]
+        header = json.loads(handle.read(header_size).decode("utf-8"))
+    shapes: dict[str, list[int]] = {}
+    for key, meta in header.items():
+        if key == "__metadata__":
+            continue
+        shape = meta.get("shape")
+        if shape:
+            shapes[key] = list(shape)
+    return shapes
+
+
+def _ckpt_tensor_shapes(path: Path) -> dict[str, list[int]]:
+    """Best-effort shape map for legacy .ckpt checkpoints."""
+    try:
+        import torch
+
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        if not isinstance(state, dict):
+            return {}
+        state_dict = state.get("state_dict", state)
+        shapes: dict[str, list[int]] = {}
+        for key, value in state_dict.items():
+            if hasattr(value, "shape"):
+                shapes[key] = list(value.shape)
+        return shapes
+    except Exception:
+        logger.debug("Could not inspect ckpt shapes for %s", path, exc_info=True)
+        return {}
+
+
+def _shapes_for_checkpoint(path: Path) -> dict[str, list[int]]:
+    suffix = path.suffix.lower()
+    if suffix == ".safetensors":
+        try:
+            return _safetensors_tensor_shapes(path)
+        except Exception:
+            logger.debug("Could not read safetensors header for %s", path, exc_info=True)
+            return {}
+    if suffix in {".ckpt", ".pt"}:
+        return _ckpt_tensor_shapes(path)
+    return {}
+
+
+def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: str = "") -> str:
+    """Classify checkpoint architecture from state-dict key shapes."""
+    unet_in = shapes.get(UNET_INPUT_KEY)
+    has_sdxl = SDXL_OPENCLIP_KEY in shapes or SDXL_BASE_KEY in shapes
+
+    if unet_in and len(unet_in) >= 2 and unet_in[1] == 9:
+        if has_sdxl:
+            return ARCH_SDXL_INPAINT
+        return ARCH_INPAINT
+
+    if has_sdxl:
+        return ARCH_SDXL
+
+    lower = filename.lower()
+    if "inpaint" in lower:
+        return ARCH_INPAINT
+    return ARCH_SD15
+
+
+def looks_like_lora_weights(path: Path | str) -> bool:
+    """True when a safetensors/ckpt file contains LoRA adapters but no full UNet."""
+    shapes = _shapes_for_checkpoint(Path(path))
+    if not shapes:
+        return False
+    if UNET_INPUT_KEY in shapes:
+        return False
+    return any("lora_down" in key or "lora_up" in key for key in shapes)
+
+
+def detect_checkpoint_architecture(path: Path | str) -> str:
+    """Detect SD1.5 / SDXL / inpaint variants from checkpoint weights."""
+    resolved = Path(path)
+    shapes = _shapes_for_checkpoint(resolved)
+    if shapes:
+        return infer_architecture_from_shapes(shapes, filename=resolved.name)
+
+    lower = resolved.name.lower()
+    if "inpaint" in lower and "xl" in lower.replace("_", " "):
+        return ARCH_SDXL_INPAINT
+    if "inpaint" in lower:
+        return ARCH_INPAINT
+    if "xl" in lower or "sdxl" in lower:
+        return ARCH_SDXL
+    return ARCH_SD15
+
+
+def architecture_label(architecture: str) -> str:
+    return {
+        ARCH_SDXL: "SDXL",
+        ARCH_SDXL_INPAINT: "SDXL inpaint",
+        ARCH_INPAINT: "inpaint",
+        ARCH_SD15: "SD1.5",
+    }.get(architecture, architecture)
+
+
+def is_inpaint_architecture(architecture: str) -> bool:
+    return architecture in {ARCH_INPAINT, ARCH_SDXL_INPAINT}
+
+
+def is_sdxl_architecture(architecture: str) -> bool:
+    return architecture in {ARCH_SDXL, ARCH_SDXL_INPAINT}

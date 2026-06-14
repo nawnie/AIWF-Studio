@@ -1,0 +1,24 @@
+# EveryDream2 full fine-tuning engine requirements.
+# Installed into engines/ed2/.venv/ by launch.py when ED2 is enabled.
+#
+# SETUP:
+#   1. Clone EveryDream2trainer into engines/ed2/EveryDream2trainer/:
+#        git clone https://github.com/victorchall/EveryDream2trainer.git engines/ed2/EveryDream2trainer
+#   2. Enable in engines.json:
+#        { "ed2": { "enabled": true } }
+#   3. Restart AIWF Studio — launch.py will create the venv and install deps.
+#
+# ED2 trains full model checkpoints (DreamBooth and fine-tuning).
+# Textual Inversion is not supported in ED2 by default.
+
+torch>=2.1.0
+torchvision>=0.16.0
+accelerate>=0.26.0
+transformers>=4.36.0
+diffusers>=0.25.0
+safetensors>=0.4.0
+Pillow>=10.0.0
+pyyaml>=6.0
+colorama>=0.4.6
+# ED2's own requirements will be installed from its repo after cloning:
+#   pip install -r engines/ed2/EveryDream2trainer/requirements.txt

@@ -1,0 +1,14 @@
+# Generation engine requirements.
+# This engine shares the main AIWF Studio venv (see architecture doc §2).
+# Splitting into a dedicated venv is deferred until a dependency conflict forces it.
+#
+# To see what is actually installed:
+#   venv\Scripts\pip list
+#
+# The generation engine worker inherits all packages from the main venv.
+# Nothing extra is needed here — this file is a marker and documentation.
+#
+# Future split trigger (from architecture doc §7.2):
+#   - Wan requires incompatible Torch/CUDA/SageAttention stack
+#   - LTX requires incompatible dependency stack
+#   - Image generation stability is harmed by video deps

@@ -1,0 +1,36 @@
+# Models & weights (multi-GB — never commit)
+models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+*.onnx
+
+# Environments & caches
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated output & media
+outputs/
+*.mp4
+*.webm
+*.avi
+*.mov
+
+# Local config / logs
+config.json
+launch.json
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

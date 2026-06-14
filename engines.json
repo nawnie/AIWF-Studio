@@ -1,0 +1,24 @@
+{
+  "_comment": "AIWF Studio engine configuration. Set enabled=true to activate training engines.",
+  "_comment_setup": "See engines/<name>/requirements.txt for clone and setup instructions.",
+
+  "generation": {
+    "enabled": true,
+    "venv_dir": "",
+    "_comment": "Shares the main venv. venv_dir is intentionally empty."
+  },
+
+  "kohya": {
+    "enabled": false,
+    "repo_dir": "engines/kohya/kohya_ss",
+    "venv_dir": "engines/kohya/.venv",
+    "_comment": "Clone kohya_ss into repo_dir, then set enabled=true and restart."
+  },
+
+  "ed2": {
+    "enabled": false,
+    "repo_dir": "engines/ed2/EveryDream2trainer",
+    "venv_dir": "engines/ed2/.venv",
+    "_comment": "Clone EveryDream2trainer into repo_dir, then set enabled=true and restart."
+  }
+}
