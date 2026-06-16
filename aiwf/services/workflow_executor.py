@@ -107,7 +107,7 @@ class WorkflowExecutor:
             elif state.image is not None:
                 step_images.append(state.image)
 
-            if workflow.save_intermediate and self.settings.save_images:
+            if workflow.save_intermediate and self.settings.save_images and image is not None:
                 subdir = self.settings.workflow_output_subdir
                 artifact = self.enhance.store.save(image, result.infotext, subdir)
                 result.image_path = artifact.path

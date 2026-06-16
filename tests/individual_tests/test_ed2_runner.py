@@ -15,7 +15,7 @@ class _CapturingSupervisor:
     def is_running(self, worker_id: str) -> bool:
         return False
 
-    def start(self, worker_id: str, command):
+    def start(self, worker_id: str, command, *, check: bool = False):
         request_file = Path(command.args[2])
         self.request = json.loads(request_file.read_text(encoding="utf-8"))
         yield "captured"

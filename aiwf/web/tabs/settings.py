@@ -22,7 +22,12 @@ from aiwf.web.theme import accent_preset_names
 
 TAB_VISIBILITY_CHOICES = [
     "Models",
+    "Segment",
     "Enhance",
+    "Chat",
+    "Video",
+    "RIFE",
+    "Training",
     "Workflows",
     "Face Swap",
     "Library",
@@ -1259,7 +1264,7 @@ def register_settings(registry: WebRegistry) -> None:
                 values[extra_ckpt_dirs_index] = merged_ckpt_dirs
                 settings = _launch_settings_from_inputs(values[: len(launch_inputs)])
             except ValueError as exc:
-                return gr.update(), gr.update(), f"**Import failed** â€” {exc}", gr.update()
+                return gr.update(), gr.update(), f"**Import failed** - {exc}", gr.update()
             return (
                 merged_model_dirs,
                 merged_ckpt_dirs,

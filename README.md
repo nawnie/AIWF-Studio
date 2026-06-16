@@ -29,6 +29,10 @@ AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion 
 - Models
 - Segment
 - Enhance
+- Chat
+- Video
+- RIFE
+- Training
 - Workflows
 - Face Swap
 - Library
@@ -72,7 +76,7 @@ models/Stable-diffusion/
 Put LoRAs in:
 
 ```text
-models/Lora/
+models/Loras/
 ```
 
 Put VAEs in:
@@ -96,12 +100,12 @@ Security guidance:
 
 The Workflows tab is still a work in progress. It is useful, but it should be treated as experimental until it gets a deeper validation pass.
 
-## Coming soon
+## Active roadmap
 
-- training tools
 - extension management
 - broader theme and workspace customization
 - more mature workflow authoring
+- deeper training-engine setup flows
 
 ## Credits and thanks
 

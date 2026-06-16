@@ -8,11 +8,14 @@ from PIL import Image
 
 from aiwf import __version__
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
+from aiwf.core.domain.engine import EngineTenant
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest, GenerationResult
 from aiwf.core.domain.models import Checkpoint, LoraInfo, VaeInfo
 from aiwf.core.events.bus import EventBus
+from aiwf.services.engine_supervisor import EngineSupervisor
 from aiwf.services.queue import JobQueue
 from aiwf.services.generation import GenerationService
+from aiwf.services.gpu_tenant_lock import GpuTenantLock
 from aiwf.services.metadata import MetadataService
 from aiwf.services.prompt_processor import PromptProcessorService
 
@@ -126,6 +129,51 @@ def test_streaming_generation_reports_model_loading_before_backend_steps():
 
     assert progress[0][1:4] == (0, 1, "Loading image model: Tiny Model")
     assert progress[1][3] == "Step 1/1"
+
+
+def test_generation_postprocess_reuses_image_tenant_for_nested_enhance(monkeypatch):
+    checkpoint = Checkpoint(
+        id="tiny",
+        title="Tiny Model",
+        filename="tiny.safetensors",
+        path="/models/tiny.safetensors",
+        hash="abc123",
+    )
+    image = Image.new("RGB", (8, 8))
+
+    backend = MagicMock()
+    backend.resolve_checkpoint.return_value = checkpoint
+    backend.generate.return_value = GenerationResult(
+        job_id=uuid4(),
+        images=[image],
+        seeds=[1],
+        infotexts=[""],
+        mode=GenerationMode.TXT2IMG,
+    )
+    events = EventBus()
+    supervisor = EngineSupervisor(gpu_lock=GpuTenantLock())
+    monkeypatch.setattr(supervisor, "_flush_cuda", lambda: None)
+    service = GenerationService(
+        backend=backend,
+        store=MagicMock(),
+        metadata=MagicMock(),
+        queue=JobQueue(events),
+        events=events,
+        settings=UserSettings(save_images=False),
+        supervisor=supervisor,
+    )
+
+    def postprocess(img):
+        with supervisor.tenant_session(EngineTenant.ENHANCE, reason="postprocess") as owner:
+            assert owner
+            assert supervisor.active_tenant == EngineTenant.IMAGE
+        return img
+
+    job = service.submit(GenerationRequest(prompt="cat", steps=1), image_postprocess=postprocess)
+
+    assert job.result is not None
+    assert job.result.images == [image]
+    assert supervisor.active_tenant == EngineTenant.IDLE
 
 
 def test_generation_service_records_model_throughput(monkeypatch):

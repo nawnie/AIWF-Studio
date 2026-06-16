@@ -1509,7 +1509,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
     # ── Prompt Tools accordion handlers ─────────────────────────────────────────
     _pt_service = PromptToolsService(
         checkpoint_dir=ctx.flags.resolved_ckpt_dir(),
-        lora_dir=ctx.flags.resolved_models_dir() / "Lora",
+        lora_dir=ctx.flags.resolved_models_dir() / "Loras",
         output_dir=ctx.flags.resolved_output_dir(),
     )
 

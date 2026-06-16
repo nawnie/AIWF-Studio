@@ -6,119 +6,107 @@ This document describes how the Chat tab integrates with the GPU tenant system.
 
 ## Architecture
 
-```
+```text
 User clicks Chat tab
-        │
-        ▼
-chat_workspace.py  ──► OllamaClient.healthcheck()
-        │                OllamaClient.list_models()
-        │
+  -> chat_workspace.py
+  -> OllamaClient.healthcheck()
+  -> OllamaClient.list_models()
+
 User presses Send
-        │
-        ▼
-on_send() ──► EngineSupervisor.request_switch(CHAT)
-        │           │
-        │           ├─ If current == CHAT → no-op
-        │           └─ If current == IMAGE/VIDEO/TRAINING
-        │                 → refuse (GPU busy)
-        │
-        ▼
-OllamaClient.stream_chat(model, messages)
-        │
-        ▼
-Tokens streamed to gr.Chatbot
+  -> on_send()
+  -> EngineSupervisor.request_switch(CHAT, job_id="chat")
+      - if GPU is idle: grant CHAT
+      - if CHAT already owns the lock for the same job: no-op
+      - if image/video/enhance/training owns the GPU: deny unless the caller opted into waiting
+  -> OllamaClient.stream_chat(model, messages)
+  -> stream tokens to gr.Chatbot
 ```
 
 ---
 
-## GPU tenant rules
+## GPU Tenant Rules
 
-| Situation | Behaviour |
-|-----------|-----------|
-| GPU is IDLE | `request_switch(CHAT)` succeeds immediately |
-| GPU is held by IMAGE or VIDEO | `request_switch(CHAT)` returns `ok=False`; chat shows "GPU busy" message |
-| GPU is already in CHAT | `request_switch(CHAT)` is a no-op (returns ok=True, "already active") |
-| User clicks Unload | `client.unload(model)` + `request_switch(IDLE)` |
-| User switches to Video tab | Video service calls `request_switch(VIDEO)`; supervisor calls `client.unload(active_model)` first |
+| Situation | Behavior |
+|-----------|----------|
+| GPU is IDLE | `request_switch(CHAT, job_id="chat")` succeeds immediately. |
+| GPU is held by IMAGE, VIDEO, ENHANCE, or TRAINING | Chat is denied by default and the UI shows the busy message. |
+| GPU is already in CHAT for the same job | The request is idempotent and succeeds. |
+| User clicks Unload | The tab calls `client.unload(model)` and releases with `request_switch(IDLE, job_id="chat")`. |
+| A GPU-heavy tenant starts while CHAT is active | The supervisor asks Ollama to unload the active chat model before granting the heavy tenant. |
 
-Chat is classified as **not** GPU-heavy (`EngineTenant.CHAT.is_gpu_heavy() == False`) because Ollama manages its own VRAM independently of the diffusers pipeline.  However, the tenant lock still prevents accidental conflicts.
+Chat is classified as not GPU-heavy (`EngineTenant.CHAT.is_gpu_heavy() == False`) because Ollama manages its own VRAM independently of the diffusers pipeline. The tenant lock still tracks CHAT so GPU-heavy work has a single place to preempt and unload it.
 
 ---
 
 ## OllamaClient
 
-`aiwf/services/ollama_client.py` — thin `httpx` wrapper.
+`aiwf/services/ollama_client.py` is a thin `httpx` wrapper.
 
 ```python
 client = OllamaClient(base_url="http://127.0.0.1:11434")
 
-# Health check (fast, <1s)
-alive = client.healthcheck()       # bool
+alive = client.healthcheck()
+models = client.list_models()
 
-# Available models
-models = client.list_models()      # list[str]
-
-# Stream a chat response
 for token in client.stream_chat(model, messages, options):
     print(token, end="", flush=True)
 
-# Evict from VRAM before switching to image/video
-client.unload("llama3:8b")         # keep_alive: 0
-
-# Show model metadata
+client.unload("llama3:8b")  # keep_alive: 0
 info = client.model_info("llama3:8b")
 ```
 
-`httpx` must be installed (`pip install httpx`).  If missing, `OllamaClient` raises `ImportError` with an install hint on first use.
+`httpx` is imported on first use. If it is missing, `OllamaClient` raises `ImportError` with an install hint instead of breaking app import.
 
 ---
 
-## EngineSupervisor wiring
-
-`EngineSupervisor` gains three new members (Sprint A1):
+## EngineSupervisor Wiring
 
 | Member | Description |
 |--------|-------------|
-| `active_tenant` property | Returns current `EngineTenant` |
-| `request_switch(EngineSwitchRequest)` | Switch tenant; unloads Ollama on CHAT→* transitions |
-| `set_chat_model(name)` | Track which model is loaded so we can unload it later |
+| `active_tenant` | Returns the current `EngineTenant`. |
+| `request_switch(EngineSwitchRequest)` | Acquires, waits for, denies, or releases GPU ownership. |
+| `tenant_session(target, job_id=...)` | Context manager for service-level GPU ownership. |
+| `borrow_active_tenant(target, job_id=...)` | Lets same-thread nested post-processing reuse an already-held tenant without releasing it. |
+| `set_ollama_client(client)` | Installs the client used to evict chat models. |
+| `set_chat_model(name)` | Tracks which model is loaded so it can be unloaded before heavy work. |
 
-The supervisor is injected via `AppContext` — the chat tab accesses it as `ctx.supervisor`.
+The supervisor is injected via `AppContext`; the Chat tab accesses it as `ctx.supervisor`.
 
 ---
 
-## Ollama not installed
+## Ollama Not Installed
 
 If Ollama is not reachable:
+
 - `healthcheck()` returns `False`
-- The status pill shows 🔴 Ollama not detected
-- An install guide appears in the tab body
-- No crash, no exception propagated to the UI
+- the status pill shows Ollama is not detected
+- the tab renders guidance instead of crashing
+- no exception is propagated to app startup
 
 ---
 
-## VRAM behaviour
+## VRAM Behavior
 
-Ollama keeps models in VRAM until they are explicitly unloaded or `keep_alive` expires (default 5 minutes).
+Ollama keeps models in VRAM until they are explicitly unloaded or `keep_alive` expires.
 
-To free VRAM before a video/image job:
-1. The supervisor calls `client.unload(active_model)` in `request_switch()` when switching away from CHAT.
+To free VRAM before a video/image/enhance/training job:
+
+1. The supervisor calls `client.unload(active_model)` when a higher-priority tenant preempts CHAT.
 2. Ollama receives `POST /api/generate {"model": "...", "keep_alive": 0}`.
-3. The model is evicted; VRAM is returned to the OS/CUDA allocator.
+3. The model is evicted before the GPU-heavy tenant starts.
 
-This happens automatically — the user does not need to click Unload before starting a video job.
-
----
-
-## Security note
-
-`OllamaClient` only connects to `127.0.0.1` (loopback) by default.  Do not expose the Ollama port to an external network without authentication.
+This happens automatically; the user does not need to click Unload before starting a video or image job.
 
 ---
 
-## Future work
+## Security Note
 
-- `allow_wait=True` in `EngineSwitchRequest` — queue chat requests while GPU is busy
-- System prompt persistence (per-model)
+`OllamaClient` connects to `127.0.0.1` by default. Do not expose the Ollama port to an external network without authentication.
+
+---
+
+## Future Work
+
+- System prompt persistence per model
 - Chat history export
-- Model pull UI (progress bar, cancel)
+- Model pull UI with progress and cancel support

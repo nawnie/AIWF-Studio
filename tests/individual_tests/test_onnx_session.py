@@ -62,6 +62,13 @@ class TestONNXBackend:
         samplers = backend.list_samplers()
         assert len(samplers) > 0
 
+    def test_catalog_methods_include_empty_embeddings(self, tmp_path: Path) -> None:
+        from aiwf.infrastructure.onnx.backend import ONNXBackend
+        backend = ONNXBackend(tmp_path)
+        assert backend.list_loras() == []
+        assert backend.list_vaes() == []
+        assert backend.list_embeddings() == []
+
 
 class TestONNXTokenizer:
     def test_tokenize_requires_local_tokenizer_dir(self, tmp_path: Path) -> None:
@@ -165,7 +172,7 @@ class TestONNXBootstrap:
 
         with patch("aiwf.bootstrap.DeviceManager", FakeDevices), patch(
             "aiwf.bootstrap.ONNXBackend", FakeONNXBackend
-        ), patch("aiwf.bootstrap.SegmentService.ensure_default_models", lambda self: None), patch(
+        ), patch(
             "aiwf.dev.diagnostics.install_dev_diagnostics", lambda ctx: None
         ):
             from aiwf.bootstrap import build_context

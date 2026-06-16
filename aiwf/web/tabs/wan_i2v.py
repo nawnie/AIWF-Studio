@@ -23,7 +23,12 @@ logger = logging.getLogger(__name__)
 def _service(ctx: AppContext) -> WanService:
     svc = _SERVICES.get(id(ctx))
     if svc is None:
-        svc = WanService(ctx.flags, ctx.settings, unload_image_models=ctx.generation.backend.unload)
+        svc = WanService(
+            ctx.flags,
+            ctx.settings,
+            unload_image_models=ctx.generation.backend.unload,
+            supervisor=ctx.supervisor,
+        )
         _SERVICES[id(ctx)] = svc
     return svc
 

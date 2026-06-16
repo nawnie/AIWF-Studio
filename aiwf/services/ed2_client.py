@@ -1,6 +1,6 @@
 """EveryDream2 full fine-tuning service client.
 
-Mirrors the pattern of ``aiwf.services.kohya_client`` — validates the request,
+Mirrors the pattern of ``aiwf.services.kohya_client`` - validates the request,
 acquires the GPU tenant lock (ED2 has the highest priority: 100), and submits
 a subprocess job through the EngineSupervisor.
 
@@ -24,9 +24,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from aiwf.core.domain.engine import EngineTenant
 from aiwf.core.domain.training import ED2TrainingRequest
 from aiwf.services.engine_supervisor import EngineSupervisor, get_supervisor
-from aiwf.services.gpu_tenant_lock import get_gpu_lock
 
 logger = logging.getLogger(__name__)
 _MODEL_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".bin", ".pth"}
@@ -37,7 +37,7 @@ class ED2Unavailable(RuntimeError):
 
 
 class ED2Client:
-    """Thin service client: validates → GPU lock → supervisor.submit_subprocess_job().
+    """Thin service client: validates -> GPU lock -> supervisor.submit_subprocess_job().
 
     ED2 holds the highest GPU priority (100), meaning it will block all other
     engines.  Wan generation, Kohya, and Ollama will be blocked while ED2 trains.
@@ -55,7 +55,7 @@ class ED2Client:
     ) -> str:
         """Validate the request, acquire the GPU tenant lock, and spawn an ED2 worker.
 
-        Returns the job_id.  The job runs asynchronously — register a listener on
+        Returns the job_id.  The job runs asynchronously - register a listener on
         the supervisor to receive progress events::
 
             supervisor.add_progress_listener(my_callback)
@@ -100,21 +100,18 @@ class ED2Client:
                 "Provide an existing path or a Hugging Face model ID (org/repo)."
             )
 
-        # GPU tenant lock — ed2 priority=100 (highest)
-        gpu_lock = get_gpu_lock()
         import uuid as _uuid
         job_id_tentative = f"ed2_{_uuid.uuid4().hex[:8]}"
-        with gpu_lock.acquire("ed2", job_id_tentative) as granted:
-            if not granted:
-                raise ED2Unavailable(
-                    f"Cannot start ED2 training: {gpu_lock.blocked_message('ed2')}"
-                )
+        try:
             return self._supervisor.submit_subprocess_job(
                 spec,
                 request.model_dump(),
                 outputs_root=outputs_root,
                 job_id=job_id_tentative,
+                tenant=EngineTenant.FULL_TRAINING,
             )
+        except RuntimeError as exc:
+            raise ED2Unavailable(f"Cannot start ED2 training: {exc}") from exc
 
     def cancel(self, job_id: str) -> None:
         """Cancel a running ED2 job (sends SIGTERM to the worker process)."""

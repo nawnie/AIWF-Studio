@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import urllib.request
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +13,7 @@ from pathlib import Path
 from PIL import Image
 
 from aiwf.core.config.settings import RuntimeFlags
+from aiwf.core.domain.engine import EngineTenant
 from aiwf.core.domain.faceswap import FaceSwapModelInfo, FaceSwapOptions
 from aiwf.core.domain.video import VideoProcessResult
 from aiwf.infrastructure.faceswap import FaceSwapper, FaceSwapUnavailable
@@ -59,10 +62,30 @@ class FaceSwapService:
     the infrastructure layer and loaded lazily.
     """
 
-    def __init__(self, flags: RuntimeFlags) -> None:
+    def __init__(self, flags: RuntimeFlags, supervisor=None) -> None:
         self.flags = flags
+        self.supervisor = supervisor
         self._swapper: FaceSwapper | None = None
         self._swapper_path: str | None = None
+
+    @contextmanager
+    def _gpu_tenant(self, reason: str):
+        supervisor = getattr(self, "supervisor", None)
+        if supervisor is None:
+            yield
+            return
+        manager = supervisor.tenant_session(EngineTenant.ENHANCE, reason=reason)
+        try:
+            manager.__enter__()
+        except RuntimeError as exc:
+            raise FaceSwapUnavailable(f"GPU busy: {exc}") from exc
+        try:
+            yield
+        except BaseException:
+            if not manager.__exit__(*sys.exc_info()):
+                raise
+        else:
+            manager.__exit__(None, None, None)
 
     def models_dir(self) -> Path:
         return self.flags.resolved_models_dir() / "insightface"
@@ -196,21 +219,22 @@ class FaceSwapService:
         if target is None or source is None:
             raise FaceSwapUnavailable("Provide both a source face and a target image.")
         options = options or FaceSwapOptions()
-        swapper = self._get_swapper(options)
-        result = swapper.swap(
-            target,
-            source,
-            source_index=options.source_face_index,
-            target_index=options.target_face_index,
-            source_faces_index=list(options.source_faces_index or []),
-            target_faces_index=list(options.target_faces_index or []),
-            gender_source=int(options.gender_source),
-            gender_target=int(options.gender_target),
-            mask_face=bool(options.mask_face),
-        )
-        if options.restore_face and restore_fn is not None:
-            result = restore_fn(result)
-        return result
+        with self._gpu_tenant("Face swap"):
+            swapper = self._get_swapper(options)
+            result = swapper.swap(
+                target,
+                source,
+                source_index=options.source_face_index,
+                target_index=options.target_face_index,
+                source_faces_index=list(options.source_faces_index or []),
+                target_faces_index=list(options.target_faces_index or []),
+                gender_source=int(options.gender_source),
+                gender_target=int(options.gender_target),
+                mask_face=bool(options.mask_face),
+            )
+            if options.restore_face and restore_fn is not None:
+                result = restore_fn(result)
+            return result
 
     def swap_video(
         self,
@@ -236,13 +260,14 @@ class FaceSwapService:
         def process_frame(frame: Image.Image, _index: int) -> Image.Image:
             return self.swap(frame, source, options, restore_fn=restore_fn)
 
-        result = process_video_file(
-            target_video,
-            dest,
-            process_frame,
-            on_progress=on_progress,
-            max_frames=max_frames,
-        )
+        with self._gpu_tenant("Face swap video"):
+            result = process_video_file(
+                target_video,
+                dest,
+                process_frame,
+                on_progress=on_progress,
+                max_frames=max_frames,
+            )
         infotext = f"Face swap video: {options.model_id}"
         return result.model_copy(
             update={

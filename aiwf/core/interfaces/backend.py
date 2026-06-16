@@ -5,7 +5,7 @@ from typing import Callable, Protocol
 from PIL import Image
 
 from aiwf.core.domain.generation import GenerationRequest, GenerationResult
-from aiwf.core.domain.models import Checkpoint, LoraInfo, SamplerInfo, VaeInfo
+from aiwf.core.domain.models import Checkpoint, EmbeddingInfo, LoraInfo, SamplerInfo, VaeInfo
 
 
 ProgressCallback = Callable[[int, int, str, Image.Image | None], None]
@@ -21,6 +21,8 @@ class InferenceBackend(Protocol):
     def list_loras(self) -> list[LoraInfo]: ...
 
     def list_vaes(self) -> list[VaeInfo]: ...
+
+    def list_embeddings(self) -> list[EmbeddingInfo]: ...
 
     def resolve_checkpoint(self, checkpoint_id: str | None = None) -> Checkpoint: ...
 

@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
+from aiwf.web.app import register_default_tabs
 from aiwf.web.registry import WebRegistry
+from aiwf.web.tabs.settings import TAB_VISIBILITY_CHOICES
 
 
 def _noop(_ctx, _tab):
@@ -30,3 +32,18 @@ def test_visible_tabs_keeps_pinned_tabs_even_if_hidden():
     visible = [name for name, _builder, _order in registry.visible_tabs(ctx)]
 
     assert visible == ["Studio", "Settings"]
+
+
+def test_default_tabs_include_shipped_workspace_tabs():
+    registry = WebRegistry()
+    register_default_tabs(registry)
+
+    names = [name for name, _builder, _order in registry.tabs]
+
+    for expected in ("Studio", "Models", "Segment", "Chat", "Video", "RIFE", "Training", "Settings"):
+        assert expected in names
+
+
+def test_settings_visibility_choices_include_secondary_shipped_tabs():
+    for expected in ("Models", "Segment", "Enhance", "Chat", "Video", "RIFE", "Training"):
+        assert expected in TAB_VISIBILITY_CHOICES

@@ -22,6 +22,49 @@ def test_format_validation_result_reports_ok():
     assert text == "OK: Dataset looks good."
 
 
+def test_lora_training_uses_kohya_runner(monkeypatch):
+    created = object()
+
+    class FakeKohyaRunner:
+        def __new__(cls):
+            return created
+
+    monkeypatch.setattr("aiwf.services.training.kohya_runner.KohyaRunner", FakeKohyaRunner)
+
+    assert training._runner_for_engine("Kohya LoRA") is created
+
+
+def test_ed2_training_uses_ed2_runner(monkeypatch):
+    created = object()
+
+    class FakeED2Runner:
+        def __new__(cls):
+            return created
+
+    monkeypatch.setattr("aiwf.services.training.ed2_runner.ED2Runner", FakeED2Runner)
+
+    assert training._runner_for_engine("ED2 Full Fine-tune") is created
+
+
+def test_validate_training_request_routes_lora_to_kohya_validator(monkeypatch):
+    calls = []
+
+    class FakeValidator:
+        def validate_kohya(self, request):
+            calls.append(("kohya", request))
+            return ValidationResult.passed()
+
+        def validate_ed2(self, request):
+            calls.append(("ed2", request))
+            return ValidationResult.passed()
+
+    monkeypatch.setattr(training, "_validator", FakeValidator())
+
+    training._validate_training_request("Kohya LoRA", {"job_name": "x"})
+
+    assert calls == [("kohya", {"job_name": "x"})]
+
+
 def test_release_tenant_uses_supervisor_idle_switch():
     calls = []
 

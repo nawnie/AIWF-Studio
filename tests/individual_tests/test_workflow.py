@@ -109,6 +109,33 @@ def test_executor_runs_segment_then_inpaint(workflow_service):
     segment.segment_from_workflow_params.assert_called_once()
 
 
+def test_executor_does_not_save_none_for_segment_intermediate(tmp_path: Path):
+    settings = UserSettings(save_images=True)
+    generation = MagicMock()
+    enhance = MagicMock()
+    enhance.store.save.side_effect = AssertionError("segment steps do not produce an image to save")
+    segment = MagicMock()
+    service = WorkflowService(RuntimeFlags(data_dir=tmp_path), settings, generation, enhance, segment)
+
+    source = Image.new("RGB", (64, 64), color=(1, 2, 3))
+    mask = Image.new("L", (64, 64), 255)
+    segment.segment_from_workflow_params.return_value = (mask, "segmented")
+
+    workflow = WorkflowDefinition(
+        name="mask-only",
+        save_intermediate=True,
+        steps=[
+            WorkflowStep(type=WorkflowStepType.SEGMENT, params={"text_prompt": "bag"}),
+        ],
+    )
+
+    run, images = service.run(workflow, seed_image=source)
+
+    assert images == [source]
+    assert run.steps[0].image_path is None
+    enhance.store.save.assert_not_called()
+
+
 def test_executor_runs_txt2img_then_upscale(workflow_service):
     service, generation, enhance, _segment = workflow_service
     fake_image = Image.new("RGB", (64, 64), color=(10, 20, 30))

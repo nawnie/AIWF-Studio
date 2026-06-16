@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
+from aiwf.core.domain.engine import EngineSwitchRequest, EngineTenant
 from aiwf.core.domain.rife import RifeOptions, RifeResult
 from aiwf.infrastructure.rife import RifeUnavailable, interpolate_video_file
 from aiwf.infrastructure.rife.backend import list_rife_checkpoints, resolve_vfi_root
@@ -15,10 +17,11 @@ logger = logging.getLogger(__name__)
 
 
 class RifeService:
-    def __init__(self, flags: RuntimeFlags, settings: UserSettings, devices: DeviceManager) -> None:
+    def __init__(self, flags: RuntimeFlags, settings: UserSettings, devices: DeviceManager, supervisor=None) -> None:
         self.flags = flags
         self.settings = settings
         self.devices = devices
+        self.supervisor = supervisor
 
     def folder_help(self) -> str:
         root = resolve_vfi_root()
@@ -63,25 +66,46 @@ class RifeService:
         on_progress: Callable[[int, int], None] | None = None,
     ) -> RifeResult:
         dest = Path(output_path) if output_path else self._output_path(input_video)
-        try:
-            out, in_frames, out_frames, in_fps, out_fps, width, height = interpolate_video_file(
-                input_video,
-                dest,
-                ckpt_name=options.ckpt_name,
-                multiplier=options.multiplier,
-                scale_factor=options.scale_factor,
-                fast_mode=options.fast_mode,
-                ensemble=options.ensemble,
-                clear_cache_every_n_frames=options.clear_cache_every_n_frames,
-                max_input_frames=options.max_input_frames,
-                device=self.devices.device(),
-                on_progress=on_progress,
+        tenant_job_id = f"video_{uuid.uuid4().hex[:8]}"
+        if self.supervisor is not None:
+            switch = self.supervisor.request_switch(
+                EngineSwitchRequest(
+                    target=EngineTenant.VIDEO,
+                    reason="RIFE interpolation",
+                    job_id=tenant_job_id,
+                )
             )
-        except RifeUnavailable:
-            raise
-        except Exception as exc:
-            logger.exception("RIFE interpolation failed")
-            raise RifeUnavailable(str(exc)) from exc
+            if not switch.ok:
+                raise RifeUnavailable(f"GPU busy: {switch.message}")
+        try:
+            try:
+                out, in_frames, out_frames, in_fps, out_fps, width, height = interpolate_video_file(
+                    input_video,
+                    dest,
+                    ckpt_name=options.ckpt_name,
+                    multiplier=options.multiplier,
+                    scale_factor=options.scale_factor,
+                    fast_mode=options.fast_mode,
+                    ensemble=options.ensemble,
+                    clear_cache_every_n_frames=options.clear_cache_every_n_frames,
+                    max_input_frames=options.max_input_frames,
+                    device=self.devices.device(),
+                    on_progress=on_progress,
+                )
+            except RifeUnavailable:
+                raise
+            except Exception as exc:
+                logger.exception("RIFE interpolation failed")
+                raise RifeUnavailable(str(exc)) from exc
+        finally:
+            if self.supervisor is not None:
+                self.supervisor.request_switch(
+                    EngineSwitchRequest(
+                        target=EngineTenant.IDLE,
+                        reason="RIFE interpolation complete",
+                        job_id=tenant_job_id,
+                    )
+                )
 
         infotext = (
             f"RIFE {options.ckpt_name} x{options.multiplier} "

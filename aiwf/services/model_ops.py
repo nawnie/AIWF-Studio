@@ -17,6 +17,8 @@ from aiwf.infrastructure.safetensors_metadata import read_safetensors_metadata
 MODEL_OP_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".bin", ".pth", ".gguf", ".onnx"}
 IMAGE_MODEL_ARCHES = {"sd15", "sdxl", "sdxl_inpaint", "inpaint"}
 JOB_OUTPUT_DIRNAME = "model-ops"
+DTYPE_EXPORT_QUANTS = {"fp16", "bf16"}
+RECEIPT_ONLY_QUANTS = {"fp8", "int8", "nvfp4"}
 
 
 @dataclass(frozen=True)
@@ -291,10 +293,11 @@ class ModelOpsService:
             output = output.with_suffix("") if output.suffix else output
             messages = (f"Export Diffusers folder to `{output}`.",)
         elif operation == "onnx-export":
-            if asset.storage not in {"diffusers", "safetensors", "ckpt"}:
-                errors.append("ONNX export requires a Diffusers folder or single image checkpoint.")
+            if asset.storage != "diffusers":
+                errors.append("ONNX export currently requires a Diffusers model folder.")
+            errors.append("ONNX export is blocked until a stable local Optimum exporter path is wired.")
             output = output.with_suffix("") if output.suffix else output
-            messages = (f"Export ONNX folder to `{output}` using Optimum when installed.",)
+            messages = (f"Target ONNX folder would be `{output}`.",)
         elif operation == "diffusers-to-single":
             if asset.storage != "diffusers":
                 errors.append("Diffusers folder to single-file requires a Diffusers model folder.")
@@ -305,7 +308,7 @@ class ModelOpsService:
             messages = ()
 
         if errors:
-            return PreflightResult(False, "Conversion is not ready", tuple(errors), tuple(warnings))
+            return PreflightResult(False, "Conversion blocked", tuple(errors), tuple(warnings))
 
         receipt = (output / "aiwf_model_op_receipt.json") if output_suffix == "" else output.with_suffix(output.suffix + ".receipt.json")
         command = self._worker_command(
@@ -330,6 +333,8 @@ class ModelOpsService:
         architecture: str,
     ) -> PreflightResult:
         asset = inspect_model_asset(source_path, architecture=architecture)
+        quant = (quant or "").strip().lower()
+        target = (target or "").strip().lower()
         errors: list[str] = []
         warnings = _platform_notes()
         messages: list[str] = []
@@ -341,11 +346,15 @@ class ModelOpsService:
             )
         if target == "vae":
             errors.append("VAE quantization is preflight-only until decode-quality validation is implemented.")
-        if quant in {"fp8", "nvfp4"} and asset.storage not in {"safetensors", "diffusers"}:
-            errors.append(f"{quant.upper()} preflight expects safetensors or a Diffusers folder.")
+        if quant in DTYPE_EXPORT_QUANTS and asset.storage != "safetensors":
+            errors.append(f"{quant.upper()} export currently supports single-file safetensors only.")
+        elif quant in RECEIPT_ONLY_QUANTS and asset.storage not in {"safetensors", "diffusers"}:
+            errors.append(f"{quant.upper()} receipt jobs expect safetensors or a Diffusers folder.")
         if quant == "gguf":
             warnings.append("GGUF conversion belongs to the future llama.cpp/chat lane and is not executed from image quantization yet.")
             errors.append("GGUF image-model quantization is not enabled in this pass.")
+        elif quant not in DTYPE_EXPORT_QUANTS | RECEIPT_ONLY_QUANTS:
+            errors.append(f"Unknown quantization choice: {quant or 'none'}")
 
         purpose = {
             "fp16": "compatibility and broad runtime support",
@@ -357,10 +366,19 @@ class ModelOpsService:
         messages.append(f"Purpose: {purpose}.")
 
         if errors:
-            return PreflightResult(False, "Quantization is not ready", tuple(errors + messages), tuple(warnings))
+            return PreflightResult(False, "Quantization blocked", tuple(errors + messages), tuple(warnings))
 
         output = self.default_output_path(output_name)
         receipt = output.with_suffix(output.suffix + ".receipt.json")
+        if quant in DTYPE_EXPORT_QUANTS:
+            messages.append("Worker will write a converted safetensors copy; non-floating tensors are preserved.")
+            title = "Quantization job ready"
+        else:
+            messages.append(
+                "Worker will write a receipt only; model export is held until quality and runtime validation land."
+            )
+            title = "Quantization receipt job ready"
+        messages.append(f"Output: `{output}`")
         command = self._worker_command(
             "quantize",
             [
@@ -372,8 +390,7 @@ class ModelOpsService:
                 "--receipt", str(receipt),
             ],
         )
-        messages.append(f"Output: `{output}`")
-        return PreflightResult(True, "Quantization job ready", tuple(messages), tuple(warnings), command, receipt)
+        return PreflightResult(True, title, tuple(messages), tuple(warnings), command, receipt)
 
     def _worker_command(self, op: str, args: list[str]) -> WorkerCommand:
         name = f"model-ops-{op}"

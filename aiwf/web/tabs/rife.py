@@ -14,7 +14,7 @@ _SERVICES: dict[int, RifeService] = {}
 def _service(ctx: AppContext) -> RifeService:
     svc = _SERVICES.get(id(ctx))
     if svc is None:
-        svc = RifeService(ctx.flags, ctx.settings, ctx.generation.backend.devices)
+        svc = RifeService(ctx.flags, ctx.settings, ctx.generation.backend.devices, supervisor=ctx.supervisor)
         _SERVICES[id(ctx)] = svc
     return svc
 

@@ -53,6 +53,7 @@ class TestEngineSwitchRequest:
     def test_defaults(self):
         req = EngineSwitchRequest(target=EngineTenant.VIDEO)
         assert req.reason == ""
+        assert req.job_id == ""
         assert req.allow_wait is False
 
     def test_frozen(self):
@@ -62,10 +63,14 @@ class TestEngineSwitchRequest:
 
     def test_fields(self):
         req = EngineSwitchRequest(
-            target=EngineTenant.CHAT, reason="user opened chat", allow_wait=True
+            target=EngineTenant.CHAT,
+            reason="user opened chat",
+            job_id="chat",
+            allow_wait=True,
         )
         assert req.target == EngineTenant.CHAT
         assert "chat" in req.reason
+        assert req.job_id == "chat"
         assert req.allow_wait is True
 
 

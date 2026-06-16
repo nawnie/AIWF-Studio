@@ -13,6 +13,7 @@ from aiwf.bootstrap import AppContext
 from aiwf.web.components.checkpoints import resolve_default_checkpoint
 from aiwf.web.registry import WebRegistry
 from aiwf.web.studio import register_studio
+from aiwf.web.tabs.chat_workspace import register_chat_workspace
 from aiwf.web.tabs.enhance import register_enhance
 from aiwf.web.tabs.faceswap import register_faceswap
 from aiwf.web.tabs.history import register_history
@@ -21,7 +22,9 @@ from aiwf.web.tabs.wan_i2v import register_wan_i2v
 from aiwf.web.tabs.library import register_library
 from aiwf.web.tabs.model_manager import register_model_manager
 from aiwf.web.tabs.pnginfo import register_pnginfo
+from aiwf.web.tabs.segment import register_segment
 from aiwf.web.tabs.settings import register_settings
+from aiwf.web.tabs.training import register_training
 from aiwf.web.tabs.workflows import register_workflows
 from aiwf.web.theme import build_theme, theme_css_overrides
 
@@ -94,19 +97,26 @@ def _topbar_runtime_html(ctx: AppContext) -> str:
     return f'<div class="aiwf-runtime-summary" aria-label="Runtime summary">{chips}</div>'
 
 
-def create_web_ui(ctx: AppContext) -> tuple[gr.Blocks, object, str, str]:
-    registry = WebRegistry()
+def register_default_tabs(registry: WebRegistry) -> None:
     register_studio(registry)
     register_model_manager(registry)
+    register_segment(registry)
     register_enhance(registry)
     register_faceswap(registry)
     register_workflows(registry)
     register_history(registry)
+    register_chat_workspace(registry)
     register_wan_i2v(registry)
     register_rife(registry)
+    register_training(registry)
     register_library(registry)
     register_pnginfo(registry)
     register_settings(registry)
+
+
+def create_web_ui(ctx: AppContext) -> tuple[gr.Blocks, object, str, str]:
+    registry = WebRegistry()
+    register_default_tabs(registry)
 
     with gr.Blocks(title="AIWF Studio", elem_classes=["aiwf-app"]) as demo:
         gr.HTML(

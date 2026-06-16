@@ -54,13 +54,16 @@ class EngineSwitchRequest:
     Args:
         target:      The tenant you want to activate.
         reason:      Human-readable description (shown in logs / UI).
+        job_id:      Optional owner token. GPU-heavy callers should pass a
+                     real job id so repeated requests from the same tenant are
+                     not confused with separate concurrent jobs.
         allow_wait:  If True, the caller is willing to wait for the current
                      tenant to finish rather than getting an immediate refusal.
-                     (Not implemented yet — reserved for future queue support.)
     """
 
     target: EngineTenant
     reason: str = ""
+    job_id: str = ""
     allow_wait: bool = False
 
 

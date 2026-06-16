@@ -68,7 +68,7 @@ class ProcessSupervisor:
     # Public API
     # ------------------------------------------------------------------
 
-    def start(self, worker_name: str, command: WorkerCommand) -> Iterator[str]:
+    def start(self, worker_name: str, command: WorkerCommand, *, check: bool = False) -> Iterator[str]:
         """Spawn the worker and yield stdout lines until the process exits.
 
         This is a *generator*.  Lines are yielded as they arrive (unbuffered
@@ -119,6 +119,7 @@ class ProcessSupervisor:
 
         logger.info("[ProcessSupervisor] Worker '%s' started (pid=%d)", worker_name, proc.pid)
 
+        rc: int | None = None
         try:
             for line in proc.stdout:
                 yield line.rstrip("\n")
@@ -133,6 +134,8 @@ class ProcessSupervisor:
                 # Only clear the slot if it still points to *this* process
                 if self._procs.get(worker_name) is proc:
                     del self._procs[worker_name]
+        if check and rc not in (0, None):
+            raise RuntimeError(f"Worker '{worker_name}' exited with code {rc}.")
 
     def stop(self, worker_name: str, timeout: float = 10.0) -> str:
         """Terminate the named worker and wait for it to exit.

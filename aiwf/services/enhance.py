@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from aiwf.core.domain.enhance import (
     RestoreOptions,
     UpscaleOptions,
 )
+from aiwf.core.domain.engine import EngineTenant
 from aiwf.core.domain.photo_restore import PhotoRestoreOptions
 from aiwf.core.domain.video import VideoProcessResult
 from aiwf.infrastructure.enhance.catalog import EnhanceModelCatalog
@@ -38,6 +40,7 @@ class EnhanceService:
         settings: UserSettings,
         devices: DeviceManager,
         store: FilesystemImageStore,
+        supervisor=None,
     ) -> None:
         self.flags = flags
         self.settings = settings
@@ -45,6 +48,15 @@ class EnhanceService:
         self.store = store
         self.catalog = EnhanceModelCatalog(flags)
         self._loaded: dict[str, Any] = {}
+        self.supervisor = supervisor
+
+    @contextmanager
+    def _gpu_tenant(self, reason: str):
+        if self.supervisor is None:
+            yield
+            return
+        with self.supervisor.tenant_session(EngineTenant.ENHANCE, reason=reason):
+            yield
 
     def list_upscalers(self) -> list[EnhanceModel]:
         return self.catalog.list_models(kind=EnhanceModelKind.UPSCALER)
@@ -78,29 +90,31 @@ class EnhanceService:
         return descriptor
 
     def upscale(self, image: Image.Image, options: UpscaleOptions) -> Image.Image:
-        model_info = self.catalog.get_model(options.model_id)
-        if model_info is None:
-            raise ValueError(f"Unknown upscaler: {options.model_id}")
-        descriptor = self._load_descriptor(model_info)
-        return upscale_image(
-            image.convert("RGB"),
-            descriptor,
-            model_info=model_info,
-            options=options,
-        )
+        with self._gpu_tenant("Enhance upscale"):
+            model_info = self.catalog.get_model(options.model_id)
+            if model_info is None:
+                raise ValueError(f"Unknown upscaler: {options.model_id}")
+            descriptor = self._load_descriptor(model_info)
+            return upscale_image(
+                image.convert("RGB"),
+                descriptor,
+                model_info=model_info,
+                options=options,
+            )
 
     def restore(self, image: Image.Image, options: RestoreOptions) -> Image.Image:
-        model_info = self.catalog.get_model(options.model_id)
-        if model_info is None:
-            raise ValueError(f"Unknown restorer: {options.model_id}")
-        descriptor = self._load_descriptor(model_info)
-        return restore_image(
-            image.convert("RGB"),
-            descriptor.model,
-            model_info=model_info,
-            options=options,
-            device=self.devices.device(),
-        )
+        with self._gpu_tenant("Enhance restore"):
+            model_info = self.catalog.get_model(options.model_id)
+            if model_info is None:
+                raise ValueError(f"Unknown restorer: {options.model_id}")
+            descriptor = self._load_descriptor(model_info)
+            return restore_image(
+                image.convert("RGB"),
+                descriptor.model,
+                model_info=model_info,
+                options=options,
+                device=self.devices.device(),
+            )
 
     def run_pipeline(
         self,
@@ -113,34 +127,35 @@ class EnhanceService:
         if image is None:
             raise ValueError("Upload an image first.")
 
-        working = image.convert("RGB")
-        steps: list[str] = []
+        with self._gpu_tenant("Enhance pipeline"):
+            working = image.convert("RGB")
+            steps: list[str] = []
 
-        def apply_restore() -> None:
-            nonlocal working
-            if restore is None:
-                return
-            working = self.restore(working, restore)
-            model = self.catalog.get_model(restore.model_id)
-            steps.append(f"Restore: {model.title if model else restore.model_id}")
+            def apply_restore() -> None:
+                nonlocal working
+                if restore is None:
+                    return
+                working = self.restore(working, restore)
+                model = self.catalog.get_model(restore.model_id)
+                steps.append(f"Restore: {model.title if model else restore.model_id}")
 
-        def apply_upscale() -> None:
-            nonlocal working
-            if upscale is None:
-                return
-            working = self.upscale(working, upscale)
-            model = self.catalog.get_model(upscale.model_id)
-            steps.append(f"Upscale: {model.title if model else upscale.model_id} ({upscale.scale}x)")
+            def apply_upscale() -> None:
+                nonlocal working
+                if upscale is None:
+                    return
+                working = self.upscale(working, upscale)
+                model = self.catalog.get_model(upscale.model_id)
+                steps.append(f"Upscale: {model.title if model else upscale.model_id} ({upscale.scale}x)")
 
-        if restore_first:
-            apply_restore()
-            apply_upscale()
-        else:
-            apply_upscale()
-            apply_restore()
+            if restore_first:
+                apply_restore()
+                apply_upscale()
+            else:
+                apply_upscale()
+                apply_restore()
 
-        infotext = " | ".join(steps) if steps else "Enhance"
-        return working, infotext
+            infotext = " | ".join(steps) if steps else "Enhance"
+            return working, infotext
 
     def _video_output_path(self, input_path: str | Path, output_path: str | Path | None = None) -> Path:
         if output_path is not None:
@@ -173,33 +188,34 @@ class EnhanceService:
         """
         if restore is None and upscale is None:
             raise ValueError("Enable restore and/or upscale for video processing.")
-        dest = self._video_output_path(input_video, output_path)
-        last_infotext = "Enhance video"
+        with self._gpu_tenant("Enhance video"):
+            dest = self._video_output_path(input_video, output_path)
+            last_infotext = "Enhance video"
 
-        def process_frame(frame: Image.Image, _index: int) -> Image.Image:
-            nonlocal last_infotext
-            processed, last_infotext = self.run_pipeline(
-                frame,
-                restore=restore,
-                upscale=upscale,
-                restore_first=restore_first,
+            def process_frame(frame: Image.Image, _index: int) -> Image.Image:
+                nonlocal last_infotext
+                processed, last_infotext = self.run_pipeline(
+                    frame,
+                    restore=restore,
+                    upscale=upscale,
+                    restore_first=restore_first,
+                )
+                return processed
+
+            result = process_video_file(
+                input_video,
+                dest,
+                process_frame,
+                on_progress=on_progress,
+                max_frames=max_frames,
             )
-            return processed
-
-        result = process_video_file(
-            input_video,
-            dest,
-            process_frame,
-            on_progress=on_progress,
-            max_frames=max_frames,
-        )
-        infotext = f"Video: {last_infotext}"
-        return result.model_copy(
-            update={
-                "infotext": infotext,
-                "message": f"Enhance video complete. {result.message}",
-            }
-        )
+            infotext = f"Video: {last_infotext}"
+            return result.model_copy(
+                update={
+                    "infotext": infotext,
+                    "message": f"Enhance video complete. {result.message}",
+                }
+            )
 
     def upscale_video(
         self,
@@ -219,28 +235,29 @@ class EnhanceService:
         )
 
     def run_photo_restore(self, image: Image.Image, options: PhotoRestoreOptions) -> tuple[Image.Image, str]:
-        """BOPBTL-inspired staged restoration: scratches → global → faces → optional upscale."""
+        """BOPBTL-inspired staged restoration: scratches -> global -> faces -> optional upscale."""
 
-        def face_restore_fn(img: Image.Image) -> Image.Image:
-            if options.restore is None:
-                return img
-            return self.restore(img, options.restore)
+        with self._gpu_tenant("Photo restore"):
+            def face_restore_fn(img: Image.Image) -> Image.Image:
+                if options.restore is None:
+                    return img
+                return self.restore(img, options.restore)
 
-        working, steps, crop_box = run_photo_restore_stages(
-            image,
-            options,
-            face_restore_fn=face_restore_fn,
-        )
+            working, steps, crop_box = run_photo_restore_stages(
+                image,
+                options,
+                face_restore_fn=face_restore_fn,
+            )
 
-        if options.upscale is not None:
-            working = self.upscale(working, options.upscale)
-            model = self.catalog.get_model(options.upscale.model_id)
-            steps.append(f"Upscale: {model.title if model else options.upscale.model_id} ({options.upscale.scale}x)")
-        elif crop_box != (0, 0, working.width, working.height):
-            working = crop_to_box(working, crop_box)
+            if options.upscale is not None:
+                working = self.upscale(working, options.upscale)
+                model = self.catalog.get_model(options.upscale.model_id)
+                steps.append(f"Upscale: {model.title if model else options.upscale.model_id} ({options.upscale.scale}x)")
+            elif crop_box != (0, 0, working.width, working.height):
+                working = crop_to_box(working, crop_box)
 
-        infotext = " → ".join(steps) if steps else "Photo restore"
-        return working, infotext
+            infotext = " -> ".join(steps) if steps else "Photo restore"
+            return working, infotext
 
     def save_result(self, image: Image.Image, infotext: str) -> EnhanceResult:
         if not self.settings.save_images:

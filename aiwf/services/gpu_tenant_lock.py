@@ -26,6 +26,7 @@ Tenants (engine names that can own the GPU):
 from __future__ import annotations
 
 import logging
+import time
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -37,10 +38,16 @@ logger = logging.getLogger(__name__)
 # Tenants in priority order (higher = more important; lower-priority tenants
 # can be pre-empted by higher-priority ones when an Ollama callback is wired).
 _TENANT_PRIORITY: dict[str, int] = {
+    "full_training": 100,
     "ed2": 100,
+    "lora_training": 90,
     "kohya": 90,
+    "video": 80,
     "wan": 80,
+    "image": 70,
     "generation": 70,
+    "enhance": 60,
+    "chat": 10,
     "ollama": 10,
 }
 
@@ -61,7 +68,7 @@ class GpuTenantLock:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._condition = threading.Condition(threading.RLock())
         self._state: TenantState | None = None
         # Optional callback wired by the Ollama service so we can unload Ollama
         # before granting the GPU to a heavy tenant.
@@ -73,22 +80,22 @@ class GpuTenantLock:
 
     @property
     def is_free(self) -> bool:
-        with self._lock:
+        with self._condition:
             return self._state is None
 
     @property
     def active_tenant(self) -> str | None:
-        with self._lock:
+        with self._condition:
             return self._state.tenant if self._state else None
 
     @property
     def active_job_id(self) -> str | None:
-        with self._lock:
+        with self._condition:
             return self._state.job_id if self._state else None
 
     def status_message(self) -> str:
         """Human-readable current GPU state, suitable for UI display."""
-        with self._lock:
+        with self._condition:
             if self._state is None:
                 return "GPU is free."
             return (
@@ -99,7 +106,7 @@ class GpuTenantLock:
 
     def blocked_message(self, requesting_tenant: str) -> str:
         """Message to show when *requesting_tenant* cannot start because GPU is busy."""
-        with self._lock:
+        with self._condition:
             if self._state is None:
                 return ""
             return (
@@ -120,38 +127,53 @@ class GpuTenantLock:
         successfully pre-empted), False if the GPU is owned by another heavy
         tenant.
         """
-        with self._lock:
+        with self._condition:
             if self._state is None:
                 self._state = TenantState(tenant=tenant, job_id=job_id)
                 logger.info("[GPU] %s acquired lock for job %s", tenant, job_id)
+                self._condition.notify_all()
+                return True
+
+            if self._state.tenant == tenant and self._state.job_id == job_id:
                 return True
 
             current = self._state
-            # Allow Ollama to be pre-empted by higher-priority tenants.
-            if current.tenant == "ollama" and _TENANT_PRIORITY.get(tenant, 0) > _TENANT_PRIORITY.get("ollama", 0):
+            # Allow chat/Ollama to be pre-empted by higher-priority tenants.
+            if (
+                current.tenant in {"chat", "ollama"}
+                and _TENANT_PRIORITY.get(tenant, 0) > _TENANT_PRIORITY.get(current.tenant, 0)
+            ):
                 logger.info(
-                    "[GPU] Pre-empting Ollama (job %s) for %s (job %s)",
-                    current.job_id, tenant, job_id,
+                    "[GPU] Pre-empting %s (job %s) for %s (job %s)",
+                    current.tenant, current.job_id, tenant, job_id,
                 )
-                # Release the lock briefly so the callback can fire without
-                # holding the lock (prevents deadlock if callback re-enters).
                 cb = self._ollama_unload_callback
             else:
                 cb = None
 
             if cb is not None:
-                # Release lock, fire callback, reacquire.
-                self._lock.release()
+                # Release the condition briefly so the callback can fire
+                # without holding the lock (prevents deadlock if it re-enters).
+                self._condition.release()
+                unloaded = False
                 try:
-                    cb()
+                    unloaded = cb() is not False
                 except Exception:
                     logger.exception("[GPU] Ollama unload callback failed")
                 finally:
-                    self._lock.acquire()
-                # Recheck — another thread might have slipped in.
-                if self._state is None or self._state.tenant == "ollama":
+                    self._condition.acquire()
+
+                if not unloaded:
+                    logger.warning("[GPU] %s blocked: chat/Ollama unload failed", tenant)
+                    return False
+
+                # Recheck — another thread might have acquired while the
+                # callback was running. If chat/Ollama is still recorded, the
+                # callback succeeded and this request owns the transition.
+                if self._state is None or self._state.tenant in {"chat", "ollama"}:
                     self._state = TenantState(tenant=tenant, job_id=job_id)
-                    logger.info("[GPU] %s acquired lock for job %s (post Ollama unload)", tenant, job_id)
+                    logger.info("[GPU] %s acquired lock for job %s (post chat unload)", tenant, job_id)
+                    self._condition.notify_all()
                     return True
 
             logger.warning(
@@ -160,12 +182,32 @@ class GpuTenantLock:
             )
             return False
 
+    def wait_acquire(self, tenant: str, job_id: str, timeout: float | None = None) -> bool:
+        """Wait until the GPU can be acquired by *tenant*/*job_id*.
+
+        Returns False only if *timeout* elapses.  A timeout of None waits
+        indefinitely.
+        """
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while True:
+            if self.try_acquire(tenant, job_id):
+                return True
+            with self._condition:
+                if deadline is None:
+                    self._condition.wait(timeout=0.25)
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(timeout=min(0.25, remaining))
+
     def release(self, tenant: str, job_id: str) -> None:
         """Release the GPU lock.  Silently ignored if not held by this tenant/job."""
-        with self._lock:
+        with self._condition:
             if self._state and self._state.tenant == tenant and self._state.job_id == job_id:
                 logger.info("[GPU] %s released lock for job %s", tenant, job_id)
                 self._state = None
+                self._condition.notify_all()
 
     # ------------------------------------------------------------------
     # Context manager
@@ -204,7 +246,8 @@ class GpuTenantLock:
 
         or the equivalent via the Ollama HTTP API.
         """
-        self._ollama_unload_callback = callback
+        with self._condition:
+            self._ollama_unload_callback = callback
 
 
 # ---------------------------------------------------------------------------

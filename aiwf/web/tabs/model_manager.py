@@ -7,6 +7,7 @@ from pathlib import Path
 import gradio as gr
 
 from aiwf.bootstrap import AppContext
+from aiwf.core.domain.engine import EngineTenant
 from aiwf.infrastructure.safetensors_metadata import read_safetensors_metadata
 from aiwf.services.model_download import CATEGORY_LABELS, browse_links_html, inspect_custom_input, is_unsafe_download_format
 from aiwf.services.model_download_catalog import QUICK_START_BUNDLES
@@ -15,6 +16,15 @@ from aiwf.services.model_ops import ModelOpsService, PreflightResult, inspect_mo
 from aiwf.services.process_supervisor import get_process_supervisor
 from aiwf.services.civitai_browser import CivitAIBrowser
 from aiwf.web.registry import WebRegistry
+
+
+def _model_op_tenant(preflight: PreflightResult) -> EngineTenant | None:
+    """Return the GPU tenant needed by a model operation, if any."""
+    if preflight.command is None:
+        return None
+    if preflight.command.name in {"model-ops-lora-fuse", "model-ops-convert"}:
+        return EngineTenant.IMAGE
+    return None
 
 
 def _cn_download_choices(ctx: AppContext) -> list[tuple[str, str]]:
@@ -1117,13 +1127,23 @@ def register_model_manager(registry: WebRegistry) -> None:
             if not preflight.ok:
                 yield preflight.markdown()
                 return
-            supervisor = get_process_supervisor()
+            process_supervisor = get_process_supervisor()
+            tenant = _model_op_tenant(preflight)
             lines = [preflight.markdown(), "\n**Log**"]
             yield "\n".join(lines)
             try:
-                for line in supervisor.start(preflight.command.name, preflight.command):
-                    lines.append(f"`{line}`")
-                    yield "\n".join(lines[-60:])
+                if tenant is None:
+                    for line in process_supervisor.start(preflight.command.name, preflight.command, check=True):
+                        lines.append(f"`{line}`")
+                        yield "\n".join(lines[-60:])
+                else:
+                    with ctx.supervisor.tenant_session(
+                        tenant,
+                        reason=f"Model operation: {preflight.command.name}",
+                    ):
+                        for line in process_supervisor.start(preflight.command.name, preflight.command, check=True):
+                            lines.append(f"`{line}`")
+                            yield "\n".join(lines[-60:])
                 lines.append("\n**Done.** Refresh model lists if you created a new model.")
                 yield "\n".join(lines[-60:])
             except Exception as exc:

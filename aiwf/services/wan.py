@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from importlib.util import find_spec
@@ -13,11 +14,11 @@ from PIL import Image
 
 from aiwf import __version__
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
+from aiwf.core.domain.engine import EngineSwitchRequest, EngineTenant
 from aiwf.core.domain.wan import WAN_TI2V_5B, WanI2VRequest, WanI2VResult, SAMPLER_TYPES
 from aiwf.dev.diagnostics import trace_model_throughput
 from aiwf.infrastructure.video import write_frames
 from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
-from aiwf.services.gpu_tenant_lock import get_gpu_lock
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ class WanService:
         settings: UserSettings,
         *,
         unload_image_models: Callable[[], None] | None = None,
+        supervisor=None,
     ) -> None:
         self.flags = flags
         self.settings = settings
@@ -82,6 +84,7 @@ class WanService:
             pinned_memory=getattr(flags, "pinned_memory", True),
         )
         self._unload_image_models = unload_image_models
+        self.supervisor = supervisor
 
     def available(self) -> bool:
         return self._backend.available()
@@ -231,7 +234,7 @@ class WanService:
                     errors.append(gguf_unavailable_message(path, label=label))
                 elif gguf_dequant_stub_allowed() and not gguf_quantized_runtime_enabled():
                     warnings.append(
-                        f"{label} GGUF dequant stub is enabled — expect very slow load and high RAM. "
+                        f"{label} GGUF dequant stub is enabled - expect very slow load and high RAM. "
                         "Use the default mmap runtime or FP8 safetensors on RTX 40-series."
                     )
                 else:
@@ -451,7 +454,7 @@ class WanService:
 
     def folder_help(self) -> str:
         return (
-            f"**Wan models** → `{self.models_dir()}`.  \n"
+            f"**Wan models** -> `{self.models_dir()}`.  \n"
             f"Default model: `{WAN_TI2V_5B}` (5B, the most VRAM-friendly). "
             "8 GB cards: use Sequential offload + small size/frames (slow). "
             "Needs a recent `diffusers` + `ftfy`. "
@@ -506,7 +509,7 @@ class WanService:
         """Like list_local_models() but returns (display_name, identifier) for Gradio dropdowns.
 
         The display_name is read from the model file header (arch, precision, size).
-        The identifier is the same string returned by list_local_models() — used
+        The identifier is the same string returned by list_local_models() - used
         unchanged in WanI2VRequest so no pipeline changes are needed.
         """
         try:
@@ -518,7 +521,7 @@ class WanService:
         seen: set[str] = set()
         seen_file_names: set[str] = set()
 
-        # Diffusers folders — no weight file to inspect; use folder name
+        # Diffusers folders - no weight file to inspect; use folder name
         for root in self._wan_diffusers_roots():
             if not root.exists():
                 continue
@@ -531,7 +534,7 @@ class WanService:
                         name = child.name
                     if name not in seen:
                         seen.add(name)
-                        out.append((f"Wan Diffusers — {child.name}", name))
+                        out.append((f"Wan Diffusers - {child.name}", name))
 
         # Standalone safetensors / gguf files
         for root in self._wan_weight_roots() + self._wan_file_candidates():
@@ -661,7 +664,7 @@ class WanService:
                 deduped.append(r)
         return deduped
 
-    # File stems that signal this is a T5-XXL (Flux/SD3) encoder — NOT UMT5-XXL (Wan).
+    # File stems that signal this is a T5-XXL (Flux/SD3) encoder - NOT UMT5-XXL (Wan).
     # Wan's text encoder is UMT5-XXL; these T5 files will produce garbage output if used.
     _T5_REJECT_STEMS = frozenset([
         "t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl_fp8_e4m3fn_scaled",
@@ -675,7 +678,7 @@ class WanService:
     def list_local_text_encoders(self) -> list[str]:
         """Scan text-encoder directories for UMT5-XXL files (.safetensors, .gguf).
 
-        T5-XXL files (Flux/SD3) are excluded — they are NOT compatible with Wan.
+        T5-XXL files (Flux/SD3) are excluded - they are NOT compatible with Wan.
         Returns filenames (not full paths), or an empty list if none found.
         """
         out: list[str] = []
@@ -924,64 +927,85 @@ class WanService:
             raise WanUnavailable("Upload a source image to animate.")
         if not self.available():
             raise WanUnavailable(
-                "Wan video is unavailable — update `diffusers` (>=0.35) and install `ftfy`, then restart."
+                "Wan video is unavailable - update `diffusers` (>=0.35) and install `ftfy`, then restart."
             )
-        if self._unload_image_models is not None:
-            _video_status("Unloading image models before loading video pipeline.")
-            try:
-                self._unload_image_models()
-            except Exception:
-                logger.exception("Failed to unload image models before Wan generation; continuing.")
-
-        # Expose HF token so large/gated model
-        hf_token = getattr(self.settings, "huggingface_token", "").strip() if self.settings else ""
-        if hf_token:
-            os.environ.setdefault("HF_TOKEN", hf_token)
-            os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
-
-        started = time.perf_counter()
-
+        tenant_job_id = f"wan_{uuid.uuid4().hex[:8]}"
+        if self.supervisor is not None:
+            switch = self.supervisor.request_switch(
+                EngineSwitchRequest(
+                    target=EngineTenant.VIDEO,
+                    reason="Wan video generation",
+                    job_id=tenant_job_id,
+                )
+            )
+            if not switch.ok:
+                raise WanUnavailable(f"GPU busy: {switch.message}")
         try:
-            frames, h, w = self._backend.generate(
-                request,
-                image,
-                on_progress=on_progress,
-                should_cancel=should_cancel,
+            if self._unload_image_models is not None:
+                _video_status("Unloading image models before loading video pipeline.")
+                try:
+                    self._unload_image_models()
+                except Exception:
+                    logger.exception("Failed to unload image models before Wan generation; continuing.")
+
+            # Expose HF token so large/gated model
+            hf_token = getattr(self.settings, "huggingface_token", "").strip() if self.settings else ""
+            if hf_token:
+                os.environ.setdefault("HF_TOKEN", hf_token)
+                os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
+
+            started = time.perf_counter()
+
+            try:
+                frames, h, w = self._backend.generate(
+                    request,
+                    image,
+                    on_progress=on_progress,
+                    should_cancel=should_cancel,
+                )
+            except WanUnavailable:
+                raise
+            except Exception as exc:
+                raise WanUnavailable(f"Video generation failed: {exc}") from exc
+
+            elapsed = time.perf_counter() - started
+
+            output_path = self._output_path()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            frame_count = write_frames(
+                frames,
+                output_path,
+                fps=float(getattr(request, "fps", 16) or 16),
             )
-        except WanUnavailable:
-            raise
-        except Exception as exc:
-            raise WanUnavailable(f"Video generation failed: {exc}") from exc
+            trace_model_throughput(
+                kind="wan.video",
+                model_id=str(request.high_noise_model_id or ""),
+                model_name=f"{request.high_noise_model_id} + {request.low_noise_model_id}",
+                app_version=__version__,
+                elapsed_seconds=elapsed,
+                units=max(1, int(frame_count)),
+                units_label="frames",
+                high_noise_model_id=request.high_noise_model_id,
+                low_noise_model_id=request.low_noise_model_id,
+                offload=request.offload,
+                fps=int(getattr(request, "fps", 16) or 16),
+            )
 
-        elapsed = time.perf_counter() - started
-
-        output_path = self._output_path()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        frame_count = write_frames(
-            frames,
-            output_path,
-            fps=float(getattr(request, "fps", 16) or 16),
-        )
-        trace_model_throughput(
-            kind="wan.video",
-            model_id=str(request.high_noise_model_id or ""),
-            model_name=f"{request.high_noise_model_id} + {request.low_noise_model_id}",
-            app_version=__version__,
-            elapsed_seconds=elapsed,
-            units=max(1, int(frame_count)),
-            units_label="frames",
-            high_noise_model_id=request.high_noise_model_id,
-            low_noise_model_id=request.low_noise_model_id,
-            offload=request.offload,
-            fps=int(getattr(request, "fps", 16) or 16),
-        )
-
-        return WanI2VResult(
-            output_path=str(output_path),
-            frame_count=frame_count,
-            fps=int(getattr(request, "fps", 16) or 16),
-            width=w,
-            height=h,
-            elapsed_seconds=round(elapsed, 2),
-        )
+            return WanI2VResult(
+                output_path=str(output_path),
+                frame_count=frame_count,
+                fps=int(getattr(request, "fps", 16) or 16),
+                width=w,
+                height=h,
+                elapsed_seconds=round(elapsed, 2),
+            )
+        finally:
+            if self.supervisor is not None:
+                self.supervisor.request_switch(
+                    EngineSwitchRequest(
+                        target=EngineTenant.IDLE,
+                        reason="Wan video generation complete",
+                        job_id=tenant_job_id,
+                    )
+                )

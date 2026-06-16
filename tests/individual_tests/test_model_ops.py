@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.models import Checkpoint, LoraInfo
@@ -131,6 +134,25 @@ def test_conversion_preflight_allows_single_to_diffusers(tmp_path: Path):
     assert "single-to-diffusers" in result.command.args
 
 
+def test_fp16_quantization_builds_real_export_command(tmp_path: Path):
+    svc = ModelOpsService(_flags(tmp_path))
+    source = tmp_path / "model.safetensors"
+    source.write_bytes(b"fake")
+
+    result = svc.preflight_quantization(
+        source_path=str(source),
+        target="model",
+        quant="fp16",
+        output_name="small",
+        architecture="sdxl",
+    )
+
+    assert result.ok
+    assert result.command is not None
+    assert result.command.name == "model-ops-quantize"
+    assert "converted safetensors copy" in result.markdown()
+
+
 def test_diffusers_to_single_is_blocked_first_pass(tmp_path: Path):
     svc = ModelOpsService(_flags(tmp_path))
     source = tmp_path / "folder"
@@ -146,6 +168,24 @@ def test_diffusers_to_single_is_blocked_first_pass(tmp_path: Path):
 
     assert not result.ok
     assert "preflight-only" in result.markdown()
+
+
+def test_onnx_export_is_blocked_until_exporter_is_wired(tmp_path: Path):
+    svc = ModelOpsService(_flags(tmp_path))
+    source = tmp_path / "folder"
+    source.mkdir()
+    (source / "model_index.json").write_text("{}", encoding="utf-8")
+
+    result = svc.preflight_conversion(
+        source_path=str(source),
+        operation="onnx-export",
+        output_name="onnx_model",
+        architecture="sdxl",
+    )
+
+    assert not result.ok
+    assert result.command is None
+    assert "Optimum exporter path" in result.markdown()
 
 
 def test_nvfp4_quant_warns_storage_only(tmp_path: Path):
@@ -164,6 +204,7 @@ def test_nvfp4_quant_warns_storage_only(tmp_path: Path):
     assert result.ok
     assert "storage" in result.markdown().lower()
     assert "RTX 4070 Ti SUPER" in result.markdown()
+    assert "receipt only" in result.markdown().lower()
 
 
 def test_vae_quantization_is_preflight_only(tmp_path: Path):
@@ -181,6 +222,43 @@ def test_vae_quantization_is_preflight_only(tmp_path: Path):
 
     assert not result.ok
     assert "VAE quantization is preflight-only" in result.markdown()
+
+
+def test_worker_quantize_fp16_writes_safetensors_and_receipt(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+    from aiwf.workers import model_ops as worker_model_ops
+
+    source = tmp_path / "source.safetensors"
+    output = tmp_path / "output.safetensors"
+    receipt = tmp_path / "output.safetensors.receipt.json"
+    safetensors.save_file(
+        {
+            "float_weight": torch.ones((2, 2), dtype=torch.float32),
+            "integer_weight": torch.ones((2,), dtype=torch.int64),
+        },
+        str(source),
+        metadata={"modelspec.architecture": "sdxl"},
+    )
+
+    rc = worker_model_ops.quantize(
+        SimpleNamespace(
+            source=str(source),
+            output=str(output),
+            target="model",
+            quant="fp16",
+            architecture="sdxl",
+            receipt=str(receipt),
+        )
+    )
+
+    state = safetensors.load_file(str(output), device="cpu")
+    data = json.loads(receipt.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert state["float_weight"].dtype == torch.float16
+    assert state["integer_weight"].dtype == torch.int64
+    assert data["operation"] == "quantize_dtype_export"
+    assert data["output"] == str(output)
 
 
 def test_write_model_op_receipt(tmp_path: Path):

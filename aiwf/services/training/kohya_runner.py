@@ -123,7 +123,7 @@ class KohyaRunner:
 
         logger.info("[KohyaRunner] Starting job %s with %s", jid, python_exe)
         try:
-            yield from self._supervisor.start(jid, cmd)
+            yield from self._supervisor.start(jid, cmd, check=True)
         finally:
             with self._lock:
                 if self._active_worker == jid:

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from aiwf.infrastructure.safetensors_metadata import read_safetensors_metadata
 from aiwf.services.model_ops import write_model_op_receipt
 
 
@@ -167,24 +168,64 @@ def convert(args: argparse.Namespace) -> int:
 def quantize(args: argparse.Namespace) -> int:
     source = Path(args.source)
     output = Path(args.output)
-    if args.quant in {"nvfp4", "fp8", "int8"}:
-        _log(f"{args.quant.upper()} requested for {source}")
+    quant = str(args.quant).lower()
+    if quant in {"fp16", "bf16"}:
+        if source.suffix.lower() != ".safetensors":
+            raise RuntimeError(f"{quant.upper()} export currently supports safetensors sources only.")
+        import torch
+
+        dtype = torch.float16 if quant == "fp16" else torch.bfloat16
+        _log(f"Loading safetensors source: {source}")
+        state = _read_safetensors(source)
+        _log(f"Converting floating tensors to {quant.upper()}")
+        converted = {
+            key: tensor.to(dtype=dtype) if tensor.is_floating_point() else tensor
+            for key, tensor in state.items()
+        }
+        metadata = read_safetensors_metadata(source)
+        metadata.update(
+            {
+                "aiwf.operation": "quantize_dtype_export",
+                "aiwf.source": str(source),
+                "aiwf.target": args.target,
+                "aiwf.quant": quant,
+                "aiwf.architecture": args.architecture,
+            }
+        )
+        _log(f"Saving converted checkpoint: {output}")
+        _save_safetensors(converted, output, metadata)
         write_model_op_receipt(
             args.receipt,
             {
-                "operation": "quantize_preflight",
+                "operation": "quantize_dtype_export",
                 "source": str(source),
                 "output": str(output),
                 "target": args.target,
-                "quant": args.quant,
+                "quant": quant,
+                "architecture": args.architecture,
+                "warnings": ["Only floating tensors were converted; integer and metadata tensors were preserved."],
+            },
+        )
+        _log(f"Receipt written: {args.receipt}")
+        return 0
+    if quant in {"nvfp4", "fp8", "int8"}:
+        _log(f"{quant.upper()} receipt requested for {source}")
+        write_model_op_receipt(
+            args.receipt,
+            {
+                "operation": "quantize_receipt_only",
+                "source": str(source),
+                "proposed_output": str(output),
+                "target": args.target,
+                "quant": quant,
                 "architecture": args.architecture,
                 "warnings": [
-                    "This first pass records a preflight receipt only; destructive quantized export is disabled until quality validation lands.",
+                    "This receipt records intent only; destructive quantized export is disabled until quality validation lands.",
                     "NVFP4 is storage/compression only on RTX 4070 Ti SUPER, not a speed promise.",
                 ],
             },
         )
-        _log(f"Preflight receipt written: {args.receipt}")
+        _log(f"Receipt written: {args.receipt}")
         return 0
     raise RuntimeError(f"Unsupported quantization target: {args.quant}")
 

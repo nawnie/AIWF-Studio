@@ -51,7 +51,7 @@ CATEGORY_LABELS: dict[ModelCategory, str] = {
 
 CATEGORY_FOLDERS: dict[ModelCategory, tuple[str, ...]] = {
     "checkpoint": ("Stable-diffusion",),
-    "lora": ("Lora",),
+    "lora": ("Loras",),
     "vae": ("VAE",),
     "controlnet": ("ControlNet",),
     "upscaler": ("RealESRGAN",),

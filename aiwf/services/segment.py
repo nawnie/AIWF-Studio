@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 
 from PIL import Image
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
+from aiwf.core.domain.engine import EngineTenant
 from aiwf.core.domain.segment import SamModelInfo, SegmentBox, SegmentPoint, SegmentRequest
 from aiwf.infrastructure.segment.catalog import ensure_default_sam_model, scan_sam_models
 from aiwf.infrastructure.diffusers.mask import blur_mask
@@ -23,12 +25,28 @@ class SegmentService:
     https://github.com/continue-revolution/sd-webui-segment-anything
     """
 
-    def __init__(self, flags: RuntimeFlags, settings: UserSettings, devices: DeviceManager) -> None:
+    def __init__(
+        self,
+        flags: RuntimeFlags,
+        settings: UserSettings,
+        devices: DeviceManager,
+        supervisor=None,
+    ) -> None:
         self.flags = flags
         self.settings = settings
         self.devices = devices
+        self.supervisor = supervisor
         self._backend = SamSegmenter(devices.device())
         self._catalog: list[SamModelInfo] | None = None
+
+    @contextmanager
+    def _gpu_tenant(self, reason: str):
+        supervisor = getattr(self, "supervisor", None)
+        if supervisor is None:
+            yield
+            return
+        with supervisor.tenant_session(EngineTenant.ENHANCE, reason=reason):
+            yield
 
     def sam_dir(self) -> str:
         return str((self.flags.resolved_models_dir() / "sam").resolve())
@@ -90,17 +108,18 @@ class SegmentService:
         if image is None:
             raise ValueError("Upload an image to segment.")
 
-        model = self.resolve_model(model_id)
-        mask, candidates, status = self._backend.segment(
-            image,
-            model,
-            text_prompt=request.text_prompt,
-            box_threshold=request.box_threshold,
-            points=request.points,
-            box=request.box,
-            mask_index=request.mask_index,
-            multimask_output=request.multimask_output,
-        )
+        with self._gpu_tenant("Segment mask"):
+            model = self.resolve_model(model_id)
+            mask, candidates, status = self._backend.segment(
+                image,
+                model,
+                text_prompt=request.text_prompt,
+                box_threshold=request.box_threshold,
+                points=request.points,
+                box=request.box,
+                mask_index=request.mask_index,
+                multimask_output=request.multimask_output,
+            )
         if request.dilation > 0:
             mask = dilate_mask(mask, request.dilation)
             status += f", dilation={request.dilation}"

@@ -56,6 +56,26 @@ class TestProcessSupervisor:
         list(self.sup.start("echo", cmd))
         assert not self.sup.is_running("echo")
 
+    def test_start_check_raises_after_streaming_failed_worker(self):
+        cmd = WorkerCommand(
+            args=[
+                sys.executable,
+                "-c",
+                "import sys; print('about to fail', flush=True); sys.exit(3)",
+            ],
+            cwd=Path("/tmp"),
+            env={},
+            name="fail-test",
+        )
+        lines = []
+
+        with pytest.raises(RuntimeError, match="exited with code 3"):
+            for line in self.sup.start("fail-test", cmd, check=True):
+                lines.append(line)
+
+        assert lines == ["about to fail"]
+        assert not self.sup.is_running("fail-test")
+
     def test_running_workers_empty_after_finish(self):
         cmd = _echo_cmd("line1")
         list(self.sup.start("echo", cmd))

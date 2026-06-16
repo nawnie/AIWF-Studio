@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -8,12 +9,26 @@ import pytest
 from PIL import Image
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
+from aiwf.core.domain.engine import EngineTenant
 from aiwf.core.domain.segment import SegmentRequest
 from aiwf.infrastructure.segment.catalog import DEFAULT_SAM_FILENAME, ensure_default_sam_model, sam_model_type, scan_sam_models
 from aiwf.infrastructure.segment.mask_ops import dilate_mask, mask_from_bool_array
 from aiwf.infrastructure.segment.sam_backend import _union_box_masks
 from aiwf.infrastructure.segment.text_boxes import _post_process_grounded_detection
 from aiwf.services.segment import SegmentService
+
+
+class _RecordingSupervisor:
+    def __init__(self) -> None:
+        self.calls = []
+
+    @contextmanager
+    def tenant_session(self, target, *, reason="", job_id=None, allow_wait=False):
+        self.calls.append((target, "acquire", reason))
+        try:
+            yield job_id or "segment-test"
+        finally:
+            self.calls.append((EngineTenant.IDLE, "release", reason))
 
 
 def test_sam_model_type_recognizes_standard_filenames():
@@ -188,3 +203,24 @@ def test_segment_service_delegates(mock_segment, tmp_path: Path):
     assert result_mask.size == (32, 32)
     assert preview.size == (32, 32)
     assert status.startswith("ok")
+
+
+@patch("aiwf.infrastructure.segment.sam_backend.SamSegmenter.segment")
+def test_segment_service_uses_enhance_tenant(mock_segment, tmp_path: Path):
+    sam_dir = tmp_path / "models" / "sam"
+    sam_dir.mkdir(parents=True)
+    (sam_dir / "sam_vit_b_01ec64.pth").write_bytes(b"x")
+
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models")
+    devices = MagicMock()
+    devices.device.return_value = "cpu"
+    supervisor = _RecordingSupervisor()
+    service = SegmentService(flags, UserSettings(), devices, supervisor=supervisor)
+
+    image = Image.new("RGB", (16, 16), color=(100, 120, 140))
+    mask = mask_from_bool_array(np.ones((16, 16), dtype=bool))
+    mock_segment.return_value = (mask, [mask], "ok")
+
+    service.segment(image, SegmentRequest(text_prompt="cat"))
+
+    assert [call[0] for call in supervisor.calls] == [EngineTenant.ENHANCE, EngineTenant.IDLE]

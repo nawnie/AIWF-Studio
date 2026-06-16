@@ -1,6 +1,6 @@
 """Kohya LoRA training service client.
 
-Mirrors the pattern of ``aiwf.services.wan`` — validates the request,
+Mirrors the pattern of ``aiwf.services.wan`` - validates the request,
 acquires the GPU tenant lock, and submits a subprocess job through the
 EngineSupervisor.
 
@@ -24,9 +24,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from aiwf.core.domain.engine import EngineTenant
 from aiwf.core.domain.training import KohyaLoraRequest
 from aiwf.services.engine_supervisor import EngineSupervisor, get_supervisor
-from aiwf.services.gpu_tenant_lock import get_gpu_lock
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class KohyaUnavailable(RuntimeError):
 
 
 class KohyaClient:
-    """Thin service client: validates → GPU lock → supervisor.submit_subprocess_job()."""
+    """Thin service client: validates -> GPU lock -> supervisor.submit_subprocess_job()."""
 
     def __init__(self, supervisor: EngineSupervisor | None = None) -> None:
         self._supervisor = supervisor or get_supervisor()
@@ -49,7 +49,7 @@ class KohyaClient:
     ) -> str:
         """Validate the request, acquire the GPU tenant lock, and spawn a Kohya worker.
 
-        Returns the job_id.  The job runs asynchronously — register a listener on
+        Returns the job_id.  The job runs asynchronously - register a listener on
         the supervisor to receive progress events::
 
             supervisor.add_progress_listener(my_callback)
@@ -87,23 +87,18 @@ class KohyaClient:
                 "Prepare your training images there before submitting a job."
             )
 
-        # GPU tenant lock
-        gpu_lock = get_gpu_lock()
         import uuid as _uuid
         job_id_tentative = f"kohya_{_uuid.uuid4().hex[:8]}"
-        with gpu_lock.acquire("kohya", job_id_tentative) as granted:
-            if not granted:
-                raise KohyaUnavailable(
-                    f"Cannot start Kohya training: {gpu_lock.blocked_message('kohya')}"
-                )
+        try:
             return self._supervisor.submit_subprocess_job(
                 spec,
                 request.model_dump(),
                 outputs_root=outputs_root,
                 job_id=job_id_tentative,
+                tenant=EngineTenant.LORA_TRAINING,
             )
-        # GPU lock is held for the duration of submit_subprocess_job() setup only.
-        # The actual training subprocess manages its own GPU ownership.
+        except RuntimeError as exc:
+            raise KohyaUnavailable(f"Cannot start Kohya training: {exc}") from exc
 
     def cancel(self, job_id: str) -> None:
         """Cancel a running Kohya job (sends SIGTERM to the worker)."""

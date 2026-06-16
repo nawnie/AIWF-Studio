@@ -168,8 +168,10 @@ def register_chat_workspace(registry: WebRegistry) -> None:
             # Acquire CHAT tenant via supervisor
             supervisor = getattr(ctx, "supervisor", None)
             if supervisor is not None:
+                supervisor.set_ollama_client(client)
+                supervisor.set_chat_model(model)
                 result = supervisor.request_switch(
-                    EngineSwitchRequest(target=EngineTenant.CHAT, reason="Chat send")
+                    EngineSwitchRequest(target=EngineTenant.CHAT, reason="Chat send", job_id="chat")
                 )
                 if not result.ok:
                     history = history + [
@@ -178,7 +180,6 @@ def register_chat_workspace(registry: WebRegistry) -> None:
                     ]
                     yield history, gr.update(value="")
                     return
-                supervisor.set_chat_model(model)
 
             # Build message list
             messages: list[dict] = []
@@ -233,7 +234,7 @@ def register_chat_workspace(registry: WebRegistry) -> None:
             supervisor = getattr(ctx, "supervisor", None)
             if supervisor is not None and ok:
                 supervisor.request_switch(
-                    EngineSwitchRequest(target=EngineTenant.IDLE, reason="Chat model unloaded")
+                    EngineSwitchRequest(target=EngineTenant.IDLE, reason="Chat model unloaded", job_id="chat")
                 )
             return gr.update(value=f"{'✅ Unloaded' if ok else '⚠️ Unload failed'}: {model}")
 

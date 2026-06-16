@@ -18,6 +18,7 @@ from aiwf.core.domain.generation import (
     JobRecord,
     JobState,
 )
+from aiwf.core.domain.engine import EngineSwitchRequest, EngineTenant
 from aiwf.core.events.bus import EventBus
 from aiwf.core.events.types import AfterGenerate, BeforeGenerate, JobProgressed
 from aiwf.core.interfaces.backend import InferenceBackend
@@ -30,6 +31,7 @@ from aiwf.services.queue import JobQueue
 
 if TYPE_CHECKING:
     from aiwf.services.prompt_processor import PromptProcessorService
+    from aiwf.services.engine_supervisor import EngineSupervisor
 
 
 DEFAULT_NEGATIVE_PROMPT = (
@@ -51,6 +53,7 @@ class GenerationService:
         settings: UserSettings,
         prompts: PromptProcessorService | None = None,
         settings_path: Path | None = None,
+        supervisor: EngineSupervisor | None = None,
     ) -> None:
         self.backend = backend
         self.store = store
@@ -60,6 +63,7 @@ class GenerationService:
         self.settings = settings
         self.prompts = prompts
         self._settings_path = settings_path
+        self.supervisor = supervisor
 
     def _apply_default_negative(self, request):
         """When the user leaves the negative prompt blank, fall back to a generic
@@ -225,9 +229,30 @@ class GenerationService:
         return self.backend.resolve_checkpoint(checkpoint_id)
 
     def load_checkpoint(self, checkpoint_id: str | None = None):
-        checkpoint = self.backend.load_checkpoint(checkpoint_id)
-        self._persist_last_checkpoint(checkpoint.id)
-        return checkpoint
+        tenant_job_id = f"image_load_{threading.get_ident()}"
+        if self.supervisor is not None:
+            switch = self.supervisor.request_switch(
+                EngineSwitchRequest(
+                    target=EngineTenant.IMAGE,
+                    reason="Load image checkpoint",
+                    job_id=tenant_job_id,
+                )
+            )
+            if not switch.ok:
+                raise RuntimeError(f"GPU busy: {switch.message}")
+        try:
+            checkpoint = self.backend.load_checkpoint(checkpoint_id)
+            self._persist_last_checkpoint(checkpoint.id)
+            return checkpoint
+        finally:
+            if self.supervisor is not None:
+                self.supervisor.request_switch(
+                    EngineSwitchRequest(
+                        target=EngineTenant.IDLE,
+                        reason="Image checkpoint load complete",
+                        job_id=tenant_job_id,
+                    )
+                )
 
     @staticmethod
     def _loading_model_message(checkpoint) -> str:
@@ -246,81 +271,106 @@ class GenerationService:
         self.queue.enqueue(record)
 
         def worker(job: JobRecord) -> GenerationResult:
-            job.request = self._resolve_prompts(job.request)
-            job.request = self._apply_default_negative(job.request)
-            self.events.publish(BeforeGenerate(job.id, job.request))
-            active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
-            self._persist_last_checkpoint(active.id)
-            job.request = self._guard_distilled_cfg(job.request, active)
-
-            def on_progress(
-                step: int,
-                total: int,
-                message: str,
-                preview: Image.Image | None = None,
-            ) -> None:
-                self.queue.update_progress(job.id, step, total, message, preview)
-                self.events.publish(JobProgressed(job.id, step, total, message))
-
-            on_progress(0, max(1, int(job.request.steps)), self._loading_model_message(active))
-            _gen_t0 = time.perf_counter()
-            result = self.backend.generate(
-                job.request,
-                init_images=init_images,
-                mask_images=mask_images,
-                control_images=control_images,
-                on_progress=on_progress,
-                should_cancel=lambda: self.queue.should_cancel(job.id),
-                preview_every_n_steps=0,
-            )
-            result.elapsed_seconds = time.perf_counter() - _gen_t0
-            trace_model_throughput(
-                kind=str(job.request.mode.value),
-                model_id=getattr(active, "id", None),
-                model_name=getattr(active, "title", None),
-                app_version=__version__,
-                elapsed_seconds=result.elapsed_seconds,
-                units=max(1, int(job.request.steps)),
-                units_label="steps",
-                image_count=len(result.images),
-                batch_size=int(job.request.batch_size),
-            )
-
-            if image_postprocess is not None:
-                result.images = [image_postprocess(img) for img in result.images]
-
-            if self.settings.save_images and job.request.save_images:
-                subdir = {
-                    GenerationMode.TXT2IMG: self.settings.txt2img_output_subdir,
-                    GenerationMode.IMG2IMG: self.settings.img2img_output_subdir,
-                    GenerationMode.INPAINT: self.settings.inpaint_output_subdir,
-                }[job.request.mode]
-                checkpoint = self.backend.resolve_checkpoint(job.request.checkpoint_id)
-                model_name = getattr(checkpoint, "name", None) or getattr(checkpoint, "id", None)
-                artifacts = []
-                saved_images = []
-                for index, image in enumerate(result.images):
-                    infotext = result.infotexts[index] if index < len(result.infotexts) else ""
-                    infotext = self._enrich_saved_infotext(infotext, job.request, checkpoint)
-                    if index < len(result.infotexts):
-                        result.infotexts[index] = infotext
-                    seed = result.seeds[index] if index < len(result.seeds) else None
-                    if self.settings.embed_metadata or job.request.tags:
-                        image = self.metadata.embed(image, infotext, tags=job.request.tags)
-                    artifact = self.store.save(
-                        image, infotext, subdir, seed=seed, index=index, model_name=model_name
+            tenant_job_id = str(job.id)
+            if self.supervisor is not None:
+                switch = self.supervisor.request_switch(
+                    EngineSwitchRequest(
+                        target=EngineTenant.IMAGE,
+                        reason=f"Image generation {job.id}",
+                        job_id=tenant_job_id,
                     )
-                    artifacts.append(artifact)
-                    saved_images.append(image)
-                if getattr(self.settings, "save_grid", False) and len(saved_images) > 1:
-                    grid_info = result.infotexts[0] if result.infotexts else ""
-                    grid_artifact = self.store.save_grid(saved_images, subdir, infotext=grid_info)
-                    if grid_artifact is not None:
-                        artifacts.append(grid_artifact)
-                result.artifacts = artifacts
+                )
+                if not switch.ok:
+                    raise RuntimeError(f"GPU busy: {switch.message}")
+            try:
+                job.request = self._resolve_prompts(job.request)
+                job.request = self._apply_default_negative(job.request)
+                self.events.publish(BeforeGenerate(job.id, job.request))
+                active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
+                self._persist_last_checkpoint(active.id)
+                job.request = self._guard_distilled_cfg(job.request, active)
 
-            self.events.publish(AfterGenerate(job.id, result))
-            return result
+                def on_progress(
+                    step: int,
+                    total: int,
+                    message: str,
+                    preview: Image.Image | None = None,
+                ) -> None:
+                    self.queue.update_progress(job.id, step, total, message, preview)
+                    self.events.publish(JobProgressed(job.id, step, total, message))
+
+                on_progress(0, max(1, int(job.request.steps)), self._loading_model_message(active))
+                _gen_t0 = time.perf_counter()
+                result = self.backend.generate(
+                    job.request,
+                    init_images=init_images,
+                    mask_images=mask_images,
+                    control_images=control_images,
+                    on_progress=on_progress,
+                    should_cancel=lambda: self.queue.should_cancel(job.id),
+                    preview_every_n_steps=0,
+                )
+                result.elapsed_seconds = time.perf_counter() - _gen_t0
+                trace_model_throughput(
+                    kind=str(job.request.mode.value),
+                    model_id=getattr(active, "id", None),
+                    model_name=getattr(active, "title", None),
+                    app_version=__version__,
+                    elapsed_seconds=result.elapsed_seconds,
+                    units=max(1, int(job.request.steps)),
+                    units_label="steps",
+                    image_count=len(result.images),
+                    batch_size=int(job.request.batch_size),
+                )
+
+                if image_postprocess is not None:
+                    if self.supervisor is None:
+                        result.images = [image_postprocess(img) for img in result.images]
+                    else:
+                        with self.supervisor.borrow_active_tenant(EngineTenant.IMAGE, job_id=tenant_job_id):
+                            result.images = [image_postprocess(img) for img in result.images]
+
+                if self.settings.save_images and job.request.save_images:
+                    subdir = {
+                        GenerationMode.TXT2IMG: self.settings.txt2img_output_subdir,
+                        GenerationMode.IMG2IMG: self.settings.img2img_output_subdir,
+                        GenerationMode.INPAINT: self.settings.inpaint_output_subdir,
+                    }[job.request.mode]
+                    checkpoint = self.backend.resolve_checkpoint(job.request.checkpoint_id)
+                    model_name = getattr(checkpoint, "name", None) or getattr(checkpoint, "id", None)
+                    artifacts = []
+                    saved_images = []
+                    for index, image in enumerate(result.images):
+                        infotext = result.infotexts[index] if index < len(result.infotexts) else ""
+                        infotext = self._enrich_saved_infotext(infotext, job.request, checkpoint)
+                        if index < len(result.infotexts):
+                            result.infotexts[index] = infotext
+                        seed = result.seeds[index] if index < len(result.seeds) else None
+                        if self.settings.embed_metadata or job.request.tags:
+                            image = self.metadata.embed(image, infotext, tags=job.request.tags)
+                        artifact = self.store.save(
+                            image, infotext, subdir, seed=seed, index=index, model_name=model_name
+                        )
+                        artifacts.append(artifact)
+                        saved_images.append(image)
+                    if getattr(self.settings, "save_grid", False) and len(saved_images) > 1:
+                        grid_info = result.infotexts[0] if result.infotexts else ""
+                        grid_artifact = self.store.save_grid(saved_images, subdir, infotext=grid_info)
+                        if grid_artifact is not None:
+                            artifacts.append(grid_artifact)
+                    result.artifacts = artifacts
+
+                self.events.publish(AfterGenerate(job.id, result))
+                return result
+            finally:
+                if self.supervisor is not None:
+                    self.supervisor.request_switch(
+                        EngineSwitchRequest(
+                            target=EngineTenant.IDLE,
+                            reason=f"Image generation {job.id} complete",
+                            job_id=tenant_job_id,
+                        )
+                    )
 
         self.queue.run_next(worker)
         finished = self.queue.get(record.id)
@@ -351,84 +401,109 @@ class GenerationService:
         progress_q: queue.Queue = queue.Queue()
 
         def worker(job: JobRecord) -> GenerationResult:
-            job.request = self._resolve_prompts(job.request)
-            job.request = self._apply_default_negative(job.request)
-            self.events.publish(BeforeGenerate(job.id, job.request))
-            active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
-            self._persist_last_checkpoint(active.id)
-            job.request = self._guard_distilled_cfg(job.request, active)
-            preview_every = self.settings.live_preview_interval()
-
-            def on_progress(
-                step: int,
-                total: int,
-                message: str,
-                preview: Image.Image | None = None,
-            ) -> None:
-                self.queue.update_progress(job.id, step, total, message, preview)
-                self.events.publish(JobProgressed(job.id, step, total, message))
-                progress_q.put(("progress", step, total, message, preview))
-
-            on_progress(0, max(1, int(job.request.steps)), self._loading_model_message(active))
-            _gen_t0 = time.perf_counter()
-            result = self.backend.generate(
-                job.request,
-                init_images=init_images,
-                mask_images=mask_images,
-                control_images=control_images,
-                on_progress=on_progress,
-                should_cancel=lambda: self.queue.should_cancel(job.id),
-                preview_every_n_steps=preview_every,
-            )
-            result.elapsed_seconds = time.perf_counter() - _gen_t0
-            trace_model_throughput(
-                kind=str(job.request.mode.value),
-                model_id=getattr(active, "id", None),
-                model_name=getattr(active, "title", None),
-                app_version=__version__,
-                elapsed_seconds=result.elapsed_seconds,
-                units=max(1, int(job.request.steps)),
-                units_label="steps",
-                image_count=len(result.images),
-                batch_size=int(job.request.batch_size),
-            )
-
-            if image_postprocess is not None:
-                result.images = [image_postprocess(img) for img in result.images]
-
-            if self.settings.save_images and job.request.save_images:
-                total = max(1, int(job.request.steps))
-                on_progress(total, total, "Saving output", None)
-                subdir = {
-                    GenerationMode.TXT2IMG: self.settings.txt2img_output_subdir,
-                    GenerationMode.IMG2IMG: self.settings.img2img_output_subdir,
-                    GenerationMode.INPAINT: self.settings.inpaint_output_subdir,
-                }[job.request.mode]
-                model_name = getattr(active, "name", None) or getattr(active, "id", None)
-                artifacts = []
-                saved_images = []
-                for index, image in enumerate(result.images):
-                    infotext = result.infotexts[index] if index < len(result.infotexts) else ""
-                    infotext = self._enrich_saved_infotext(infotext, job.request, active)
-                    if index < len(result.infotexts):
-                        result.infotexts[index] = infotext
-                    seed = result.seeds[index] if index < len(result.seeds) else None
-                    if self.settings.embed_metadata or job.request.tags:
-                        image = self.metadata.embed(image, infotext, tags=job.request.tags)
-                    artifact = self.store.save(
-                        image, infotext, subdir, seed=seed, index=index, model_name=model_name
+            tenant_job_id = str(job.id)
+            if self.supervisor is not None:
+                switch = self.supervisor.request_switch(
+                    EngineSwitchRequest(
+                        target=EngineTenant.IMAGE,
+                        reason=f"Image generation {job.id}",
+                        job_id=tenant_job_id,
                     )
-                    artifacts.append(artifact)
-                    saved_images.append(image)
-                if getattr(self.settings, "save_grid", False) and len(saved_images) > 1:
-                    grid_info = result.infotexts[0] if result.infotexts else ""
-                    grid_artifact = self.store.save_grid(saved_images, subdir, infotext=grid_info)
-                    if grid_artifact is not None:
-                        artifacts.append(grid_artifact)
-                result.artifacts = artifacts
+                )
+                if not switch.ok:
+                    raise RuntimeError(f"GPU busy: {switch.message}")
+            try:
+                job.request = self._resolve_prompts(job.request)
+                job.request = self._apply_default_negative(job.request)
+                self.events.publish(BeforeGenerate(job.id, job.request))
+                active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
+                self._persist_last_checkpoint(active.id)
+                job.request = self._guard_distilled_cfg(job.request, active)
+                preview_every = self.settings.live_preview_interval()
 
-            self.events.publish(AfterGenerate(job.id, result))
-            return result
+                def on_progress(
+                    step: int,
+                    total: int,
+                    message: str,
+                    preview: Image.Image | None = None,
+                ) -> None:
+                    self.queue.update_progress(job.id, step, total, message, preview)
+                    self.events.publish(JobProgressed(job.id, step, total, message))
+                    progress_q.put(("progress", step, total, message, preview))
+
+                on_progress(0, max(1, int(job.request.steps)), self._loading_model_message(active))
+                _gen_t0 = time.perf_counter()
+                result = self.backend.generate(
+                    job.request,
+                    init_images=init_images,
+                    mask_images=mask_images,
+                    control_images=control_images,
+                    on_progress=on_progress,
+                    should_cancel=lambda: self.queue.should_cancel(job.id),
+                    preview_every_n_steps=preview_every,
+                )
+                result.elapsed_seconds = time.perf_counter() - _gen_t0
+                trace_model_throughput(
+                    kind=str(job.request.mode.value),
+                    model_id=getattr(active, "id", None),
+                    model_name=getattr(active, "title", None),
+                    app_version=__version__,
+                    elapsed_seconds=result.elapsed_seconds,
+                    units=max(1, int(job.request.steps)),
+                    units_label="steps",
+                    image_count=len(result.images),
+                    batch_size=int(job.request.batch_size),
+                )
+
+                if image_postprocess is not None:
+                    if self.supervisor is None:
+                        result.images = [image_postprocess(img) for img in result.images]
+                    else:
+                        with self.supervisor.borrow_active_tenant(EngineTenant.IMAGE, job_id=tenant_job_id):
+                            result.images = [image_postprocess(img) for img in result.images]
+
+                if self.settings.save_images and job.request.save_images:
+                    total = max(1, int(job.request.steps))
+                    on_progress(total, total, "Saving output", None)
+                    subdir = {
+                        GenerationMode.TXT2IMG: self.settings.txt2img_output_subdir,
+                        GenerationMode.IMG2IMG: self.settings.img2img_output_subdir,
+                        GenerationMode.INPAINT: self.settings.inpaint_output_subdir,
+                    }[job.request.mode]
+                    model_name = getattr(active, "name", None) or getattr(active, "id", None)
+                    artifacts = []
+                    saved_images = []
+                    for index, image in enumerate(result.images):
+                        infotext = result.infotexts[index] if index < len(result.infotexts) else ""
+                        infotext = self._enrich_saved_infotext(infotext, job.request, active)
+                        if index < len(result.infotexts):
+                            result.infotexts[index] = infotext
+                        seed = result.seeds[index] if index < len(result.seeds) else None
+                        if self.settings.embed_metadata or job.request.tags:
+                            image = self.metadata.embed(image, infotext, tags=job.request.tags)
+                        artifact = self.store.save(
+                            image, infotext, subdir, seed=seed, index=index, model_name=model_name
+                        )
+                        artifacts.append(artifact)
+                        saved_images.append(image)
+                    if getattr(self.settings, "save_grid", False) and len(saved_images) > 1:
+                        grid_info = result.infotexts[0] if result.infotexts else ""
+                        grid_artifact = self.store.save_grid(saved_images, subdir, infotext=grid_info)
+                        if grid_artifact is not None:
+                            artifacts.append(grid_artifact)
+                    result.artifacts = artifacts
+
+                self.events.publish(AfterGenerate(job.id, result))
+                return result
+            finally:
+                if self.supervisor is not None:
+                    self.supervisor.request_switch(
+                        EngineSwitchRequest(
+                            target=EngineTenant.IDLE,
+                            reason=f"Image generation {job.id} complete",
+                            job_id=tenant_job_id,
+                        )
+                    )
 
         done = threading.Event()
 

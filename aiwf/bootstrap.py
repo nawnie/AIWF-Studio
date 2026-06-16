@@ -19,6 +19,7 @@ from aiwf.infrastructure.storage.filesystem import FilesystemImageStore
 from aiwf.infrastructure.torch.devices import DeviceManager
 from aiwf.plugins.registry import PluginRegistry
 from aiwf.services.enhance import EnhanceService
+from aiwf.services.engine_supervisor import EngineSupervisor, get_supervisor
 from aiwf.services.faceswap import FaceSwapService
 from aiwf.services.controlnet import ControlNetService
 from aiwf.services.generation import GenerationService
@@ -40,6 +41,7 @@ class AppContext:
     settings: UserSettings
     events: EventBus
     plugins: PluginRegistry
+    supervisor: EngineSupervisor
     generation: GenerationService
     enhance: EnhanceService
     controlnet: ControlNetService
@@ -132,6 +134,7 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     settings_path = flags.data_dir / "config.json"
     settings = UserSettings()
     _load_user_settings(settings, settings_path)
+    supervisor = get_supervisor()
 
     # Propagate engine feature flags to environment so sub-modules pick them up.
     _engine_env = {
@@ -174,11 +177,12 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
         events,
         settings,
         settings_path=settings_path,
+        supervisor=supervisor,
     )
-    enhance = EnhanceService(flags, settings, devices, store)
+    enhance = EnhanceService(flags, settings, devices, store, supervisor=supervisor)
     controlnet = ControlNetService(flags)
     controlnet.ensure_dir()
-    faceswap = FaceSwapService(flags)
+    faceswap = FaceSwapService(flags, supervisor=supervisor)
     faceswap.ensure_dir()
     plots = PlotService(generation)
     models = ModelCatalogService(generation, flags, settings)
@@ -187,14 +191,7 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     prompts = PromptProcessorService(flags, settings, models)
     prompts.ensure_dirs()
     generation.prompts = prompts
-    segment = SegmentService(flags, settings, devices)
-    try:
-        segment.ensure_default_models()
-    except Exception:
-        # First-run convenience download (SAM + GroundingDINO). A network
-        # failure here must not prevent the app from starting — the Segment
-        # tab re-attempts the download when used.
-        logger.exception("Optional segmentation model download failed; continuing startup")
+    segment = SegmentService(flags, settings, devices, supervisor=supervisor)
     workflows = WorkflowService(flags, settings, generation, enhance, segment)
     workflows.ensure_dir()
     ctx = AppContext(
@@ -202,6 +199,7 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
         settings=settings,
         events=events,
         plugins=PluginRegistry(),
+        supervisor=supervisor,
         generation=generation,
         enhance=enhance,
         controlnet=controlnet,

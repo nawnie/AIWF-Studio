@@ -251,13 +251,15 @@ class ModelCatalogService:
     def models_folder_help(self) -> str:
         models_dir = self.flags.resolved_models_dir()
         ckpt_dir = self.flags.resolved_ckpt_dir()
-        lora_dir = models_dir / "Lora"
+        lora_dir = models_dir / "Loras"
+        legacy_lora_dir = models_dir / "Lora"
         return (
             f"**Checkpoint folders**  \n"
             f"- `{ckpt_dir}`  \n"
             f"- `{models_dir}`  \n\n"
             f"**LoRA folders**  \n"
             f"- `{lora_dir}`  \n"
-            f"- `{models_dir}`  \n\n"
+            f"- `{legacy_lora_dir}`  \n"
+            "\n"
             "Drop `.safetensors` or `.ckpt` files in these folders, then click **Refresh**."
         )

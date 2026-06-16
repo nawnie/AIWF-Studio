@@ -32,7 +32,7 @@ from typing import Callable
 from PIL import Image
 
 from aiwf.core.domain.generation import GenerationRequest, GenerationResult
-from aiwf.core.domain.models import Checkpoint, LoraInfo, SamplerInfo, VaeInfo
+from aiwf.core.domain.models import Checkpoint, EmbeddingInfo, LoraInfo, SamplerInfo, VaeInfo
 from aiwf.infrastructure.onnx.pipeline import ONNXPipeline
 from aiwf.infrastructure.onnx.session import ProviderPreference
 from aiwf.services.pipeline_preflight import PipelinePreflightResult, preflight_onnx_pipeline
@@ -110,6 +110,10 @@ class ONNXBackend:
 
     def list_vaes(self) -> list[VaeInfo]:
         # VAE is baked into the model dir
+        return []
+
+    def list_embeddings(self) -> list[EmbeddingInfo]:
+        # Textual inversion is not implemented for ONNX models yet.
         return []
 
     def preflight_checkpoint(self, checkpoint_id: str | None = None) -> PipelinePreflightResult:

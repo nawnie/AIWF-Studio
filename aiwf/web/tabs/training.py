@@ -1,7 +1,7 @@
 """
 aiwf/web/tabs/training.py
 
-Training tab â€” Kohya LoRA and EveryDream2 full fine-tuning.
+Training tab - Kohya LoRA and EveryDream2 full fine-tuning.
 
 Rules enforced here:
   - No torch imports.
@@ -10,11 +10,12 @@ Rules enforced here:
     tracebacks go to the logger only.
   - GPU tenant lock acquired through EngineSupervisor.request_switch()
     before starting a training job.
-  - Tab renders even if neither engine is installed â€” shows setup guidance.
+  - Tab renders even if neither engine is installed - shows setup guidance.
 """
 from __future__ import annotations
 
 import logging
+import uuid
 
 import gradio as gr
 
@@ -29,7 +30,7 @@ _validator = DatasetValidator()
 
 
 # ---------------------------------------------------------------------------
-# Engine availability probe â€” deferred, never at import time
+# Engine availability probe - deferred, never at import time
 # ---------------------------------------------------------------------------
 
 def _probe_engines() -> dict[str, bool]:
@@ -52,10 +53,11 @@ _NOT_CONFIGURED = (
     "See `docs/TRAINING_ENGINE_ROADMAP.md` for details."
 )
 
-_NATIVE_LORA_NOT_READY = (
-    "**Native LoRA / DreamBooth training is not installed yet.**\n\n"
-    "Target coverage is SD 1.5, SD 2.x, SDXL, and SD 3.5. "
-    "This path should be built as an AIWF-native trainer, not a Kohya wrapper."
+_KOHYA_NOT_CONFIGURED = (
+    "**Kohya LoRA training is not ready yet.**\n\n"
+    "Install or configure the optional Kohya engine, set `enabled=true` for `kohya` "
+    "in `engines.json`, then restart AIWF Studio. The Training tab will stay available "
+    "even while this optional engine is missing."
 )
 
 
@@ -70,15 +72,31 @@ def _format_validation_result(result) -> str:
 
 
 def _validate_training_request(engine: str, request: dict):
-    if "Kohya" in engine or "LoRA" in engine:
+    if _is_lora_engine(engine):
         return _validator.validate_kohya(request)
     return _validator.validate_ed2(request)
 
 
-def _release_tenant(ctx: AppContext, reason: str) -> None:
+def _is_lora_engine(engine: str) -> bool:
+    return "Kohya" in engine or "LoRA" in engine or "DreamBooth" in engine
+
+
+def _runner_for_engine(engine: str):
+    if _is_lora_engine(engine):
+        from aiwf.services.training.kohya_runner import KohyaRunner  # type: ignore
+
+        return KohyaRunner()
+    if "ED2" in engine:
+        from aiwf.services.training.ed2_runner import ED2Runner  # type: ignore
+
+        return ED2Runner()
+    raise RuntimeError(f"Unknown training engine: {engine}")
+
+
+def _release_tenant(ctx: AppContext, reason: str, job_id: str = "") -> None:
     supervisor = getattr(ctx, "supervisor", None)
     if supervisor is not None:
-        supervisor.request_switch(EngineSwitchRequest(target=EngineTenant.IDLE, reason=reason))
+        supervisor.request_switch(EngineSwitchRequest(target=EngineTenant.IDLE, reason=reason, job_id=job_id))
 
 
 # ---------------------------------------------------------------------------
@@ -111,11 +129,11 @@ def register_training(registry: WebRegistry) -> None:
         # ---- Mode picker ----
         engine_choices = []
         if engines["kohya"]:
-            engine_choices.append("AIWF LoRA / DreamBooth")
+            engine_choices.append("Kohya LoRA")
         if engines["ed2"]:
             engine_choices.append("ED2 Full Fine-tune")
         if not engine_choices:
-            engine_choices = ["AIWF LoRA / DreamBooth", "ED2 Full Fine-tune"]   # show disabled UI
+            engine_choices = ["Kohya LoRA", "ED2 Full Fine-tune"]   # show disabled UI
 
         engine_radio = gr.Radio(
             choices=engine_choices,
@@ -178,12 +196,12 @@ def register_training(registry: WebRegistry) -> None:
         # ---- Controls ----
         with gr.Row():
             start_btn = gr.Button(
-                "â–¶ Start Training",
+                "Start Training",
                 variant="primary",
                 interactive=any_ready,
             )
             stop_btn = gr.Button(
-                "â¹ Stop",
+                "Stop",
                 variant="stop",
                 interactive=False,
             )
@@ -213,6 +231,7 @@ def register_training(registry: WebRegistry) -> None:
 
         # State: active runner reference (kept in a list so we can mutate from closure)
         _active_runner: list = [None]
+        _active_tenant_job_id: list[str] = [""]
 
         def on_enable_full_training():
             try:
@@ -225,7 +244,7 @@ def register_training(registry: WebRegistry) -> None:
                 return f"ERROR: Full training enable failed: {exc}"
 
         def on_enable_lora_training():
-            return _NATIVE_LORA_NOT_READY
+            return _KOHYA_NOT_CONFIGURED
 
         enable_full_btn.click(fn=on_enable_full_training, outputs=[training_enable_status])
         enable_lora_btn.click(fn=on_enable_lora_training, outputs=[training_enable_status])
@@ -268,7 +287,7 @@ def register_training(registry: WebRegistry) -> None:
                 "seed": 42,
             }
 
-            if "LoRA" in engine or "DreamBooth" in engine:
+            if _is_lora_engine(engine):
                 req["max_train_steps"] = int(steps)
                 req["learning_rate"] = float(lr)
                 req["base_arch"] = "sdxl"
@@ -288,27 +307,28 @@ def register_training(registry: WebRegistry) -> None:
 
             supervisor = getattr(ctx, "supervisor", None)
             tenant = EngineTenant.LORA_TRAINING if "LoRA" in engine else EngineTenant.FULL_TRAINING
+            tenant_job_id = f"{tenant.value}_{uuid.uuid4().hex[:8]}"
             tenant_acquired = False
             if supervisor is not None:
-                result = supervisor.request_switch(EngineSwitchRequest(target=tenant, reason=f"Training: {jname}"))
+                result = supervisor.request_switch(
+                    EngineSwitchRequest(
+                        target=tenant,
+                        reason=f"Training: {jname}",
+                        job_id=tenant_job_id,
+                    )
+                )
                 if not result.ok:
                     yield gr.update(interactive=True), gr.update(interactive=False), f"ERROR: GPU busy: {result.message}\n", "ERROR: GPU busy"
                     return
                 tenant_acquired = True
+                _active_tenant_job_id[0] = tenant_job_id
 
             log_lines: list[str] = []
             try:
-                if "LoRA" in engine or "DreamBooth" in engine:
-                    raise RuntimeError("Native LoRA / DreamBooth training is not implemented yet.")
-                elif "ED2" in engine:
-                    from aiwf.services.training.ed2_runner import ED2Runner  # type: ignore
-
-                    runner = ED2Runner()
-                else:
-                    raise RuntimeError(f"Unknown training engine: {engine}")
+                runner = _runner_for_engine(engine)
 
                 _active_runner[0] = runner
-                for line in runner.start(req):
+                for line in runner.start(req, job_id=tenant_job_id):
                     log_lines.append(line)
                     if len(log_lines) % 5 == 0:
                         yield (
@@ -321,15 +341,17 @@ def register_training(registry: WebRegistry) -> None:
                 logger.exception("[Training tab] Training error")
                 log_lines.append(f"ERROR: {exc}")
                 if tenant_acquired:
-                    _release_tenant(ctx, "Training failed")
+                    _release_tenant(ctx, "Training failed", tenant_job_id)
                 _active_runner[0] = None
+                _active_tenant_job_id[0] = ""
                 yield gr.update(interactive=True), gr.update(interactive=False), "\n".join(log_lines), f"ERROR: {exc}"
                 return
 
             if tenant_acquired:
-                _release_tenant(ctx, "Training complete")
+                _release_tenant(ctx, "Training complete", tenant_job_id)
 
             _active_runner[0] = None
+            _active_tenant_job_id[0] = ""
             yield (
                 gr.update(interactive=True),
                 gr.update(interactive=False),
@@ -356,7 +378,9 @@ def register_training(registry: WebRegistry) -> None:
             except Exception as exc:
                 msg = f"Stop error: {exc}"
             _active_runner[0] = None
-            _release_tenant(ctx, "Training stopped by user")
+            tenant_job_id = _active_tenant_job_id[0]
+            _active_tenant_job_id[0] = ""
+            _release_tenant(ctx, "Training stopped by user", tenant_job_id)
 
             return gr.update(interactive=True), gr.update(interactive=False), f"Stopped: {msg}"
         stop_btn.click(

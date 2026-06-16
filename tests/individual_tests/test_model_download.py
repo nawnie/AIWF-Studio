@@ -68,7 +68,7 @@ def test_destination_dirs(tmp_path: Path):
     flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models")
     service = ModelDownloadService(flags)
     assert service.destination_dir("checkpoint").name == "Stable-diffusion"
-    assert service.destination_dir("lora").name == "Lora"
+    assert service.destination_dir("lora").name == "Loras"
     assert service.destination_dir("controlnet").name == "ControlNet"
     assert service.destination_dir("upscaler").name == "RealESRGAN"
     assert service.destination_dir("esrgan").name == "ESRGAN"

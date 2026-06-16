@@ -3,11 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from aiwf.core.config.settings import RuntimeFlags
+from aiwf.core.domain.engine import EngineSwitchRequest, EngineTenant
 from aiwf.core.domain.faceswap import FaceSwapModelInfo, FaceSwapOptions
 from aiwf.infrastructure.faceswap import FaceSwapUnavailable
+from aiwf.services.engine_supervisor import EngineSupervisor
 from aiwf.services.faceswap import DOWNLOADABLE_FACESWAP, FaceSwapService
+from aiwf.services.gpu_tenant_lock import GpuTenantLock
 
 
 def _svc(tmp_path: Path) -> FaceSwapService:
@@ -50,6 +54,54 @@ def test_swap_without_model_raises(tmp_path: Path):
 
     with pytest.raises(FaceSwapUnavailable):
         svc.swap(Image.new("RGB", (8, 8)), Image.new("RGB", (8, 8)))
+
+
+def test_swap_uses_enhance_tenant_for_onnx_work(tmp_path: Path, monkeypatch):
+    supervisor = EngineSupervisor(gpu_lock=GpuTenantLock())
+    monkeypatch.setattr(supervisor, "_flush_cuda", lambda: None)
+    svc = FaceSwapService(
+        RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"),
+        supervisor=supervisor,
+    )
+
+    class FakeSwapper:
+        def swap(self, target, source, **_kwargs):
+            assert supervisor.active_tenant == EngineTenant.ENHANCE
+            return target
+
+    monkeypatch.setattr(svc, "_get_swapper", lambda _options: FakeSwapper())
+    image = Image.new("RGB", (8, 8), "red")
+    source = Image.new("RGB", (8, 8), "blue")
+
+    def restore(img):
+        assert supervisor.active_tenant == EngineTenant.ENHANCE
+        return img
+
+    result = svc.swap(image, source, FaceSwapOptions(restore_face=True), restore_fn=restore)
+
+    assert result is image
+    assert supervisor.active_tenant == EngineTenant.IDLE
+
+
+def test_swap_reports_gpu_busy_as_faceswap_unavailable(tmp_path: Path, monkeypatch):
+    supervisor = EngineSupervisor(gpu_lock=GpuTenantLock())
+    monkeypatch.setattr(supervisor, "_flush_cuda", lambda: None)
+    assert supervisor.request_switch(
+        EngineSwitchRequest(
+            target=EngineTenant.IMAGE,
+            job_id="image-job",
+        )
+    ).ok
+    svc = FaceSwapService(
+        RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"),
+        supervisor=supervisor,
+    )
+
+    with pytest.raises(FaceSwapUnavailable, match="GPU busy"):
+        svc.swap(
+            Image.new("RGB", (8, 8), "red"),
+            Image.new("RGB", (8, 8), "blue"),
+        )
 
 
 def test_resolve_model_path_falls_back_to_installed(tmp_path: Path):
