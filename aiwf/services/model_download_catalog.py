@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from aiwf.core.domain.model_download import CatalogEntry
 
-_CN = "https://huggingface.co/comfyanonymous/ControlNet-v1-1_fp16_safetensors/resolve/main"
+_CN15 = "https://huggingface.co/comfyanonymous/ControlNet-v1-1_fp16_safetensors/resolve/main"
+_CNXL = "https://huggingface.co/xinsir"
 _SAM = "https://dl.fbaipublicfiles.com/segment_anything"
+_GDINO = "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha"
+_OPENAI = "https://openaipublic.azureedge.net/clip/models"
 
-# Keys grouped by quick-start bundle — used by the Download tab bundle buttons.
-# Each value is an ordered list of catalog keys to download in sequence.
+# ---------------------------------------------------------------------------
+# Quick-start bundle keys (used by Download tab bundle buttons)
+# ---------------------------------------------------------------------------
 QUICK_START_BUNDLES: dict[str, list[str]] = {
     "video": [
         "wan-gguf-high-q4km",
@@ -14,15 +18,28 @@ QUICK_START_BUNDLES: dict[str, list[str]] = {
         "wan-vae-21",
     ],
     "rife": ["rife-47"],
-    "seg": ["sam-vit-b"],
+    "seg": ["sam-vit-b", "gdino-swinb"],
     "faceswap": ["fs-inswapper-fp16"],
     "sd": ["hf-sd15-pruned", "hf-vae-mse"],
-    "sdxl": ["hf-sdxl-base", "hf-vae-sdxl"],
+    "sdxl": ["hf-sdxl-base", "hf-vae-sdxl", "hf-sdxl-refiner"],
+    "controlnet-sd15": [
+        "cn15-canny", "cn15-depth", "cn15-openpose",
+        "cn15-tile", "cn15-lineart", "cn15-softedge",
+    ],
+    "controlnet-sdxl": [
+        "cnxl-canny", "cnxl-openpose", "cnxl-depth",
+    ],
+    "embeddings": [
+        "emb-easynegative", "emb-badprompt", "emb-negxl",
+    ],
 }
 
-# Curated starter catalog — expand over time. Users can always paste custom HF/CivitAI URLs.
+# ---------------------------------------------------------------------------
+# Full catalog
+# ---------------------------------------------------------------------------
 MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
-    # --- Wan video ---
+
+    # ── Wan I2V ─────────────────────────────────────────────────────────────
     CatalogEntry(
         key="wan-vae-21",
         title="Wan 2.1 VAE",
@@ -41,10 +58,7 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         repo_id="city96/Wan2.2-I2V-A14B-480P-gguf",
         filename="Wan2.2-I2V-A14B-480P-HighNoise-Q4_K_M.gguf",
         size_mb=8600,
-        notes=(
-            "First half of the dual-transformer pair. Q4_K_M fits 16 GB VRAM with model offload. "
-            "If the exact filename differs, use Custom Download with the HF repo path."
-        ),
+        notes="First half of dual-transformer pair. Q4_K_M fits 16 GB VRAM with model offload.",
     ),
     CatalogEntry(
         key="wan-gguf-low-q4km",
@@ -54,9 +68,10 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         repo_id="city96/Wan2.2-I2V-A14B-480P-gguf",
         filename="Wan2.2-I2V-A14B-480P-LowNoise-Q4_K_M.gguf",
         size_mb=8600,
-        notes="Second half of the dual-transformer pair. Must match the High Noise model series.",
+        notes="Second half of dual-transformer pair. Must match the High Noise model series.",
     ),
-    # --- Checkpoints (Hugging Face) ---
+
+    # ── Checkpoints — Hugging Face ───────────────────────────────────────────
     CatalogEntry(
         key="hf-sd15-pruned",
         title="Stable Diffusion 1.5 (fp16 pruned)",
@@ -65,7 +80,7 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         repo_id="Comfy-Org/stable-diffusion-v1-5-archive",
         filename="v1-5-pruned-emaonly-fp16.safetensors",
         size_mb=2034,
-        notes="Classic SD1.5 base — fp16 pruned single file, half the download of fp32.",
+        notes="Classic SD1.5 base — fp16 pruned single file.",
     ),
     CatalogEntry(
         key="hf-sdxl-base",
@@ -75,44 +90,100 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         repo_id="stabilityai/stable-diffusion-xl-base-1.0",
         filename="sd_xl_base_1.0.safetensors",
         size_mb=6617,
-        notes="SDXL base — pair with a refiner for best results.",
+        notes="SDXL base — pair with the refiner for best quality.",
     ),
-    # --- Checkpoints (CivitAI) ---
+    CatalogEntry(
+        key="hf-sdxl-refiner",
+        title="Stable Diffusion XL Refiner 1.0",
+        category="checkpoint",
+        source="huggingface",
+        repo_id="stabilityai/stable-diffusion-xl-refiner-1.0",
+        filename="sd_xl_refiner_1.0.safetensors",
+        size_mb=6082,
+        notes="Run SDXL Base at 0.8 denoise then Refiner for final 0.2 for best detail.",
+    ),
+
+    # ── Checkpoints — CivitAI ───────────────────────────────────────────────
     CatalogEntry(
         key="civit-dreamshaper-8",
-        title="DreamShaper 8",
+        title="DreamShaper 8 (SD1.5)",
         category="checkpoint",
         source="civitai",
         civitai_model_id=4384,
         size_mb=2000,
-        notes="Popular SD1.5 checkpoint on CivitAI.",
+        notes="Versatile SD1.5 checkpoint, great for illustrations and photorealism.",
+    ),
+    CatalogEntry(
+        key="civit-realistic-vision-v6",
+        title="Realistic Vision V6.0 B1 (SD1.5)",
+        category="checkpoint",
+        source="civitai",
+        civitai_model_id=4201,
+        size_mb=2000,
+        notes="Best SD1.5 photorealism checkpoint. VAE baked in.",
+    ),
+    CatalogEntry(
+        key="civit-deliberate-v6",
+        title="Deliberate v6 (SD1.5)",
+        category="checkpoint",
+        source="civitai",
+        civitai_model_id=4823,
+        size_mb=2000,
+        notes="High-detail semi-realistic SD1.5 model.",
     ),
     CatalogEntry(
         key="civit-juggernaut-xl",
-        title="Juggernaut XL",
+        title="Juggernaut XL v9 (SDXL)",
         category="checkpoint",
         source="civitai",
         civitai_model_id=133005,
         size_mb=6500,
-        notes="Strong general-purpose SDXL checkpoint.",
+        notes="Strong general-purpose SDXL checkpoint. Excellent photorealism.",
     ),
     CatalogEntry(
         key="civit-realvisxl",
-        title="RealVisXL V4.0",
+        title="RealVisXL V4.0 (SDXL)",
         category="checkpoint",
         source="civitai",
         civitai_model_id=139562,
         size_mb=6500,
-        notes="Photoreal SDXL checkpoint.",
+        notes="Photoreal SDXL checkpoint, consistent humans.",
     ),
-    # --- LoRAs ---
+    CatalogEntry(
+        key="civit-dreamshaper-xl",
+        title="DreamShaper XL v2 (SDXL)",
+        category="checkpoint",
+        source="civitai",
+        civitai_model_id=112902,
+        size_mb=6500,
+        notes="SDXL version of DreamShaper — versatile, detailed.",
+    ),
+    CatalogEntry(
+        key="civit-pony-diffusion-xl",
+        title="Pony Diffusion XL v6 (SDXL)",
+        category="checkpoint",
+        source="civitai",
+        civitai_model_id=257749,
+        size_mb=6500,
+        notes="Anime/illustration SDXL model with extensive style tags.",
+    ),
+
+    # ── LoRAs ────────────────────────────────────────────────────────────────
     CatalogEntry(
         key="civit-lora-add-detail",
         title="Add More Details (SD1.5 LoRA)",
         category="lora",
         source="civitai",
         civitai_model_id=82098,
-        notes="Detail enhancer for SD1.5 — small download.",
+        notes="Detail enhancer for SD1.5. Weight 0.5–1.0.",
+    ),
+    CatalogEntry(
+        key="civit-lora-detail-xl",
+        title="Detail Tweaker XL (SDXL LoRA)",
+        category="lora",
+        source="civitai",
+        civitai_model_id=122359,
+        notes="Detail enhancer for SDXL. Weight 0.5–1.0.",
     ),
     CatalogEntry(
         key="hf-lora-hyper-sdxl-8step",
@@ -122,7 +193,7 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         repo_id="ByteDance/Hyper-SD",
         filename="Hyper-SDXL-8steps-CFG-lora.safetensors",
         size_mb=751,
-        notes="Run SDXL at 8 steps, CFG 5-8. Use weight ~0.7.",
+        notes="Run SDXL at 8 steps, CFG 5-8. Weight ~0.7.",
     ),
     CatalogEntry(
         key="hf-lora-hyper-sd15-8step",
@@ -145,67 +216,388 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         notes="4-8 steps at CFG 1-2 with the LCM sampler.",
     ),
     CatalogEntry(
-        key="civit-lora-detail-xl",
-        title="Detail Tweaker XL (SDXL LoRA)",
+        key="hf-lora-lcm-sd15",
+        title="LCM-LoRA SD1.5",
         category="lora",
-        source="civitai",
-        civitai_model_id=122359,
-        notes="Detail enhancer for SDXL — small download.",
+        source="huggingface",
+        repo_id="latent-consistency/lcm-lora-sdv1-5",
+        filename="pytorch_lora_weights.safetensors",
+        size_mb=145,
+        notes="4-8 steps at CFG 1-2 with the LCM sampler on SD1.5.",
     ),
-    # --- VAE ---
+
+    # ── Embeddings (Textual Inversion) ───────────────────────────────────────
+    CatalogEntry(
+        key="emb-easynegative",
+        title="EasyNegative (SD1.5 embedding)",
+        category="embedding",
+        source="civitai",
+        civitai_model_id=7808,
+        notes=(
+            "Add 'EasyNegative' to your negative prompt. "
+            "Reduces artifacts, bad anatomy, and low quality outputs."
+        ),
+    ),
+    CatalogEntry(
+        key="emb-badprompt",
+        title="BadDream + UnrealisticDream (SD1.5)",
+        category="embedding",
+        source="civitai",
+        civitai_model_id=72437,
+        notes="Pair with FastNegativeV2 for best results on SD1.5 realistic models.",
+    ),
+    CatalogEntry(
+        key="emb-fastnegv2",
+        title="FastNegativeV2 (SD1.5 embedding)",
+        category="embedding",
+        source="civitai",
+        civitai_model_id=71961,
+        notes="Lightweight negative embedding for SD1.5. Use weight 0.8 in negatives.",
+    ),
+    CatalogEntry(
+        key="emb-ng-deepneg",
+        title="ng_deepnegative_v1_75t (SD1.5)",
+        category="embedding",
+        source="civitai",
+        civitai_model_id=4629,
+        notes="Classic deep negative embedding. 'ng_deepnegative_v1_75t' in negative prompt.",
+    ),
+    CatalogEntry(
+        key="emb-negxl",
+        title="negativeXL_D (SDXL embedding)",
+        category="embedding",
+        source="civitai",
+        civitai_model_id=118418,
+        notes="General negative embedding for SDXL. Add to negative prompt at weight 1.0.",
+    ),
+    CatalogEntry(
+        key="emb-unaesthetic-xl",
+        title="unaestheticXL (SDXL embedding)",
+        category="embedding",
+        source="civitai",
+        civitai_model_id=119032,
+        notes="Quality-boosting SDXL negative embedding. Pairs well with negativeXL_D.",
+    ),
+
+    # ── VAE ──────────────────────────────────────────────────────────────────
     CatalogEntry(
         key="hf-vae-mse",
-        title="SD VAE FT MSE Original",
+        title="SD VAE FT MSE Original (SD1.5)",
         category="vae",
         source="huggingface",
         repo_id="stabilityai/sd-vae-ft-mse-original",
         filename="vae-ft-mse-840000-ema-pruned.safetensors",
         size_mb=319,
-        notes="Fixes washed-out SD1.5 colors.",
+        notes="Fixes washed-out SD1.5 colors. Not needed if checkpoint has VAE baked in.",
     ),
     CatalogEntry(
         key="hf-vae-sdxl",
-        title="SDXL VAE (fp16 fix)",
+        title="SDXL VAE fp16 fix",
         category="vae",
         source="huggingface",
         repo_id="madebyollin/sdxl-vae-fp16-fix",
         filename="sdxl_vae.safetensors",
         size_mb=319,
+        notes="Required to run SDXL VAE in fp16 without NaN artifacts.",
     ),
-    # --- ControlNet (light) ---
+
+    # ── ControlNet — SD1.5 (v1.1 fp16 safetensors) ──────────────────────────
     CatalogEntry(
-        key="cn-canny-light",
-        title="ControlNet Canny v1.1 Light",
+        key="cn15-canny",
+        title="ControlNet v1.1 Canny (SD1.5)",
         category="controlnet",
         source="direct",
-        url=f"{_CN}/control_lora_rank128_v11p_sd15_canny_fp16.safetensors",
-        size_mb=129,
+        url=f"{_CN15}/control_v11p_sd15_canny_fp16.safetensors",
+        size_mb=689,
+        notes="Edge detection control. Preprocessor: CannyDetector.",
     ),
     CatalogEntry(
-        key="cn-depth-light",
-        title="ControlNet Depth v1.1 Light",
+        key="cn15-depth",
+        title="ControlNet v1.1 Depth (SD1.5)",
         category="controlnet",
         source="direct",
-        url=f"{_CN}/control_lora_rank128_v11f1p_sd15_depth_fp16.safetensors",
-        size_mb=129,
+        url=f"{_CN15}/control_v11f1p_sd15_depth_fp16.safetensors",
+        size_mb=689,
+        notes="Depth map control. Preprocessors: MiDaS, ZoeDepth, DPT-Hybrid.",
     ),
     CatalogEntry(
-        key="cn-openpose-light",
-        title="ControlNet OpenPose v1.1 Light",
+        key="cn15-openpose",
+        title="ControlNet v1.1 OpenPose (SD1.5)",
         category="controlnet",
         source="direct",
-        url=f"{_CN}/control_lora_rank128_v11p_sd15_openpose_fp16.safetensors",
-        size_mb=129,
+        url=f"{_CN15}/control_v11p_sd15_openpose_fp16.safetensors",
+        size_mb=689,
+        notes="Pose skeleton control. Preprocessors: OpenPose, DWPose.",
     ),
     CatalogEntry(
-        key="cn-tile-light",
-        title="ControlNet Tile v1.1 Light",
+        key="cn15-tile",
+        title="ControlNet v1.1 Tile (SD1.5)",
         category="controlnet",
         source="direct",
-        url=f"{_CN}/control_lora_rank128_v11f1e_sd15_tile_fp16.safetensors",
-        size_mb=129,
+        url=f"{_CN15}/control_v11f1e_sd15_tile_fp16.safetensors",
+        size_mb=689,
+        notes="Tiled upscaling control. No preprocessor needed — use original image.",
     ),
-    # --- Upscalers ---
+    CatalogEntry(
+        key="cn15-lineart",
+        title="ControlNet v1.1 LineArt (SD1.5)",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN15}/control_v11p_sd15_lineart_fp16.safetensors",
+        size_mb=689,
+        notes="Anime/realistic line art control. Preprocessors: LineArt, LineArtAnime.",
+    ),
+    CatalogEntry(
+        key="cn15-softedge",
+        title="ControlNet v1.1 SoftEdge (SD1.5)",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN15}/control_v11p_sd15_softedge_fp16.safetensors",
+        size_mb=689,
+        notes="Soft edge detection (HED/PIDI). More flexible than Canny.",
+    ),
+    CatalogEntry(
+        key="cn15-normalbae",
+        title="ControlNet v1.1 NormalMap BAE (SD1.5)",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN15}/control_v11p_sd15_normalbae_fp16.safetensors",
+        size_mb=689,
+        notes="Surface normal map control. Preprocessor: NormalBae.",
+    ),
+    CatalogEntry(
+        key="cn15-scribble",
+        title="ControlNet v1.1 Scribble (SD1.5)",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN15}/control_v11p_sd15_scribble_fp16.safetensors",
+        size_mb=689,
+        notes="Rough sketch/scribble control. Preprocessors: HED Scribble, PidiNet Scribble.",
+    ),
+    CatalogEntry(
+        key="cn15-mlsd",
+        title="ControlNet v1.1 MLSD Lines (SD1.5)",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN15}/control_v11p_sd15_mlsd_fp16.safetensors",
+        size_mb=689,
+        notes="Straight-line (architecture) control. Preprocessor: MLSD.",
+    ),
+    CatalogEntry(
+        key="cn15-seg",
+        title="ControlNet v1.1 Segmentation (SD1.5)",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN15}/control_v11p_sd15_seg_fp16.safetensors",
+        size_mb=689,
+        notes="Semantic segmentation control. Preprocessor: OneFormer/Uniformer.",
+    ),
+    CatalogEntry(
+        key="cn15-inpaint",
+        title="ControlNet v1.1 Inpaint (SD1.5)",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN15}/control_v11p_sd15_inpaint_fp16.safetensors",
+        size_mb=689,
+        notes="Inpainting control — use instead of the inpaint checkpoint for more flexibility.",
+    ),
+    CatalogEntry(
+        key="cn15-shuffle",
+        title="ControlNet v1.1 Shuffle (SD1.5)",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN15}/control_v11e_sd15_shuffle_fp16.safetensors",
+        size_mb=689,
+        notes="Color/composition palette transfer from reference image.",
+    ),
+    CatalogEntry(
+        key="cn15-ip2p",
+        title="ControlNet v1.1 IP2P (SD1.5)",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN15}/control_v11e_sd15_ip2p_fp16.safetensors",
+        size_mb=689,
+        notes="InstructPix2Pix-style image editing control.",
+    ),
+
+    # ── ControlNet — SDXL ────────────────────────────────────────────────────
+    CatalogEntry(
+        key="cnxl-canny",
+        title="ControlNet Canny SDXL (xinsir)",
+        category="controlnet",
+        source="huggingface",
+        repo_id="xinsir/controlnet-canny-sdxl-1.0",
+        filename="diffusion_pytorch_model.safetensors",
+        size_mb=2494,
+        notes="Canny edge control for SDXL. Requires diffusers ControlNetModel loader.",
+    ),
+    CatalogEntry(
+        key="cnxl-openpose",
+        title="ControlNet OpenPose SDXL (xinsir)",
+        category="controlnet",
+        source="huggingface",
+        repo_id="xinsir/controlnet-openpose-sdxl-1.0",
+        filename="diffusion_pytorch_model.safetensors",
+        size_mb=2494,
+        notes="Pose control for SDXL. Works with OpenPose and DWPose preprocessors.",
+    ),
+    CatalogEntry(
+        key="cnxl-depth",
+        title="ControlNet Depth SDXL (diffusers)",
+        category="controlnet",
+        source="huggingface",
+        repo_id="diffusers/controlnet-depth-sdxl-1.0",
+        filename="diffusion_pytorch_model.safetensors",
+        size_mb=2494,
+        notes="Depth map control for SDXL. Use ZoeDepth or MiDaS preprocessor.",
+    ),
+    CatalogEntry(
+        key="cnxl-softedge",
+        title="ControlNet SoftEdge SDXL (SargeZT)",
+        category="controlnet",
+        source="huggingface",
+        repo_id="SargeZT/controlnet-sd-xl-1.0-softedge-dexined",
+        filename="diffusion_pytorch_model.safetensors",
+        size_mb=2494,
+        notes="Soft edge / DexiNed edge detection for SDXL.",
+    ),
+
+    # ── ControlNet Preprocessors ─────────────────────────────────────────────
+    CatalogEntry(
+        key="pre-dwpose",
+        title="DWPose body+hand+face estimator",
+        category="preprocessor",
+        source="huggingface",
+        repo_id="yzd-v/DWPose",
+        filename="dw-ll_ucoco_384.onnx",
+        size_mb=280,
+        notes=(
+            "Best pose preprocessor for ControlNet OpenPose. "
+            "Also download dw-ll_ucoco_384.pth for the DW detector."
+        ),
+    ),
+    CatalogEntry(
+        key="pre-midas-depth",
+        title="MiDaS Depth v2.1 Large",
+        category="preprocessor",
+        source="direct",
+        url="https://github.com/isl-org/MiDaS/releases/download/v2_1/dpt_large_384.pt",
+        size_mb=414,
+        notes="Classic depth estimator. Faster than ZoeDepth, lower accuracy.",
+    ),
+    CatalogEntry(
+        key="pre-zoe-depth",
+        title="ZoeDepth (metric depth estimator)",
+        category="preprocessor",
+        source="huggingface",
+        repo_id="isl-org/ZoeDepth",
+        filename="ZoeD_M12_N.pt",
+        size_mb=400,
+        notes="Metric depth estimator — best accuracy for indoor scenes.",
+    ),
+    CatalogEntry(
+        key="pre-normalbae",
+        title="NormalBae surface estimator",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/scannet.pt",
+        size_mb=272,
+        notes="Surface normal estimator for ControlNet NormalBae.",
+    ),
+    CatalogEntry(
+        key="pre-lineart-realistic",
+        title="LineArt Realistic preprocessor",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/sk_model.pth",
+        size_mb=158,
+        notes="Extracts realistic line art from photos.",
+    ),
+    CatalogEntry(
+        key="pre-lineart-anime",
+        title="LineArt Anime preprocessor",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/netG.pth",
+        size_mb=274,
+        notes="Extracts anime-style line art.",
+    ),
+    CatalogEntry(
+        key="pre-clip-vit-h",
+        title="CLIP ViT-H/14 (OpenAI)",
+        category="preprocessor",
+        source="direct",
+        url=f"{_OPENAI}/a37b88a3b52a98db4f723e4a6bde19e3f03e9e0f/ViT-H-14.pt",
+        size_mb=3900,
+        notes=(
+            "Large CLIP vision encoder. Used by IP-Adapter, BLIP, and interrogators. "
+            "Also required by some ControlNet preprocessors."
+        ),
+    ),
+    CatalogEntry(
+        key="pre-clip-vit-l",
+        title="CLIP ViT-L/14 (OpenAI)",
+        category="preprocessor",
+        source="direct",
+        url=f"{_OPENAI}/b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd/ViT-L-14.pt",
+        size_mb=890,
+        notes="Standard CLIP encoder used by SD1.5 and SDXL (dual encoder).",
+    ),
+
+    # ── Segment / DINO ───────────────────────────────────────────────────────
+    CatalogEntry(
+        key="sam-vit-b",
+        title="SAM ViT-B (375 MB)",
+        category="sam",
+        source="direct",
+        url=f"{_SAM}/sam_vit_b_01ec64.pth",
+        size_mb=375,
+        notes="Fastest SAM model. Good for most segmentation tasks.",
+    ),
+    CatalogEntry(
+        key="sam-vit-l",
+        title="SAM ViT-L (1.2 GB)",
+        category="sam",
+        source="direct",
+        url=f"{_SAM}/sam_vit_l_0b3195.pth",
+        size_mb=1250,
+        notes="Better accuracy than ViT-B.",
+    ),
+    CatalogEntry(
+        key="sam-vit-h",
+        title="SAM ViT-H (2.5 GB)",
+        category="sam",
+        source="direct",
+        url=f"{_SAM}/sam_vit_h_4b8939.pth",
+        size_mb=2560,
+        notes="Highest accuracy SAM. Requires ~8 GB VRAM for inference.",
+    ),
+    CatalogEntry(
+        key="gdino-swint",
+        title="GroundingDINO Swin-T (text-guided seg)",
+        category="sam",
+        source="direct",
+        url=f"{_GDINO}/groundingdino_swint_ogc.pth",
+        size_mb=694,
+        notes=(
+            "Open-vocabulary object detection. Use with SAM for text-prompted segmentation. "
+            "Config: GroundingDINO_SwinT_OGC.py"
+        ),
+    ),
+    CatalogEntry(
+        key="gdino-swinb",
+        title="GroundingDINO Swin-B (text-guided seg)",
+        category="sam",
+        source="direct",
+        url=f"{_GDINO}/groundingdino_swinb_cogcoor.pth",
+        size_mb=938,
+        notes=(
+            "Larger GroundingDINO — higher accuracy, slower. "
+            "Config: GroundingDINO_SwinB_cfg.py"
+        ),
+    ),
+
+    # ── Upscalers ────────────────────────────────────────────────────────────
     CatalogEntry(
         key="up-realesrgan-x4",
         title="RealESRGAN 4x+",
@@ -213,6 +605,7 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         source="direct",
         url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
         size_mb=64,
+        notes="General-purpose 4x upscaler. Good for photos.",
     ),
     CatalogEntry(
         key="up-realesrgan-anime",
@@ -221,6 +614,7 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         source="direct",
         url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
         size_mb=18,
+        notes="Anime/illustration 4x upscaler. Tiny model.",
     ),
     CatalogEntry(
         key="up-realesrgan-x2",
@@ -230,7 +624,26 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
         size_mb=64,
     ),
-    # --- RIFE (frame interpolation) ---
+    CatalogEntry(
+        key="up-4x-ultrasharp",
+        title="4x-UltraSharp (ESRGAN)",
+        category="upscaler",
+        source="direct",
+        url="https://huggingface.co/lokCX/4x-Ultrasharp/resolve/main/4x-UltraSharp.pth",
+        size_mb=64,
+        notes="Very popular community upscaler — sharper than RealESRGAN for illustrations.",
+    ),
+    CatalogEntry(
+        key="up-4x-foolhardy",
+        title="4x_foolhardy_Remacri (ESRGAN)",
+        category="upscaler",
+        source="direct",
+        url="https://huggingface.co/FacehuggerSP/foolhardy_Remacri/resolve/main/4x_foolhardy_Remacri.pth",
+        size_mb=64,
+        notes="Smooth, natural-looking upscaler — great for faces and textures.",
+    ),
+
+    # ── RIFE (frame interpolation) ────────────────────────────────────────────
     CatalogEntry(
         key="rife-47",
         title="RIFE 4.7",
@@ -238,7 +651,7 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         source="direct",
         url="https://github.com/hzwer/Practical-RIFE/releases/download/model4.7/rife47.pth",
         size_mb=130,
-        notes="Recommended version — best quality/speed balance. Saves to models/rife/.",
+        notes="Best quality/speed balance. Recommended default.",
     ),
     CatalogEntry(
         key="rife-49",
@@ -247,37 +660,10 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         source="direct",
         url="https://github.com/hzwer/Practical-RIFE/releases/download/model4.9/rife49.pth",
         size_mb=130,
-        notes="Latest stable RIFE version.",
+        notes="Latest stable RIFE.",
     ),
-    # --- SAM (segmentation) ---
-    CatalogEntry(
-        key="sam-vit-b",
-        title="SAM ViT-B (375 MB)",
-        category="sam",
-        source="direct",
-        url=f"{_SAM}/sam_vit_b_01ec64.pth",
-        size_mb=375,
-        notes="Fastest SAM model. Auto-downloaded on first Segment use.",
-    ),
-    CatalogEntry(
-        key="sam-vit-l",
-        title="SAM ViT-L (1.2 GB)",
-        category="sam",
-        source="direct",
-        url=f"{_SAM}/sam_vit_l_0b3195.pth",
-        size_mb=1250,
-        notes="Better accuracy than ViT-B with moderate VRAM cost.",
-    ),
-    CatalogEntry(
-        key="sam-vit-h",
-        title="SAM ViT-H (2.5 GB)",
-        category="sam",
-        source="direct",
-        url=f"{_SAM}/sam_vit_h_4b8939.pth",
-        size_mb=2560,
-        notes="Highest accuracy SAM model.",
-    ),
-    # --- Face swap ---
+
+    # ── Face swap ─────────────────────────────────────────────────────────────
     CatalogEntry(
         key="fs-inswapper-fp16",
         title="inswapper_128 fp16 (ReActor)",
@@ -289,7 +675,7 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
     ),
     CatalogEntry(
         key="fs-inswapper",
-        title="inswapper_128 (ReActor)",
+        title="inswapper_128 (ReActor, full)",
         category="faceswap",
         source="direct",
         url="https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx",

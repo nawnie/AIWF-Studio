@@ -50,6 +50,7 @@ class WanPreflightResult:
     high_noise_model: str | None = None
     low_noise_model: str | None = None
     vae: str | None = None
+    text_encoder: str | None = None
     high_noise_lora: str | None = None
     low_noise_lora: str | None = None
 
@@ -84,6 +85,11 @@ class WanService:
 
     def available(self) -> bool:
         return self._backend.available()
+
+    def acceleration_capabilities(self) -> dict[str, dict[str, object]]:
+        from aiwf.infrastructure.torch.wan_perf import describe_wan_acceleration_capabilities
+
+        return describe_wan_acceleration_capabilities()
 
     def models_dir(self) -> Path:
         return self.flags.resolved_models_dir() / "wan"
@@ -340,6 +346,11 @@ class WanService:
         elif "wan" not in Path(vae_res).name.lower():
             warnings.append(f"Selected VAE does not look Wan-specific: {Path(vae_res).name}")
 
+        text_encoder_id = request.text_encoder_path or self.default_text_encoder()
+        text_encoder_res = self.resolve_text_encoder(text_encoder_id) if text_encoder_id else None
+        if text_encoder_id and not text_encoder_res:
+            errors.append(f"Selected Wan text encoder is not local: {text_encoder_id}")
+
         high_lora_res = self.resolve_lora(request.high_noise_lora_id)
         low_lora_res = self.resolve_lora(request.low_noise_lora_id)
         for label, lora in (("High noise LoRA", high_lora_res), ("Low noise LoRA", low_lora_res)):
@@ -354,6 +365,7 @@ class WanService:
             high_noise_model=high_res,
             low_noise_model=low_res,
             vae=vae_res,
+            text_encoder=text_encoder_res,
             high_noise_lora=high_lora_res,
             low_noise_lora=low_lora_res,
         )
@@ -896,6 +908,17 @@ class WanService:
         preflight = self.preflight(request, image_present=image is not None)
         if not preflight.ok:
             raise WanUnavailable(preflight.message())
+        request = request.model_copy(
+            update={
+                "high_noise_model_id": preflight.high_noise_model or request.high_noise_model_id,
+                "low_noise_model_id": preflight.low_noise_model or request.low_noise_model_id,
+                "vae_id": preflight.vae or request.vae_id,
+                "text_encoder_path": preflight.text_encoder or request.text_encoder_path,
+                "high_noise_lora_id": preflight.high_noise_lora or request.high_noise_lora_id,
+                "low_noise_lora_id": preflight.low_noise_lora or request.low_noise_lora_id,
+                "components_base": preflight.components_base or request.components_base,
+            }
+        )
 
         if image is None:
             raise WanUnavailable("Upload a source image to animate.")

@@ -25,6 +25,17 @@ class RuntimeFlags(BaseSettings):
     no_half: bool = False
     fp8: bool = False
     directml: bool = False
+    # Custom engine feature flags (set via env AIWF_* or launch profile)
+    cuda_graphs: bool = False
+    torchao: bool = False
+    torch_compile: bool = False
+    channels_last: bool = False
+    fp8_quant: bool = False       # TorchAO FP8 (distinct from --fp8 half-precision)
+    nvenc: bool = False
+    hevc: bool = False
+    # Inference backend: "diffusers" (default) or "onnx"
+    inference_backend: str = "diffusers"
+    onnx_provider: str = "auto"   # auto | cuda | directml | cpu
     medvram: bool = False
     lowvram: bool = False
     xformers: bool = False
@@ -146,9 +157,25 @@ class UserSettings(BaseSettings):
     use_default_negative: bool = True
     default_negative_prompt: str = ""
 
+    # Gallery & viewer preferences.
+    gallery_height: int = Field(default=480, ge=120, le=1200)
+    gallery_columns: int = Field(default=2, ge=1, le=8)
+    send_seed_on_click: bool = True
+    send_size_on_click: bool = True
+
+    # Download safety. prefer_safetensors warns before starting a .ckpt/.pt
+    # download. write_download_receipts writes a companion .json alongside each
+    # downloaded file so you can trace what was fetched and when.
+    prefer_safetensors: bool = True
+    write_download_receipts: bool = True
+
     # API keys for model downloads (stored locally in config.json).
     huggingface_token: str = ""
     civitai_token: str = ""
+
+    # ONNX model root — directory containing one or more ONNX model subdirs.
+    # Only used when inference_backend == "onnx".
+    onnx_model_dir: str = ""
 
     def apply_token_env(self) -> None:
         """Expose saved API keys to download helpers via environment variables."""

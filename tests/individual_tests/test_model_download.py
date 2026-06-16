@@ -124,8 +124,12 @@ def test_catalog_lists_entries(tmp_path: Path):
     service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
     keys = {item.key for item in service.list_catalog()}
     assert "hf-sd15-pruned" in keys
-    assert "cn-canny-light" in keys
+    assert "cn15-canny" in keys          # renamed from cn-canny-light
     assert "civit-dreamshaper-8" in keys
+    assert "cnxl-canny" in keys          # SDXL ControlNet
+    assert "emb-easynegative" in keys    # embeddings
+    assert "pre-dwpose" in keys          # preprocessors
+    assert "gdino-swinb" in keys         # GroundingDINO
 
 
 def test_direct_private_download_url_blocked(tmp_path: Path):

@@ -39,6 +39,15 @@ class LaunchSettings(BaseSettings):
     fp8: bool = False
     directml: bool = False
     cpu: bool = False
+    inference_backend: str = "diffusers"
+    onnx_provider: str = "auto"
+    cuda_graphs: bool = False
+    torchao: bool = False
+    fp8_quant: bool = False
+    torch_compile: bool = False
+    channels_last: bool = False
+    nvenc: bool = False
+    hevc: bool = False
     api: bool = False
     nowebui: bool = False
     models_dir: str = ""
@@ -65,6 +74,22 @@ class LaunchSettings(BaseSettings):
             raise ValueError("gradio_auth must be username:password")
         return cleaned
 
+    @field_validator("inference_backend")
+    @classmethod
+    def validate_inference_backend(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"diffusers", "onnx"}:
+            raise ValueError("inference_backend must be diffusers or onnx")
+        return normalized
+
+    @field_validator("onnx_provider")
+    @classmethod
+    def validate_onnx_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"auto", "cuda", "directml", "cpu"}:
+            raise ValueError("onnx_provider must be auto, cuda, directml, or cpu")
+        return normalized
+
     @classmethod
     def from_runtime_flags(cls, flags: RuntimeFlags) -> LaunchSettings:
         return cls(
@@ -89,6 +114,15 @@ class LaunchSettings(BaseSettings):
             fp8=flags.fp8,
             directml=flags.directml,
             cpu=flags.cpu,
+            inference_backend=flags.inference_backend,
+            onnx_provider=flags.onnx_provider,
+            cuda_graphs=flags.cuda_graphs,
+            torchao=flags.torchao,
+            fp8_quant=flags.fp8_quant,
+            torch_compile=flags.torch_compile,
+            channels_last=flags.channels_last,
+            nvenc=flags.nvenc,
+            hevc=flags.hevc,
             api=flags.api,
             nowebui=flags.nowebui,
             models_dir=str(flags.models_dir) if flags.models_dir else "",
@@ -123,6 +157,15 @@ class LaunchSettings(BaseSettings):
                 "fp8": self.fp8,
                 "directml": self.directml,
                 "cpu": self.cpu,
+                "inference_backend": self.inference_backend,
+                "onnx_provider": self.onnx_provider,
+                "cuda_graphs": self.cuda_graphs,
+                "torchao": self.torchao,
+                "fp8_quant": self.fp8_quant,
+                "torch_compile": self.torch_compile,
+                "channels_last": self.channels_last,
+                "nvenc": self.nvenc,
+                "hevc": self.hevc,
                 "api": self.api,
                 "nowebui": self.nowebui,
                 "models_dir": Path(self.models_dir).resolve() if self.models_dir.strip() else None,
@@ -186,6 +229,24 @@ class LaunchSettings(BaseSettings):
             args.append("--directml")
         if self.cpu:
             args.append("--cpu")
+        if self.inference_backend != "diffusers":
+            args.extend(["--inference-backend", self.inference_backend])
+        if self.onnx_provider != "auto":
+            args.extend(["--onnx-provider", self.onnx_provider])
+        if self.cuda_graphs:
+            args.append("--cuda-graphs")
+        if self.torchao:
+            args.append("--torchao")
+        if self.fp8_quant:
+            args.append("--fp8-quant")
+        if self.torch_compile:
+            args.append("--torch-compile")
+        if self.channels_last:
+            args.append("--channels-last")
+        if self.nvenc:
+            args.append("--nvenc")
+        if self.hevc:
+            args.append("--hevc")
         if self.api:
             args.append("--api")
         if self.nowebui:
@@ -266,7 +327,18 @@ def merge_launch_settings(
         "pinned_memory": "--no-pinned-memory",
         "cuda_malloc": "--no-cuda-malloc",
         "no_half": "--no-half",
+        "fp8": "--fp8",
+        "directml": "--directml",
         "cpu": "--cpu",
+        "inference_backend": "--inference-backend",
+        "onnx_provider": "--onnx-provider",
+        "cuda_graphs": "--cuda-graphs",
+        "torchao": "--torchao",
+        "fp8_quant": "--fp8-quant",
+        "torch_compile": "--torch-compile",
+        "channels_last": "--channels-last",
+        "nvenc": "--nvenc",
+        "hevc": "--hevc",
         "api": "--api",
         "nowebui": "--nowebui",
         "models_dir": "--models-dir",

@@ -14,6 +14,7 @@ from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.events.bus import EventBus
 from aiwf.core.events.types import AppStarted
 from aiwf.infrastructure.diffusers.backend import DiffusersBackend
+from aiwf.infrastructure.onnx.backend import ONNXBackend
 from aiwf.infrastructure.storage.filesystem import FilesystemImageStore
 from aiwf.infrastructure.torch.devices import DeviceManager
 from aiwf.plugins.registry import PluginRegistry
@@ -63,21 +64,7 @@ class AppContext:
         )
 
     def load_settings(self) -> None:
-        if not self.settings_path.exists():
-            return
-        try:
-            data = json.loads(self.settings_path.read_text(encoding="utf-8"))
-            if data.get("show_progress_every_n_steps", 1) == 0:
-                data["enable_live_preview"] = False
-                data["show_progress_every_n_steps"] = 1
-            loaded = UserSettings.model_validate(data)
-            # Update in place: services hold a reference to this settings object,
-            # so replacing it would leave them reading stale defaults.
-            for name in UserSettings.model_fields:
-                setattr(self.settings, name, getattr(loaded, name))
-            self.settings.apply_token_env()
-        except (json.JSONDecodeError, ValueError):
-            pass
+        _load_user_settings(self.settings, self.settings_path)
 
     def load_launch_settings(self) -> LaunchSettings | None:
         return load_launch_settings(self.launch_settings_path)
@@ -98,6 +85,22 @@ def _check_transformers_compat() -> None:
                 transformers.__version__,
             )
     except Exception:
+        pass
+
+
+def _load_user_settings(settings: UserSettings, settings_path: Path) -> None:
+    if not settings_path.exists():
+        return
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        if data.get("show_progress_every_n_steps", 1) == 0:
+            data["enable_live_preview"] = False
+            data["show_progress_every_n_steps"] = 1
+        loaded = UserSettings.model_validate(data)
+        for name in UserSettings.model_fields:
+            setattr(settings, name, getattr(loaded, name))
+        settings.apply_token_env()
+    except (json.JSONDecodeError, ValueError):
         pass
 
 
@@ -126,11 +129,41 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     events = EventBus()
     devices = DeviceManager(flags)
     devices.log_status()
-    backend = DiffusersBackend(flags, devices)
-    metadata = MetadataService()
-    queue = JobQueue(events)
     settings_path = flags.data_dir / "config.json"
     settings = UserSettings()
+    _load_user_settings(settings, settings_path)
+
+    # Propagate engine feature flags to environment so sub-modules pick them up.
+    _engine_env = {
+        "AIWF_CUDA_GRAPHS":    ("1" if flags.cuda_graphs    else "0"),
+        "AIWF_TORCHAO":        ("1" if flags.torchao        else "0"),
+        "AIWF_TORCH_COMPILE":  ("1" if flags.torch_compile  else "0"),
+        "AIWF_CHANNELS_LAST":  ("1" if flags.channels_last  else "0"),
+        "AIWF_FP8":            ("1" if flags.fp8_quant      else "0"),
+        "AIWF_NVENC":          ("1" if flags.nvenc          else "0"),
+        "AIWF_HEVC":           ("1" if flags.hevc           else "0"),
+    }
+    import os as _os
+    for _k, _v in _engine_env.items():
+        _os.environ.setdefault(_k, _v)
+
+    if flags.inference_backend == "onnx":
+        from pathlib import Path as _Path
+        _onnx_root = (
+            _Path(settings.onnx_model_dir) if settings.onnx_model_dir
+            else flags.resolved_models_dir() / "onnx"
+        )
+        backend = ONNXBackend(
+            models_root=_onnx_root,
+            provider=flags.onnx_provider,  # type: ignore[arg-type]
+            device_id=0,
+        )
+        logger.info("Inference backend: ONNX Runtime (provider=%s, models=%s)", flags.onnx_provider, _onnx_root)
+    else:
+        backend = DiffusersBackend(flags, devices)
+        logger.info("Inference backend: Diffusers")
+    metadata = MetadataService()
+    queue = JobQueue(events)
     store = FilesystemImageStore(flags.resolved_output_dir(), settings=settings)
 
     generation = GenerationService(

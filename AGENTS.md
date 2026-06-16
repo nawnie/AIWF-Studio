@@ -300,9 +300,244 @@ For UI-only changes: `from aiwf.web.app import create_web_ui` / `build_context()
 | Generation logic | `aiwf/services/generation.py`, `aiwf/infrastructure/diffusers/backend.py` |
 | Prompts / styles | `aiwf/services/prompt_processor.py`, `aiwf/core/domain/style_presets.py` |
 | Inpaint / masks | `aiwf/infrastructure/diffusers/mask.py` |
-| Model downloads | `aiwf/web/tabs/model_manager.py`, `aiwf/services/model_download.py` |
+| Model downloads | `aiwf/web/tabs/model_manager.py`, `aiwf/services/model_download_catalog.py` |
 | API | `aiwf/api/v1/routes.py` |
-| Settings / launch | `aiwf/web/tabs/settings.py`, `aiwf/core/config/launch.py` |
-| Bootstrap wiring | `aiwf/bootstrap.py` |
+| Job tracking | `aiwf/services/engine_supervisor.py`, `aiwf/core/domain/job_status.py` |
+| Video (Wan I2V) | `aiwf/services/wan.py`, `aiwf/infrastructure/wan/pipeline.py` |
+| RIFE interpolation | `aiwf/services/rife.py`, `aiwf/web/tabs/rife.py` |
+| Chat (Ollama) | `aiwf/services/ollama_client.py`, `aiwf/web/tabs/chat_workspace.py` |
+| GPU tenant tracking | `aiwf/services/engine_supervisor.py` (`active_tenant`, `request_switch`) |
+| Subprocess workers | `aiwf/services/process_supervisor.py`, `aiwf/core/domain/worker.py` |
 
-## Imported Claude Cowork project instructions
+---
+
+## Sprint A addendum (v2 roadmap)
+
+### New files added in Sprint A
+
+| File | Purpose |
+|------|---------|
+| `aiwf/core/domain/engine.py` | `EngineTenant` enum, `EngineSwitchRequest/Result`, `EngineStatus` |
+| `aiwf/core/domain/worker.py` | `WorkerCommand`, `WorkerResult` -- typed subprocess contract |
+| `aiwf/services/process_supervisor.py` | Named-slot subprocess launcher with psutil tree-kill |
+| `aiwf/services/ollama_client.py` | Thin `httpx` wrapper around Ollama REST API |
+| `aiwf/web/tabs/chat_workspace.py` | Chat tab -- Ollama model picker, streaming chatbot |
+| `tests/test_engine_domain.py` | Engine domain tests |
+| `tests/test_process_supervisor.py` | ProcessSupervisor tests (echo, stop, double-start guard) |
+| `tests/test_ollama_client.py` | OllamaClient tests (mocked httpx) |
+| `docs/WORKER_PROTOCOL.md` | Full JSONL event protocol spec |
+| `docs/OLLAMA_CHAT_TENANT.md` | Chat GPU tenant architecture |
+
+### Engine tenant rules (non-negotiable)
+
+1. At most **one GPU-heavy tenant** active at a time (`is_gpu_heavy()` covers IMAGE, VIDEO, TRAINING, ENHANCE).
+2. CHAT (`is_gpu_heavy() == False`) shares the lock slot but does not block image/video if scheduled carefully.
+3. Switching FROM CHAT to any GPU-heavy tenant **always** calls `ollama_client.unload(model)` first.
+4. `EngineSupervisor.request_switch()` is the single choke-point for all tenant transitions -- never bypass it.
+5. `set_chat_model(name)` must be called when a chat model is loaded so the supervisor can unload it later.
+6. Optional engines must never become mandatory boot dependencies.
+
+### ProcessSupervisor rules
+
+- Never `shell=True`.
+- Use `CREATE_NEW_PROCESS_GROUP` (Windows) / `start_new_session=True` (POSIX) for clean tree-kill.
+- Worker slots are identified by a string name; one live process per name.
+- `stop()` uses psutil recursive tree termination if available; falls back to `proc.terminate()`.
+- `stop_all()` is called on app shutdown.
+
+### OllamaClient rules
+
+- Gracefully degrades -- `healthcheck()` returns `False` if Ollama is not running (never crashes the app).
+- `unload(model)` uses `keep_alive: 0` on `/api/generate` -- the only correct way to evict a model.
+- `stream_chat()` uses `httpx.stream()` context manager; never buffers the full response.
+- Import is deferred via `_httpx()` helper -- the client can be constructed even without `httpx` installed.
+
+### Chat tab rules
+
+- Direction update: future local chat work should target **llama.cpp with GGUF models**, not Ollama, unless the user explicitly asks to keep Ollama compatibility.
+- No torch imports in `chat_workspace.py`.
+- Tab select triggers
+---
+
+## Sprint B addendum — Training services
+
+### Training engine rule (CRITICAL)
+
+**Optional engines must never become mandatory boot dependencies.**
+
+- `from launch import ...` is only permitted inside method/function bodies, never at module top-level.
+- `KohyaRunner._resolve_python_exe()` and `ED2Runner._resolve_python_exe()` defer the `launch` import to first call.
+- `_probe_engines()` in `training.py` wraps the entire `launch` import in `try/except Exception: pass`.
+- The training tab renders fully (with a "not configured" guidance notice) even when no engine is installed.
+- Any new engine added in future MUST follow this pattern.
+
+### Dataset validator rules
+
+- `DatasetValidator` and all helpers in `dataset_validator.py` are pure stdlib — zero engine, torch, or diffusers imports.
+- Safe to import at boot time.
+- HF ID heuristic: `count("/")==1` AND no leading `/` AND no `\\` AND suffix not in `{.safetensors,.ckpt,.pt,.bin,.pth}`.
+  - This correctly handles `stabilityai/stable-diffusion-xl-base-1.0` (suffix `.0` is not a model extension).
+  - On Linux `os.sep=='/'` — do NOT use `os.sep in path` to detect local paths; use the explicit heuristic above.
+- Caption missing threshold: >50% missing → error; ≤50% → warning.
+
+### Config builder rules
+
+- Pure-Python TOML serialiser (`_toml_value`, `_toml_section`, `_render_toml`) — no `tomli_w`/`toml` dependency.
+- `bool` must be checked before `int` in `_toml_value` (Python `bool` is a subclass of `int`).
+- All string values must escape `\` as `\\` and `"` as `\"`.
+- `_RequestProxy` lets validators and builders accept both `dict` and plain-attribute objects without importing domain types.
+
+### ProcessSupervisor `_resolve_cwd` rule
+
+- `_resolve_cwd(cwd)` maps POSIX `/tmp` → `tempfile.gettempdir()` on Windows so workers can specify `/tmp` cross-platform.
+- Raises `FileNotFoundError` if the resolved path does not exist (fail-fast, not silent fallback to cwd).
+
+### Quick-reference: Sprint B files
+
+| File | Purpose |
+|------|---------|
+| `aiwf/services/training/__init__.py` | Package marker |
+| `aiwf/services/training/dataset_validator.py` | Pre-flight checks, pure stdlib |
+| `aiwf/services/training/kohya_config.py` | TOML builder for Kohya configs |
+| `aiwf/services/training/ed2_config.py` | JSON builder for ED2 `train.json` |
+| `aiwf/services/training/kohya_runner.py` | Subprocess runner for Kohya LoRA |
+| `aiwf/services/training/ed2_runner.py` | Subprocess runner for ED2 full FT |
+| `aiwf/web/tabs/training.py` | Training tab UI |
+| `tests/test_dataset_validator.py` | 29 tests |
+| `tests/test_training_config_builders.py` | 35 tests |
+| `docs/TRAINING_ENGINE_ROADMAP.md` | Architecture + "how to add an engine" guide |
+
+---
+
+## Sprint C addendum — Model info lookup
+
+### ModelInfoLookup rules
+
+- `aiwf/services/model_info_lookup.py` — zero imports at module level beyond stdlib.
+- All HTTP is done via `urllib.request` (stdlib only) — no httpx, no requests, no huggingface_hub package required.
+- Returns `None` rather than raising on network errors, 404s, or missing tokens.
+- Callers must treat the result as advisory — never block the user on a lookup failure.
+- Token resolution reads env vars (`HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `CIVITAI_API_TOKEN`) or the passed argument. Never imports `launch` or any engine module.
+
+### HF lookup notes
+
+- Uses `https://huggingface.co/api/models/{repo_id}` — no `huggingface_hub` package required.
+- `tags` list is filtered: entries starting with `license:`, `arxiv:`, `base_model:`, `language:` are stripped from concept tags but parsed into dedicated fields.
+- Trigger words come from `cardData.trigger_words`, base model from `cardData.base_model`.
+- Token sent as `Authorization: Bearer {token}` header (not query param).
+
+### CivitAI lookup notes
+
+- Token sent as `?token=` query param (CivitAI's documented auth method).
+- `description` field contains HTML — always call `_strip_html()` before display.
+- `trainedWords` from the version object are the trigger words.
+- `_parse_civitai_ref()` handles bare integer IDs, `/models/<id>` URLs, and `?modelVersionId=` query strings.
+
+### Auto-detect routing
+
+```
+civitai.com in string  → lookup_civitai
+bare integer           → lookup_civitai
+org/repo (one slash)   → lookup_hf
+anything else          → lookup_ollama → (None if miss)
+```
+
+### Model Info tab
+
+- Added as a new tab in `aiwf/web/tabs/model_manager.py` (after ControlNet).
+- Reads `ctx.settings.huggingface_token` and `ctx.settings.civitai_token` at call time (not at import time).
+- Supports pressing Enter in the query box (`.submit`) as well as button click.
+
+### Quick-reference: Sprint C files
+
+| File | Purpose |
+|------|---------|
+| `aiwf/services/model_info_lookup.py` | RemoteModelInfo + ModelInfoLookup service |
+| `aiwf/web/tabs/model_manager.py` | Model Info tab wired in (new tab after ControlNet) |
+| `tests/test_model_info_lookup.py` | 57 tests — all network calls mocked |
+
+---
+
+## Addendum — Sprint A/B/C/D (added 2026-06-14)
+
+### Engine domain (`aiwf/core/domain/engine.py`)
+
+- `EngineTenant` enum: `IDLE`, `IMAGE`, `VIDEO`, `CHAT`, `LORA_TRAINING`, `FULL_TRAINING`, `ENHANCE`
+- `EngineSwitchRequest(target, reason, allow_wait)` — frozen dataclass
+- `EngineSwitchResult(ok, active, message, log_path)` — frozen dataclass
+- `EngineStatus` — mutable live snapshot; call `record_switch()` on each transition
+- `CHAT` is **not** GPU-heavy (`is_gpu_heavy() → False`). Ollama manages its own VRAM.
+
+### Worker domain (`aiwf/core/domain/worker.py`)
+
+- `WorkerCommand(args, cwd, env, name, timeout_seconds)` — subprocess spec, frozen
+- `WorkerResult(job_id, status, return_code, output_paths, logs_path, error_message)` — frozen
+- `WorkerEvent` dataclass hierarchy: `LogLine`, `ProgressEvent`, `DoneEvent`, `ErrorEvent`
+- `status` values: `"completed"`, `"failed"`, `"cancelled"`
+
+### Process supervisor (`aiwf/services/process_supervisor.py`)
+
+- `ProcessSupervisor` — singleton-style (one per app). Stores `dict[str, Popen]`.
+- `start(worker_id, command) → Iterator[WorkerEvent]` — never `shell=True`; `CREATE_NEW_PROCESS_GROUP` on Windows, `os.setsid` on POSIX
+- `stop(worker_id) → str` — psutil recursive tree kill; returns status string
+- Guard: raises `RuntimeError` if `worker_id` already active (no silent double-start)
+- All log lines are yielded as `LogLine` events before `DoneEvent`
+
+### Ollama client (`aiwf/services/ollama_client.py`)
+
+- `OllamaClient(base_url="http://127.0.0.1:11434")` — no mandatory install
+- `healthcheck() → bool` — GET `/api/tags`; returns `False` on any error
+- `list_models() → list[str]` — parses `models[].name` from tags response
+- `unload(model) → bool` — POST `/api/generate` with `keep_alive: 0`
+- `stream_chat(model, messages, options) → Iterator[str]` — streams token strings from `/api/chat`
+- Always uses `httpx`. If `httpx` missing, raises `ImportError` with install hint.
+- Never imports torch, diffusers, or any GPU module.
+
+### Chat workspace tab (`aiwf/web/tabs/chat_workspace.py`)
+
+- Registered as `@registry.tab("Chat", order=15)`
+- Ollama status pill refreshes on tab select; shows install guidance if not detected
+- Send → acquires `gpu_tenant_lock` with `CHAT` tenant, streams tokens to `gr.Chatbot`
+- Unload button → `client.unload(model)` then releases lock
+- Does NOT auto-download Ollama, auto-load on startup, or share VRAM
+
+### Training services (`aiwf/services/training/`)
+
+- `dataset_validator.py`: `DatasetValidator.validate(root, config) → ValidationResult(ok, errors, warnings)`
+  - Checks: root exists, images present, captions present (if mode requires), output dir writable, base checkpoint exists, engine venv exists
+- `kohya_config.py`: `KohyaConfigBuilder.build(request) → str` — pure TOML string, no subprocess
+- `kohya_runner.py`: `KohyaRunner.start(config_path, output_dir) → Iterator[WorkerEvent]` — delegates to `ProcessSupervisor`
+- `ed2_config.py` / `ed2_runner.py`: same pattern for EveryDream2
+- Training tab: `@registry.tab("Training", order=20)` — blocks if GPU held by video/chat
+- Full fine-tune policy: ED2 is mandatory for full model fine-tuning jobs, but ED2 must still remain optional at app boot. Preflight should block full tune until ED2 is enabled, a usable Python environment exists, and `EveryDream2trainer/train.py` is present.
+- ED2 may use the main Studio venv only when `engines.json` explicitly sets `"venv_dir": "studio"` (or `"shared"` / `"main"`). Shared mode installs only AIWF's ED2 overlay requirements and must skip `EveryDream2trainer/requirements.txt` because the upstream file pins older core packages.
+
+### Model info lookup (`aiwf/services/model_info_lookup.py`)
+
+- `ModelInfoLookup(hf_token, civitai_token)` — tokens from settings, read at call time
+- `lookup(query) → RemoteModelInfo | None` — auto-routes by query shape
+- Auto-detect routing: `civitai.com` or bare int → CivitAI; `org/repo` → HF; else → Ollama
+- All network errors return `None`, never raise to caller
+- `RemoteModelInfo`: name, description, tags, license, downloads, size_mb, url, trigger_words, base_model, source
+
+### Acceleration experiments
+
+All perf experiments are **flag-gated** (`AIWF_*=1`). See `docs/ACCELERATION_EXPERIMENTS.md` for the full list, benchmark protocol, and current status. Nothing is enabled by default. Do not claim performance improvements without a logged benchmark entry.
+
+### Model operations tabs
+
+- Model mixing and conversion/quantization live under `aiwf/services/model_ops.py`, `aiwf/workers/model_ops.py`, and `aiwf/web/tabs/model_manager.py`.
+- Heavy operations must preflight first, then run through `ProcessSupervisor`; never load or convert large models directly inside Gradio callbacks.
+- Write a receipt for generated model artifacts so users can trace source files, ratios, dtypes/quant choices, warnings, and timestamps.
+- NVFP4 is a storage/compression concept on Shawn's RTX 4070 Ti SUPER (Ada Lovelace), not a promised speed path. Native FP4/NVFP4 speed claims require future hardware/runtime validation.
+- Optional converters and quant packages must never become mandatory boot dependencies.
+- TODO only for now: add AMD, Intel, and CPU quant/acceleration backends after the NVIDIA path has preflight, receipts, and benchmarks.
+
+### Sprint D docs
+
+| Doc | Purpose |
+|-----|---------|
+| `docs/WORKER_PROTOCOL.md` | WorkerEvent types, streaming contract, error handling |
+| `docs/OLLAMA_CHAT_TENANT.md` | Chat architecture, unload behavior, GPU lock interaction |
+| `docs/TRAINING_ENGINE_ROADMAP.md` | Kohya and ED2 subprocess design, config generation |
+| `docs/ACCELERATION_EXPERIMENTS.md` | Flagged experiments, benchmark protocol, status |

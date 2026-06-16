@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -380,6 +381,39 @@ def inspect_custom_input(
         return source, text, filename, f"**Cannot use this link yet** — {exc}"
 
 
+_UNSAFE_EXTENSIONS = frozenset({".ckpt", ".pt", ".pth"})
+
+
+def is_unsafe_download_format(filename: str) -> bool:
+    """Return True if the file extension can execute arbitrary code on load.
+
+    .ckpt and .pt files are Python pickles that run arbitrary code when
+    torch.load() is called.  Prefer .safetensors for all new downloads.
+    """
+    return Path(filename).suffix.lower() in _UNSAFE_EXTENSIONS
+
+
+def write_download_receipt(dest: Path, *, url: str, source: str) -> None:
+    """Write a companion JSON receipt alongside a downloaded model file.
+
+    Records the download URL, source, and UTC timestamp so every file can
+    be traced back to its origin.  Silently skips on any I/O error.
+    """
+    try:
+        receipt_path = dest.with_suffix(dest.suffix + ".receipt.json")
+        payload = {
+            "file": dest.name,
+            "url": url,
+            "source": source,
+            "downloaded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        receipt_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass  # receipts are advisory; never fail a download over them
+
+
 class ModelDownloadService:
     """Download checkpoints, LoRAs, and other assets from Hugging Face, CivitAI, or direct URLs."""
 
@@ -505,10 +539,14 @@ class ModelDownloadService:
                 headers["Authorization"] = f"Bearer {token}"
 
         try:
-            return stream_download(remote.url, dest, on_progress=on_progress, headers=headers)
+            result = stream_download(remote.url, dest, on_progress=on_progress, headers=headers)
+            write_download_receipt(result, url=remote.url, source=remote.source)
+            return result
         except Exception as exc:
             if remote.source == "huggingface" and remote.repo_id and remote.filename:
-                return self._download_hf_hub(remote, dest, on_progress=on_progress)
+                path = self._download_hf_hub(remote, dest, on_progress=on_progress)
+                write_download_receipt(path, url=remote.url, source=remote.source)
+                return path
             raise ValueError(f"Download failed: {exc}") from exc
 
     def _download_hf_hub(

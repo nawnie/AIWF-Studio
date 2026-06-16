@@ -113,6 +113,28 @@ def test_install_logs_app_version_on_startup(tmp_path, monkeypatch):
     assert row["app_version"] == __version__
 
 
+def test_trace_model_throughput_defaults_app_version(tmp_path, monkeypatch):
+    """When caller omits app_version, helper falls back to AIWF_VERSION."""
+    monkeypatch.setenv("AIWF_DEV_TRACE", "1")
+    diag = DevDiagnostics(tmp_path / "outputs")
+    from aiwf.dev import diagnostics as diagnostics_module
+    monkeypatch.setattr(diagnostics_module, "_installed", diag)
+
+    trace_model_throughput(
+        kind="wan.video",
+        elapsed_seconds=10.0,
+        units=81,
+        units_label="frames",
+        # app_version intentionally omitted — must default to AIWF_VERSION
+    )
+
+    row = json.loads((tmp_path / "outputs" / "dev-trace.log").read_text(encoding="utf-8").strip())
+    assert row["app_version"] == __version__, (
+        "trace_model_throughput must emit app_version=AIWF_VERSION when caller omits it"
+    )
+    assert row["units_per_second"] == pytest.approx(8.1, abs=0.01)
+
+
 def test_trace_safe_noop_without_install():
     trace_safe("noop", "should not raise")
 

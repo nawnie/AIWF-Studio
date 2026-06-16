@@ -29,6 +29,7 @@ from aiwf.services.engine_supervisor import EngineSupervisor, get_supervisor
 from aiwf.services.gpu_tenant_lock import get_gpu_lock
 
 logger = logging.getLogger(__name__)
+_MODEL_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".bin", ".pth"}
 
 
 class ED2Unavailable(RuntimeError):
@@ -91,12 +92,12 @@ class ED2Client:
                 "Prepare your training images there before submitting a job."
             )
 
-        # Validate base model exists (ED2 needs a local path, not just HF ID)
+        # Validate base model exists (or is a clear HF ID).
         base = Path(request.base_model_path)
-        if not base.exists() and "/" not in request.base_model_path:
+        if not base.exists() and not _looks_like_hf_repo_id(request.base_model_path):
             raise ValueError(
                 f"Base model not found: {request.base_model_path}. "
-                "Provide an absolute path or a HuggingFace model ID (org/repo)."
+                "Provide an existing path or a Hugging Face model ID (org/repo)."
             )
 
         # GPU tenant lock — ed2 priority=100 (highest)
@@ -125,3 +126,14 @@ class ED2Client:
         if record is None:
             return f"Job {job_id} not found."
         return f"[{record.phase.value}] {record.message or 'running'}"
+
+
+def _looks_like_hf_repo_id(value: str) -> bool:
+    text = str(value).strip()
+    if not text or "\\" in text or text.startswith(("/", "./", "../")):
+        return False
+    if ":" in text:
+        return False
+    if Path(text).suffix.lower() in _MODEL_EXTENSIONS:
+        return False
+    return text.count("/") == 1

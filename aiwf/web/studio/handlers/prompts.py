@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import gradio as gr
 from PIL import Image as PILImage
 
@@ -151,6 +153,60 @@ def add_lora_to_prompt(ctx: AppContext, current_prompt: str, lora_id: str | None
     addition = f"{tag}, {keywords}" if keywords else tag
     text = (current_prompt or "").rstrip().rstrip(",")
     return f"{text}, {addition}" if text else addition
+
+
+_LORA_TAG_RE = re.compile(r"\s*,?\s*<lora:[^>]+>")
+
+
+def strip_lora_tags(prompt: str) -> str:
+    text = _LORA_TAG_RE.sub("", prompt or "")
+    text = re.sub(r"\s*,\s*,+", ", ", text)
+    return text.strip().strip(",").strip()
+
+
+def apply_lora_stack_to_prompt(
+    ctx: AppContext,
+    current_prompt: str,
+    *slot_values,
+) -> str:
+    """Replace prompt LoRA tags with a compact selected stack.
+
+    slot_values is packed as repeating ``(lora_id, strength)`` pairs followed
+    by one ``include_keywords`` boolean.
+    """
+    include_keywords = bool(slot_values[-1]) if slot_values else True
+    pairs = list(zip(slot_values[0:-1:2], slot_values[1:-1:2]))
+    seen: set[str] = set()
+    additions: list[str] = []
+    for lora_id, strength in pairs:
+        if not lora_id or lora_id in seen:
+            continue
+        lora = ctx.models.find_lora(str(lora_id))
+        if lora is None:
+            continue
+        seen.add(lora.id)
+        tag = f"<lora:{lora.id}:{float(strength):g}>"
+        if include_keywords:
+            keywords = (ctx.models.lora_keywords(lora.id) or "").strip()
+            additions.append(f"{tag}, {keywords}" if keywords else tag)
+        else:
+            additions.append(tag)
+
+    base = strip_lora_tags(current_prompt)
+    if not additions:
+        return base
+    suffix = ", ".join(additions)
+    return f"{base}, {suffix}" if base else suffix
+
+
+def refresh_lora_stack(ctx: AppContext, *current_values):
+    ctx.models.refresh_loras()
+    choices = ctx.models.lora_choices()
+    ids = {value for _, value in choices}
+    updates = []
+    for current in current_values:
+        updates.append(gr.update(choices=choices, value=current if current in ids else None))
+    return tuple(updates)
 
 
 def refresh_embedding_picker(ctx: AppContext, current):

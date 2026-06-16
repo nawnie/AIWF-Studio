@@ -10,7 +10,15 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-STUDIO = Path(__file__).resolve().parents[1] / "aiwf" / "web" / "studio.py"
+
+def _repo_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "launch.py").is_file():
+            return parent
+    raise RuntimeError("Could not find AIWF repo root")
+
+
+STUDIO = _repo_root() / "aiwf" / "web" / "studio.py"
 
 # Anchor pairs: (component name in generate_inputs, parameter name in run()).
 # Each pair must sit at the same position in both sequences.

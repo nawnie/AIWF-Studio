@@ -11,6 +11,9 @@ models/
 # Environments & caches
 venv/
 .venv/
+.venv-*/
+engines/*/.venv*/
+engines/pipeline_accel/.venv-test/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -19,15 +22,23 @@ __pycache__/
 
 # Generated output & media
 outputs/
+datasets/
 *.mp4
 *.webm
 *.avi
 *.mov
 
+# Optional local engine checkouts
+engines/ed2/EveryDream2trainer/
+training/EveryDream2trainer/
+
 # Local config / logs
 config.json
 launch.json
 *.log
+*.null_guard
+*.skill
+wan_dance_test.py
 
 # OS / editor
 .DS_Store

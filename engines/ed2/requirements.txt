@@ -1,24 +1,47 @@
-# EveryDream2 full fine-tuning engine requirements.
-# Installed into engines/ed2/.venv/ by launch.py when ED2 is enabled.
+# EveryDream2 full fine-tuning engine AIWF overlay requirements.
+# Installed by launch.py when ED2 is enabled.
 #
 # SETUP:
-#   1. Clone EveryDream2trainer into engines/ed2/EveryDream2trainer/:
-#        git clone https://github.com/victorchall/EveryDream2trainer.git engines/ed2/EveryDream2trainer
+#   1. Install the add-on from the Training tab, or clone EveryDream2trainer into training/EveryDream2trainer/:
+#        git clone https://github.com/victorchall/EveryDream2trainer.git training/EveryDream2trainer
 #   2. Enable in engines.json:
 #        { "ed2": { "enabled": true } }
-#   3. Restart AIWF Studio — launch.py will create the venv and install deps.
+#      To experiment with Studio's shared venv instead of a dedicated ED2 venv:
+#        { "ed2": { "enabled": true, "venv_dir": "studio" } }
+#   3. Restart AIWF Studio - launch.py will prepare the selected environment.
 #
 # ED2 trains full model checkpoints (DreamBooth and fine-tuning).
 # Textual Inversion is not supported in ED2 by default.
+#
+# IMPORTANT:
+# Do not install EveryDream2trainer/requirements.txt into the shared Studio venv.
+# The upstream file pins older torch, diffusers, numpy, protobuf, xformers, and
+# compel versions. Dedicated ED2 venvs may still install upstream requirements;
+# shared Studio venv mode intentionally installs only this overlay.
 
-torch>=2.1.0
+torch>=2.3.0
 torchvision>=0.16.0
 accelerate>=0.26.0
 transformers>=4.36.0
-diffusers>=0.25.0
+diffusers>=0.35.0
 safetensors>=0.4.0
 Pillow>=10.0.0
 pyyaml>=6.0
 colorama>=0.4.6
-# ED2's own requirements will be installed from its repo after cloning:
-#   pip install -r engines/ed2/EveryDream2trainer/requirements.txt
+tensorboard>=2.11.0
+omegaconf>=2.3.0
+pyre-extensions>=0.0.29
+lion-pytorch>=0.2.0
+tiktoken>=0.5.0
+aiohttp>=3.9.0
+wandb>=0.16.0
+# ED2 imports `pynvml.smi`, which exists in 11.4.1 but not the newer
+# NVIDIA split package shape installed by recent `pynvml` releases.
+pynvml==11.4.1
+bitsandbytes>=0.43.0
+dowg>=0.3.1
+
+# ED2 upstream lists pytorch-lightning, but the current train.py path does not
+# need to import it before startup. Keep this advisory until an ED2 import audit
+# proves a modern Lightning version is required:
+# pytorch-lightning>=2.2.0

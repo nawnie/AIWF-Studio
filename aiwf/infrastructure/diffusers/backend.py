@@ -70,7 +70,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
 )
 from aiwf.infrastructure.diffusers.prompt_encode import build_prompt_kwargs
 from aiwf.infrastructure.diffusers.vae import resolve_vae, scan_vaes
-from aiwf.infrastructure.torch.attention import apply_attention_optimizations
+from aiwf.infrastructure.torch.attention import apply_attention_optimizations, apply_image_pipeline_optimizations
 from aiwf.infrastructure.torch.devices import DeviceManager
 
 logger = logging.getLogger(__name__)
@@ -163,6 +163,13 @@ def _add_cached_single_file_config(load_kwargs: dict, pipeline_cls) -> None:
     config_dir = _cached_single_file_config_dir(pipeline_cls)
     if config_dir:
         load_kwargs["config"] = config_dir
+        # Prevent Diffusers from attempting HF hub downloads for sub-components
+        # (tokenizer vocab, feature extractor, etc.) when a local config is already
+        # supplied.  Those download calls internally use tqdm.contrib.concurrent
+        # which crashes with AttributeError: _lock on some tqdm versions.
+        # With local_files_only=True any missing remote asset raises a clean
+        # EnvironmentError that the caller's except-block catches gracefully.
+        load_kwargs["local_files_only"] = True
 
 
 class DiffusersBackend:
@@ -390,6 +397,9 @@ class DiffusersBackend:
         threshold = 7.0 if self.flags.fp8 else self._AUTO_OFFLOAD_VRAM_GB
         return vram < threshold
 
+    def _compile_allowed_for_architecture(self, architecture: str) -> bool:
+        return not (self.flags.lowvram or self.flags.medvram or self._wants_offload(architecture))
+
     def _tune_vae_memory(self, pipe, architecture: str) -> None:
         """SDXL's 1024px VAE decode is the peak-VRAM step — slice and tile it."""
         if not is_sdxl_architecture(architecture):
@@ -461,6 +471,13 @@ class DiffusersBackend:
                 pipe.vae.enable_tiling()
             except Exception:
                 logger.debug("Could not re-enable VAE slicing/tiling", exc_info=True)
+        apply_image_pipeline_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=not self._offload_active,
+            include_unet=False,
+            include_vae=True,
+        )
         pipe._aiwf_vae_id = vae_info.id
         self._active_vae_id = vae_info.id
         if pipe is self._txt2img:
@@ -516,7 +533,8 @@ class DiffusersBackend:
         self._remember_base_scheduler_config(pipe)
         self._apply_fp8_storage(pipe)
 
-        apply_attention_optimizations(pipe, self.flags)
+        compile_allowed = self._compile_allowed_for_architecture(checkpoint.architecture)
+        apply_attention_optimizations(pipe, self.flags, compile_allowed=compile_allowed)
         pipe = self._place_pipeline(pipe, prefer_offload=self._wants_offload(checkpoint.architecture))
         self._tune_vae_memory(pipe, checkpoint.architecture)
         # Embeddings are now loaded on-demand in generate() only for those referenced
@@ -572,7 +590,8 @@ class DiffusersBackend:
         self._remember_base_scheduler_config(pipe)
         self._apply_fp8_storage(pipe)
 
-        apply_attention_optimizations(pipe, self.flags)
+        compile_allowed = self._compile_allowed_for_architecture(checkpoint.architecture)
+        apply_attention_optimizations(pipe, self.flags, compile_allowed=compile_allowed)
         pipe = self._place_pipeline(pipe, prefer_offload=self._wants_offload(checkpoint.architecture))
         self._tune_vae_memory(pipe, checkpoint.architecture)
         # Embeddings are now loaded on-demand in generate() only for those referenced

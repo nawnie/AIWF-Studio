@@ -4,8 +4,9 @@
 [engine]
 name = "ed2"
 # Path to the cloned EveryDream2trainer repository (relative to project root or absolute).
-repo_dir = "engines/ed2/EveryDream2trainer"
+repo_dir = "training/EveryDream2trainer"
 # Path to the engine venv (created by launch.py). Leave empty to use auto path.
+# Use "studio" only for shared-venv experiments with AIWF's ED2 overlay deps.
 venv_dir = "engines/ed2/.venv"
 
 [training]

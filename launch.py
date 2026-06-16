@@ -118,6 +118,27 @@ def _engine_path(name: str, key: str, config: dict, fallback: str) -> Path:
     return p if p.is_absolute() else ROOT / p
 
 
+def _engine_venv_dir(name: str, config: dict, fallback: str) -> Path | None:
+    """Resolve an engine venv path.
+
+    Training engines default to isolated venvs, but an explicit shared/studio
+    sentinel lets experiments run in the main AIWF venv without making the
+    engine a mandatory boot dependency.
+    """
+    section = config.get(name, {})
+    if isinstance(section, dict) and "venv_dir" in section:
+        raw = section.get("venv_dir")
+        if raw is None:
+            return None
+        raw_text = str(raw).strip().lower()
+        if raw_text in {"", "studio", "shared", "main", "aiwf"}:
+            return None
+        p = Path(str(raw))
+        return p if p.is_absolute() else ROOT / p
+    p = Path(fallback)
+    return p if p.is_absolute() else ROOT / p
+
+
 # ---------------------------------------------------------------------------
 # Built-in engine registry
 # ---------------------------------------------------------------------------
@@ -129,7 +150,7 @@ def _build_engine_registry() -> list[EngineSpec]:
     gen_venv_raw = _engine_path("generation", "venv_dir", cfg, "")
     generation = EngineSpec(
         name="generation",
-        label="Generation (Wan / image)",
+        label="Generation (stable image reference)",
         worker_script=ROOT / "engines" / "generation" / "worker.py",
         # venv_dir=None → uses main venv (ROOT/venv)
         venv_dir=gen_venv_raw if str(gen_venv_raw) != str(ROOT) else None,
@@ -137,11 +158,22 @@ def _build_engine_registry() -> list[EngineSpec]:
         cuda_torch=True,
     )
 
+    wan = EngineSpec(
+        name="wan",
+        label="Wan video engine",
+        worker_script=ROOT / "engines" / "wan" / "worker.py",
+        venv_dir=_engine_venv_dir("wan", cfg, "engines/wan/.venv"),
+        extra_requirements=ROOT / "engines" / "wan" / "requirements.txt",
+        skip_flag="--skip-wan",
+        enabled_by_default=False,
+        cuda_torch=True,
+    )
+
     kohya = EngineSpec(
         name="kohya",
         label="Kohya LoRA trainer",
         worker_script=ROOT / "engines" / "kohya" / "worker.py",
-        venv_dir=_engine_path("kohya", "venv_dir", cfg, "engines/kohya/.venv"),
+        venv_dir=_engine_venv_dir("kohya", cfg, "engines/kohya/.venv"),
         repo_dir=_engine_path("kohya", "repo_dir", cfg, "engines/kohya/kohya_ss"),
         repo_requirements="requirements.txt",
         extra_requirements=ROOT / "engines" / "kohya" / "requirements.txt",
@@ -154,8 +186,8 @@ def _build_engine_registry() -> list[EngineSpec]:
         name="ed2",
         label="EveryDream2 full trainer",
         worker_script=ROOT / "engines" / "ed2" / "worker.py",
-        venv_dir=_engine_path("ed2", "venv_dir", cfg, "engines/ed2/.venv"),
-        repo_dir=_engine_path("ed2", "repo_dir", cfg, "engines/ed2/EveryDream2trainer"),
+        venv_dir=_engine_venv_dir("ed2", cfg, "engines/ed2/.venv"),
+        repo_dir=_engine_path("ed2", "repo_dir", cfg, "training/EveryDream2trainer"),
         repo_requirements="requirements.txt",
         extra_requirements=ROOT / "engines" / "ed2" / "requirements.txt",
         skip_flag="--skip-ed2",
@@ -163,7 +195,7 @@ def _build_engine_registry() -> list[EngineSpec]:
         cuda_torch=True,
     )
 
-    return [generation, kohya, ed2]
+    return [generation, wan, kohya, ed2]
 
 
 def print_startup_banner() -> None:
@@ -345,15 +377,11 @@ def _prepare_engine_venv(spec: EngineSpec, argv: list[str]) -> None:
 
     Skipped if:
     - spec.skip_flag is present in argv
-    - spec.venv_dir is None (uses main venv)
     - The repo_dir doesn't exist yet (user hasn't cloned the tool)
     """
     if spec.skip_flag and spec.skip_flag in argv:
         print(f"[{spec.label}] Skipped ({spec.skip_flag} passed).")
         return
-
-    if spec.venv_dir is None:
-        return  # shares main venv, already set up
 
     if spec.repo_dir and not spec.repo_dir.exists():
         print(
@@ -363,19 +391,21 @@ def _prepare_engine_venv(spec: EngineSpec, argv: list[str]) -> None:
         )
         return
 
-    venv_dir = spec.venv_dir
-    if not venv_dir.exists():
+    shared_main_venv = spec.venv_dir is None
+    venv_dir = spec.effective_venv
+    if not shared_main_venv and not venv_dir.exists():
         print(f"[{spec.label}] Creating engine venv at {venv_dir} ...")
         subprocess.check_call([sys.executable, "-m", "venv", str(venv_dir)])
 
     py = spec.python_exe()
 
-    if spec.cuda_torch and not torch_cuda_ready(py):
+    if not shared_main_venv and spec.cuda_torch and not torch_cuda_ready(py):
         print(f"[{spec.label}] Installing CUDA torch ...")
         install_cuda_torch(py)
 
     if spec.extra_requirements and spec.extra_requirements.exists():
-        print(f"[{spec.label}] Installing engine requirements ...")
+        scope = "shared Studio venv" if shared_main_venv else "engine venv"
+        print(f"[{spec.label}] Installing AIWF engine overlay into {scope} ...")
         subprocess.check_call(
             [py, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
              "-r", str(spec.extra_requirements)]
@@ -383,11 +413,16 @@ def _prepare_engine_venv(spec: EngineSpec, argv: list[str]) -> None:
 
     if spec.repo_dir and spec.repo_dir.exists():
         repo_req = spec.repo_dir / spec.repo_requirements
-        if repo_req.exists():
+        if repo_req.exists() and not shared_main_venv:
             print(f"[{spec.label}] Installing {spec.repo_dir.name} requirements ...")
             subprocess.check_call(
                 [py, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
                  "-r", str(repo_req)]
+            )
+        elif repo_req.exists() and shared_main_venv:
+            print(
+                f"[{spec.label}] Sharing Studio venv; skipping upstream "
+                f"{spec.repo_dir.name}/{spec.repo_requirements} to avoid legacy core pins."
             )
 
     if spec.setup_hook:

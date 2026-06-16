@@ -8,6 +8,13 @@
     "_comment": "Shares the main venv. venv_dir is intentionally empty."
   },
 
+  "wan": {
+    "enabled": false,
+    "worker_script": "engines/wan/worker.py",
+    "venv_dir": "engines/wan/.venv",
+    "_comment": "Optional isolated Wan video worker venv. Enable after running scripts/bootstrap_engine.ps1 wan."
+  },
+
   "kohya": {
     "enabled": false,
     "repo_dir": "engines/kohya/kohya_ss",
@@ -16,9 +23,9 @@
   },
 
   "ed2": {
-    "enabled": false,
-    "repo_dir": "engines/ed2/EveryDream2trainer",
-    "venv_dir": "engines/ed2/.venv",
-    "_comment": "Clone EveryDream2trainer into repo_dir, then set enabled=true and restart."
+    "enabled": true,
+    "repo_dir": "training/EveryDream2trainer",
+    "venv_dir": "studio",
+    "_comment": "Uses the main Studio venv with AIWF's ED2 overlay. Upstream ED2 requirements are skipped to avoid legacy core pins."
   }
 }

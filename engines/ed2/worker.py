@@ -92,44 +92,72 @@ except ImportError:
 _EPOCH_RE = re.compile(r"Epoch\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 _STEP_RE  = re.compile(r"step[:\s]+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 _LOSS_RE  = re.compile(r"loss[:\s=]+([0-9.eE+\-]+)", re.IGNORECASE)
+_MODEL_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".bin", ".pth"}
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+def _looks_like_hf_repo_id(value: str) -> bool:
+    text = str(value).strip()
+    if not text or "\\" in text or text.startswith(("/", "./", "../")):
+        return False
+    if ":" in text:
+        return False
+    if Path(text).suffix.lower() in _MODEL_EXTENSIONS:
+        return False
+    return text.count("/") == 1
+
+
+def _validate_request_paths(req: dict) -> None:
+    dataset_dir = Path(str(req.get("dataset_dir", "")))
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
+    if not dataset_dir.is_dir():
+        raise NotADirectoryError(f"Dataset path is not a directory: {dataset_dir}")
+    if not any(path.is_file() and path.suffix.lower() in _IMAGE_EXTENSIONS for path in dataset_dir.rglob("*")):
+        raise ValueError(
+            f"Dataset directory contains no training images: {dataset_dir}. "
+            f"Supported formats: {', '.join(sorted(_IMAGE_EXTENSIONS))}"
+        )
+
+    base_model_path = str(req.get("base_model_path", "")).strip()
+    if not base_model_path:
+        raise ValueError("base_model_path is required for ED2 training")
+
+    if _looks_like_hf_repo_id(base_model_path):
+        return
+
+    if not Path(base_model_path).exists():
+        raise FileNotFoundError(
+            f"Base model not found: {base_model_path}. "
+            "Use an existing local path or a Hugging Face repo ID in org/repo form."
+        )
 
 
 def _build_ed2_config(req: dict, job_dir: Path, repo_dir: Path) -> Path:
     """Write a train.json that ED2's train.py will accept."""
+    from aiwf.services.training.ed2_config import build_ed2_config
+
     output_dir = Path(req.get("output_dir", "outputs/training/ed2"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg: dict = {
-        "model": req["base_model_path"],
-        "train_data_dir": req["dataset_dir"],
-        "output_dir": str(output_dir),
-        "log_dir": req.get("log_dir", str(job_dir / "logs")),
-        "resolution": req.get("resolution", 512),
-        "flip_p": req.get("flip_p", 0.0),
-        "max_epochs": req.get("max_epochs", 20),
-        "batch_size": req.get("batch_size", 4),
-        "lr": req.get("lr", 1.5e-6),
-        "lr_scheduler": req.get("lr_scheduler", "constant"),
-        "lr_warmup_steps": req.get("lr_warmup_steps", 0),
-        "optimizer": req.get("optimizer", "adamw"),
-        "mixed_precision": req.get("mixed_precision", "bf16"),
-        "gradient_checkpointing": req.get("gradient_checkpointing", True),
-        "clip_skip": req.get("clip_skip", 2),
-        "seed": req.get("seed", 42),
-        "save_every_n_epochs": req.get("save_every_n_epochs", 1),
-        "save_last_n_epochs": req.get("save_last_n_epochs", 3),
-        "ckpt_type": req.get("ckpt_type", "safetensors"),
-        "project_name": req.get("job_name", "ed2_training"),
-    }
-
-    if req.get("vae_path"):
-        cfg["vae"] = req["vae_path"]
+    cfg = build_ed2_config(
+        {
+            **req,
+            "output_dir": str(output_dir),
+            "log_dir": req.get("log_dir", str(job_dir / "logs")),
+        }
+    )
 
     sample_steps = req.get("sample_steps", 0)
     sample_prompts = req.get("sample_prompts", [])
     if sample_steps > 0 and sample_prompts:
         cfg["sample_steps"] = sample_steps
-        cfg["sample_prompts"] = sample_prompts
+        if isinstance(sample_prompts, str):
+            cfg["sample_prompts"] = sample_prompts
+        else:
+            sample_file = job_dir / "sample_prompts.txt"
+            sample_file.write_text("\n".join(str(p) for p in sample_prompts), encoding="utf-8")
+            cfg["sample_prompts"] = str(sample_file)
 
     config_path = job_dir / "train.json"
     config_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -140,7 +168,7 @@ def main(ctx: WorkerContext) -> None:
     req = ctx.request
     job_id = ctx.job_id
 
-    repo_dir = Path(req.get("_repo_dir", str(_WORKER_DIR / "EveryDream2trainer")))
+    repo_dir = Path(req.get("_repo_dir", str(_ROOT / "engines" / "ed2" / "EveryDream2trainer")))
     if not repo_dir.exists():
         raise RuntimeError(
             f"EveryDream2trainer repository not found at {repo_dir}. "
@@ -159,6 +187,9 @@ def main(ctx: WorkerContext) -> None:
 
     job_name = req.get("job_name", "ed2_job")
     max_epochs = req.get("max_epochs", 20)
+
+    emit_status(job_id, "Running ED2 preflight")
+    _validate_request_paths(req)
 
     emit_status(job_id, f"Building ED2 config for {job_name!r} ({max_epochs} epochs)")
     config_path = _build_ed2_config(req, job_dir, repo_dir)

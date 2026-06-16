@@ -51,6 +51,33 @@ def test_launch_settings_argv_includes_extra_model_search_dirs():
     assert "F:\\Checkpoints" in argv
 
 
+def test_launch_settings_argv_includes_pipeline_and_engine_flags():
+    settings = LaunchSettings(
+        inference_backend="onnx",
+        onnx_provider="cuda",
+        cuda_graphs=True,
+        torchao=True,
+        fp8_quant=True,
+        torch_compile=True,
+        channels_last=True,
+        nvenc=True,
+        hevc=True,
+    )
+    argv = settings.argv()
+
+    assert "--inference-backend" in argv
+    assert "onnx" in argv
+    assert "--onnx-provider" in argv
+    assert "cuda" in argv
+    assert "--cuda-graphs" in argv
+    assert "--torchao" in argv
+    assert "--fp8-quant" in argv
+    assert "--torch-compile" in argv
+    assert "--channels-last" in argv
+    assert "--nvenc" in argv
+    assert "--hevc" in argv
+
+
 def test_merge_launch_settings_respects_explicit_cli(tmp_path: Path):
     cli = RuntimeFlags(data_dir=tmp_path, listen=False, port=7860, xformers=False)
     saved = LaunchSettings(listen=True, port=9000, xformers=True)
@@ -97,6 +124,33 @@ def test_merge_launch_settings_applies_extra_model_dirs(tmp_path: Path):
 
     assert [str(path) for path in merged.resolved_extra_model_dirs()] == [str((tmp_path / "shared-models").resolve())]
     assert [str(path) for path in merged.resolved_extra_ckpt_dirs()] == [str((tmp_path / "shared-checkpoints").resolve())]
+
+
+def test_merge_launch_settings_applies_pipeline_and_engine_flags(tmp_path: Path):
+    cli = RuntimeFlags(data_dir=tmp_path)
+    saved = LaunchSettings(
+        inference_backend="onnx",
+        onnx_provider="cuda",
+        cuda_graphs=True,
+        torchao=True,
+        fp8_quant=True,
+        torch_compile=True,
+        channels_last=True,
+        nvenc=True,
+        hevc=True,
+    )
+
+    merged = merge_launch_settings(cli, saved, explicit=set())
+
+    assert merged.inference_backend == "onnx"
+    assert merged.onnx_provider == "cuda"
+    assert merged.cuda_graphs is True
+    assert merged.torchao is True
+    assert merged.fp8_quant is True
+    assert merged.torch_compile is True
+    assert merged.channels_last is True
+    assert merged.nvenc is True
+    assert merged.hevc is True
 
 
 def test_save_and_load_launch_settings_roundtrip(tmp_path: Path):

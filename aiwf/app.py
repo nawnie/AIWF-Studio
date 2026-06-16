@@ -119,6 +119,18 @@ def _parse_cli() -> RuntimeFlags:
         action="store_true",
         help="Force CPU inference even when a GPU is available (useful for testing)",
     )
+    parser.add_argument(
+        "--inference-backend",
+        choices=["diffusers", "onnx"],
+        default="diffusers",
+        help="Studio image pipeline family: diffusers or onnx",
+    )
+    parser.add_argument(
+        "--onnx-provider",
+        choices=["auto", "cuda", "directml", "cpu"],
+        default="auto",
+        help="ONNX Runtime execution provider when --inference-backend=onnx",
+    )
     parser.add_argument("--medvram", action="store_true")
     parser.add_argument("--lowvram", action="store_true")
     parser.add_argument("--xformers", action="store_true", help="Use xformers memory-efficient attention")
@@ -147,6 +159,13 @@ def _parse_cli() -> RuntimeFlags:
         action="store_true",
         help="Disable cudaMallocAsync allocator (PYTORCH_CUDA_ALLOC_CONF)",
     )
+    parser.add_argument("--cuda-graphs", action="store_true", help="Enable experimental CUDA Graph replay")
+    parser.add_argument("--torchao", action="store_true", help="Enable experimental TorchAO int8 quantization")
+    parser.add_argument("--fp8-quant", action="store_true", help="Enable experimental TorchAO FP8 quantization")
+    parser.add_argument("--torch-compile", action="store_true", help="Enable experimental torch.compile")
+    parser.add_argument("--channels-last", action="store_true", help="Use channels-last memory layout where supported")
+    parser.add_argument("--nvenc", action="store_true", help="Prefer NVIDIA NVENC video encoding")
+    parser.add_argument("--hevc", action="store_true", help="Prefer HEVC/H.265 video encoding")
     parser.add_argument("--skip-install", action="store_true")
     parser.add_argument("--skip-prepare-environment", action="store_true")
     parser.add_argument("--ckpt", type=Path, default=None, dest="default_checkpoint")
@@ -174,6 +193,8 @@ def _parse_cli() -> RuntimeFlags:
         fp8=args.fp8,
         directml=args.directml,
         cpu=args.cpu,
+        inference_backend=args.inference_backend,
+        onnx_provider=args.onnx_provider,
         medvram=args.medvram,
         lowvram=args.lowvram,
         xformers=args.xformers,
@@ -182,6 +203,13 @@ def _parse_cli() -> RuntimeFlags:
         async_offload=not args.no_async_offload,
         pinned_memory=not args.no_pinned_memory,
         cuda_malloc=not args.no_cuda_malloc,
+        cuda_graphs=args.cuda_graphs,
+        torchao=args.torchao,
+        fp8_quant=args.fp8_quant,
+        torch_compile=args.torch_compile,
+        channels_last=args.channels_last,
+        nvenc=args.nvenc,
+        hevc=args.hevc,
         skip_install=args.skip_install,
         skip_prepare_environment=args.skip_prepare_environment,
         default_checkpoint=args.default_checkpoint,

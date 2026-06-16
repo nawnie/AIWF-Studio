@@ -1212,6 +1212,38 @@ fieldset.aiwf-resolution-ratio-square {
     gap: 0.5rem !important;
 }
 
+.aiwf-lora-stack {
+    gap: 0.35rem !important;
+}
+
+.aiwf-lora-stack-row {
+    align-items: end !important;
+    gap: 0.45rem !important;
+    margin: 0 !important;
+}
+
+.aiwf-lora-stack-row > .form,
+.aiwf-lora-stack-row > .block {
+    min-width: 0 !important;
+}
+
+.aiwf-lora-stack-row .wrap {
+    padding: 0 !important;
+}
+
+.aiwf-compact-check {
+    margin: 0.15rem 0 0.35rem !important;
+}
+
+.aiwf-compact-check label {
+    min-height: 1.7rem !important;
+}
+
+.aiwf-compact-check span {
+    text-transform: none !important;
+    letter-spacing: 0 !important;
+}
+
 /* ── Enhance tab ─────────────────────────────────────────────────── */
 .aiwf-enhance {
     gap: 0.75rem !important;

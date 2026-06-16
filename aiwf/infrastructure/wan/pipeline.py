@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import inspect
 import threading
 import time
 from pathlib import Path
@@ -68,6 +69,17 @@ def _is_wan_latent_output(value: Any) -> bool:
         return False
 
 
+def _call_accepts_kwarg(callable_obj: Any, name: str) -> bool:
+    try:
+        sig = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return True
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    return name in sig.parameters
+
+
 def _flatten_wan_video_frames(value: Any) -> list:
     if isinstance(value, list):
         if value and isinstance(value[0], list):
@@ -91,6 +103,10 @@ def _frames_from_wan_pipeline_output(output_frames: Any, *, pipe: Any, decode_la
         decoded = decode_latents(pipe, output_frames, output_type="pil")
         return _flatten_wan_video_frames(decoded)
     return _flatten_wan_video_frames(output_frames)
+
+
+def _wan_output_type_for_pipe(pipe: Any) -> str:
+    return "latent" if hasattr(pipe, "decode_latents") else "pil"
 
 
 def _new_wan_euler_scheduler(
@@ -264,7 +280,11 @@ def _new_fp8_scaled_linear(in_features: int, out_features: int, bias: bool):
                     x = F.pad(x, (0, 0, 0, pad_m))
                 scale_a = torch.ones((), device=x.device, dtype=torch.float32)
                 x8 = x.clamp(-448, 448).to(torch.float8_e4m3fn).contiguous()
-                weight_t = self.weight.t().contiguous()
+                # cuBLASLt FP8 scaled matmul requires row-major lhs and
+                # column-major rhs. ``self.weight.t()`` already has the
+                # required column-major stride; making it contiguous changes it
+                # back to row-major and forces the slow bf16 fallback.
+                weight_t = self.weight.t()
                 try:
                     y = torch._scaled_mm(
                         x8,
@@ -2308,7 +2328,8 @@ class WanI2VBackend:
             return callback_kwargs
 
         try:
-            output = pipe(
+            output_type = _wan_output_type_for_pipe(pipe)
+            call_kwargs = dict(
                 image=image,
                 prompt=_prompt,
                 negative_prompt=_negative_prompt,
@@ -2317,11 +2338,18 @@ class WanI2VBackend:
                 num_frames=num_frames,
                 num_inference_steps=total_steps,
                 guidance_scale=_guidance_scale,
-                image_guidance_scale=_image_guidance_scale,
                 generator=generator,
-                output_type="latent",
+                output_type=output_type,
                 callback_on_step_end=_step_callback,
             )
+            if _call_accepts_kwarg(pipe.__call__, "image_guidance_scale"):
+                call_kwargs["image_guidance_scale"] = _image_guidance_scale
+            elif _image_guidance_scale != 1.0:
+                logger.warning(
+                    "Installed Diffusers Wan pipeline does not support image_guidance_scale; requested %.3f ignored.",
+                    _image_guidance_scale,
+                )
+            output = pipe(**call_kwargs)
         except Exception as exc:
             if cancelled[0]:
                 raise WanUnavailable("Generation cancelled by user.") from exc

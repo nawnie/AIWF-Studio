@@ -14,13 +14,24 @@ def result_image(label: str = "Output") -> gr.Image:
     )
 
 
-def results_gallery(label: str = "All results", *, columns: int = 2, visible: bool = True) -> gr.Gallery:
-    """Gallery that shows complete images without a scrollable thumbnail strip."""
+def results_gallery(
+    label: str = "All results",
+    *,
+    columns: int = 2,
+    height: int | None = None,
+    visible: bool = True,
+) -> gr.Gallery:
+    """Gallery that shows complete images without a scrollable thumbnail strip.
+
+    Pass ``height`` (in px) to override the default auto-size.  The settings
+    value ``UserSettings.gallery_height`` is the canonical source; callers that
+    have access to ``ctx.settings`` should pass it here.
+    """
     return gr.Gallery(
         label=label,
         columns=columns,
         object_fit="contain",
-        height=None,
+        height=height,
         fit_columns=True,
         allow_preview=True,
         visible=visible,

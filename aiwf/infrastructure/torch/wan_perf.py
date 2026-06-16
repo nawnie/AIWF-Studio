@@ -3,13 +3,37 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import asdict, dataclass
+from importlib import import_module
+from importlib.util import find_spec
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class WanAccelerationCapability:
+    name: str
+    available: bool
+    detail: str
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _module_importable(name: str) -> bool:
+    if find_spec(name) is None:
+        return False
+    try:
+        import_module(name)
+        return True
+    except Exception:
+        logger.debug("Optional Wan accelerator module is present but not importable: %s", name, exc_info=True)
+        return False
 
 
 def bootstrap_wan_cuda_settings() -> list[str]:
@@ -179,6 +203,43 @@ def _set_wan_sage_backend(transformer) -> str | None:
     except Exception:
         logger.debug("Wan sage backend setup skipped", exc_info=True)
     return None
+
+
+def describe_wan_acceleration_capabilities() -> dict[str, dict[str, object]]:
+    """Return JSON-friendly Wan accelerator availability for diagnostics/benchmarks."""
+    capabilities = [
+        WanAccelerationCapability(
+            name="diffusers_sage",
+            available=_sage_dispatch_available(),
+            detail="Diffusers per-module SAGE attention backend.",
+        ),
+        WanAccelerationCapability(
+            name="diffusers_flash",
+            available=_flash_attn_dispatch_available(),
+            detail="Diffusers per-module FLASH attention backend.",
+        ),
+        WanAccelerationCapability(
+            name="sageattention_fallback",
+            available=_module_importable("sageattention"),
+            detail="AIWF fallback hook that patches torch SDPA for Wan tensors.",
+        ),
+        WanAccelerationCapability(
+            name="gguf_runtime",
+            available=_module_importable("gguf") and os.environ.get("AIWF_WAN_GGUF_RUNTIME", "").strip().lower() not in {"0", "false", "no", "off"},
+            detail="AIWF mmap + on-the-fly dequant GGUF transformer runtime.",
+        ),
+        WanAccelerationCapability(
+            name="gguf_cuda_kernels",
+            available=_module_importable("kernels") and os.environ.get("DIFFUSERS_GGUF_CUDA_KERNELS", "").strip().lower() in {"1", "true", "yes", "on"},
+            detail="Diffusers GGUF optimized CUDA kernels package and env flag.",
+        ),
+        WanAccelerationCapability(
+            name="torchao",
+            available=_module_importable("torchao"),
+            detail="Optional TorchAO quantization package.",
+        ),
+    ]
+    return {capability.name: capability.to_dict() for capability in capabilities}
 
 
 def apply_wan_transformer_optimizations(transformer, *, name: str = "transformer") -> list[str]:

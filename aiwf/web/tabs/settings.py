@@ -14,6 +14,9 @@ from aiwf.services.model_path_imports import (
     import_comfyui_paths,
     merge_imported_path_text,
 )
+from aiwf.services.pipeline_registry import PipelineRegistry
+from aiwf.services.worker_probe import WorkerProbeService
+from aiwf.services.worker_tenant import WorkerTenantRegistry
 from aiwf.web.registry import PINNED_TABS, WebRegistry
 from aiwf.web.theme import accent_preset_names
 
@@ -100,6 +103,104 @@ def _model_paths_markdown(ctx: AppContext) -> str:
     if extra_ckpts:
         lines.append(f"**Extra checkpoint libraries** `{len(extra_ckpts)}` configured")
     return "  \n".join(lines)
+
+
+def _pipeline_registry(ctx: AppContext) -> PipelineRegistry:
+    return PipelineRegistry(ctx.flags, ctx.settings)
+
+
+def _pipeline_choices(ctx: AppContext) -> list[tuple[str, str]]:
+    return _pipeline_registry(ctx).launch_choices()
+
+
+def _pipeline_status_markdown(ctx: AppContext) -> str:
+    return _pipeline_registry(ctx).status_markdown()
+
+
+def _worker_tenants_markdown() -> str:
+    registry = WorkerTenantRegistry()
+    lines = ["**Engines**"]
+    for status in registry.statuses().values():
+        ready = "Ready" if status.ready else "Needs setup"
+        state = "Enabled" if status.enabled else "Disabled"
+        if status.uses_studio_venv:
+            state = f"{state}, uses Studio runtime"
+        issues = _engine_issue_summary(status.messages)
+        lines.append(f"- **{status.label}:** {ready} ({state}) - {issues}")
+        lines.append(f"  - Runtime: `{status.python_exe}`")
+        lines.append(f"  - Worker file: `{status.worker_script}`")
+        if status.repo_dir is not None:
+            lines.append(f"  - Engine files: `{status.repo_dir}`")
+    lines.append("")
+    lines.append("Disabled or missing engines never block the core UI. Enable an engine in `engines.json`, run its bootstrap script, then refresh this panel.")
+    return "\n".join(lines)
+
+
+def _engine_issue_summary(messages: tuple[str, ...]) -> str:
+    if not messages:
+        return "ready"
+    friendly: list[str] = []
+    for message in messages:
+        if "enabled=true" in message:
+            friendly.append("not enabled")
+        elif "runtime missing" in message or "python missing" in message:
+            friendly.append("runtime folder missing")
+        elif "AIWF worker missing" in message:
+            friendly.append("app worker file missing")
+        elif "repo folder missing" in message or "entry script missing" in message:
+            friendly.append("engine files missing")
+        else:
+            friendly.append(message)
+    return "; ".join(dict.fromkeys(friendly))
+
+
+def _probe_worker_markdown(engine: str) -> str:
+    label = engine
+    try:
+        label = WorkerTenantRegistry().status(engine).label
+        result = WorkerProbeService().probe(engine)
+    except Exception as exc:
+        return f"**{label} probe failed before launch:** `{exc}`"
+    status = "OK" if result.ok else "Failed"
+    lines = [f"**{label} probe:** {status} - {result.message}", f"Request: `{result.request_path}`"]
+    for event in result.events[-5:]:
+        kind = event.get("kind", "event")
+        message = event.get("message") or event.get("detail") or ""
+        lines.append(f"- `{kind}` {message}")
+    return "\n".join(lines)
+
+
+def _launch_component_values(settings: LaunchSettings) -> list:
+    return [
+        settings.listen,
+        settings.port,
+        settings.gradio_auth,
+        settings.api_cors_origins,
+        settings.api_rate_limit_per_minute,
+        settings.block_private_download_urls,
+        settings.share,
+        settings.autolaunch,
+        settings.theme,
+        settings.cpu,
+        settings.xformers,
+        settings.opt_sdp_attention,
+        settings.opt_split_attention,
+        settings.medvram,
+        settings.lowvram,
+        settings.no_half,
+        settings.fp8,
+        settings.async_offload,
+        settings.pinned_memory,
+        settings.cuda_malloc,
+        settings.directml,
+        settings.api,
+        settings.nowebui,
+        settings.models_dir,
+        settings.ckpt_dir,
+        settings.output_dir,
+        settings.extra_model_dirs,
+        settings.extra_ckpt_dirs,
+    ]
 
 
 def _connect_qr(ctx: AppContext):
@@ -329,6 +430,44 @@ def register_settings(registry: WebRegistry) -> None:
                                 lines=2,
                                 info="Generic quality terms only; no style/subject words.",
                             )
+                            gr.Markdown("Gallery & viewer", elem_classes=["aiwf-section-label"])
+                            gallery_height = gr.Slider(
+                                label="Gallery height (px)",
+                                minimum=120,
+                                maximum=1200,
+                                step=40,
+                                value=ctx.settings.gallery_height,
+                                info="Height of the image gallery panel in the Studio tab.",
+                            )
+                            gallery_columns = gr.Slider(
+                                label="Gallery columns",
+                                minimum=1,
+                                maximum=8,
+                                step=1,
+                                value=ctx.settings.gallery_columns,
+                                info="Number of columns in the batch results gallery.",
+                            )
+                            send_seed_on_click = gr.Checkbox(
+                                label="Send seed to img2img when clicking a result",
+                                value=ctx.settings.send_seed_on_click,
+                            )
+                            send_size_on_click = gr.Checkbox(
+                                label="Send image size to img2img when clicking a result",
+                                value=ctx.settings.send_size_on_click,
+                            )
+
+                            gr.Markdown("Download safety", elem_classes=["aiwf-section-label"])
+                            prefer_safetensors = gr.Checkbox(
+                                label="Warn before downloading .ckpt or .pt files",
+                                value=ctx.settings.prefer_safetensors,
+                                info="Safetensors files are safer — .ckpt/.pt can execute arbitrary code on load.",
+                            )
+                            write_download_receipts = gr.Checkbox(
+                                label="Write download receipts (.json alongside each file)",
+                                value=ctx.settings.write_download_receipts,
+                                info="Saves URL, hash, and timestamp next to every downloaded model file.",
+                            )
+
                             with gr.Row(elem_classes=["aiwf-settings-actions"]):
                                 save_btn = gr.Button("Save workspace settings", variant="primary")
                                 refresh_ui_btn = gr.Button(
@@ -584,8 +723,109 @@ def register_settings(registry: WebRegistry) -> None:
                         elem_classes=["aiwf-launch-preview"],
                     )
                     with gr.Row(elem_classes=["aiwf-settings-actions"]):
+                        refresh_launch_btn = gr.Button(
+                            "Refresh launch settings",
+                            elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                        )
                         save_launch_btn = gr.Button("Save launch profile", variant="primary")
                     launch_save_status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
+
+
+                with gr.Tab("Engines & pipelines"):
+                    gr.Markdown(
+                        "Pipelines are generation methods inside Studio. Engines are optional add-on runners for video, training, and other heavy jobs.",
+                        elem_classes=["aiwf-page-intro"],
+                    )
+
+                    with gr.Row(equal_height=False, elem_classes=["aiwf-settings-grid"]):
+                        with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
+                            gr.Markdown("Pipelines", elem_classes=["aiwf-section-label"])
+                            engine_backend = gr.Radio(
+                                label="Image pipeline",
+                                choices=_pipeline_choices(ctx),
+                                value=launch.inference_backend,
+                                info="Diffusers is the default reference path. ONNX Runtime uses AIWF's own sampler path.",
+                            )
+                            pipeline_status = gr.Markdown(
+                                _pipeline_status_markdown(ctx),
+                                elem_classes=["aiwf-settings-paths"],
+                            )
+                            with gr.Group(visible=(launch.inference_backend == "onnx")) as onnx_group:
+                                engine_onnx_dir = gr.Textbox(
+                                    label="ONNX models directory",
+                                    value=ctx.settings.onnx_model_dir,
+                                    placeholder=r"C:\models\onnx  (leave blank → models/onnx inside data_dir)",
+                                    info="Directory containing subdirectories with text_encoder/, unet/, vae_decoder/ ONNX files.",
+                                )
+                                engine_onnx_provider = gr.Radio(
+                                    label="ORT execution provider",
+                                    choices=["auto", "cuda", "directml", "cpu"],
+                                    value=launch.onnx_provider,
+                                    info="auto tries CUDA → DirectML → CPU in order.",
+                                )
+
+                        with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
+                            gr.Markdown("Optimizations", elem_classes=["aiwf-section-label"])
+                            gr.Markdown(
+                                "These flags are set at startup via environment variables. "
+                                "Save then restart to apply.",
+                                elem_classes=["aiwf-settings-hint"],
+                            )
+                            engine_cuda_graphs = gr.Checkbox(
+                                label="CUDA Graphs (AIWF_CUDA_GRAPHS)",
+                                value=launch.cuda_graphs,
+                                info="Capture and replay the UNet forward pass. ~5–15% throughput gain on NVIDIA Ada/Ampere.",
+                            )
+                            engine_torchao = gr.Checkbox(
+                                label="TorchAO int8 weight-only quantization (AIWF_TORCHAO)",
+                                value=launch.torchao,
+                                info="Halves UNet weight memory. Requires torchao installed.",
+                            )
+                            engine_fp8 = gr.Checkbox(
+                                label="FP8 weight-only quantization (AIWF_FP8)",
+                                value=launch.fp8_quant,
+                                info="Requires NVIDIA Ada Lovelace (RTX 40xx) or newer and torchao.",
+                            )
+                            engine_torch_compile = gr.Checkbox(
+                                label="torch.compile reduce-overhead (AIWF_TORCH_COMPILE)",
+                                value=launch.torch_compile,
+                                info="Fuses ops in the UNet. First run is slow; subsequent runs are faster.",
+                            )
+                            engine_channels_last = gr.Checkbox(
+                                label="Channels-last memory layout (AIWF_CHANNELS_LAST)",
+                                value=launch.channels_last,
+                                info="Best for SD 1.x UNet (Conv2D-heavy). Skip for transformer-based models.",
+                            )
+                            engine_nvenc = gr.Checkbox(
+                                label="NVENC GPU video encoding (AIWF_NVENC)",
+                                value=launch.nvenc,
+                                info="Uses h264_nvenc instead of libx264 for video export. NVIDIA only.",
+                            )
+                            engine_hevc = gr.Checkbox(
+                                label="Prefer HEVC / H.265 (AIWF_HEVC)",
+                                value=launch.hevc,
+                                info="Uses hevc_nvenc or libx265. Smaller files, slower encode.",
+                            )
+
+                        with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
+                            gr.Markdown("Engines", elem_classes=["aiwf-section-label"])
+                            worker_tenant_status = gr.Markdown(
+                                _worker_tenants_markdown(),
+                                elem_classes=["aiwf-settings-paths"],
+                            )
+                            refresh_engines_btn = gr.Button(
+                                "Refresh engines and pipelines",
+                                elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                            )
+                            probe_wan_btn = gr.Button(
+                                "Probe Wan Video Engine",
+                                elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                            )
+                            worker_probe_status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
+
+                    with gr.Row(elem_classes=["aiwf-settings-actions"]):
+                        save_engine_btn = gr.Button("Save engine settings", variant="primary")
+                    engine_save_status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
 
                 with gr.Tab("Access & security"):
                     with gr.Row(equal_height=False, elem_classes=["aiwf-settings-grid"]):
@@ -712,6 +952,23 @@ def register_settings(registry: WebRegistry) -> None:
         extra_model_dirs_index = len(launch_inputs) - 2
         extra_ckpt_dirs_index = len(launch_inputs) - 1
 
+        def refresh_launch_profile():
+            ctx.load_settings()
+            settings = _launch_form_values(ctx)
+            return (
+                *_launch_component_values(settings),
+                f"**Next start command**  \n`{settings.command_preview()}`",
+                format_launch_status(LaunchSettings.from_runtime_flags(ctx.flags), settings),
+                _session_snapshot_markdown(ctx),
+                "**Launch settings refreshed from disk.**",
+            )
+
+        refresh_launch_btn.click(
+            refresh_launch_profile,
+            outputs=[*launch_inputs, launch_preview, launch_status, session_snapshot, launch_save_status],
+            show_progress=False,
+        )
+
         def refresh_access():
             qr_image, qr_text = _connect_qr(ctx)
             return (
@@ -733,6 +990,119 @@ def register_settings(registry: WebRegistry) -> None:
             inputs=None,
             outputs=None,
             show_progress=False,
+        )
+
+
+        # ── Engine tab ──────────────────────────────────────────────────────
+        def _toggle_onnx_group(backend_val: str):
+            return gr.update(visible=(backend_val == "onnx"))
+
+        engine_backend.change(
+            _toggle_onnx_group,
+            inputs=[engine_backend],
+            outputs=[onnx_group],
+            show_progress=False,
+        )
+
+        def save_engine_settings(
+            backend, onnx_dir, onnx_provider,
+            cuda_graphs, torchao, fp8, torch_compile, channels_last, nvenc, hevc,
+        ):
+            import os as _os
+            # Persist onnx_model_dir to UserSettings
+            ctx.settings.onnx_model_dir = (onnx_dir or "").strip()
+            ctx.save_settings()
+
+            # Persist pipeline and optimization flags to the next-start profile.
+            saved = ctx.load_launch_settings() or LaunchSettings.from_runtime_flags(ctx.flags)
+            settings = saved.model_copy(
+                update={
+                    "inference_backend": backend,
+                    "onnx_provider": onnx_provider,
+                    "cuda_graphs": bool(cuda_graphs),
+                    "torchao": bool(torchao),
+                    "fp8_quant": bool(fp8),
+                    "torch_compile": bool(torch_compile),
+                    "channels_last": bool(channels_last),
+                    "nvenc": bool(nvenc),
+                    "hevc": bool(hevc),
+                }
+            )
+            ctx.save_launch_settings(settings)
+
+            # Apply env vars immediately for the current session
+            flag_map = {
+                "AIWF_CUDA_GRAPHS":   cuda_graphs,
+                "AIWF_TORCHAO":       torchao,
+                "AIWF_FP8":           fp8,
+                "AIWF_TORCH_COMPILE": torch_compile,
+                "AIWF_CHANNELS_LAST": channels_last,
+                "AIWF_NVENC":         nvenc,
+                "AIWF_HEVC":          hevc,
+            }
+            for k, v in flag_map.items():
+                _os.environ[k] = "1" if v else "0"
+
+            return (
+                "**Engine settings saved.** Restart AIWF Studio to activate the selected pipeline and flags."
+            )
+
+        save_engine_btn.click(
+            save_engine_settings,
+            inputs=[
+                engine_backend, engine_onnx_dir, engine_onnx_provider,
+                engine_cuda_graphs, engine_torchao, engine_fp8,
+                engine_torch_compile, engine_channels_last, engine_nvenc, engine_hevc,
+            ],
+            outputs=[engine_save_status],
+            show_progress=False,
+        )
+        # ── /Engine tab ──────────────────────────────────────────────────────
+
+        def refresh_engine_panel():
+            ctx.load_settings()
+            settings = _launch_form_values(ctx)
+            return (
+                _worker_tenants_markdown(),
+                gr.update(choices=_pipeline_choices(ctx), value=settings.inference_backend),
+                _pipeline_status_markdown(ctx),
+                gr.update(visible=(settings.inference_backend == "onnx")),
+                ctx.settings.onnx_model_dir,
+                settings.onnx_provider,
+                settings.cuda_graphs,
+                settings.torchao,
+                settings.fp8_quant,
+                settings.torch_compile,
+                settings.channels_last,
+                settings.nvenc,
+                settings.hevc,
+                "**Engines and pipelines refreshed from disk.**",
+            )
+
+        refresh_engines_btn.click(
+            refresh_engine_panel,
+            outputs=[
+                worker_tenant_status,
+                engine_backend,
+                pipeline_status,
+                onnx_group,
+                engine_onnx_dir,
+                engine_onnx_provider,
+                engine_cuda_graphs,
+                engine_torchao,
+                engine_fp8,
+                engine_torch_compile,
+                engine_channels_last,
+                engine_nvenc,
+                engine_hevc,
+                engine_save_status,
+            ],
+            show_progress=False,
+        )
+        probe_wan_btn.click(
+            lambda: _probe_worker_markdown("wan"),
+            outputs=[worker_probe_status],
+            show_progress=True,
         )
 
         def save_api_keys(hf_value, civitai_value):
@@ -824,6 +1194,7 @@ def register_settings(registry: WebRegistry) -> None:
                 extra_model_dirs,
                 extra_ckpt_dirs,
             ) = values
+            engine_profile = ctx.load_launch_settings() or LaunchSettings.from_runtime_flags(ctx.flags)
             return LaunchSettings(
                 listen=bool(listen),
                 port=int(port),
@@ -846,6 +1217,15 @@ def register_settings(registry: WebRegistry) -> None:
                 pinned_memory=bool(pinned_memory),
                 cuda_malloc=bool(cuda_malloc),
                 directml=bool(directml),
+                inference_backend=engine_profile.inference_backend,
+                onnx_provider=engine_profile.onnx_provider,
+                cuda_graphs=engine_profile.cuda_graphs,
+                torchao=engine_profile.torchao,
+                fp8_quant=engine_profile.fp8_quant,
+                torch_compile=engine_profile.torch_compile,
+                channels_last=engine_profile.channels_last,
+                nvenc=engine_profile.nvenc,
+                hevc=engine_profile.hevc,
                 api=bool(api),
                 nowebui=bool(nowebui),
                 models_dir=(models_dir or "").strip(),
@@ -969,6 +1349,12 @@ def register_settings(registry: WebRegistry) -> None:
             auto_cfg_distilled,
             use_default_neg,
             default_neg_text,
+            gallery_h,
+            gallery_cols,
+            send_seed,
+            send_size,
+            prefer_safe,
+            write_receipts,
             sampler_label,
             schedule_label,
             d_steps,
@@ -1004,6 +1390,12 @@ def register_settings(registry: WebRegistry) -> None:
             ctx.settings.auto_cfg_for_distilled = bool(auto_cfg_distilled)
             ctx.settings.use_default_negative = bool(use_default_neg)
             ctx.settings.default_negative_prompt = default_neg_text or ""
+            ctx.settings.gallery_height = int(gallery_h or 480)
+            ctx.settings.gallery_columns = int(gallery_cols or 2)
+            ctx.settings.send_seed_on_click = bool(send_seed)
+            ctx.settings.send_size_on_click = bool(send_size)
+            ctx.settings.prefer_safetensors = bool(prefer_safe)
+            ctx.settings.write_download_receipts = bool(write_receipts)
             ctx.settings.default_sampler = sampler_label_to_id.get(sampler_label, ctx.settings.default_sampler)
             ctx.settings.default_scheduler = schedule_label_to_id.get(schedule_label, "automatic")
             ctx.settings.default_steps = int(d_steps or 20)
@@ -1050,6 +1442,12 @@ def register_settings(registry: WebRegistry) -> None:
                 auto_cfg_for_distilled,
                 use_default_negative,
                 default_negative_prompt,
+                gallery_height,
+                gallery_columns,
+                send_seed_on_click,
+                send_size_on_click,
+                prefer_safetensors,
+                write_download_receipts,
                 default_sampler,
                 default_schedule,
                 default_steps,
@@ -1068,5 +1466,25 @@ def register_settings(registry: WebRegistry) -> None:
             tab.select(
                 refresh_access,
                 outputs=[remote_access, session_snapshot_remote, remote_paths, connect_qr, qr_status],
+                show_progress=False,
+            )
+            tab.select(
+                refresh_engine_panel,
+                outputs=[
+                    worker_tenant_status,
+                    engine_backend,
+                    pipeline_status,
+                    onnx_group,
+                    engine_onnx_dir,
+                    engine_onnx_provider,
+                    engine_cuda_graphs,
+                    engine_torchao,
+                    engine_fp8,
+                    engine_torch_compile,
+                    engine_channels_last,
+                    engine_nvenc,
+                    engine_hevc,
+                    engine_save_status,
+                ],
                 show_progress=False,
             )

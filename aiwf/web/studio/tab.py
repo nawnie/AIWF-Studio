@@ -45,6 +45,7 @@ from aiwf.web.studio.handlers import prompts as prompt_handlers
 from aiwf.web.studio.handlers import reactor as reactor_handlers
 from aiwf.web.tabs.segment import build_segment_panel
 from aiwf.web.studio.handlers import styles as style_handlers
+from aiwf.services.prompt_tools import PromptToolsService
 from aiwf.web.studio.resolution import (
     ASPECT_RATIO_PRESETS,
     BUCKET_CHOICES,
@@ -273,15 +274,39 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                             )
                     with gr.Accordion("LoRAs", open=False, elem_classes=["aiwf-prompt-tools"]):
                         gr.Markdown(
-                            "Pick a LoRA and **Add to prompt** — inserts the `<lora:name:strength>` tag "
-                            "plus any saved trigger words. Set aliases, default strength, and trigger "
-                            "words in the **Models** tab.",
+                            "Build a compact LoRA stack, then apply it to the prompt. Saved trigger "
+                            "words and default strengths come from the **Models** tab.",
                             elem_classes=["aiwf-settings-paths"],
+                        )
+                        lora_choices = ctx.models.lora_choices()
+                        with gr.Column(elem_classes=["aiwf-lora-stack"]):
+                            lora_stack_components = []
+                            for index in range(4):
+                                with gr.Row(elem_classes=["aiwf-lora-stack-row"]):
+                                    stack_pick = gr.Dropdown(
+                                        label=f"LoRA {index + 1}",
+                                        choices=lora_choices,
+                                        value=None,
+                                        scale=4,
+                                    )
+                                    stack_strength = gr.Slider(
+                                        0.0,
+                                        2.0,
+                                        value=1.0,
+                                        step=0.05,
+                                        label="Strength",
+                                        scale=2,
+                                    )
+                                    lora_stack_components.extend([stack_pick, stack_strength])
+                        lora_stack_keywords = gr.Checkbox(
+                            label="Include saved trigger words",
+                            value=True,
+                            elem_classes=["aiwf-compact-check"],
                         )
                         with gr.Row():
                             lora_pick = gr.Dropdown(
-                                label="LoRA",
-                                choices=ctx.models.lora_choices(),
+                                label="Quick add one LoRA",
+                                choices=lora_choices,
                                 value=None,
                                 scale=4,
                             )
@@ -293,7 +318,9 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                         lora_pick_strength = gr.Slider(
                             0.0, 2.0, value=0.8, step=0.05, label="Strength"
                         )
-                        add_lora_btn = gr.Button("Add to prompt", elem_classes=["aiwf-btn-ghost"])
+                        with gr.Row():
+                            apply_lora_stack_btn = gr.Button("Apply stack", variant="primary")
+                            add_lora_btn = gr.Button("Add one", elem_classes=["aiwf-btn-ghost"])
 
                     with gr.Accordion("Prompt file & wildcards", open=False, elem_classes=["aiwf-prompt-tools"]):
                         gr.Markdown(
@@ -529,6 +556,61 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                         op_overlap = gr.Slider(0, 64, value=8, step=1, label="Seam overlap")
                         op_btn = gr.Button("Prepare outpaint canvas", elem_classes=["aiwf-btn-ghost"])
 
+                with gr.Accordion("Prompt Tools", open=False, elem_classes=["aiwf-prompt-tools"]):
+                    gr.Markdown(
+                        "Inspect local checkpoints / LoRAs, read model metadata, build prompt drafts, "
+                        "and get settings recommendations — all without loading weights.",
+                        elem_classes=["aiwf-settings-hint"],
+                    )
+                    with gr.Tabs():
+                        with gr.Tab("Inspector"):
+                            with gr.Row():
+                                pt_inspect_btn = gr.Button("Scan checkpoints & LoRAs", elem_classes=["aiwf-btn-ghost"], scale=1)
+                            pt_inspect_out = gr.Markdown("", elem_classes=["aiwf-settings-hint"])
+
+                        with gr.Tab("Metadata"):
+                            pt_meta_path = gr.Textbox(
+                                label="Safetensors path",
+                                placeholder=r"C:\models\my_model.safetensors",
+                                info="Full path to a .safetensors file. Only the header (metadata) is read — no weights loaded.",
+                            )
+                            with gr.Row():
+                                pt_meta_btn = gr.Button("Read metadata", elem_classes=["aiwf-btn-ghost"], scale=1)
+                            pt_meta_out = gr.Markdown("", elem_classes=["aiwf-settings-hint"])
+
+                        with gr.Tab("Prompt builder"):
+                            with gr.Row():
+                                pt_subject = gr.Textbox(label="Subject", placeholder="a cat sitting on a windowsill", scale=3)
+                                pt_style = gr.Textbox(label="Style name (optional)", placeholder="watercolor", scale=1)
+                            pt_loras = gr.Textbox(
+                                label="LoRA names (comma-separated)",
+                                placeholder="detail_tweaker, film_grain",
+                                info="These become <lora:name:1.0> tags in the prompt.",
+                            )
+                            pt_neg = gr.Textbox(label="Negative additions (optional)", placeholder="blurry, watermark")
+                            with gr.Row():
+                                pt_build_btn = gr.Button("Build prompt draft", variant="secondary", scale=1)
+                                pt_apply_btn = gr.Button("Apply to prompt", elem_classes=["aiwf-btn-ghost"], scale=1)
+                            pt_draft_out = gr.Textbox(label="Draft", interactive=False, lines=3)
+
+                        with gr.Tab("Recommend settings"):
+                            with gr.Row():
+                                pt_arch = gr.Dropdown(
+                                    label="Architecture",
+                                    choices=["sd15", "sdxl", "wan"],
+                                    value="sd15",
+                                    scale=1,
+                                )
+                                pt_goal = gr.Dropdown(
+                                    label="Goal",
+                                    choices=["speed", "balanced", "quality"],
+                                    value="balanced",
+                                    scale=1,
+                                )
+                            with gr.Row():
+                                pt_rec_btn = gr.Button("Get recommendations", elem_classes=["aiwf-btn-ghost"], scale=1)
+                            pt_rec_out = gr.Markdown("", elem_classes=["aiwf-settings-hint"])
+
                 advanced_accordion = gr.Accordion("Advanced", open=False, elem_classes=["aiwf-advanced"])
                 with advanced_accordion:
                     cooldown_seconds = gr.Slider(
@@ -640,7 +722,11 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                             elem_classes=["aiwf-compare"],
                         )
 
-                gallery = results_gallery(visible=False)
+                gallery = results_gallery(
+                    visible=False,
+                    columns=getattr(ctx.settings, "gallery_columns", 2),
+                    height=getattr(ctx.settings, "gallery_height", None) or None,
+                )
                 with gr.Accordion("Generation parameters", open=False, elem_classes=["aiwf-meta-accordion"]):
                     tag_summary = gr.Markdown("", elem_classes=["aiwf-tag-summary"], visible=False)
                     info = gr.Textbox(
@@ -821,6 +907,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
 
     state = gr.State(checkpoint_map)
     last_seed = gr.State(-1)
+    gallery_seeds = gr.State([])
     last_result = gr.State(None)
     last_before = gr.State(None)
     show_compare = gr.State(False)
@@ -1034,15 +1121,23 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         return gr.update(value=ctx.models.lora_strength(lora_id))
 
     lora_pick.change(_on_lora_pick, inputs=[lora_pick], outputs=[lora_pick_strength], show_progress=False)
+    for stack_pick, stack_strength in zip(lora_stack_components[0::2], lora_stack_components[1::2]):
+        stack_pick.change(_on_lora_pick, inputs=[stack_pick], outputs=[stack_strength], show_progress=False)
 
-    def _refresh_lora_picker(current):
+    def _refresh_lora_picker(current, *stack_current):
         ctx.models.refresh_loras()
         choices = ctx.models.lora_choices()
         ids = {value for _, value in choices}
-        return gr.update(choices=choices, value=current if current in ids else None)
+        updates = [gr.update(choices=choices, value=current if current in ids else None)]
+        for value in stack_current:
+            updates.append(gr.update(choices=choices, value=value if value in ids else None))
+        return tuple(updates)
 
     lora_pick_refresh.click(
-        _refresh_lora_picker, inputs=[lora_pick], outputs=[lora_pick], show_progress=False
+        _refresh_lora_picker,
+        inputs=[lora_pick, *lora_stack_components[0::2]],
+        outputs=[lora_pick, *lora_stack_components[0::2]],
+        show_progress=False,
     )
 
     def add_lora_to_prompt(current_prompt, lora_id, strength):
@@ -1060,6 +1155,12 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
     add_lora_btn.click(
         add_lora_to_prompt,
         inputs=[prompt, lora_pick, lora_pick_strength],
+        outputs=[prompt],
+        show_progress=False,
+    )
+    apply_lora_stack_btn.click(
+        lambda current, *values: prompt_handlers.apply_lora_stack_to_prompt(ctx, current, *values),
+        inputs=[prompt, *lora_stack_components, lora_stack_keywords],
         outputs=[prompt],
         show_progress=False,
     )
@@ -1404,6 +1505,127 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         outputs=[mask_editor, show_editor, status, mask_editor_value, *mode_outputs],
         show_progress="minimal",
     )
+
+    # ── Prompt Tools accordion handlers ─────────────────────────────────────────
+    _pt_service = PromptToolsService(
+        checkpoint_dir=ctx.flags.resolved_ckpt_dir(),
+        lora_dir=ctx.flags.resolved_models_dir() / "Lora",
+        output_dir=ctx.flags.resolved_output_dir(),
+    )
+
+    def _pt_inspect():
+        try:
+            ckpts = _pt_service.list_local_checkpoints()
+            loras = _pt_service.list_local_loras()
+            lines = ["**Checkpoints**"]
+            if ckpts:
+                for c in ckpts[:20]:
+                    size_mb = c.get("size_bytes", 0) / (1024 * 1024)
+                    lines.append(f"- `{c['name']}` — {size_mb:.0f} MB")
+                if len(ckpts) > 20:
+                    lines.append(f"… and {len(ckpts)-20} more")
+            else:
+                lines.append("_No checkpoints found._")
+            lines.append("")
+            lines.append("**LoRAs**")
+            if loras:
+                for l in loras[:20]:
+                    size_mb = l.get("size_bytes", 0) / (1024 * 1024)
+                    lines.append(f"- `{l['name']}` — {size_mb:.0f} MB")
+                if len(loras) > 20:
+                    lines.append(f"… and {len(loras)-20} more")
+            else:
+                lines.append("_No LoRAs found._")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"**Error:** {exc}"
+
+    pt_inspect_btn.click(
+        _pt_inspect,
+        inputs=[],
+        outputs=[pt_inspect_out],
+        show_progress="minimal",
+    )
+
+    def _pt_read_meta(path_str):
+        if not path_str or not path_str.strip():
+            return "_Enter a path above._"
+        try:
+            meta = _pt_service.read_safetensors_metadata(path_str.strip())
+            if not meta:
+                return "_No metadata found in header._"
+            import json as _json
+            lines = []
+            for k, v in meta.items():
+                if k.startswith("__"):
+                    continue  # skip tensor shape entries
+                val_str = _json.dumps(v) if not isinstance(v, str) else v
+                lines.append(f"**{k}**: {val_str[:200]}")
+            return "\n\n".join(lines) or "_Metadata present but empty._"
+        except Exception as exc:
+            return f"**Error:** {exc}"
+
+    pt_meta_btn.click(
+        _pt_read_meta,
+        inputs=[pt_meta_path],
+        outputs=[pt_meta_out],
+        show_progress="minimal",
+    )
+
+    def _pt_build_draft(subject, style, loras_str, neg):
+        try:
+            lora_names = [l.strip() for l in (loras_str or "").split(",") if l.strip()]
+            result = _pt_service.build_prompt_draft(
+                subject=subject or "",
+                style_name=style or "",
+                lora_names=lora_names,
+                negative=neg or "",
+            )
+            return result.get("positive", "")
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    pt_build_btn.click(
+        _pt_build_draft,
+        inputs=[pt_subject, pt_style, pt_loras, pt_neg],
+        outputs=[pt_draft_out],
+        show_progress="minimal",
+    )
+
+    def _pt_apply_draft(draft_text, current_prompt):
+        if not draft_text:
+            return gr.update()
+        # Append to existing prompt if non-empty, else replace
+        if current_prompt and current_prompt.strip():
+            return gr.update(value=current_prompt.rstrip(", ") + ", " + draft_text)
+        return gr.update(value=draft_text)
+
+    pt_apply_btn.click(
+        _pt_apply_draft,
+        inputs=[pt_draft_out, prompt],
+        outputs=[prompt],
+        show_progress=False,
+    )
+
+    def _pt_recommend(arch, goal):
+        try:
+            rec = _pt_service.recommend_settings(architecture=arch, goal=goal)
+            if not rec:
+                return "_No recommendation for this combination._"
+            lines = []
+            for k, v in rec.items():
+                lines.append(f"**{k}**: {v}")
+            return "\n\n".join(lines)
+        except Exception as exc:
+            return f"**Error:** {exc}"
+
+    pt_rec_btn.click(
+        _pt_recommend,
+        inputs=[pt_arch, pt_goal],
+        outputs=[pt_rec_out],
+        show_progress="minimal",
+    )
+    # ── /Prompt Tools ─────────────────────────────────────────────────────────
 
     def use_result_as_source(result_image, mode_label):
         if result_image is None:
@@ -1808,6 +2030,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
             gr.update(),
             gr.update(),
             gr.update(),
+            gr.update(),
             False,
             False,
             *mode_ui,
@@ -1833,6 +2056,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                 "",
                 status_text,
                 -1,
+                [],
                 None,
                 before_image,
                 gr.update(),
@@ -1866,6 +2090,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
             infotext,
             done_status,
             new_seed,
+            list(job.result.seeds),
             primary,
             before_image,
             quick_tag_update,
@@ -2272,6 +2497,39 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         outputs=[show_compare, workspace_image, compare_slider, compare_btn],
     )
 
+    def _on_gallery_select(evt: gr.SelectData, seeds: list, img_w: int, img_h: int):
+        """Promote selected gallery image to workspace; optionally send seed/size."""
+        selected_image = evt.value
+        if isinstance(selected_image, dict):
+            selected_image = selected_image.get("image") or selected_image.get("value")
+
+        seed_update = gr.update()
+        width_update = gr.update()
+        height_update = gr.update()
+
+        if getattr(ctx.settings, "send_seed_on_click", True) and seeds:
+            idx = evt.index if isinstance(evt.index, int) else (evt.index[0] if evt.index else 0)
+            if 0 <= idx < len(seeds):
+                seed_update = gr.update(value=seeds[idx])
+
+        if getattr(ctx.settings, "send_size_on_click", True) and selected_image is not None:
+            try:
+                from PIL import Image as _PILImage
+                if isinstance(selected_image, _PILImage.Image):
+                    width_update = gr.update(value=selected_image.width)
+                    height_update = gr.update(value=selected_image.height)
+            except Exception:
+                pass
+
+        return selected_image, seed_update, width_update, height_update
+
+    gallery.select(
+        _on_gallery_select,
+        inputs=[gallery_seeds, width, height],
+        outputs=[workspace_image, seed, width, height],
+        show_progress=False,
+    )
+
     generate_outputs = [
         workspace_image,
         compare_slider,
@@ -2281,6 +2539,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         info,
         status,
         last_seed,
+        gallery_seeds,
         last_result,
         last_before,
         quick_tag,

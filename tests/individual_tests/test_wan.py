@@ -22,9 +22,12 @@ from aiwf.infrastructure.wan.pipeline import (
     _load_comfy_fp8_transformer_weights,
     _load_umt5_text_encoder,
     _load_wan_vae,
+    _new_fp8_scaled_linear,
     _new_lazy_wan_transformer,
     _new_wan_euler_simple_scheduler,
     _orient_umt5_gguf_tensor,
+    _call_accepts_kwarg,
+    _wan_output_type_for_pipe,
     _wan_cache_mode,
     estimate_gguf_expanded_gb,
 )
@@ -84,6 +87,33 @@ def test_request_defaults_and_helpers():
     assert r.effective_steps() == 8
     assert r.effective_boundary_ratio() == 0.5
     assert WanI2VRequest(width=512, height=320).max_area == 512 * 320
+
+
+def test_call_accepts_kwarg_handles_explicit_and_kwargs():
+    def explicit(*, image_guidance_scale=1.0):
+        pass
+
+    def arbitrary(**kwargs):
+        pass
+
+    def missing(*, guidance_scale=1.0):
+        pass
+
+    assert _call_accepts_kwarg(explicit, "image_guidance_scale") is True
+    assert _call_accepts_kwarg(arbitrary, "image_guidance_scale") is True
+    assert _call_accepts_kwarg(missing, "image_guidance_scale") is False
+
+
+def test_wan_output_type_uses_pil_when_decode_hook_is_missing():
+    class WithDecode:
+        def decode_latents(self):
+            pass
+
+    class WithoutDecode:
+        pass
+
+    assert _wan_output_type_for_pipe(WithDecode()) == "latent"
+    assert _wan_output_type_for_pipe(WithoutDecode()) == "pil"
 
 
 def test_boundary_ratio_for_step_split_maps_half_steps():
@@ -377,10 +407,48 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     result = s.generate(WanI2VRequest(high_noise_model_id=high.name, low_noise_model_id=low.name), Image.new("RGB", (8, 8)))
 
     assert result.frame_count == 5
+    import aiwf
     assert captured["kind"] == "wan.video"
     assert captured["units_label"] == "frames"
     assert captured["units"] == 5
-    assert captured["high_noise_model_id"] == high.name
+    assert captured.get("app_version") == aiwf.__version__
+    assert Path(str(captured["high_noise_model_id"])).name == high.name
+
+
+def test_wan_generation_passes_resolved_paths_to_backend(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    s = _svc(tmp_path)
+    _force_wan_available(s)
+    base = _write_component_base(s)
+    high = s.models_dir() / "Safetensor" / "wan-high.safetensors"
+    low = s.models_dir() / "Safetensor" / "wan-low.safetensors"
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan_2.1_vae.safetensors"
+    text_encoder = s.flags.resolved_models_dir() / "Textencoder" / "nsfw_wan_umt5-xxl_fp8_scaled.safetensors"
+    _write_fake_safetensors(high)
+    _write_fake_safetensors(low)
+    _write_fake_safetensors(vae)
+    _write_fake_safetensors(text_encoder)
+    captured: dict[str, object] = {}
+
+    def fake_generate(request, *_args, **_kwargs):
+        captured["high"] = request.high_noise_model_id
+        captured["low"] = request.low_noise_model_id
+        captured["vae"] = request.vae_id
+        captured["text_encoder"] = request.text_encoder_path
+        captured["components_base"] = request.components_base
+        return [Image.new("RGB", (8, 8), "black")], 8, 8
+
+    s._backend.generate = fake_generate
+    monkeypatch.setattr("aiwf.services.wan.write_frames", lambda frames, output_path, fps: len(frames))
+
+    s.generate(WanI2VRequest(high_noise_model_id=high.name, low_noise_model_id=low.name), Image.new("RGB", (8, 8)))
+
+    assert captured["high"] == str(high.resolve())
+    assert captured["low"] == str(low.resolve())
+    assert captured["vae"] == str(vae.resolve())
+    assert captured["text_encoder"] == str(text_encoder.resolve())
+    assert captured["components_base"] == str(base.resolve())
 
 
 def test_ensure_components_base_is_local_only(tmp_path: Path, monkeypatch):
@@ -663,6 +731,25 @@ def test_load_comfy_fp8_transformer_weights_uses_native_scaled_linear(tmp_path: 
     assert y.shape == (2, 32)
     assert y.dtype == torch.bfloat16
     assert "linear.weight" not in missing
+
+
+def test_fp8_scaled_linear_uses_column_major_weight_for_scaled_mm():
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available() or not hasattr(torch, "float8_e4m3fn") or not hasattr(torch, "_scaled_mm"):
+        pytest.skip("native CUDA FP8 runtime is unavailable")
+
+    layer = _new_fp8_scaled_linear(32, 64, bias=False)
+    weight = torch.randn(64, 32).clamp(-2, 2).to(device="cuda", dtype=torch.float8_e4m3fn)
+    layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+    layer.weight_scale = torch.ones((), dtype=torch.float32)
+    layer = layer.cuda()
+    x = torch.randn(2, 32, device="cuda", dtype=torch.bfloat16)
+
+    y = layer(x)
+
+    assert y.shape == (2, 64)
+    assert y.dtype == torch.bfloat16
+    assert not getattr(layer, "_scaled_mm_warned", False)
 
 
 def test_wan_transformer_key_renames_strip_comfy_prefix():

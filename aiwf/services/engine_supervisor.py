@@ -39,6 +39,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from aiwf.core.domain.engine import EngineSwitchRequest, EngineSwitchResult, EngineTenant, EngineStatus
 from aiwf.core.domain.engine_events import EngineEvent, emit, parse_event_line
 from aiwf.core.domain.job_status import JobPhase, JobRecord, make_job_dir
 from aiwf.services.gpu_tenant_lock import GpuTenantLock, get_gpu_lock
@@ -70,7 +71,11 @@ class EngineSupervisor:
     - Allow callers to register a progress callback for live UI updates
     """
 
-    def __init__(self, gpu_lock: GpuTenantLock | None = None) -> None:
+    def __init__(
+        self,
+        gpu_lock: GpuTenantLock | None = None,
+        ollama_client=None,
+    ) -> None:
         self._gpu_lock = gpu_lock or get_gpu_lock()
         self._jobs: dict[str, JobRecord] = {}
         self._job_dirs: dict[str, Path] = {}
@@ -79,6 +84,10 @@ class EngineSupervisor:
         # Phase 2: subprocess tracking
         self._procs: dict[str, subprocess.Popen] = {}         # job_id → process
         self._reader_threads: dict[str, threading.Thread] = {}  # job_id → stdout reader
+        # Engine tenant tracking
+        self._engine_status = EngineStatus()
+        self._ollama_client = ollama_client  # injected by AppContext when available
+        self._active_chat_model: str = ""
 
     # ------------------------------------------------------------------
     # Listener registration
@@ -92,6 +101,71 @@ class EngineSupervisor:
     def remove_progress_listener(self, cb: ProgressCallback) -> None:
         with self._lock:
             self._progress_listeners = [l for l in self._progress_listeners if l is not cb]
+
+    # ------------------------------------------------------------------
+    # Engine tenant management
+    # ------------------------------------------------------------------
+
+    @property
+    def active_tenant(self) -> EngineTenant:
+        with self._lock:
+            return self._engine_status.active
+
+    def engine_status(self) -> EngineStatus:
+        with self._lock:
+            return self._engine_status
+
+    def request_switch(self, request: EngineSwitchRequest) -> EngineSwitchResult:
+        """Switch the active GPU tenant.
+
+        Side-effects:
+        - If current tenant is CHAT, unloads the Ollama model first.
+        - If switching to a GPU-heavy tenant, calls gc + cuda empty_cache.
+        """
+        with self._lock:
+            current = self._engine_status.active
+
+            if current == request.target:
+                return EngineSwitchResult(True, current, f"{current.friendly_name()} already active.")
+
+            # Unload chat model before any GPU-heavy switch
+            if current == EngineTenant.CHAT and self._ollama_client is not None:
+                model = self._active_chat_model or "llama3:8b"
+                try:
+                    self._ollama_client.unload(model)
+                    logger.info("[Supervisor] Ollama model %r unloaded before switch to %s", model, request.target.value)
+                except Exception as exc:
+                    logger.warning("[Supervisor] Ollama unload failed (non-fatal): %s", exc)
+
+            # Flush CUDA memory before GPU-heavy tenants
+            if request.target.is_gpu_heavy():
+                self._flush_cuda()
+
+            self._engine_status.record_switch(
+                request.target,
+                f"Switched from {current.value} to {request.target.value}: {request.reason}",
+            )
+            logger.info(
+                "[Supervisor] Tenant switch: %s → %s (%s)",
+                current.value, request.target.value, request.reason or "no reason given",
+            )
+            return EngineSwitchResult(True, request.target, f"Switched to {request.target.friendly_name()}.")
+
+    def set_chat_model(self, model_name: str) -> None:
+        """Remember which Ollama model is loaded so we can unload it on switch."""
+        with self._lock:
+            self._active_chat_model = model_name
+
+    def _flush_cuda(self) -> None:
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # GPU tenant lock pass-through
@@ -387,13 +461,9 @@ class EngineSupervisor:
 
     def get_job_dir(self, job_id: str) -> Path | None:
         with self._lock:
-            return self._job_dirs.get(job_id, None)
+            return self._job_dirs.get(job_id)
 
-    def active_jobs(self) -> list[JobRecord]:
-        with self._lock:
-            return [r for r in self._jobs.values() if r.phase.is_active]
-
-    def all_jobs(self) -> list[JobRecord]:
+    def list_jobs(self) -> list[JobRecord]:
         with self._lock:
             return list(self._jobs.values())
 
@@ -401,11 +471,9 @@ class EngineSupervisor:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get(self, job_id: str) -> tuple[JobRecord | None, Path]:
+    def _get(self, job_id: str) -> tuple[JobRecord | None, Path | None]:
         with self._lock:
-            record = self._jobs.get(job_id)
-            job_dir = self._job_dirs.get(job_id, Path("."))
-        return record, job_dir
+            return self._jobs.get(job_id), self._job_dirs.get(job_id)
 
     def _fire(self, event: EngineEvent) -> None:
         with self._lock:
@@ -414,22 +482,21 @@ class EngineSupervisor:
             try:
                 cb(event)
             except Exception:
-                logger.exception("[Supervisor] Progress listener raised")
+                logger.exception("[Supervisor] Progress listener error")
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton
+# Process-global singleton
 # ---------------------------------------------------------------------------
 
-_global_supervisor: EngineSupervisor | None = None
-_init_lock = threading.Lock()
+_supervisor: EngineSupervisor | None = None
+_supervisor_lock = threading.Lock()
 
 
 def get_supervisor() -> EngineSupervisor:
-    """Return the process-global ``EngineSupervisor`` (created on first call)."""
-    global _global_supervisor
-    if _global_supervisor is None:
-        with _init_lock:
-            if _global_supervisor is None:
-                _global_supervisor = EngineSupervisor()
-    return _global_supervisor
+    global _supervisor
+    if _supervisor is None:
+        with _supervisor_lock:
+            if _supervisor is None:
+                _supervisor = EngineSupervisor()
+    return _supervisor
