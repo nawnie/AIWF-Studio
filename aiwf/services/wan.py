@@ -29,8 +29,11 @@ def _native_fp8_runtime_available() -> bool:
     try:
         import torch
 
+        if not torch.cuda.is_available():
+            return False
+        major, minor = torch.cuda.get_device_capability()
         return bool(
-            torch.cuda.is_available()
+            (int(major), int(minor)) >= (8, 9)
             and hasattr(torch, "float8_e4m3fn")
             and hasattr(torch, "_scaled_mm")
         )
@@ -60,11 +63,30 @@ def _float_metric(value) -> float | None:
     return parsed
 
 
+def _int_metric(value) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _str_list_metric(value) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            items.append(text)
+    return items
+
+
 @dataclass(frozen=True)
 class WanPreflightResult:
     ok: bool
     errors: tuple[str, ...]
     warnings: tuple[str, ...]
+    model_id: str | None = None
     components_base: str | None = None
     high_noise_model: str | None = None
     low_noise_model: str | None = None
@@ -263,42 +285,37 @@ class WanService:
             return errors, warnings
 
         try:
-            from safetensors import safe_open
+            from aiwf.infrastructure.wan.comfy_quant_format import inspect_wan_quant_file
 
-            saw_tensor = False
-            saw_fp8 = False
-            saw_scale = False
-            fp8_elements = 0
-            with safe_open(str(path), framework="pt", device="cpu") as handle:
-                for key in handle.keys():
-                    saw_tensor = True
-                    key_l = key.lower()
-                    if key_l.endswith((".weight_scale", ".scale_weight", ".pre_quant_scale")):
-                        saw_scale = True
-                    try:
-                        tensor_slice = handle.get_slice(key)
-                        dtype = tensor_slice.get_dtype()
-                    except Exception:
-                        continue
-                    if str(dtype).upper().startswith("F8"):
-                        saw_fp8 = True
-                        count = 1
-                        for dim in tensor_slice.get_shape():
-                            count *= dim
-                        fp8_elements += count
-            if not saw_tensor:
+            report = inspect_wan_quant_file(path)
+            if report.format == "unreadable":
+                errors.append(
+                    f"{label} transformer safetensors header could not be read: "
+                    f"{path.name} ({'; '.join(report.warnings)})"
+                )
+                return errors, warnings
+            if report.tensor_count <= 0:
                 errors.append(f"{label} transformer safetensors file has no tensors: {path.name}")
-            if saw_fp8 and not saw_scale:
+            for missing in report.missing_scale_keys[:5]:
+                errors.append(f"{label} transformer is missing FP8 scale tensor: {missing}")
+            if report.unsupported_quant_formats:
+                errors.append(
+                    f"{label} transformer has unsupported quant metadata: "
+                    + ", ".join(report.unsupported_quant_formats[:5])
+                )
+            warnings.extend(f"{label}: {warning}" for warning in report.warnings)
+            if report.quantized_weight_count and not report.weight_scale_count:
                 warnings.append(
                     f"{label} transformer contains FP8 tensors without obvious scale tensors; "
                     "it may still load if the file is pre-scaled."
                 )
-            if saw_fp8 and saw_scale:
-                expanded_gb = fp8_elements * 2 / 1024**3
+            if report.is_comfy_fp8:
+                expanded_gb = report.estimated_bf16_expanded_mb / 1024
                 if _native_fp8_runtime_available():
                     warnings.append(
-                        f"{label} transformer is ComfyUI scaled FP8; AIWF will use the experimental native FP8 "
-                        "compatibility path instead of expanding it to bf16."
+                        f"{label} transformer is ComfyUI scaled FP8 "
+                        f"({report.quantized_linear_layers} quantized linear layers); AIWF will use the "
+                        "experimental native FP8 compatibility path instead of expanding it to bf16."
                     )
                 elif expanded_gb > _MAX_DEFAULT_FP8_DEQUANT_GB and os.environ.get("AIWF_WAN_ALLOW_EXPENSIVE_DEQUANT") != "1":
                     errors.append(
@@ -327,24 +344,45 @@ class WanService:
 
         high_res: str | None = None
         low_res: str | None = None
-        if not request.high_noise_model_id:
-            errors.append("Select a High noise transformer.")
-        else:
-            high_res = self.resolve_model(request.high_noise_model_id)
-            e, w = self._validate_transformer_file(Path(high_res), "High noise")
-            errors.extend(e)
-            warnings.extend(w)
+        model_res: str | None = None
+        requires_dual = (
+            request.requires_dual_transformers()
+            if callable(getattr(request, "requires_dual_transformers", None))
+            else True
+        )
+        if requires_dual:
+            if not request.high_noise_model_id:
+                errors.append("Select a High noise transformer.")
+            else:
+                high_res = self.resolve_model(request.high_noise_model_id)
+                e, w = self._validate_transformer_file(Path(high_res), "High noise")
+                errors.extend(e)
+                warnings.extend(w)
 
-        if not request.low_noise_model_id:
-            errors.append("Select a Low noise transformer.")
-        else:
-            low_res = self.resolve_model(request.low_noise_model_id)
-            e, w = self._validate_transformer_file(Path(low_res), "Low noise")
-            errors.extend(e)
-            warnings.extend(w)
+            if not request.low_noise_model_id:
+                errors.append("Select a Low noise transformer.")
+            else:
+                low_res = self.resolve_model(request.low_noise_model_id)
+                e, w = self._validate_transformer_file(Path(low_res), "Low noise")
+                errors.extend(e)
+                warnings.extend(w)
 
-        if high_res and low_res and Path(high_res) == Path(low_res):
-            errors.append("High noise and Low noise transformers must be different files.")
+            if high_res and low_res and Path(high_res) == Path(low_res):
+                errors.append("High noise and Low noise transformers must be different files.")
+        else:
+            model_res = self.resolve_model(request.model_id)
+            model_path = Path(model_res)
+            if model_path.exists():
+                if not (model_path.is_dir() and (model_path / "model_index.json").exists()):
+                    errors.append(
+                        "Fast 5B mode needs a local Diffusers model folder with model_index.json, "
+                        f"not a standalone transformer file: {model_res}"
+                    )
+            else:
+                errors.append(
+                    "Fast 5B mode needs a local Wan Diffusers folder. "
+                    f"Could not resolve locally: {model_res}"
+                )
 
         components_base = self.find_components_base()
         if not components_base:
@@ -382,6 +420,7 @@ class WanService:
             ok=not errors,
             errors=tuple(errors),
             warnings=tuple(warnings),
+            model_id=model_res,
             components_base=components_base,
             high_noise_model=high_res,
             low_noise_model=low_res,
@@ -931,6 +970,7 @@ class WanService:
             raise WanUnavailable(preflight.message())
         request = request.model_copy(
             update={
+                "model_id": preflight.model_id or request.model_id,
                 "high_noise_model_id": preflight.high_noise_model or request.high_noise_model_id,
                 "low_noise_model_id": preflight.low_noise_model or request.low_noise_model_id,
                 "vae_id": preflight.vae or request.vae_id,
@@ -1021,6 +1061,14 @@ class WanService:
             if steps_per_second is None and denoise_seconds > 0 and step_count > 0:
                 steps_per_second = step_count / denoise_seconds
             iterations_per_second = steps_per_second
+            fp8_linear_layers = _int_metric(backend_metrics.get("fp8_linear_layers"))
+            fp8_fast_mm_calls = _int_metric(backend_metrics.get("fp8_fast_mm_calls"))
+            fp8_fallback_calls = _int_metric(backend_metrics.get("fp8_fallback_calls"))
+            fp8_fallback_layers = _int_metric(backend_metrics.get("fp8_fallback_layers"))
+            fp8_fallback_reasons = _str_list_metric(backend_metrics.get("fp8_fallback_reasons"))
+            fp8_strict_mode = bool(backend_metrics.get("fp8_strict_mode"))
+            fp8_native_available = bool(backend_metrics.get("fp8_native_available"))
+            cache_mode = str(backend_metrics.get("cache_mode") or "").strip()
 
             output_path = self._output_path()
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1035,12 +1083,22 @@ class WanService:
             elapsed = time.perf_counter() - started
             trace_model_throughput(
                 kind="wan.video",
-                model_id=str(request.high_noise_model_id or ""),
-                model_name=f"{request.high_noise_model_id} + {request.low_noise_model_id}",
+                model_id=str(
+                    request.model_id
+                    if not request.requires_dual_transformers()
+                    else request.high_noise_model_id
+                    or ""
+                ),
+                model_name=(
+                    str(request.model_id)
+                    if not request.requires_dual_transformers()
+                    else f"{request.high_noise_model_id} + {request.low_noise_model_id}"
+                ),
                 app_version=__version__,
                 elapsed_seconds=elapsed,
                 units=max(1, int(frame_count)),
                 units_label="frames",
+                runtime_mode=request.runtime_mode,
                 high_noise_model_id=request.high_noise_model_id,
                 low_noise_model_id=request.low_noise_model_id,
                 offload=request.offload,
@@ -1067,6 +1125,14 @@ class WanService:
                 iterations_per_second=round(iterations_per_second, 6)
                 if iterations_per_second is not None
                 else None,
+                fp8_linear_layers=fp8_linear_layers,
+                fp8_fast_mm_calls=fp8_fast_mm_calls,
+                fp8_fallback_calls=fp8_fallback_calls,
+                fp8_fallback_layers=fp8_fallback_layers,
+                fp8_fallback_reasons=fp8_fallback_reasons,
+                fp8_strict_mode=fp8_strict_mode,
+                fp8_native_available=fp8_native_available,
+                cache_mode=cache_mode,
             )
 
             if steps_per_second is not None and steps_per_second > 0:
@@ -1078,6 +1144,16 @@ class WanService:
                 )
             else:
                 message = f"{frame_count} frames at {w}x{h} in {elapsed:.1f}s"
+            if fp8_fallback_calls:
+                reason = f": {fp8_fallback_reasons[0]}" if fp8_fallback_reasons else ""
+                message = (
+                    f"{message}; FP8 fallback calls={fp8_fallback_calls} "
+                    f"across {fp8_fallback_layers} layers{reason}"
+                )
+            elif fp8_linear_layers:
+                message = f"{message}; FP8 fast path clean ({fp8_linear_layers} layers, 0 fallbacks)"
+            if cache_mode:
+                message = f"{message}; cache={cache_mode}"
 
             return WanI2VResult(
                 output_path=str(output_path),
@@ -1108,6 +1184,14 @@ class WanService:
                 iterations_per_second=round(iterations_per_second, 6)
                 if iterations_per_second is not None
                 else None,
+                fp8_linear_layers=fp8_linear_layers,
+                fp8_fast_mm_calls=fp8_fast_mm_calls,
+                fp8_fallback_calls=fp8_fallback_calls,
+                fp8_fallback_layers=fp8_fallback_layers,
+                fp8_fallback_reasons=fp8_fallback_reasons,
+                fp8_strict_mode=fp8_strict_mode,
+                fp8_native_available=fp8_native_available,
+                cache_mode=cache_mode,
                 message=message,
             )
         finally:

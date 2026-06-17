@@ -23,6 +23,18 @@ SIGMA_TYPES = ("simple", "beta", "exponential", "karras")
 #   heun  -- FlowMatchHeunDiscreteScheduler (2nd-order, higher quality, ~2x NFE per step)
 SAMPLER_TYPES = ("euler", "heun")
 
+# Runtime modes. The default is the standalone 5B Diffusers path so the Video
+# tab has a reliable proof-of-life mode before the experimental 14B high/low
+# native FP8 runtime is selected.
+WAN_RUNTIME_FAST_5B = "fast_5b"
+WAN_RUNTIME_HIGH_LOW = "native_high_low"
+WAN_RUNTIME_HIGH_LOW_FP8 = "native_high_low_fp8_experimental"
+WAN_RUNTIME_MODES = (
+    WAN_RUNTIME_FAST_5B,
+    WAN_RUNTIME_HIGH_LOW,
+    WAN_RUNTIME_HIGH_LOW_FP8,
+)
+
 
 def snap_num_frames(n: int) -> int:
     """Wan requires num_frames of the form 4*k + 1. Snap to the nearest valid value."""
@@ -73,6 +85,7 @@ class WanI2VRequest(BaseModel):
     # NOT valid: t5xxl_*.safetensors -- T5-XXL is for Flux/SD3, not Wan.
     text_encoder_path: str = Field(default="")
     seed: int = -1
+    runtime_mode: str = Field(default=WAN_RUNTIME_FAST_5B)
     model_id: str = WAN_TI2V_5B
     offload: str = "model"
 
@@ -102,6 +115,13 @@ class WanI2VRequest(BaseModel):
     def _validate_sampler(cls, v: str) -> str:
         if v not in SAMPLER_TYPES:
             raise ValueError(f"sampler must be one of {SAMPLER_TYPES}, got {v!r}")
+        return v
+
+    @field_validator("runtime_mode")
+    @classmethod
+    def _validate_runtime_mode(cls, v: str) -> str:
+        if v not in WAN_RUNTIME_MODES:
+            raise ValueError(f"runtime_mode must be one of {WAN_RUNTIME_MODES}, got {v!r}")
         return v
 
     # Wan 2.2 I2V 14B+ (and some variants) use a two-stage (high-noise / low-noise) transformer pair.
@@ -136,7 +156,12 @@ class WanI2VRequest(BaseModel):
         return min(1.0, max(0.0, high / total))
 
     def uses_dual_transformers(self) -> bool:
-        return bool(self.high_noise_model_id and self.low_noise_model_id)
+        return self.runtime_mode in {WAN_RUNTIME_HIGH_LOW, WAN_RUNTIME_HIGH_LOW_FP8} and bool(
+            self.high_noise_model_id and self.low_noise_model_id
+        )
+
+    def requires_dual_transformers(self) -> bool:
+        return self.runtime_mode in {WAN_RUNTIME_HIGH_LOW, WAN_RUNTIME_HIGH_LOW_FP8}
 
 
 class WanI2VResult(BaseModel):
@@ -166,4 +191,12 @@ class WanI2VResult(BaseModel):
     video_write_seconds: float = Field(default=0.0, ge=0.0)
     steps_per_second: float | None = Field(default=None, ge=0.0)
     iterations_per_second: float | None = Field(default=None, ge=0.0)
+    fp8_linear_layers: int = Field(default=0, ge=0)
+    fp8_fast_mm_calls: int = Field(default=0, ge=0)
+    fp8_fallback_calls: int = Field(default=0, ge=0)
+    fp8_fallback_layers: int = Field(default=0, ge=0)
+    fp8_fallback_reasons: list[str] = Field(default_factory=list)
+    fp8_strict_mode: bool = False
+    fp8_native_available: bool = False
+    cache_mode: str = ""
     message: str = ""

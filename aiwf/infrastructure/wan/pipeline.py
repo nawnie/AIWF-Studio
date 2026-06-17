@@ -45,10 +45,21 @@ def _torch_native_fp8_available() -> bool:
         import torch
 
         return bool(
-            torch.cuda.is_available()
+            _cuda_supports_tensorcore_fp8(torch)
             and hasattr(torch, "float8_e4m3fn")
             and hasattr(torch, "_scaled_mm")
         )
+    except Exception:
+        return False
+
+
+def _cuda_supports_tensorcore_fp8(torch_module: Any) -> bool:
+    """Return whether the active CUDA device has native FP8 tensor-core support."""
+    try:
+        if not torch_module.cuda.is_available():
+            return False
+        major, minor = torch_module.cuda.get_device_capability()
+        return (int(major), int(minor)) >= (8, 9)
     except Exception:
         return False
 
@@ -340,90 +351,38 @@ def _trace_fp8_scaled_mm_fallback(payload: dict[str, Any]) -> None:
         logger.debug("Wan FP8 _scaled_mm diagnostic trace failed.", exc_info=True)
 
 
+def _fp8_generic_fallback_payload(
+    reason: str,
+    *,
+    layer: Any,
+    input_tensor: Any,
+) -> dict[str, Any]:
+    return {
+        "error": {
+            "type": "FP8Fallback",
+            "message": reason,
+        },
+        "layer": {
+            "class": layer.__class__.__name__,
+            "in_features": int(getattr(layer, "in_features", 0)),
+            "out_features": int(getattr(layer, "out_features", 0)),
+            "has_bias": getattr(layer, "bias", None) is not None,
+        },
+        "input": _tensor_diag(input_tensor),
+        "matmul": {},
+    }
+
+
 def _new_fp8_scaled_linear(in_features: int, out_features: int, bias: bool):
-    import torch
+    from aiwf.infrastructure.quant.fp8_linear import FP8ScaledLinear
 
-    class FP8ScaledLinear(torch.nn.Module):
-        def __init__(self, in_features: int, out_features: int, bias: bool) -> None:
-            super().__init__()
-            self.in_features = int(in_features)
-            self.out_features = int(out_features)
-            self.weight = torch.nn.Parameter(
-                torch.empty((out_features, in_features), device="meta", dtype=torch.float8_e4m3fn),
-                requires_grad=False,
-            )
-            if bias:
-                self.bias = torch.nn.Parameter(torch.empty((out_features,), device="meta"), requires_grad=False)
-            else:
-                self.register_parameter("bias", None)
-            self.register_buffer("weight_scale", torch.tensor(1.0, dtype=torch.float32), persistent=True)
-
-        def forward(self, input):
-            import torch.nn.functional as F
-
-            can_scaled_mm = (
-                input.is_cuda
-                and self.weight.is_cuda
-                and hasattr(torch, "_scaled_mm")
-                and self.in_features % 16 == 0
-                and self.out_features % 16 == 0
-            )
-            if can_scaled_mm:
-                original_shape = input.shape[:-1]
-                x = input.reshape(-1, self.in_features).contiguous()
-                m, _k = x.shape
-                pad_m = (16 - m % 16) % 16
-                if pad_m:
-                    x = F.pad(x, (0, 0, 0, pad_m))
-                scale_a = torch.ones((), device=x.device, dtype=torch.float32)
-                x8 = x.clamp(-448, 448).to(torch.float8_e4m3fn).contiguous()
-                # cuBLASLt FP8 scaled matmul requires row-major lhs and
-                # column-major rhs. ``self.weight.t()`` already has the
-                # required column-major stride; making it contiguous changes it
-                # back to row-major and forces the slow bf16 fallback.
-                weight_t = self.weight.t()
-                try:
-                    scale_b = self.weight_scale.to(device=x.device, dtype=torch.float32)
-                    y = torch._scaled_mm(
-                        x8,
-                        weight_t,
-                        scale_a=scale_a,
-                        scale_b=scale_b,
-                        out_dtype=input.dtype
-                        if input.dtype in (torch.float16, torch.bfloat16)
-                        else torch.bfloat16,
-                    )
-                    if pad_m:
-                        y = y[:m, :]
-                    if self.bias is not None:
-                        y = y + self.bias.to(device=y.device, dtype=y.dtype)
-                    return y.reshape(*original_shape, self.out_features)
-                except Exception as exc:
-                    if not getattr(self, "_scaled_mm_warned", False):
-                        payload = _fp8_scaled_mm_failure_payload(
-                            exc,
-                            layer=self,
-                            input_tensor=input,
-                            x8=x8,
-                            weight_t=weight_t,
-                            scale_a=scale_a,
-                            scale_b=scale_b,
-                            rows=m,
-                            padded_rows=x8.shape[0],
-                            pad_m=pad_m,
-                        )
-                        logger.warning(
-                            "FP8ScaledLinear _scaled_mm failed (%s: %s); falling back to bf16 linear for this layer.",
-                            payload["error"]["type"],
-                            payload["error"]["message"],
-                        )
-                        _trace_fp8_scaled_mm_fallback(payload)
-                        self._scaled_mm_warned = True
-
-            weight = (self.weight.float() * self.weight_scale.float()).contiguous()
-            return F.linear(input, weight.to(device=input.device, dtype=input.dtype), self.bias)
-
-    return FP8ScaledLinear(in_features, out_features, bias)
+    return FP8ScaledLinear(
+        in_features,
+        out_features,
+        bias,
+        strict_exception_cls=WanUnavailable,
+        fallback_tracer=_trace_fp8_scaled_mm_fallback,
+    )
 
 
 def _module_parent_and_name(root, module_path: str):
@@ -449,6 +408,12 @@ def _replace_linear_with_fp8(root, module_path: str):
     else:
         setattr(parent, name, replacement)
     return replacement
+
+
+def _collect_fp8_linear_metrics(*roots: Any) -> dict[str, Any]:
+    from aiwf.infrastructure.quant.fp8_linear import collect_fp8_linear_metrics
+
+    return collect_fp8_linear_metrics(*roots)
 
 
 class _LazyWanTransformer:
@@ -1413,7 +1378,7 @@ def _recover_cuda_after_pin_memory_failure() -> None:
             pass
 
 
-def _wan_cache_mode(offload: str, *, fast_fp8_pair: bool) -> str:
+def _wan_cache_mode(offload: str, *, fast_fp8_pair: bool, pinned_memory: bool = True) -> str:
     """Return how the dual-transformer CPU/GPU cache should behave.
 
     - ``none``: accelerate owns placement (sequential / generic model offload).
@@ -1421,11 +1386,54 @@ def _wan_cache_mode(offload: str, *, fast_fp8_pair: bool) -> str:
       (model offload + native FP8, 12–16 GB cards).
     - ``full``: legacy pinned-CPU cache (only when the full pipeline stays on GPU).
     """
-    if offload == "model" and fast_fp8_pair:
-        return "gpu_swap"
-    if offload == "none":
-        return "full"
-    return "none"
+    from aiwf.infrastructure.wan.native.memory import select_initial_stage_cache_mode
+
+    return select_initial_stage_cache_mode(
+        offload,
+        fast_quantized_pair=fast_fp8_pair,
+        pinned_memory=pinned_memory,
+    ).value
+
+
+def _stage_cache_uses_cpu_standby(mode: str) -> bool:
+    from aiwf.infrastructure.wan.native.memory import stage_cache_uses_cpu_standby
+
+    return stage_cache_uses_cpu_standby(mode)
+
+
+def _stage_cache_pins_tensors(mode: str) -> bool:
+    from aiwf.infrastructure.wan.native.memory import stage_cache_pins_tensors
+
+    return stage_cache_pins_tensors(mode)
+
+
+def _stage_cache_is_gpu_active_cpu_standby(mode: str) -> bool:
+    from aiwf.infrastructure.wan.native.memory import stage_cache_is_gpu_active_cpu_standby
+
+    return stage_cache_is_gpu_active_cpu_standby(mode)
+
+
+def _stage_cache_is_disk_sequential(mode: str) -> bool:
+    from aiwf.infrastructure.wan.native.memory import stage_cache_is_disk_sequential
+
+    return stage_cache_is_disk_sequential(mode)
+
+
+def _resolve_stage_cache_after_pin_probe(
+    mode: str,
+    *,
+    high_path: str | Path | None,
+    low_path: str | Path | None,
+    pin_available: bool,
+):
+    from aiwf.infrastructure.wan.native.memory import resolve_stage_cache_after_pin_probe
+
+    return resolve_stage_cache_after_pin_probe(
+        mode,
+        high_path=high_path,
+        low_path=low_path,
+        pin_available=pin_available,
+    )
 
 
 def _ensure_wan_attention_processors(transformer, name: str = "transformer") -> None:
@@ -1828,6 +1836,8 @@ class WanI2VBackend:
             return
         if self._low_preload_started:
             return
+        if self._low_preload_spec.get("disk_sequential"):
+            return
         # Disk-sequential mode: don't start a background thread — low will load
         # synchronously at the boundary point AFTER wan_high is freed from the
         # CPU cache.  Starting a thread here (with CUDA active + no pinned memory)
@@ -1883,8 +1893,9 @@ class WanI2VBackend:
                 "low_path": str(request.low_noise_model_id),
                 "low_lora_path": getattr(request, "low_noise_lora_id", None),
                 "low_lora_scale": float(getattr(request, "low_noise_lora_scale", 1.0) or 1.0),
-                "use_cache": self._cache_mode in ("full", "gpu_swap"),
-                "pin_tensors": self._pinned_memory and self.cache._global_pin_enabled,
+                "use_cache": _stage_cache_uses_cpu_standby(self._cache_mode),
+                "pin_tensors": _stage_cache_pins_tensors(self._cache_mode) and self.cache._global_pin_enabled,
+                "disk_sequential": _stage_cache_is_disk_sequential(self._cache_mode),
                 "chunk_size": chunk_size,
                 "chunk_overlap": chunk_overlap,
             }
@@ -2000,7 +2011,11 @@ class WanI2VBackend:
                 and _is_gguf_transformer(low_noise_model_id)
             )
         )
-        cache_mode = _wan_cache_mode(offload, fast_fp8_pair=fast_fp8_pair)
+        cache_mode = _wan_cache_mode(
+            offload,
+            fast_fp8_pair=fast_fp8_pair,
+            pinned_memory=self._pinned_memory,
+        )
 
         pipe = self._load_dual_pipeline(
             high_path=high_noise_model_id,
@@ -2074,9 +2089,9 @@ class WanI2VBackend:
         # Apply SageAttention / flash SDPA / channels_last to the FP8 transformer.
         # This was previously only done on the GGUF path — FP8 was silently missing it.
         _apply_wan_attention_optimizations(pipe.transformer, "high-noise transformer", chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        if cache_mode == "gpu_swap":
+        if _stage_cache_is_gpu_active_cpu_standby(cache_mode):
             _free_cuda_memory()
-            if not self.cache._global_pin_enabled:
+            if _stage_cache_is_disk_sequential(cache_mode):
                 # Disk-sequential mode: pin_memory failed, meaning wan_high (~14GB) is
                 # stored in ordinary (unpinned) CPU RAM.  If we load it to VRAM NOW,
                 # encode_prompt will OOM because the text encoder also needs VRAM (UMT5
@@ -2115,7 +2130,91 @@ class WanI2VBackend:
 
         self._pipe = pipe
         self._key = key
-        self._cache_mode = cache_mode
+        self._cache_mode = str(getattr(pipe, "_aiwf_cache_mode", cache_mode) or cache_mode)
+        return pipe
+
+    def _ensure_single_5b(
+        self,
+        *,
+        model_id: str,
+        vae_id: str | None = None,
+        offload: str,
+        flow_shift: float,
+        sigma_type: str = "beta",
+        sampler: str = "euler",
+    ):
+        import torch
+        from diffusers import WanImageToVideoPipeline
+
+        key = (
+            "single_5b",
+            model_id,
+            vae_id or "default",
+            offload,
+            sampler,
+            sigma_type,
+            round(float(flow_shift), 3),
+        )
+        if self._pipe is not None and self._key == key:
+            return self._pipe
+
+        if self._pipe is not None or self.cache.cpu_cache:
+            _video_status("Releasing previous video pipeline before loading the 5B demo model.")
+            self.unload()
+
+        _require_wan()
+        _video_status(f"Loading standalone Wan 5B Diffusers pipeline: {model_id}")
+        load_kwargs: dict[str, Any] = {"torch_dtype": torch.bfloat16}
+        if Path(str(model_id)).exists():
+            load_kwargs["local_files_only"] = True
+        pipe = WanImageToVideoPipeline.from_pretrained(str(model_id), **load_kwargs)
+
+        if vae_id:
+            _video_status(f"Using explicit Wan VAE for 5B path: {Path(vae_id).name}")
+            pipe.vae = _load_wan_vae(vae_id, torch_dtype=torch.float32)
+
+        _sampler = str(sampler or "euler")
+        _sigma = str(sigma_type or "beta")
+        if _sampler == "heun":
+            from diffusers import FlowMatchHeunDiscreteScheduler
+
+            base_cfg = getattr(pipe.scheduler, "config", pipe.scheduler)
+            shift = float(flow_shift or getattr(base_cfg, "flow_shift", getattr(base_cfg, "shift", 5.0)) or 5.0)
+            pipe.scheduler = FlowMatchHeunDiscreteScheduler(
+                num_train_timesteps=int(getattr(base_cfg, "num_train_timesteps", 1000) or 1000),
+                shift=shift,
+                use_dynamic_shifting=bool(getattr(base_cfg, "use_dynamic_shifting", False)),
+            )
+            _video_status(f"Using Wan sampler: FlowMatch Heun (2nd-order) | shift={shift:g}")
+        else:
+            pipe.scheduler = _new_wan_euler_scheduler(
+                pipe.scheduler,
+                flow_shift=float(flow_shift),
+                sigma_type=_sigma,
+            )
+            _video_status(f"Using Wan sampler: FlowMatch Euler | scheduler={_sigma} | shift={float(flow_shift):g}")
+
+        if offload == "sequential":
+            pipe.enable_sequential_cpu_offload()
+        elif offload == "model":
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to("cuda")
+
+        transformer = getattr(pipe, "transformer", None)
+        if transformer is not None:
+            _ensure_wan_attention_processors(transformer, "5B transformer")
+            _apply_wan_attention_optimizations(transformer, "5B transformer")
+
+        for method in ("enable_tiling", "enable_slicing"):
+            try:
+                getattr(pipe.vae, method)()
+            except Exception:
+                pass
+
+        self._pipe = pipe
+        self._key = key
+        self._cache_mode = "none"
         return pipe
 
     def _load_dual_pipeline(
@@ -2171,8 +2270,8 @@ class WanI2VBackend:
             str(base_path / "scheduler"), local_files_only=True
         )
 
-        use_cache = cache_mode in ("full", "gpu_swap")
-        pin_tensors = cache_mode == "full" or (cache_mode == "gpu_swap" and self._pinned_memory)
+        use_cache = _stage_cache_uses_cpu_standby(cache_mode)
+        pin_tensors = _stage_cache_pins_tensors(cache_mode) and self._pinned_memory
         _video_status("Building local Wan A14B I2V pipeline components.")
         _video_status("Preparing empty high-noise transformer stage.")
         high_trans = _empty_wan_transformer(WAN_I2V_A14B_TRANSFORMER_CONFIG)
@@ -2221,6 +2320,33 @@ class WanI2VBackend:
 
         if use_cache:
             self.cache.register_model("wan_high", pipe.transformer, pin=pin_tensors)
+            decision = _resolve_stage_cache_after_pin_probe(
+                cache_mode,
+                high_path=high_path,
+                low_path=low_path,
+                pin_available=self.cache._global_pin_enabled,
+            )
+            if decision.mode.value != cache_mode:
+                cache_mode = decision.mode.value
+                use_cache = _stage_cache_uses_cpu_standby(cache_mode)
+                pin_tensors = _stage_cache_pins_tensors(cache_mode) and self._pinned_memory
+                if _stage_cache_is_disk_sequential(cache_mode):
+                    _video_status(
+                        "Survival mode: low-noise model will load from disk at stage boundary. "
+                        "This is expected to be slow and is not demo-ready."
+                    )
+                    if decision.available_ram_gb is not None and decision.additional_required_gb is not None:
+                        _video_status(
+                            "Survival mode RAM preflight: "
+                            f"available={decision.available_ram_gb:.1f} GB, "
+                            f"required_for_low_standby={decision.additional_required_gb:.1f} GB."
+                        )
+                else:
+                    _video_status(
+                        "Wan stage cache: pinning unavailable; using unpinned CPU standby "
+                        "so the low-noise stage can stay in RAM instead of loading from disk."
+                    )
+            pipe._aiwf_cache_mode = cache_mode
             if cache_mode == "full":
                 self.cache.load_to_vram("wan_high")
 
@@ -2236,16 +2362,16 @@ class WanI2VBackend:
         # _release_high_stage will DELETE wan_high from the CPU cache (freeing ~14GB),
         # then _load_low_stage loads wan_low from disk into the freed space.
         # No background thread, never two 14B models in RAM simultaneously.
-        disk_sequential = use_cache and not self.cache._global_pin_enabled
+        disk_sequential = _stage_cache_is_disk_sequential(cache_mode)
         if disk_sequential:
-            if self._async_offload:
-                self._async_offload = False
             _video_status(
                 "Disk-sequential mode: wan_high will be freed from CPU cache at the "
                 "boundary point and wan_low will load from disk then. "
                 "(pin_memory unavailable — loading both 14B models simultaneously would OOM.)"
             )
-        defer_low_preload = disk_sequential or (cache_mode == "gpu_swap" and self._async_offload)
+        defer_low_preload = disk_sequential or (
+            _stage_cache_is_gpu_active_cpu_standby(cache_mode) and self._async_offload
+        )
         self._reset_low_preload_state()
 
         if defer_low_preload:
@@ -2255,6 +2381,7 @@ class WanI2VBackend:
                 "low_lora_scale": low_lora_scale,
                 "use_cache": use_cache,
                 "pin_tensors": pin_tensors,
+                "disk_sequential": disk_sequential,
                 "chunk_size": chunk_size,
                 "chunk_overlap": chunk_overlap,
             }
@@ -2302,7 +2429,7 @@ class WanI2VBackend:
                         "for wan_low disk load (~14GB freed)."
                     )
                     self.cache.cpu_cache.pop("wan_high", None)
-                    if cache_mode == "gpu_swap":
+                    if _stage_cache_is_gpu_active_cpu_standby(cache_mode):
                         pipe.transformer = None
             elif pipe.transformer is not None:
                 try:
@@ -2311,7 +2438,7 @@ class WanI2VBackend:
                     pass
 
             # cleanup handled by swap_models() inside load_to_vram(); don't duplicate it here.
-            if pipe.transformer is not None and cache_mode != "gpu_swap":
+            if pipe.transformer is not None and not _stage_cache_is_gpu_active_cpu_standby(cache_mode):
                 pipe.transformer = None
 
         def _load_low_stage():
@@ -2344,6 +2471,7 @@ class WanI2VBackend:
         # Tell the pipeline about the switch point (registered into self.config)
         # Typical values for Wan2.2 14B I2V high/low splits are around 0.875
         pipe.register_to_config(boundary_ratio=float(boundary_ratio))
+        pipe._aiwf_cache_mode = cache_mode
 
         logger.info(
             "Configured dual-stage Wan pipeline: high=%s, low=%s, boundary_ratio=%s (from base %s)",
@@ -2356,10 +2484,12 @@ class WanI2VBackend:
         _require_wan()
         import torch
 
-        # Wan 2.2 image-to-video ALWAYS runs a two-stage high-noise + low-noise
-        # transformer pair. There is no single-model path -- both must be set
-        # (this holds even when using LoRAs: you still need one high and one low).
-        if not (getattr(request, "uses_dual_transformers", None) and request.uses_dual_transformers()):
+        requires_dual = (
+            request.requires_dual_transformers()
+            if callable(getattr(request, "requires_dual_transformers", None))
+            else True
+        )
+        if requires_dual and not (getattr(request, "uses_dual_transformers", None) and request.uses_dual_transformers()):
             raise WanUnavailable(
                 "Wan 2.2 image-to-video needs BOTH a high-noise and a low-noise model. "
                 "Select a High noise model and a Low noise model -- Wan 2.2 always uses a "
@@ -2378,42 +2508,62 @@ class WanI2VBackend:
         _vae_decode_chunk_frames = _env_int("AIWF_WAN_VAE_CHUNK_FRAMES", 4)
 
         load_started = time.perf_counter()
-        pipe = self._ensure(
-            high_noise_model_id=request.high_noise_model_id,
-            low_noise_model_id=            request.low_noise_model_id,
-            boundary_ratio=getattr(request, "boundary_ratio", None),
-            vae_id=getattr(request, "vae_id", None),
-            high_noise_lora_id=getattr(request, "high_noise_lora_id", None),
-            high_noise_lora_scale=float(getattr(request, "high_noise_lora_scale", 1.0) or 1.0),
-            low_noise_lora_id=getattr(request, "low_noise_lora_id", None),
-            low_noise_lora_scale=float(getattr(request, "low_noise_lora_scale", 1.0) or 1.0),
-            components_base=getattr(request, "components_base", None),
-            offload=str(getattr(request, "offload", "model") or "model"),
-            flow_shift=_flow_shift,
-            sigma_type=_sigma_type,
-            sampler=_sampler,
-            text_encoder_path=_te_path,
-            chunk_size=_chunk_size,
-            chunk_overlap=_chunk_overlap,
-        )
+        if requires_dual:
+            pipe = self._ensure(
+                high_noise_model_id=request.high_noise_model_id,
+                low_noise_model_id=request.low_noise_model_id,
+                boundary_ratio=getattr(request, "boundary_ratio", None),
+                vae_id=getattr(request, "vae_id", None),
+                high_noise_lora_id=getattr(request, "high_noise_lora_id", None),
+                high_noise_lora_scale=float(getattr(request, "high_noise_lora_scale", 1.0) or 1.0),
+                low_noise_lora_id=getattr(request, "low_noise_lora_id", None),
+                low_noise_lora_scale=float(getattr(request, "low_noise_lora_scale", 1.0) or 1.0),
+                components_base=getattr(request, "components_base", None),
+                offload=str(getattr(request, "offload", "model") or "model"),
+                flow_shift=_flow_shift,
+                sigma_type=_sigma_type,
+                sampler=_sampler,
+                text_encoder_path=_te_path,
+                chunk_size=_chunk_size,
+                chunk_overlap=_chunk_overlap,
+            )
+        else:
+            if _te_path:
+                _video_status(
+                    "Fast 5B mode uses the selected Diffusers pipeline text encoder; "
+                    "standalone text_encoder_path override is ignored in this pass."
+                )
+            pipe = self._ensure_single_5b(
+                model_id=str(getattr(request, "model_id", "") or ""),
+                vae_id=getattr(request, "vae_id", None),
+                offload=str(getattr(request, "offload", "model") or "model"),
+                flow_shift=_flow_shift,
+                sigma_type=_sigma_type,
+                sampler=_sampler,
+            )
         load_seconds = max(0.0, time.perf_counter() - load_started)
 
         preprocess_started = time.perf_counter()
-        # Recompute boundary_ratio from the scheduler's actual timestep distribution
-        # so high_noise_steps + low_noise_steps is honoured regardless of flow_shift.
-        high_steps = max(1, int(getattr(request, "high_noise_steps", 4) or 4))
-        low_steps = max(1, int(getattr(request, "low_noise_steps", 4) or 4))
-        total_steps = high_steps + low_steps
-        stage_boundary_ratio = _boundary_ratio_for_step_split(
-            pipe.scheduler, total_steps=total_steps, high_steps=high_steps
-        )
-        req_boundary = float(getattr(request, "boundary_ratio", 0.875) or 0.875)
-        if abs(stage_boundary_ratio - req_boundary) > 0.05:
-            logger.info(
-                "Boundary ratio adjusted: scheduler-derived=%.3f request=%.3f",
-                stage_boundary_ratio, req_boundary,
+        if requires_dual:
+            # Recompute boundary_ratio from the scheduler's actual timestep distribution
+            # so high_noise_steps + low_noise_steps is honoured regardless of flow_shift.
+            high_steps = max(1, int(getattr(request, "high_noise_steps", 4) or 4))
+            low_steps = max(1, int(getattr(request, "low_noise_steps", 4) or 4))
+            total_steps = high_steps + low_steps
+            stage_boundary_ratio = _boundary_ratio_for_step_split(
+                pipe.scheduler, total_steps=total_steps, high_steps=high_steps
             )
-        pipe.register_to_config(boundary_ratio=stage_boundary_ratio)
+            req_boundary = float(getattr(request, "boundary_ratio", 0.875) or 0.875)
+            if abs(stage_boundary_ratio - req_boundary) > 0.05:
+                logger.info(
+                    "Boundary ratio adjusted: scheduler-derived=%.3f request=%.3f",
+                    stage_boundary_ratio, req_boundary,
+                )
+            pipe.register_to_config(boundary_ratio=stage_boundary_ratio)
+        else:
+            high_steps = max(1, int(getattr(request, "steps", 8) or 8))
+            low_steps = 0
+            total_steps = high_steps
 
         seed = int(getattr(request, "seed", -1))
         if seed < 0:
@@ -2426,14 +2576,15 @@ class WanI2VBackend:
         real_device = self._real_device(pipe)
         generator = torch.Generator(device=real_device).manual_seed(seed)
 
-        # Kick off the low-noise preload only if _load_dual_pipeline did not
-        # already preload it. Resetting here discards a ready transformer and
-        # causes a second safetensors/GGUF load before the same generation.
-        self._prepare_low_preload_for_generation(
-            request,
-            chunk_size=_chunk_size,
-            chunk_overlap=_chunk_overlap,
-        )
+        if requires_dual:
+            # Kick off the low-noise preload only if _load_dual_pipeline did not
+            # already preload it. Resetting here discards a ready transformer and
+            # causes a second safetensors/GGUF load before the same generation.
+            self._prepare_low_preload_for_generation(
+                request,
+                chunk_size=_chunk_size,
+                chunk_overlap=_chunk_overlap,
+            )
 
         num_frames = int(getattr(request, "num_frames", 49))
         num_frames = max(5, num_frames if (num_frames - 1) % 4 == 0 else num_frames - (num_frames - 1) % 4)
@@ -2441,10 +2592,15 @@ class WanI2VBackend:
         _prompt = str(getattr(request, "prompt", "") or "")
         _negative_prompt = str(getattr(request, "negative_prompt", "") or "")
         _guidance_scale = float(getattr(request, "guidance_scale", 1.0) or 1.0)
+        step_summary = (
+            f"{total_steps} steps (high={high_steps}/low={low_steps})"
+            if requires_dual
+            else f"{total_steps} steps (single 5B)"
+        )
 
         _video_status(
             f"Generating {num_frames} frames at {w}×{h} — "
-            f"{total_steps} steps (high={high_steps}/low={low_steps}), "
+            f"{step_summary}, "
             f"guidance={_guidance_scale:g}, shift={_flow_shift:g}, seed={seed}."
         )
         preprocess_seconds = max(0.0, time.perf_counter() - preprocess_started)
@@ -2637,6 +2793,11 @@ class WanI2VBackend:
         low_stage_elapsed = max(0.0, denoise_seconds - high_stage_elapsed)
         pipeline_overhead_seconds = max(0.0, pipeline_seconds - denoise_seconds)
         steps_per_second = completed_steps / denoise_seconds if denoise_seconds > 0 else None
+        fp8_metrics = _collect_fp8_linear_metrics(
+            getattr(pipe, "transformer", None),
+            getattr(pipe, "transformer_2", None),
+            getattr(self, "_preloaded_low", None),
+        )
         metrics = {
             "step_count": int(completed_steps),
             "load_seconds": round(float(load_seconds), 3),
@@ -2656,6 +2817,8 @@ class WanI2VBackend:
             "offload_cleanup_seconds": round(float(hook_timings.get("offload_cleanup_seconds", 0.0)), 3),
             "postprocess_seconds": round(float(postprocess_seconds), 3),
             "steps_per_second": round(float(steps_per_second), 6) if steps_per_second is not None else None,
+            "cache_mode": str(self._cache_mode or "none"),
+            **fp8_metrics,
         }
         return frames, h, w, metrics
 

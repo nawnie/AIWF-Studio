@@ -5,7 +5,16 @@ import logging
 import gradio as gr
 
 from aiwf.bootstrap import AppContext
-from aiwf.core.domain.wan import SIGMA_TYPES, SAMPLER_TYPES, WanI2VRequest, duration_seconds_for_frames, frames_for_duration_seconds
+from aiwf.core.domain.wan import (
+    SIGMA_TYPES,
+    SAMPLER_TYPES,
+    WAN_RUNTIME_FAST_5B,
+    WAN_RUNTIME_HIGH_LOW,
+    WAN_RUNTIME_HIGH_LOW_FP8,
+    WanI2VRequest,
+    duration_seconds_for_frames,
+    frames_for_duration_seconds,
+)
 from aiwf.infrastructure.wan import WanUnavailable
 from aiwf.services.wan import WanService
 from aiwf.web.registry import WebRegistry
@@ -113,6 +122,17 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     source = gr.Image(label="Source image", type="pil", sources=["upload", "clipboard"])
                     prompt = gr.Textbox(label="Prompt", lines=3, placeholder="Describe the motion / scene")
                     negative = gr.Textbox(label="Negative prompt", lines=2, value="")
+
+                    runtime_mode = gr.Radio(
+                        label="Runtime",
+                        choices=[
+                            ("Fast demo - Wan 2.2 TI2V 5B", WAN_RUNTIME_FAST_5B),
+                            ("Native high/low - quality", WAN_RUNTIME_HIGH_LOW),
+                            ("Native high/low FP8 - experimental", WAN_RUNTIME_HIGH_LOW_FP8),
+                        ],
+                        value=WAN_RUNTIME_FAST_5B,
+                        info="Fast demo uses the standalone 5B Diffusers model. High/low modes require matching transformer pairs.",
+                    )
 
                     gr.Markdown("Models", elem_classes=["aiwf-section-label"])
                     high_noise = gr.Dropdown(
@@ -380,6 +400,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             sigma_type_v,
             flow_v,
             seed_v,
+            runtime_mode_v,
             high_v,
             low_v,
             vae_v,
@@ -399,10 +420,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 raise gr.Error(
                     "Wan video is unavailable — update diffusers (>=0.35) and install ftfy, then restart."
                 )
-            if not (high_v and low_v):
+            selected_runtime = str(runtime_mode_v or WAN_RUNTIME_FAST_5B)
+            if selected_runtime != WAN_RUNTIME_FAST_5B and not (high_v and low_v):
                 raise gr.Error(
                     "Select BOTH a High noise model and a Low noise model. Wan 2.2 image-to-video "
-                    "always runs a two-stage high/low transformer pair."
+                    "high/low modes run a two-stage transformer pair."
                 )
             # Warn if user somehow selected a t5xxl file (shouldn't happen via dropdown but allow_custom_value=True)
             _te_path = str(text_encoder_v or "").strip()
@@ -428,6 +450,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 sigma_type=str(sigma_type_v or "beta"),
                 flow_shift=float(flow_v),
                 seed=int(seed_v),
+                runtime_mode=selected_runtime,
                 offload=offload_v,
                 high_noise_model_id=high_v or None,
                 low_noise_model_id=low_v or None,
@@ -450,7 +473,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     desc = f"{desc} - {rate_text}"
                 progress(min(1.0, step / max(1, tot)), desc=desc)
 
-            progress(0.0, desc="Loading + encoding for Wan 14B dual-stage I2V (UMT5 text + VAE cond can take 30-180s with low GPU util; watch terminal for [AIWF] Video: and step messages, then 'Video step X/Y' will appear)")
+            runtime_label = "Wan 5B demo" if selected_runtime == WAN_RUNTIME_FAST_5B else "Wan 14B dual-stage I2V"
+            progress(0.0, desc=f"Loading + encoding for {runtime_label} (watch terminal for [AIWF] Video: and step messages, then 'Video step X/Y' will appear)")
             try:
                 result = service.generate(request, image, on_progress=on_progress)
             except WanUnavailable as exc:
@@ -498,6 +522,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 sigma_type,
                 flow_shift,
                 seed,
+                runtime_mode,
                 high_noise,
                 low_noise,
                 vae_id,

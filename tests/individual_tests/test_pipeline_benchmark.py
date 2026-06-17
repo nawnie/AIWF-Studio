@@ -29,6 +29,14 @@ def test_run_with_receipt_writes_completed_receipt(tmp_path: Path, monkeypatch):
             "offload_cleanup_seconds": 0.05,
             "postprocess_seconds": 0.1,
             "video_write_seconds": 0.2,
+            "fp8_linear_layers": 12,
+            "fp8_fast_mm_calls": 96,
+            "fp8_fallback_calls": 0,
+            "fp8_fallback_layers": 0,
+            "fp8_fallback_reasons": [],
+            "fp8_strict_mode": True,
+            "fp8_native_available": True,
+            "cache_mode": "gpu_active_cpu_unpinned_standby",
         },
     )
 
@@ -42,6 +50,11 @@ def test_run_with_receipt_writes_completed_receipt(tmp_path: Path, monkeypatch):
     assert data["status"] == "completed"
     assert data["result"]["steps_per_second"] == 4.0
     assert data["result"]["iterations_per_second"] == 4.0
+    assert data["result"]["fp8_linear_layers"] == 12
+    assert data["result"]["fp8_fast_mm_calls"] == 96
+    assert data["result"]["fp8_fallback_calls"] == 0
+    assert data["result"]["fp8_strict_mode"] is True
+    assert data["result"]["cache_mode"] == "gpu_active_cpu_unpinned_standby"
     assert data["runtime"]["app_version"]
     assert data["runtime"]["packages"]["torch"]
     assert data["diagnostics_log"] == str(tmp_path / "dev-trace.log")

@@ -8,6 +8,8 @@ import pytest
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.wan import (
     WAN_TI2V_5B,
+    WAN_RUNTIME_FAST_5B,
+    WAN_RUNTIME_HIGH_LOW,
     WanI2VRequest,
     duration_seconds_for_frames,
     frames_for_duration_seconds,
@@ -30,6 +32,8 @@ from aiwf.infrastructure.wan.pipeline import (
     _new_wan_euler_simple_scheduler,
     _orient_umt5_gguf_tensor,
     _call_accepts_kwarg,
+    _collect_fp8_linear_metrics,
+    _cuda_supports_tensorcore_fp8,
     _wan_output_type_for_pipe,
     _wan_cache_mode,
     estimate_gguf_expanded_gb,
@@ -84,6 +88,7 @@ def test_duration_frame_helpers():
 def test_request_defaults_and_helpers():
     r = WanI2VRequest()
     assert r.model_id == WAN_TI2V_5B
+    assert r.runtime_mode == WAN_RUNTIME_FAST_5B
     assert r.fps == 16 and r.offload == "model"
     assert r.guidance_scale == 1.0
     assert r.normalized_frames() == 49
@@ -167,8 +172,17 @@ def test_gguf_allowed_with_quantized_runtime(tmp_path: Path, monkeypatch):
 
 
 def test_wan_cache_mode_prefers_gpu_swap_for_model_offload_fp8():
+    from aiwf.infrastructure.wan.native.memory import WanStageCacheMode
+
     assert _wan_cache_mode("sequential", fast_fp8_pair=True) == "none"
-    assert _wan_cache_mode("model", fast_fp8_pair=True) == "gpu_swap"
+    assert (
+        _wan_cache_mode("model", fast_fp8_pair=True)
+        == WanStageCacheMode.GPU_ACTIVE_CPU_PINNED_STANDBY.value
+    )
+    assert (
+        _wan_cache_mode("model", fast_fp8_pair=True, pinned_memory=False)
+        == WanStageCacheMode.GPU_ACTIVE_CPU_UNPINNED_STANDBY.value
+    )
     assert _wan_cache_mode("model", fast_fp8_pair=False) == "none"
     assert _wan_cache_mode("none", fast_fp8_pair=False) == "full"
 
@@ -336,7 +350,9 @@ def test_wan_preflight_passes_with_local_hybrid_components(tmp_path: Path):
     _write_fake_safetensors(low)
     _write_fake_safetensors(vae)
 
-    result = s.preflight(WanI2VRequest(high_noise_model_id=high.name, low_noise_model_id=low.name))
+    result = s.preflight(
+        WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high.name, low_noise_model_id=low.name)
+    )
 
     assert result.ok, result.message()
     assert result.components_base is not None
@@ -355,7 +371,9 @@ def test_wan_preflight_blocks_missing_component_base(tmp_path: Path):
     _write_fake_safetensors(low)
     _write_fake_safetensors(vae)
 
-    result = s.preflight(WanI2VRequest(high_noise_model_id=high.name, low_noise_model_id=low.name))
+    result = s.preflight(
+        WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high.name, low_noise_model_id=low.name)
+    )
 
     assert not result.ok
     assert "Missing local Wan component base" in result.message()
@@ -384,7 +402,10 @@ def test_wan_generation_unloads_image_models_before_video_load(tmp_path: Path):
 
     s._backend.generate = fake_generate
 
-    s.generate(WanI2VRequest(high_noise_model_id=high.name, low_noise_model_id=low.name), Image.new("RGB", (8, 8)))
+    s.generate(
+        WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high.name, low_noise_model_id=low.name),
+        Image.new("RGB", (8, 8)),
+    )
 
     assert calls[:2] == ["unload", "video"]
 
@@ -425,13 +446,24 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
             "offload_cleanup_seconds": 0.2,
             "postprocess_seconds": 0.2,
             "steps_per_second": 4.0,
+            "fp8_linear_layers": 12,
+            "fp8_fast_mm_calls": 96,
+            "fp8_fallback_calls": 0,
+            "fp8_fallback_layers": 0,
+            "fp8_fallback_reasons": [],
+            "fp8_strict_mode": True,
+            "fp8_native_available": True,
+            "cache_mode": "gpu_active_cpu_pinned_standby",
         },
     )
     captured: dict[str, object] = {}
     monkeypatch.setattr("aiwf.services.wan.trace_model_throughput", lambda **kwargs: captured.update(kwargs))
     monkeypatch.setattr("aiwf.services.wan.write_frames", lambda frames, output_path, fps: len(frames))
 
-    result = s.generate(WanI2VRequest(high_noise_model_id=high.name, low_noise_model_id=low.name), Image.new("RGB", (8, 8)))
+    result = s.generate(
+        WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high.name, low_noise_model_id=low.name),
+        Image.new("RGB", (8, 8)),
+    )
 
     assert result.frame_count == 5
     import aiwf
@@ -458,6 +490,14 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     assert captured["video_write_seconds"] >= 0.0
     assert captured["steps_per_second"] == 4.0
     assert captured["iterations_per_second"] == 4.0
+    assert captured["fp8_linear_layers"] == 12
+    assert captured["fp8_fast_mm_calls"] == 96
+    assert captured["fp8_fallback_calls"] == 0
+    assert captured["fp8_fallback_layers"] == 0
+    assert captured["fp8_fallback_reasons"] == []
+    assert captured["fp8_strict_mode"] is True
+    assert captured["fp8_native_available"] is True
+    assert captured["cache_mode"] == "gpu_active_cpu_pinned_standby"
     assert captured.get("app_version") == aiwf.__version__
     assert Path(str(captured["high_noise_model_id"])).name == high.name
     assert result.step_count == 8
@@ -480,7 +520,46 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     assert result.video_write_seconds >= 0.0
     assert result.steps_per_second == 4.0
     assert result.iterations_per_second == 4.0
+    assert result.fp8_linear_layers == 12
+    assert result.fp8_fast_mm_calls == 96
+    assert result.fp8_fallback_calls == 0
+    assert result.fp8_fallback_layers == 0
+    assert result.fp8_fallback_reasons == []
+    assert result.fp8_strict_mode is True
+    assert result.fp8_native_available is True
+    assert result.cache_mode == "gpu_active_cpu_pinned_standby"
     assert "4.000 it/s" in result.message
+    assert "FP8 fast path clean" in result.message
+    assert "cache=gpu_active_cpu_pinned_standby" in result.message
+
+
+def test_wan_generation_fast_5b_uses_local_model_without_high_low(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    s = _svc(tmp_path)
+    _force_wan_available(s)
+    base = _write_component_base(s)
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan_2.1_vae.safetensors"
+    _write_fake_safetensors(vae)
+    captured: dict[str, object] = {}
+
+    def fake_generate(request, *_args, **_kwargs):
+        captured["runtime_mode"] = request.runtime_mode
+        captured["model_id"] = request.model_id
+        captured["high"] = request.high_noise_model_id
+        captured["low"] = request.low_noise_model_id
+        return [Image.new("RGB", (8, 8), "black")] * 5, 8, 8, {"step_count": 6, "denoise_seconds": 3.0}
+
+    s._backend.generate = fake_generate
+    monkeypatch.setattr("aiwf.services.wan.write_frames", lambda frames, output_path, fps: len(frames))
+
+    result = s.generate(WanI2VRequest(steps=6), Image.new("RGB", (8, 8)))
+
+    assert result.frame_count == 5
+    assert captured["runtime_mode"] == WAN_RUNTIME_FAST_5B
+    assert captured["model_id"] == str(base.resolve())
+    assert captured["high"] is None
+    assert captured["low"] is None
 
 
 def test_wan_generation_passes_resolved_paths_to_backend(tmp_path: Path, monkeypatch):
@@ -510,7 +589,10 @@ def test_wan_generation_passes_resolved_paths_to_backend(tmp_path: Path, monkeyp
     s._backend.generate = fake_generate
     monkeypatch.setattr("aiwf.services.wan.write_frames", lambda frames, output_path, fps: len(frames))
 
-    s.generate(WanI2VRequest(high_noise_model_id=high.name, low_noise_model_id=low.name), Image.new("RGB", (8, 8)))
+    s.generate(
+        WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high.name, low_noise_model_id=low.name),
+        Image.new("RGB", (8, 8)),
+    )
 
     assert captured["high"] == str(high.resolve())
     assert captured["low"] == str(low.resolve())
@@ -711,10 +793,56 @@ def test_prepare_low_preload_sets_spec_when_low_is_not_ready():
         "low_lora_path": "low-lora.safetensors",
         "low_lora_scale": 0.75,
         "use_cache": False,
-        "pin_tensors": True,
+        "pin_tensors": False,
+        "disk_sequential": False,
         "chunk_size": 20,
         "chunk_overlap": 6,
     }
+
+
+def test_prepare_low_preload_marks_unpinned_cpu_standby_cache():
+    from aiwf.infrastructure.wan.native.memory import WanStageCacheMode
+
+    backend = WanI2VBackend()
+    backend._cache_mode = WanStageCacheMode.GPU_ACTIVE_CPU_UNPINNED_STANDBY.value
+    started: list[bool] = []
+
+    with patch.object(backend, "_maybe_start_background_low_preload", side_effect=lambda: started.append(True)):
+        backend._prepare_low_preload_for_generation(
+            SimpleNamespace(
+                low_noise_model_id="low.safetensors",
+                low_noise_lora_id=None,
+                low_noise_lora_scale=1.0,
+            ),
+            chunk_size=16,
+            chunk_overlap=8,
+        )
+
+    assert started == [True]
+    assert backend._low_preload_spec["use_cache"] is True
+    assert backend._low_preload_spec["pin_tensors"] is False
+    assert backend._low_preload_spec["disk_sequential"] is False
+
+
+def test_disk_sequential_low_preload_does_not_start_background_thread():
+    from aiwf.infrastructure.wan.native.memory import WanStageCacheMode
+
+    backend = WanI2VBackend()
+    backend._cache_mode = WanStageCacheMode.DISK_SEQUENTIAL.value
+    backend._prepare_low_preload_for_generation(
+        SimpleNamespace(
+            low_noise_model_id="low.safetensors",
+            low_noise_lora_id=None,
+            low_noise_lora_scale=1.0,
+        ),
+        chunk_size=16,
+        chunk_overlap=8,
+    )
+
+    assert backend._low_preload_spec["use_cache"] is True
+    assert backend._low_preload_spec["pin_tensors"] is False
+    assert backend._low_preload_spec["disk_sequential"] is True
+    assert backend._low_preload_started is False
 
 
 def test_wan_pipeline_cache_key_includes_temporal_chunk_settings():
@@ -867,6 +995,90 @@ def test_fp8_scaled_linear_uses_column_major_weight_for_scaled_mm():
     assert y.shape == (2, 64)
     assert y.dtype == torch.bfloat16
     assert not getattr(layer, "_scaled_mm_warned", False)
+    assert layer.fast_mm_calls == 1
+    assert layer.fallback_calls == 0
+
+
+def test_fp8_scaled_linear_counts_bf16_fallback_on_cpu():
+    torch = pytest.importorskip("torch")
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch float8 unavailable")
+
+    layer = _new_fp8_scaled_linear(16, 32, bias=False)
+    weight = torch.randn(32, 16).clamp(-2, 2).to(dtype=torch.float8_e4m3fn)
+    layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+    layer.weight_scale = torch.ones((), dtype=torch.float32)
+
+    y = layer(torch.randn(2, 16, dtype=torch.bfloat16))
+
+    assert y.shape == (2, 32)
+    assert layer.fast_mm_calls == 0
+    assert layer.fallback_calls == 1
+    assert "input is not CUDA" in str(layer.last_fallback_reason)
+    metrics = _collect_fp8_linear_metrics(layer)
+    assert metrics["fp8_linear_layers"] == 1
+    assert metrics["fp8_fallback_calls"] == 1
+    assert metrics["fp8_fallback_layers"] == 1
+
+
+def test_aiwf_fp8_linear_load_quantized_weight_api():
+    torch = pytest.importorskip("torch")
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch float8 unavailable")
+
+    from aiwf.infrastructure.quant.fp8_linear import AIWFFP8Linear
+
+    layer = AIWFFP8Linear(16, 32, bias=False, strict_exception_cls=WanUnavailable)
+    qweight = torch.randn(32, 16).clamp(-2, 2).to(dtype=torch.float8_e4m3fn)
+    weight_scale = torch.tensor(0.25, dtype=torch.float32)
+    input_scale = torch.tensor(0.5, dtype=torch.float32)
+
+    layer.load_quantized_weight(qweight, weight_scale, input_scale, orig_dtype=torch.bfloat16)
+    y = layer(torch.randn(2, 16, dtype=torch.bfloat16))
+
+    assert y.shape == (2, 32)
+    assert layer.weight.dtype == torch.float8_e4m3fn
+    assert layer.weight_scale.dtype == torch.float32
+    assert layer.input_scale.dtype == torch.float32
+    assert layer.orig_dtype == torch.bfloat16
+    assert layer.fallback_calls == 1
+
+
+def test_fp8_scaled_linear_strict_mode_raises_on_fallback(monkeypatch):
+    torch = pytest.importorskip("torch")
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch float8 unavailable")
+
+    monkeypatch.setenv("AIWF_WAN_STRICT_FP8", "1")
+    layer = _new_fp8_scaled_linear(16, 32, bias=False)
+    weight = torch.randn(32, 16).clamp(-2, 2).to(dtype=torch.float8_e4m3fn)
+    layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+    layer.weight_scale = torch.ones((), dtype=torch.float32)
+
+    with pytest.raises(WanUnavailable, match="strict FP8 mode refused"):
+        layer(torch.randn(2, 16, dtype=torch.bfloat16))
+
+    assert layer.fallback_calls == 1
+
+
+def test_cuda_supports_tensorcore_fp8_requires_ada_or_newer():
+    class _Cuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def get_device_capability():
+            return (8, 6)
+
+    assert _cuda_supports_tensorcore_fp8(SimpleNamespace(cuda=_Cuda)) is False
+
+    class _AdaCuda(_Cuda):
+        @staticmethod
+        def get_device_capability():
+            return (8, 9)
+
+    assert _cuda_supports_tensorcore_fp8(SimpleNamespace(cuda=_AdaCuda)) is True
 
 
 def test_fp8_scaled_mm_failure_payload_contains_only_tensor_metadata():
