@@ -33,6 +33,16 @@ def _service(ctx: AppContext) -> WanService:
     return svc
 
 
+def _format_it_s(steps_per_second) -> str:
+    try:
+        rate = float(steps_per_second)
+    except (TypeError, ValueError):
+        return ""
+    if rate <= 0 or rate != rate:
+        return ""
+    return f"{rate:.3f} it/s ({1.0 / rate:.2f} s/it)"
+
+
 def register_wan_i2v(registry: WebRegistry) -> None:
     @registry.tab("Video", order=18)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
@@ -433,8 +443,12 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 image_guidance_scale=float(image_guidance_scale_v or 1.0),
             )
 
-            def on_progress(step, tot):
-                progress(min(1.0, step / max(1, tot)), desc=f"Video step {step}/{tot}")
+            def on_progress(step, tot, steps_per_second=None):
+                rate_text = _format_it_s(steps_per_second)
+                desc = f"Video step {step}/{tot}"
+                if rate_text:
+                    desc = f"{desc} - {rate_text}"
+                progress(min(1.0, step / max(1, tot)), desc=desc)
 
             progress(0.0, desc="Loading + encoding for Wan 14B dual-stage I2V (UMT5 text + VAE cond can take 30-180s with low GPU util; watch terminal for [AIWF] Video: and step messages, then 'Video step X/Y' will appear)")
             try:

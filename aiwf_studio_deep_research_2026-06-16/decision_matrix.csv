@@ -1,0 +1,15 @@
+Recommendation,Status,Why,Primary sources
+Default to PyTorch SDPA,Do now,Best no-extra-dependency attention baseline in Diffusers/PyTorch 2.x,S02; S03; S04
+Use fp16 for SD1.5/SDXL baseline,Do now,Practical ecosystem default for CUDA memory/speed,S02
+Channels-last after smoke test,Do now,Low dependency speed/memory opportunity with fallback,S02
+VAE slicing for batch and tiling for high-res/low VRAM,Do now,Official memory tools; tiling visible due tone variation,S01; S65
+Model CPU offload Low VRAM profile,Do now,"Useful fallback; faster than sequential, lower memory than full GPU",S01
+Sequential offload emergency only,Avoid default,Diffusers warns extremely slow/impractical,S01
+Keep xFormers optional,Experiment,Potential benefit but dependency/wheel churn,S09; S10
+Regional torch.compile,Experiment,Promising speed with lower cold-start; shape/Windows/LoRA risks,S02; S08; S11; S67
+TensorRT Engine Lab,Research/experiment,Strong fixed-profile speed; build/resolution/LoRA burden,S12; S13; S14
+torchao FP8,Experiment,Ada cc 8.9 makes it plausible; module/quality validation needed,S23; S27; S30
+FP4/NVFP4 on RTX 4070 Ti SUPER,Avoid now,"Blackwell-facing, not Ada target",S24; S25; S26
+LCM/Lightning Fast Mode,Experiment/beta,Mature enough if separated from normal scheduler semantics,S39; S46; S49
+SDXL Turbo separate model profile,Experiment/beta,1–4 step distilled model with CFG=0/no normal negative prompt,S44; S45
+Pin Transformers 4.x mainline,Do now,Project constraint and compatibility churn,S52; S71; S72

@@ -122,6 +122,34 @@ def _pipeline_status_markdown(ctx: AppContext) -> str:
     return _pipeline_registry(ctx).status_markdown()
 
 
+def _optimization_profile_choices(ctx: AppContext) -> list[tuple[str, str]]:
+    profiles = getattr(ctx.optimization_planner, "profiles", {})
+    order = [
+        "safe_eager_cuda",
+        "balanced_sdpa_fp16",
+        "quality_visible_modifiers",
+        "low_vram_model_offload",
+        "fast_method_recipe",
+        "experimental_feature_flags",
+    ]
+    choices: list[tuple[str, str]] = []
+    for profile_id in order:
+        profile = profiles.get(profile_id)
+        label = getattr(profile, "display_name", profile_id)
+        choices.append((label, profile_id))
+    return choices
+
+
+def _optimization_diagnostics_markdown(ctx: AppContext) -> str:
+    diagnostics = getattr(ctx, "optimization_diagnostics", None)
+    if diagnostics is None or not callable(getattr(diagnostics, "status_markdown", None)):
+        return "**Optimization diagnostics unavailable.**"
+    try:
+        return diagnostics.status_markdown()
+    except Exception as exc:
+        return f"**Optimization diagnostics failed:** `{exc}`"
+
+
 def _worker_tenants_markdown() -> str:
     registry = WorkerTenantRegistry()
     lines = ["**Engines**"]
@@ -410,6 +438,20 @@ def register_settings(registry: WebRegistry) -> None:
                             metadata_include_app_version = gr.Checkbox(
                                 label="Include AIWF Studio version in saved parameters",
                                 value=ctx.settings.metadata_include_app_version,
+                            )
+                            metadata_include_optimization_profile = gr.Checkbox(
+                                label="Include optimization profile in saved parameters",
+                                value=ctx.settings.metadata_include_optimization_profile,
+                            )
+                            optimization_profile = gr.Radio(
+                                label="Generation profile",
+                                choices=_optimization_profile_choices(ctx),
+                                value=ctx.settings.optimization_profile_id,
+                                info="Recorded now; backend-changing optimizations remain gated by launch flags and benchmark receipts.",
+                            )
+                            optimization_diagnostics = gr.Markdown(
+                                _optimization_diagnostics_markdown(ctx),
+                                elem_classes=["aiwf-settings-hint"],
                             )
                             pnginfo_send_to_studio = gr.Checkbox(
                                 label="Switch to Studio after PNG Info Send",
@@ -1349,6 +1391,8 @@ def register_settings(registry: WebRegistry) -> None:
             include_vae_hash,
             include_lora_hashes,
             include_app_version,
+            include_optimization_profile,
+            optimization_profile_id,
             send_pnginfo_to_studio,
             clear_pnginfo_after_apply,
             auto_cfg_distilled,
@@ -1390,6 +1434,9 @@ def register_settings(registry: WebRegistry) -> None:
             ctx.settings.metadata_include_vae_hash = bool(include_vae_hash)
             ctx.settings.metadata_include_lora_hashes = bool(include_lora_hashes)
             ctx.settings.metadata_include_app_version = bool(include_app_version)
+            ctx.settings.metadata_include_optimization_profile = bool(include_optimization_profile)
+            if optimization_profile_id in {value for _label, value in _optimization_profile_choices(ctx)}:
+                ctx.settings.optimization_profile_id = optimization_profile_id
             ctx.settings.pnginfo_send_to_studio = bool(send_pnginfo_to_studio)
             ctx.settings.pnginfo_clear_after_apply = bool(clear_pnginfo_after_apply)
             ctx.settings.auto_cfg_for_distilled = bool(auto_cfg_distilled)
@@ -1442,6 +1489,8 @@ def register_settings(registry: WebRegistry) -> None:
                 metadata_include_vae_hash,
                 metadata_include_lora_hashes,
                 metadata_include_app_version,
+                metadata_include_optimization_profile,
+                optimization_profile,
                 pnginfo_send_to_studio,
                 pnginfo_clear_after_apply,
                 auto_cfg_for_distilled,
@@ -1491,5 +1540,10 @@ def register_settings(registry: WebRegistry) -> None:
                     engine_hevc,
                     engine_save_status,
                 ],
+                show_progress=False,
+            )
+            tab.select(
+                lambda: _optimization_diagnostics_markdown(ctx),
+                outputs=[optimization_diagnostics],
                 show_progress=False,
             )

@@ -17,7 +17,13 @@ from aiwf.core.domain.generation import GenerationMode, GenerationRequest, JobRe
 from aiwf.core.events.types import AppStarted
 from aiwf.core.events.bus import EventBus
 from aiwf.core.events.types import JobFailed, JobQueued
-from aiwf.dev.diagnostics import DevDiagnostics, install_dev_diagnostics, trace_model_throughput, trace_safe
+from aiwf.dev.diagnostics import (
+    DevDiagnostics,
+    install_dev_diagnostics,
+    install_standalone_dev_diagnostics,
+    trace_model_throughput,
+    trace_safe,
+)
 from aiwf.services.queue import JobQueue
 
 pytestmark = pytest.mark.dev
@@ -111,6 +117,46 @@ def test_install_logs_app_version_on_startup(tmp_path, monkeypatch):
     row = json.loads((flags.resolved_output_dir() / "dev-trace.log").read_text(encoding="utf-8").strip())
     assert row["category"] == "app.started"
     assert row["app_version"] == __version__
+
+
+def test_install_standalone_dev_diagnostics_enables_trace_safe(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIWF_DEV_TRACE", "1")
+
+    diag = install_standalone_dev_diagnostics(tmp_path / "outputs")
+    trace_safe("worker.test", "Worker trace", field="value")
+
+    assert diag.log_path == tmp_path / "outputs" / "dev-trace.log"
+    row = json.loads(diag.log_path.read_text(encoding="utf-8").strip())
+    assert row["category"] == "worker.test"
+    assert row["field"] == "value"
+
+
+def test_wan_service_status_writes_dev_trace(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIWF_DEV_TRACE", "1")
+    diag = install_standalone_dev_diagnostics(tmp_path / "outputs")
+
+    from aiwf.services.wan import _video_status
+
+    _video_status("service stage")
+
+    row = json.loads(diag.log_path.read_text(encoding="utf-8").strip())
+    assert row["category"] == "wan.status"
+    assert row["message"] == "service stage"
+    assert row["component"] == "wan.service"
+
+
+def test_wan_pipeline_status_writes_dev_trace(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIWF_DEV_TRACE", "1")
+    diag = install_standalone_dev_diagnostics(tmp_path / "outputs")
+
+    from aiwf.infrastructure.wan.pipeline import _video_status
+
+    _video_status("pipeline stage")
+
+    row = json.loads(diag.log_path.read_text(encoding="utf-8").strip())
+    assert row["category"] == "wan.status"
+    assert row["message"] == "pipeline stage"
+    assert row["component"] == "wan.pipeline"
 
 
 def test_trace_model_throughput_defaults_app_version(tmp_path, monkeypatch):

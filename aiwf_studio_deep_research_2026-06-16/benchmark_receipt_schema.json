@@ -1,0 +1,436 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aiwf.local/schemas/benchmark_receipt.schema.json",
+  "title": "AIWF Studio Benchmark Receipt",
+  "type": "object",
+  "required": [
+    "receipt_id",
+    "created_at",
+    "aiwf",
+    "system",
+    "dependencies",
+    "gpu",
+    "model",
+    "pipeline",
+    "optimization_profile",
+    "generation",
+    "timing",
+    "memory",
+    "outputs",
+    "status"
+  ],
+  "properties": {
+    "receipt_id": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "aiwf": {
+      "type": "object",
+      "properties": {
+        "git_commit": {
+          "type": "string"
+        },
+        "app_version": {
+          "type": "string"
+        },
+        "profile_registry_version": {
+          "type": "string"
+        }
+      }
+    },
+    "system": {
+      "type": "object",
+      "properties": {
+        "os": {
+          "type": "string"
+        },
+        "python": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "cpu": {
+          "type": "string"
+        },
+        "ram_bytes": {
+          "type": "integer"
+        }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "gpu": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "compute_capability": {
+          "type": "string"
+        },
+        "vram_total_bytes": {
+          "type": "integer"
+        },
+        "driver_version": {
+          "type": "string"
+        },
+        "cuda_runtime": {
+          "type": "string"
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "family": {
+          "type": "string"
+        },
+        "checkpoint_path": {
+          "type": "string"
+        },
+        "checkpoint_sha256": {
+          "type": "string"
+        },
+        "vae_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vae_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lora": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "weight": {
+                "type": "number"
+              },
+              "rank": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "targets_text_encoder": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "controlnets": {
+          "type": "array"
+        }
+      }
+    },
+    "pipeline": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "diffusers_pipeline_class": {
+          "type": "string"
+        },
+        "scheduler_class": {
+          "type": "string"
+        },
+        "scheduler_config": {
+          "type": "object"
+        }
+      }
+    },
+    "optimization_profile": {
+      "type": "object",
+      "properties": {
+        "profile_id": {
+          "type": "string"
+        },
+        "dtype_policy": {
+          "type": "string"
+        },
+        "attention_backend": {
+          "type": "string"
+        },
+        "memory_format": {
+          "type": "string"
+        },
+        "compile_policy": {
+          "type": "string"
+        },
+        "offload_policy": {
+          "type": "string"
+        },
+        "vae_policy": {
+          "type": "object"
+        },
+        "quant_policy": {
+          "type": "object"
+        },
+        "engine_policy": {
+          "type": "object"
+        },
+        "quality_modifiers": {
+          "type": "object"
+        },
+        "fast_method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "experimental_flags": {
+          "type": "object"
+        }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "properties": {
+        "prompt_id": {
+          "type": "string"
+        },
+        "prompt_sha256": {
+          "type": "string"
+        },
+        "negative_prompt_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "width": {
+          "type": "integer"
+        },
+        "height": {
+          "type": "integer"
+        },
+        "batch_size": {
+          "type": "integer"
+        },
+        "num_inference_steps": {
+          "type": "integer"
+        },
+        "guidance_scale": {
+          "type": "number"
+        },
+        "strength": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "clip_skip": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "control_images": {
+          "type": "array"
+        },
+        "mask_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "properties": {
+        "load_time_s": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "compile_or_build_time_s": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "first_generation_time_s": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "warmup_runs": {
+          "type": "integer"
+        },
+        "steady_state_times_s": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "median_time_s": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "p90_time_s": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "stage_times_s": {
+          "type": "object"
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "properties": {
+        "torch_max_memory_allocated_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "torch_max_memory_reserved_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nvml_peak_used_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cpu_rss_peak_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "oom": {
+          "type": "boolean"
+        },
+        "oom_stage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "properties": {
+        "image_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "image_sha256": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "phash": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "grid_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metrics": {
+          "type": "object"
+        },
+        "artifact_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "human_verdict": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "exception_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trace_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fallback_used": {
+          "type": "boolean"
+        },
+        "fallback_profile_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

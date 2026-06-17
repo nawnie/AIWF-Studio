@@ -53,6 +53,23 @@ def _torch_native_fp8_available() -> bool:
         return False
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
 def _is_native_comfy_fp8_transformer(path: str | None) -> bool:
     if not path:
         return False
@@ -172,6 +189,12 @@ WAN_I2V_A14B_TRANSFORMER_CONFIG = {
 
 def _video_status(message: str) -> None:
     print(f"[AIWF] Video: {message}", flush=True)
+    try:
+        from aiwf.dev.diagnostics import trace_safe
+
+        trace_safe("wan.status", message, component="wan.pipeline")
+    except Exception:
+        logger.debug("Wan status trace failed.", exc_info=True)
 
 
 def _safetensors_uses_comfy_fp8_quant(path: Path) -> bool:
@@ -243,6 +266,80 @@ def _dequantize_comfy_fp8_state_dict(sd: dict, torch_dtype=None) -> dict:
     return out
 
 
+def _tensor_diag(tensor: Any) -> dict[str, Any]:
+    """Return tensor metadata safe for diagnostics; never include tensor values."""
+    device = getattr(tensor, "device", None)
+    try:
+        stride = [int(v) for v in tensor.stride()]
+    except Exception:
+        stride = None
+    try:
+        is_contiguous = bool(tensor.is_contiguous())
+    except Exception:
+        is_contiguous = None
+    return {
+        "shape": [int(v) for v in getattr(tensor, "shape", ())],
+        "stride": stride,
+        "dtype": str(getattr(tensor, "dtype", "")).replace("torch.", ""),
+        "device_type": getattr(device, "type", None),
+        "device_index": getattr(device, "index", None),
+        "is_contiguous": is_contiguous,
+    }
+
+
+def _fp8_scaled_mm_failure_payload(
+    exc: BaseException,
+    *,
+    layer: Any,
+    input_tensor: Any,
+    x8: Any,
+    weight_t: Any,
+    scale_a: Any,
+    scale_b: Any,
+    rows: int,
+    padded_rows: int,
+    pad_m: int,
+) -> dict[str, Any]:
+    message = str(exc)
+    if len(message) > 800:
+        message = message[:797] + "..."
+    return {
+        "error": {
+            "type": type(exc).__name__,
+            "message": message,
+        },
+        "layer": {
+            "class": layer.__class__.__name__,
+            "in_features": int(getattr(layer, "in_features", 0)),
+            "out_features": int(getattr(layer, "out_features", 0)),
+            "has_bias": getattr(layer, "bias", None) is not None,
+        },
+        "input": _tensor_diag(input_tensor),
+        "matmul": {
+            "lhs": _tensor_diag(x8),
+            "rhs": _tensor_diag(weight_t),
+            "scale_a": _tensor_diag(scale_a),
+            "scale_b": _tensor_diag(scale_b),
+            "rows": int(rows),
+            "padded_rows": int(padded_rows),
+            "pad_m": int(pad_m),
+        },
+    }
+
+
+def _trace_fp8_scaled_mm_fallback(payload: dict[str, Any]) -> None:
+    try:
+        from aiwf.dev.diagnostics import trace_safe
+
+        trace_safe(
+            "wan.fp8_scaled_mm_fallback",
+            "Wan FP8 _scaled_mm fallback",
+            **payload,
+        )
+    except Exception:
+        logger.debug("Wan FP8 _scaled_mm diagnostic trace failed.", exc_info=True)
+
+
 def _new_fp8_scaled_linear(in_features: int, out_features: int, bias: bool):
     import torch
 
@@ -286,11 +383,12 @@ def _new_fp8_scaled_linear(in_features: int, out_features: int, bias: bool):
                 # back to row-major and forces the slow bf16 fallback.
                 weight_t = self.weight.t()
                 try:
+                    scale_b = self.weight_scale.to(device=x.device, dtype=torch.float32)
                     y = torch._scaled_mm(
                         x8,
                         weight_t,
                         scale_a=scale_a,
-                        scale_b=self.weight_scale.to(device=x.device, dtype=torch.float32),
+                        scale_b=scale_b,
                         out_dtype=input.dtype
                         if input.dtype in (torch.float16, torch.bfloat16)
                         else torch.bfloat16,
@@ -302,10 +400,24 @@ def _new_fp8_scaled_linear(in_features: int, out_features: int, bias: bool):
                     return y.reshape(*original_shape, self.out_features)
                 except Exception as exc:
                     if not getattr(self, "_scaled_mm_warned", False):
-                        logger.warning(
-                            "FP8ScaledLinear _scaled_mm failed (%s); falling back to bf16 linear for this layer.",
+                        payload = _fp8_scaled_mm_failure_payload(
                             exc,
+                            layer=self,
+                            input_tensor=input,
+                            x8=x8,
+                            weight_t=weight_t,
+                            scale_a=scale_a,
+                            scale_b=scale_b,
+                            rows=m,
+                            padded_rows=x8.shape[0],
+                            pad_m=pad_m,
                         )
+                        logger.warning(
+                            "FP8ScaledLinear _scaled_mm failed (%s: %s); falling back to bf16 linear for this layer.",
+                            payload["error"]["type"],
+                            payload["error"]["message"],
+                        )
+                        _trace_fp8_scaled_mm_fallback(payload)
                         self._scaled_mm_warned = True
 
             weight = (self.weight.float() * self.weight_scale.float()).contiguous()
@@ -1755,6 +1867,29 @@ class WanI2VBackend:
         if self._preloaded_low is None:
             raise WanUnavailable("Low-noise transformer preload finished without a model.")
 
+    def _prepare_low_preload_for_generation(
+        self,
+        request,
+        *,
+        chunk_size: int,
+        chunk_overlap: int,
+    ) -> None:
+        """Start low-stage preload only when the pipeline did not already do it."""
+        if self._preloaded_low is not None:
+            _video_status("Low-noise transformer already preloaded; skipping duplicate preload.")
+            return
+        if self._low_preload_spec is None:
+            self._low_preload_spec = {
+                "low_path": str(request.low_noise_model_id),
+                "low_lora_path": getattr(request, "low_noise_lora_id", None),
+                "low_lora_scale": float(getattr(request, "low_noise_lora_scale", 1.0) or 1.0),
+                "use_cache": self._cache_mode in ("full", "gpu_swap"),
+                "pin_tensors": self._pinned_memory and self.cache._global_pin_enabled,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+            }
+        self._maybe_start_background_low_preload()
+
     def available(self) -> bool:
         return wan_supported()
 
@@ -2239,7 +2374,10 @@ class WanI2VBackend:
         _chunk_size = int(getattr(request, "chunk_size", 16) or 16)
         _chunk_overlap = int(getattr(request, "chunk_overlap", 8) or 8)
         _image_guidance_scale = float(getattr(request, "image_guidance_scale", 1.0) or 1.0)
+        _manual_vae_decode = _env_flag("AIWF_WAN_MANUAL_VAE_DECODE", default=False)
+        _vae_decode_chunk_frames = _env_int("AIWF_WAN_VAE_CHUNK_FRAMES", 4)
 
+        load_started = time.perf_counter()
         pipe = self._ensure(
             high_noise_model_id=request.high_noise_model_id,
             low_noise_model_id=            request.low_noise_model_id,
@@ -2258,7 +2396,9 @@ class WanI2VBackend:
             chunk_size=_chunk_size,
             chunk_overlap=_chunk_overlap,
         )
+        load_seconds = max(0.0, time.perf_counter() - load_started)
 
+        preprocess_started = time.perf_counter()
         # Recompute boundary_ratio from the scheduler's actual timestep distribution
         # so high_noise_steps + low_noise_steps is honoured regardless of flow_shift.
         high_steps = max(1, int(getattr(request, "high_noise_steps", 4) or 4))
@@ -2286,20 +2426,14 @@ class WanI2VBackend:
         real_device = self._real_device(pipe)
         generator = torch.Generator(device=real_device).manual_seed(seed)
 
-        # Reset preload state in case a prior run left a stale background thread,
-        # then kick off the background load of the low-noise transformer so it
-        # arrives in CPU cache before the high-noise stage finishes.
-        self._reset_low_preload_state()
-        self._low_preload_spec = {
-            "low_path": str(request.low_noise_model_id),
-            "low_lora_path": getattr(request, "low_noise_lora_id", None),
-            "low_lora_scale": float(getattr(request, "low_noise_lora_scale", 1.0) or 1.0),
-            "use_cache": self._cache_mode in ("full", "gpu_swap"),
-            "pin_tensors": self._pinned_memory and self.cache._global_pin_enabled,
-            "chunk_size": _chunk_size,
-            "chunk_overlap": _chunk_overlap,
-        }
-        self._maybe_start_background_low_preload()
+        # Kick off the low-noise preload only if _load_dual_pipeline did not
+        # already preload it. Resetting here discards a ready transformer and
+        # causes a second safetensors/GGUF load before the same generation.
+        self._prepare_low_preload_for_generation(
+            request,
+            chunk_size=_chunk_size,
+            chunk_overlap=_chunk_overlap,
+        )
 
         num_frames = int(getattr(request, "num_frames", 49))
         num_frames = max(5, num_frames if (num_frames - 1) % 4 == 0 else num_frames - (num_frames - 1) % 4)
@@ -2313,22 +2447,102 @@ class WanI2VBackend:
             f"{total_steps} steps (high={high_steps}/low={low_steps}), "
             f"guidance={_guidance_scale:g}, shift={_flow_shift:g}, seed={seed}."
         )
+        preprocess_seconds = max(0.0, time.perf_counter() - preprocess_started)
 
         cancelled = [False]
+        denoise_started = 0.0
+        progress_steps = 0
+        last_step_elapsed = 0.0
+        high_stage_elapsed = 0.0
+        hook_timings: dict[str, float] = {}
+
+        def _install_call_timer(obj: Any, attr: str, metric: str):
+            original = getattr(obj, attr, None)
+            if original is None or not callable(original):
+                return None
+
+            def _timed(*args, **kwargs):
+                started = time.perf_counter()
+                try:
+                    return original(*args, **kwargs)
+                finally:
+                    hook_timings[metric] = hook_timings.get(metric, 0.0) + max(
+                        0.0,
+                        time.perf_counter() - started,
+                    )
+
+            try:
+                setattr(obj, attr, _timed)
+            except Exception:
+                logger.debug("Could not install Wan timing hook for %s.%s", obj.__class__.__name__, attr, exc_info=True)
+                return None
+
+            def _restore() -> None:
+                try:
+                    setattr(obj, attr, original)
+                except Exception:
+                    logger.debug(
+                        "Could not restore Wan timing hook for %s.%s",
+                        obj.__class__.__name__,
+                        attr,
+                        exc_info=True,
+                    )
+
+            return _restore
+
+        def _trace_step_rate(step: int, steps_per_second: float | None, seconds_per_step: float | None) -> None:
+            try:
+                from aiwf.dev.diagnostics import trace_safe
+
+                trace_safe(
+                    "wan.step",
+                    "Wan denoise progress",
+                    step=int(step),
+                    total_steps=int(total_steps),
+                    steps_per_second=round(float(steps_per_second), 6)
+                    if steps_per_second is not None
+                    else None,
+                    iterations_per_second=round(float(steps_per_second), 6)
+                    if steps_per_second is not None
+                    else None,
+                    seconds_per_step=round(float(seconds_per_step), 3)
+                    if seconds_per_step is not None
+                    else None,
+                )
+            except Exception:
+                logger.debug("Wan step trace failed.", exc_info=True)
 
         def _step_callback(pipe, i, t, callback_kwargs):
+            nonlocal progress_steps, last_step_elapsed, high_stage_elapsed
             if should_cancel is not None and should_cancel():
                 cancelled[0] = True
                 pipe._interrupt = True
+            try:
+                current_step = min(total_steps, max(1, int(i) + 1))
+            except Exception:
+                current_step = min(total_steps, progress_steps + 1)
+            progress_steps = max(progress_steps, current_step)
+            elapsed_steps = max(0.0, time.perf_counter() - denoise_started) if denoise_started else 0.0
+            last_step_elapsed = max(last_step_elapsed, elapsed_steps)
+            if current_step <= high_steps:
+                high_stage_elapsed = max(high_stage_elapsed, elapsed_steps)
+            steps_per_second = current_step / elapsed_steps if elapsed_steps > 0 else None
+            seconds_per_step = elapsed_steps / current_step if current_step > 0 and elapsed_steps > 0 else None
+            _trace_step_rate(current_step, steps_per_second, seconds_per_step)
             if on_progress is not None:
                 try:
-                    on_progress(i, total_steps)
+                    on_progress(current_step, total_steps, steps_per_second)
+                except TypeError:
+                    try:
+                        on_progress(current_step, total_steps)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             return callback_kwargs
 
         try:
-            output_type = _wan_output_type_for_pipe(pipe)
+            output_type = "latent" if _manual_vae_decode else _wan_output_type_for_pipe(pipe)
             call_kwargs = dict(
                 image=image,
                 prompt=_prompt,
@@ -2349,7 +2563,29 @@ class WanI2VBackend:
                     "Installed Diffusers Wan pipeline does not support image_guidance_scale; requested %.3f ignored.",
                     _image_guidance_scale,
                 )
-            output = pipe(**call_kwargs)
+            restore_hooks = [
+                hook
+                for hook in (
+                    _install_call_timer(pipe, "encode_prompt", "prompt_encode_seconds"),
+                    _install_call_timer(pipe, "encode_image", "image_encode_seconds"),
+                    _install_call_timer(pipe, "prepare_latents", "latent_prepare_seconds"),
+                    _install_call_timer(getattr(pipe, "vae", None), "decode", "vae_decode_seconds"),
+                    _install_call_timer(
+                        getattr(pipe, "video_processor", None),
+                        "postprocess_video",
+                        "video_postprocess_seconds",
+                    ),
+                    _install_call_timer(pipe, "maybe_free_model_hooks", "offload_cleanup_seconds"),
+                )
+                if hook is not None
+            ]
+            denoise_started = time.perf_counter()
+            try:
+                output = pipe(**call_kwargs)
+            finally:
+                pipeline_seconds = max(0.0, time.perf_counter() - denoise_started)
+                for restore in reversed(restore_hooks):
+                    restore()
         except Exception as exc:
             if cancelled[0]:
                 raise WanUnavailable("Generation cancelled by user.") from exc
@@ -2358,13 +2594,70 @@ class WanI2VBackend:
         if cancelled[0]:
             raise WanUnavailable("Generation cancelled by user.")
 
-        frames = _frames_from_wan_pipeline_output(
-            output.frames if hasattr(output, "frames") else output,
-            pipe=pipe,
-            decode_latents=lambda p, v, **kw: p.decode_latents(v) if hasattr(p, "decode_latents") else [],
-        )
+        postprocess_started = time.perf_counter()
+        output_frames = output.frames if hasattr(output, "frames") else output
+        if _manual_vae_decode:
+            restore_hooks = [
+                hook
+                for hook in (
+                    _install_call_timer(getattr(pipe, "vae", None), "decode", "vae_decode_seconds"),
+                    _install_call_timer(
+                        getattr(pipe, "video_processor", None),
+                        "postprocess_video",
+                        "video_postprocess_seconds",
+                    ),
+                )
+                if hook is not None
+            ]
+            try:
+                from aiwf.infrastructure.torch.wan_vram import decode_wan_video_latents
 
-        return frames, h, w
+                decoded = decode_wan_video_latents(
+                    pipe,
+                    output_frames,
+                    chunk_frames=_vae_decode_chunk_frames,
+                    output_type="pil",
+                )
+                frames = _flatten_wan_video_frames(decoded)
+            finally:
+                for restore in reversed(restore_hooks):
+                    restore()
+        else:
+            frames = _frames_from_wan_pipeline_output(
+                output_frames,
+                pipe=pipe,
+                decode_latents=lambda p, v, **kw: p.decode_latents(v) if hasattr(p, "decode_latents") else [],
+            )
+        postprocess_seconds = max(0.0, time.perf_counter() - postprocess_started)
+
+        completed_steps = max(progress_steps, total_steps)
+        denoise_seconds = last_step_elapsed if last_step_elapsed > 0 else pipeline_seconds
+        if high_stage_elapsed <= 0 and denoise_seconds > 0:
+            high_stage_elapsed = denoise_seconds * min(1.0, max(0.0, high_steps / max(1, total_steps)))
+        low_stage_elapsed = max(0.0, denoise_seconds - high_stage_elapsed)
+        pipeline_overhead_seconds = max(0.0, pipeline_seconds - denoise_seconds)
+        steps_per_second = completed_steps / denoise_seconds if denoise_seconds > 0 else None
+        metrics = {
+            "step_count": int(completed_steps),
+            "load_seconds": round(float(load_seconds), 3),
+            "preprocess_seconds": round(float(preprocess_seconds), 3),
+            "prompt_encode_seconds": round(float(hook_timings.get("prompt_encode_seconds", 0.0)), 3),
+            "image_encode_seconds": round(float(hook_timings.get("image_encode_seconds", 0.0)), 3),
+            "latent_prepare_seconds": round(float(hook_timings.get("latent_prepare_seconds", 0.0)), 3),
+            "denoise_seconds": round(float(denoise_seconds), 3),
+            "high_denoise_seconds": round(float(high_stage_elapsed), 3),
+            "low_denoise_seconds": round(float(low_stage_elapsed), 3),
+            "pipeline_seconds": round(float(pipeline_seconds), 3),
+            "pipeline_overhead_seconds": round(float(pipeline_overhead_seconds), 3),
+            "vae_decode_seconds": round(float(hook_timings.get("vae_decode_seconds", 0.0)), 3),
+            "manual_vae_decode": bool(_manual_vae_decode),
+            "vae_decode_chunk_frames": int(_vae_decode_chunk_frames if _manual_vae_decode else 0),
+            "video_postprocess_seconds": round(float(hook_timings.get("video_postprocess_seconds", 0.0)), 3),
+            "offload_cleanup_seconds": round(float(hook_timings.get("offload_cleanup_seconds", 0.0)), 3),
+            "postprocess_seconds": round(float(postprocess_seconds), 3),
+            "steps_per_second": round(float(steps_per_second), 6) if steps_per_second is not None else None,
+        }
+        return frames, h, w, metrics
 
     def _real_device(self, pipe) -> str:
         try:

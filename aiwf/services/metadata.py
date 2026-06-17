@@ -63,6 +63,7 @@ class MetadataService:
         vae_hash: str | None = None,
         lora_hashes: dict[str, str] | None = None,
         app_version: str | None = None,
+        optimization_profile_id: str | None = None,
     ) -> str:
         additions: list[str] = []
         if model_hash:
@@ -77,6 +78,8 @@ class MetadataService:
                 additions.append("Lora hashes: " + "; ".join(pairs))
         if app_version:
             additions.append(f"AIWF Studio: {app_version}")
+        if optimization_profile_id:
+            additions.append(f"AIWF profile: {optimization_profile_id}")
 
         if not additions:
             return infotext

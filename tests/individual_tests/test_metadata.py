@@ -41,6 +41,7 @@ def test_enrich_infotext_adds_requested_fields():
         vae_hash="def456",
         lora_hashes={"detail": "11aa22bb", "empty": ""},
         app_version="9.9.9",
+        optimization_profile_id="balanced_sdpa_fp16",
     )
     assert "Model hash: abc123" in out
     assert "VAE: kl-f8" in out
@@ -48,6 +49,7 @@ def test_enrich_infotext_adds_requested_fields():
     assert "Lora hashes: detail: 11aa22bb" in out
     assert "empty:" not in out  # blank hashes skipped
     assert "AIWF Studio: 9.9.9" in out
+    assert "AIWF profile: balanced_sdpa_fp16" in out
     assert out.startswith(base.rstrip())
 
 

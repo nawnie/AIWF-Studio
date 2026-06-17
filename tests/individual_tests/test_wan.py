@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -18,6 +20,7 @@ from aiwf.infrastructure.wan.pipeline import (
     _boundary_ratio_for_step_split,
     _dequantize_comfy_fp8_state_dict,
     _ensure_wan_attention_processors,
+    _fp8_scaled_mm_failure_payload,
     _frames_from_wan_pipeline_output,
     _load_comfy_fp8_transformer_weights,
     _load_umt5_text_encoder,
@@ -399,7 +402,31 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     _write_fake_safetensors(low)
     _write_fake_safetensors(vae)
 
-    s._backend.generate = lambda *args, **kwargs: ([Image.new("RGB", (8, 8), "black")] * 5, 8, 8)
+    s._backend.generate = lambda *args, **kwargs: (
+        [Image.new("RGB", (8, 8), "black")] * 5,
+        8,
+        8,
+        {
+            "step_count": 8,
+            "load_seconds": 1.0,
+            "preprocess_seconds": 0.25,
+            "prompt_encode_seconds": 0.4,
+            "image_encode_seconds": 0.3,
+            "latent_prepare_seconds": 0.6,
+            "denoise_seconds": 2.0,
+            "high_denoise_seconds": 0.75,
+            "low_denoise_seconds": 1.25,
+            "pipeline_seconds": 2.5,
+            "pipeline_overhead_seconds": 0.5,
+            "vae_decode_seconds": 0.7,
+            "manual_vae_decode": True,
+            "vae_decode_chunk_frames": 4,
+            "video_postprocess_seconds": 0.1,
+            "offload_cleanup_seconds": 0.2,
+            "postprocess_seconds": 0.2,
+            "steps_per_second": 4.0,
+        },
+    )
     captured: dict[str, object] = {}
     monkeypatch.setattr("aiwf.services.wan.trace_model_throughput", lambda **kwargs: captured.update(kwargs))
     monkeypatch.setattr("aiwf.services.wan.write_frames", lambda frames, output_path, fps: len(frames))
@@ -411,8 +438,49 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     assert captured["kind"] == "wan.video"
     assert captured["units_label"] == "frames"
     assert captured["units"] == 5
+    assert captured["step_count"] == 8
+    assert captured["load_seconds"] == 1.0
+    assert captured["preprocess_seconds"] == 0.25
+    assert captured["prompt_encode_seconds"] == 0.4
+    assert captured["image_encode_seconds"] == 0.3
+    assert captured["latent_prepare_seconds"] == 0.6
+    assert captured["denoise_seconds"] == 2.0
+    assert captured["high_denoise_seconds"] == 0.75
+    assert captured["low_denoise_seconds"] == 1.25
+    assert captured["pipeline_seconds"] == 2.5
+    assert captured["pipeline_overhead_seconds"] == 0.5
+    assert captured["vae_decode_seconds"] == 0.7
+    assert captured["manual_vae_decode"] is True
+    assert captured["vae_decode_chunk_frames"] == 4
+    assert captured["video_postprocess_seconds"] == 0.1
+    assert captured["offload_cleanup_seconds"] == 0.2
+    assert captured["postprocess_seconds"] == 0.2
+    assert captured["video_write_seconds"] >= 0.0
+    assert captured["steps_per_second"] == 4.0
+    assert captured["iterations_per_second"] == 4.0
     assert captured.get("app_version") == aiwf.__version__
     assert Path(str(captured["high_noise_model_id"])).name == high.name
+    assert result.step_count == 8
+    assert result.load_seconds == 1.0
+    assert result.preprocess_seconds == 0.25
+    assert result.prompt_encode_seconds == 0.4
+    assert result.image_encode_seconds == 0.3
+    assert result.latent_prepare_seconds == 0.6
+    assert result.denoise_seconds == 2.0
+    assert result.high_denoise_seconds == 0.75
+    assert result.low_denoise_seconds == 1.25
+    assert result.pipeline_seconds == 2.5
+    assert result.pipeline_overhead_seconds == 0.5
+    assert result.vae_decode_seconds == 0.7
+    assert result.manual_vae_decode is True
+    assert result.vae_decode_chunk_frames == 4
+    assert result.video_postprocess_seconds == 0.1
+    assert result.offload_cleanup_seconds == 0.2
+    assert result.postprocess_seconds == 0.2
+    assert result.video_write_seconds >= 0.0
+    assert result.steps_per_second == 4.0
+    assert result.iterations_per_second == 4.0
+    assert "4.000 it/s" in result.message
 
 
 def test_wan_generation_passes_resolved_paths_to_backend(tmp_path: Path, monkeypatch):
@@ -600,6 +668,55 @@ def test_low_preload_worker_passes_temporal_chunk_settings():
     assert seen == [(20, 6)]
 
 
+def test_prepare_low_preload_skips_duplicate_when_low_is_ready():
+    backend = WanI2VBackend()
+    backend._preloaded_low = object()
+    backend._low_preload_spec = None
+    started: list[bool] = []
+
+    with patch.object(backend, "_maybe_start_background_low_preload", side_effect=lambda: started.append(True)):
+        backend._prepare_low_preload_for_generation(
+            SimpleNamespace(
+                low_noise_model_id="low.safetensors",
+                low_noise_lora_id=None,
+                low_noise_lora_scale=1.0,
+            ),
+            chunk_size=16,
+            chunk_overlap=8,
+        )
+
+    assert started == []
+    assert backend._low_preload_spec is None
+    assert backend._preloaded_low is not None
+
+
+def test_prepare_low_preload_sets_spec_when_low_is_not_ready():
+    backend = WanI2VBackend()
+    started: list[bool] = []
+
+    with patch.object(backend, "_maybe_start_background_low_preload", side_effect=lambda: started.append(True)):
+        backend._prepare_low_preload_for_generation(
+            SimpleNamespace(
+                low_noise_model_id="low.safetensors",
+                low_noise_lora_id="low-lora.safetensors",
+                low_noise_lora_scale=0.75,
+            ),
+            chunk_size=20,
+            chunk_overlap=6,
+        )
+
+    assert started == [True]
+    assert backend._low_preload_spec == {
+        "low_path": "low.safetensors",
+        "low_lora_path": "low-lora.safetensors",
+        "low_lora_scale": 0.75,
+        "use_cache": False,
+        "pin_tensors": True,
+        "chunk_size": 20,
+        "chunk_overlap": 6,
+    }
+
+
 def test_wan_pipeline_cache_key_includes_temporal_chunk_settings():
     torch = pytest.importorskip("torch")
 
@@ -750,6 +867,41 @@ def test_fp8_scaled_linear_uses_column_major_weight_for_scaled_mm():
     assert y.shape == (2, 64)
     assert y.dtype == torch.bfloat16
     assert not getattr(layer, "_scaled_mm_warned", False)
+
+
+def test_fp8_scaled_mm_failure_payload_contains_only_tensor_metadata():
+    torch = pytest.importorskip("torch")
+
+    layer = _new_fp8_scaled_linear(4, 8, bias=False)
+    input_tensor = torch.tensor([[12345.5, 23456.5, 34567.5, 45678.5]], dtype=torch.float32)
+    x8 = input_tensor.contiguous()
+    weight_t = torch.empty((4, 8), dtype=torch.float32).t()
+    scale_a = torch.ones((), dtype=torch.float32)
+    scale_b = torch.ones((), dtype=torch.float32)
+
+    payload = _fp8_scaled_mm_failure_payload(
+        RuntimeError("synthetic scaled-mm failure"),
+        layer=layer,
+        input_tensor=input_tensor,
+        x8=x8,
+        weight_t=weight_t,
+        scale_a=scale_a,
+        scale_b=scale_b,
+        rows=1,
+        padded_rows=16,
+        pad_m=15,
+    )
+    encoded = json.dumps(payload, sort_keys=True)
+
+    assert payload["error"]["type"] == "RuntimeError"
+    assert payload["layer"]["in_features"] == 4
+    assert payload["layer"]["out_features"] == 8
+    assert payload["input"]["shape"] == [1, 4]
+    assert payload["matmul"]["rhs"]["shape"] == [8, 4]
+    assert payload["matmul"]["pad_m"] == 15
+    assert "12345.5" not in encoded
+    assert "23456.5" not in encoded
+    assert "values" not in encoded.lower()
 
 
 def test_wan_transformer_key_renames_strip_comfy_prefix():

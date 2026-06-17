@@ -11,6 +11,9 @@ from aiwf.api.v1.routes import build_router
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest, GenerationResult, JobProgress, JobRecord, JobState
 from aiwf.core.domain.models import Checkpoint, SamplerInfo
 from aiwf.core.interfaces.plugins import PluginInfo
+from aiwf.core.config.settings import RuntimeFlags, UserSettings
+from aiwf.services.optimization import CapabilityDetector, OptimizationPlanner
+from aiwf.services.optimization_diagnostics import OptimizationDiagnosticsService
 
 
 class FakeGeneration:
@@ -78,15 +81,17 @@ class FakePlots:
         return SimpleNamespace(labels=["seed=1"], images=[image], grid=image, infotexts=["plot"])
 
 
-def make_client(fake_generation=None):
+def make_client(fake_generation=None, optimization_diagnostics=None):
     generation = fake_generation or FakeGeneration()
     ctx = SimpleNamespace(
         generation=generation,
         controlnet=FakeControlNet(),
         plots=FakePlots(),
-        settings=SimpleNamespace(save_images=True),
+        settings=SimpleNamespace(save_images=True, optimization_profile_id="balanced_sdpa_fp16"),
         plugins=SimpleNamespace(list_plugins=lambda: [PluginInfo(id="hello", name="hello", version="1")]),
     )
+    if optimization_diagnostics is not None:
+        ctx.optimization_diagnostics = optimization_diagnostics
     app = FastAPI()
     app.include_router(build_router(ctx))
     return TestClient(app), generation
@@ -158,3 +163,33 @@ def test_native_xyz_plot_endpoint_returns_grid():
     assert response.status_code == 200
     assert response.json()["labels"] == ["seed=1"]
     assert response.json()["grid"]
+
+
+def test_native_optimization_status_endpoint_fallback():
+    client, _ = make_client()
+
+    response = client.get("/api/v1/optimization/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["profile_id"] == "balanced_sdpa_fp16"
+    assert data["promotion_gates"]["status"] == "unavailable"
+
+
+def test_native_optimization_status_endpoint_with_service(tmp_path):
+    diagnostics = OptimizationDiagnosticsService(
+        flags=RuntimeFlags(data_dir=tmp_path),
+        settings=UserSettings(),
+        detector=CapabilityDetector(core_packages=(), optional_packages={}),
+        planner=OptimizationPlanner(),
+        output_dir=tmp_path,
+    )
+    client, _ = make_client(optimization_diagnostics=diagnostics)
+
+    response = client.get("/api/v1/optimization/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["profile_id"] == "balanced_sdpa_fp16"
+    assert "capability_report" in data
+    assert "known_failures" in data

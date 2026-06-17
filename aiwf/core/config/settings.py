@@ -143,6 +143,8 @@ class UserSettings(BaseSettings):
     metadata_include_vae_hash: bool = True
     metadata_include_lora_hashes: bool = True
     metadata_include_app_version: bool = True
+    metadata_include_optimization_profile: bool = True
+    optimization_profile_id: str = "balanced_sdpa_fp16"
 
     # PNG Info handoff behavior.
     pnginfo_send_to_studio: bool = True

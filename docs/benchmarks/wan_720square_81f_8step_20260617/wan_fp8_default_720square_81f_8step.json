@@ -1,0 +1,48 @@
+{
+  "kind": "wan_i2v",
+  "label": "wan_fp8_720x720_81f_8step_default_decode",
+  "image": "docs/benchmarks/wan_720square_81f_8step_20260617/artifacts/wan_input_720x720.png",
+  "flags": {
+    "data_dir": ".",
+    "models_dir": "models",
+    "output_dir": "outputs/benchmarks/wan_720square_81f_8step_20260617/generated/fp8_default",
+    "cuda_malloc": true,
+    "async_offload": true,
+    "pinned_memory": true
+  },
+  "optimization": {
+    "profile_id": "safe_eager_cuda",
+    "experimental_flags": {
+      "wan_fp8_native": true
+    }
+  },
+  "model": {
+    "family": "wan2.2-i2v-a14b",
+    "format": "comfy_fp8_safetensors",
+    "high": "DasiwaWAN22I2V14BLightspeed_boundbiteHighV10.safetensors",
+    "low": "DasiwaWAN22I2V14BLightspeed_boundbiteLowV10.safetensors"
+  },
+  "request": {
+    "prompt": "a warm cinematic product-lighting benchmark scene at 720 square, smooth camera drift, clean details, stable geometry",
+    "negative_prompt": "low quality, blurry, noisy, flicker, warped geometry, artifacts",
+    "num_frames": 81,
+    "steps": 8,
+    "high_noise_steps": 4,
+    "low_noise_steps": 4,
+    "guidance_scale": 1,
+    "image_guidance_scale": 1,
+    "width": 720,
+    "height": 720,
+    "fps": 16,
+    "flow_shift": 5,
+    "sigma_type": "beta",
+    "sampler": "euler",
+    "seed": 123456,
+    "offload": "sequential",
+    "text_encoder_path": "models/Textencoder/nsfw_wan_umt5-xxl_fp8_scaled.safetensors",
+    "vae_id": "models/VAE/wan_2.1_vae.safetensors",
+    "components_base": "models/wan/Diffusers/Wan2.2-TI2V-5B-Diffusers",
+    "high_noise_model_id": "models/wan/Safetensor/DasiwaWAN22I2V14BLightspeed_boundbiteHighV10.safetensors",
+    "low_noise_model_id": "models/wan/Safetensor/DasiwaWAN22I2V14BLightspeed_boundbiteLowV10.safetensors"
+  }
+}

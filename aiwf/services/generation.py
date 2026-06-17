@@ -19,6 +19,12 @@ from aiwf.core.domain.generation import (
     JobState,
 )
 from aiwf.core.domain.engine import EngineSwitchRequest, EngineTenant
+from aiwf.core.domain.optimization import (
+    ModelFamily,
+    OptimizationPlan,
+    OptimizationRequest,
+    PipelineKind,
+)
 from aiwf.core.events.bus import EventBus
 from aiwf.core.events.types import AfterGenerate, BeforeGenerate, JobProgressed
 from aiwf.core.interfaces.backend import InferenceBackend
@@ -32,6 +38,7 @@ from aiwf.services.queue import JobQueue
 if TYPE_CHECKING:
     from aiwf.services.prompt_processor import PromptProcessorService
     from aiwf.services.engine_supervisor import EngineSupervisor
+    from aiwf.services.optimization import OptimizationPlanner
 
 
 DEFAULT_NEGATIVE_PROMPT = (
@@ -54,6 +61,7 @@ class GenerationService:
         prompts: PromptProcessorService | None = None,
         settings_path: Path | None = None,
         supervisor: EngineSupervisor | None = None,
+        optimization_planner: OptimizationPlanner | None = None,
     ) -> None:
         self.backend = backend
         self.store = store
@@ -64,6 +72,7 @@ class GenerationService:
         self.prompts = prompts
         self._settings_path = settings_path
         self.supervisor = supervisor
+        self.optimization_planner = optimization_planner
 
     def _apply_default_negative(self, request):
         """When the user leaves the negative prompt blank, fall back to a generic
@@ -157,7 +166,97 @@ class GenerationService:
                 return item
         return None
 
-    def _enrich_saved_infotext(self, infotext: str, request: GenerationRequest, checkpoint) -> str:
+    @staticmethod
+    def _pipeline_kind_for_request(request: GenerationRequest) -> PipelineKind:
+        if request.mode == GenerationMode.INPAINT:
+            return PipelineKind.INPAINT
+        if request.controlnet_units:
+            return PipelineKind.CONTROLNET
+        if request.enable_hr:
+            return PipelineKind.HIRES
+        if request.mode == GenerationMode.IMG2IMG:
+            return PipelineKind.IMG2IMG
+        return PipelineKind.TXT2IMG
+
+    @staticmethod
+    def _model_family_for_checkpoint(checkpoint) -> ModelFamily:
+        try:
+            prof = detect_model_profile(
+                getattr(checkpoint, "title", None),
+                getattr(checkpoint, "filename", None),
+                getattr(checkpoint, "id", None),
+            )
+            if prof.family == "turbo":
+                return ModelFamily.SDXL_TURBO
+        except Exception:
+            pass
+        blob = " ".join(
+            str(value or "")
+            for value in (
+                getattr(checkpoint, "title", None),
+                getattr(checkpoint, "filename", None),
+                getattr(checkpoint, "id", None),
+            )
+        ).lower()
+        if "sdxl" in blob or "_xl" in blob or "-xl" in blob or " xl" in blob:
+            return ModelFamily.SDXL
+        if "sd1.5" in blob or "sd15" in blob or "stable-diffusion-v1" in blob:
+            return ModelFamily.SD15
+        return ModelFamily.UNKNOWN
+
+    def _resolve_optimization_plan(self, request: GenerationRequest, checkpoint) -> OptimizationPlan | None:
+        if self.optimization_planner is None:
+            return None
+        try:
+            parsed = parse_extra_networks(request.prompt)
+            opt_request = OptimizationRequest(
+                profile_id=getattr(self.settings, "optimization_profile_id", "balanced_sdpa_fp16"),
+                pipeline_kind=self._pipeline_kind_for_request(request),
+                model_family=self._model_family_for_checkpoint(checkpoint),
+                width=int(request.width),
+                height=int(request.height),
+                batch_size=int(request.batch_size),
+                lora_count=len(parsed.loras),
+                controlnet_count=len(request.controlnet_units),
+            )
+            plan = self.optimization_planner.resolve(opt_request)
+            trace_safe(
+                "generation.optimization_plan",
+                "Resolved generation optimization profile",
+                profile_id=plan.profile_id,
+                requested_profile_id=plan.requested_profile_id,
+                blocked=plan.blocked,
+                decisions=[d.model_dump(mode="json") for d in plan.decisions],
+            )
+            trace_safe(
+                "optimization.profile_resolved",
+                "Optimization profile resolved",
+                profile_id=plan.profile_id,
+                requested_profile_id=plan.requested_profile_id,
+                pipeline_kind=opt_request.pipeline_kind.value,
+                model_family=opt_request.model_family.value,
+            )
+            for decision in plan.decisions:
+                if decision.decision in {"blocked", "disabled"}:
+                    trace_safe(
+                        "optimization.flag_blocked",
+                        decision.reason,
+                        key=decision.key,
+                        decision=decision.decision,
+                        severity=decision.severity,
+                    )
+            return plan
+        except Exception as exc:
+            trace_exception_safe("generation.optimization_plan", exc)
+            return None
+
+    def _enrich_saved_infotext(
+        self,
+        infotext: str,
+        request: GenerationRequest,
+        checkpoint,
+        optimization_plan: OptimizationPlan | None = None,
+    ) -> str:
         vae_name = None
         vae_hash = None
         if self.settings.metadata_include_vae_hash and request.vae_id:
@@ -190,6 +289,12 @@ class GenerationService:
             vae_hash=vae_hash,
             lora_hashes=lora_hashes,
             app_version=__version__ if self.settings.metadata_include_app_version else None,
+            optimization_profile_id=(
+                optimization_plan.profile_id
+                if optimization_plan is not None
+                and getattr(self.settings, "metadata_include_optimization_profile", True)
+                else None
+            ),
         )
 
     def list_checkpoints(self):
@@ -289,6 +394,7 @@ class GenerationService:
                 active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
                 self._persist_last_checkpoint(active.id)
                 job.request = self._guard_distilled_cfg(job.request, active)
+                optimization_plan = self._resolve_optimization_plan(job.request, active)
 
                 def on_progress(
                     step: int,
@@ -342,7 +448,12 @@ class GenerationService:
                     saved_images = []
                     for index, image in enumerate(result.images):
                         infotext = result.infotexts[index] if index < len(result.infotexts) else ""
-                        infotext = self._enrich_saved_infotext(infotext, job.request, checkpoint)
+                        infotext = self._enrich_saved_infotext(
+                            infotext,
+                            job.request,
+                            checkpoint,
+                            optimization_plan,
+                        )
                         if index < len(result.infotexts):
                             result.infotexts[index] = infotext
                         seed = result.seeds[index] if index < len(result.seeds) else None
@@ -419,6 +530,7 @@ class GenerationService:
                 active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
                 self._persist_last_checkpoint(active.id)
                 job.request = self._guard_distilled_cfg(job.request, active)
+                optimization_plan = self._resolve_optimization_plan(job.request, active)
                 preview_every = self.settings.live_preview_interval()
 
                 def on_progress(
@@ -475,7 +587,12 @@ class GenerationService:
                     saved_images = []
                     for index, image in enumerate(result.images):
                         infotext = result.infotexts[index] if index < len(result.infotexts) else ""
-                        infotext = self._enrich_saved_infotext(infotext, job.request, active)
+                        infotext = self._enrich_saved_infotext(
+                            infotext,
+                            job.request,
+                            active,
+                            optimization_plan,
+                        )
                         if index < len(result.infotexts):
                             result.infotexts[index] = infotext
                         seed = result.seeds[index] if index < len(result.seeds) else None

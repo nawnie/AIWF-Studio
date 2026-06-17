@@ -26,6 +26,9 @@ from aiwf.services.generation import GenerationService
 from aiwf.services.metadata import MetadataService
 from aiwf.services.model_catalog import ModelCatalogService
 from aiwf.services.model_download import ModelDownloadService
+from aiwf.services.benchmark_receipts import BenchmarkReceiptService
+from aiwf.services.optimization import CapabilityDetector, OptimizationPlanner
+from aiwf.services.optimization_diagnostics import OptimizationDiagnosticsService
 from aiwf.services.plot import PlotService
 from aiwf.services.prompt_processor import PromptProcessorService
 from aiwf.services.queue import JobQueue
@@ -49,6 +52,10 @@ class AppContext:
     plots: PlotService
     models: ModelCatalogService
     model_download: ModelDownloadService
+    capabilities: CapabilityDetector
+    optimization_planner: OptimizationPlanner
+    benchmark_receipts: BenchmarkReceiptService
+    optimization_diagnostics: OptimizationDiagnosticsService
     prompts: PromptProcessorService
     tags: TagService
     workflows: WorkflowService
@@ -169,6 +176,17 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     queue = JobQueue(events)
     store = FilesystemImageStore(flags.resolved_output_dir(), settings=settings)
 
+    capabilities = CapabilityDetector()
+    optimization_planner = OptimizationPlanner()
+    benchmark_receipts = BenchmarkReceiptService(flags.resolved_output_dir())
+    optimization_diagnostics = OptimizationDiagnosticsService(
+        flags=flags,
+        settings=settings,
+        detector=capabilities,
+        planner=optimization_planner,
+        output_dir=flags.resolved_output_dir(),
+    )
+
     generation = GenerationService(
         backend,
         store,
@@ -178,6 +196,7 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
         settings,
         settings_path=settings_path,
         supervisor=supervisor,
+        optimization_planner=optimization_planner,
     )
     enhance = EnhanceService(flags, settings, devices, store, supervisor=supervisor)
     controlnet = ControlNetService(flags)
@@ -207,6 +226,10 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
         plots=plots,
         models=models,
         model_download=model_download,
+        capabilities=capabilities,
+        optimization_planner=optimization_planner,
+        benchmark_receipts=benchmark_receipts,
+        optimization_diagnostics=optimization_diagnostics,
         prompts=prompts,
         tags=TagService(settings, flags.resolved_output_dir()),
         workflows=workflows,

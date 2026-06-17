@@ -2,17 +2,15 @@
 
 **Branch:** `v2-roadmap`  
 **Baseline commit:** `983f9e9` (Initial project snapshot)  
-**Last updated:** 2026-06-13  
+**Last updated:** 2026-06-16
 
 ---
 
 ## Repo State (audit snapshot)
 
 ### Test baseline
-- 60 test files, ~149 tests passing on torch-available hardware
-- Sandbox without torch: 15–17 tests pass (pure-domain tests); torch-dependent tests skip/error at collection
-- Known permanent skip: `test_load_wan_vae_does_not_treat_single_file_as_json_config` (requires `diffusers` mock on the mock host)
-- **Run command:** `python -m pytest tests/ -q`
+- Full local suite: 765 tests passing on the Studio venv as of the GPU-tenant audit
+- **Run command:** `python scripts/run_tests.py --full`
 
 ### What already exists (do not re-implement)
 
@@ -85,7 +83,7 @@
 
 ### A1 — `aiwf/core/domain/engine.py`
 
-Formal types for tenant switching. The `engine_supervisor.py` currently uses its own informal state — centralise it here.
+Formal types for tenant switching. `EngineSupervisor` now uses these domain types for ownership, waiting, denial, and release decisions.
 
 ```python
 class EngineTenant(str, Enum):
@@ -101,6 +99,7 @@ class EngineTenant(str, Enum):
 class EngineSwitchRequest:
     target: EngineTenant
     reason: str = ""
+    job_id: str = ""
     allow_wait: bool = False
 
 @dataclass(frozen=True)

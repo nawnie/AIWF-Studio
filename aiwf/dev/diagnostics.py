@@ -119,6 +119,10 @@ class DevDiagnostics:
         if self.enabled:
             output_dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def log_path(self) -> Path:
+        return self._log_path
+
     def trace(self, category: str, message: str, **fields: Any) -> None:
         if not self.enabled:
             return
@@ -180,6 +184,14 @@ def trace_exception_safe(
     if diag is None:
         return
     diag.trace_exception(category, exc, message=message, **fields)
+
+
+def install_standalone_dev_diagnostics(output_dir: Path, *, enabled: bool | None = None) -> DevDiagnostics:
+    """Install trace_safe output for worker/CLI commands that do not build AppContext."""
+    global _installed
+    diag = DevDiagnostics(output_dir, enabled=enabled)
+    _installed = diag
+    return diag
 
 
 def _subscribe_job_events(diag: DevDiagnostics, ctx: AppContext) -> None:

@@ -3,6 +3,7 @@
 from aiwf.dev.diagnostics import (
     DevDiagnostics,
     install_dev_diagnostics,
+    install_standalone_dev_diagnostics,
     trace_exception_safe,
     trace_job_record_state,
     trace_model_throughput,
@@ -14,6 +15,7 @@ from aiwf.dev.diagnostics import (
 __all__ = [
     "DevDiagnostics",
     "install_dev_diagnostics",
+    "install_standalone_dev_diagnostics",
     "trace_exception_safe",
     "trace_job_record_state",
     "trace_model_throughput",

@@ -141,6 +141,29 @@ def build_router(ctx: AppContext) -> APIRouter:
     def plugins():
         return [plugin.model_dump() for plugin in ctx.plugins.list_plugins()]
 
+    @native.get("/optimization/status")
+    def optimization_status():
+        diagnostics = getattr(ctx, "optimization_diagnostics", None)
+        if diagnostics is not None and callable(getattr(diagnostics, "status", None)):
+            return diagnostics.status()
+        profile_id = getattr(getattr(ctx, "settings", None), "optimization_profile_id", "balanced_sdpa_fp16")
+        return {
+            "profile_id": profile_id,
+            "requested_profile_id": profile_id,
+            "runtime_flags": {},
+            "capability_report": {},
+            "planner_decisions": [],
+            "active_runtime_paths": [],
+            "runtime_mismatches": ["Optimization diagnostics service is not configured."],
+            "known_failures": [],
+            "latest_receipts": [],
+            "promotion_gates": {
+                "status": "unavailable",
+                "reason": "Optimization diagnostics service is not configured.",
+                "candidate": False,
+            },
+        }
+
     @native.get("/jobs")
     def jobs(limit: int = 20):
         return [_job_status(job) for job in ctx.generation.recent_jobs(limit)]

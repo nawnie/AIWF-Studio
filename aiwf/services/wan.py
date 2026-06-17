@@ -40,6 +40,24 @@ def _native_fp8_runtime_available() -> bool:
 
 def _video_status(message: str) -> None:
     print(f"[AIWF] Video: {message}", flush=True)
+    try:
+        from aiwf.dev.diagnostics import trace_safe
+
+        trace_safe("wan.status", message, component="wan.service")
+    except Exception:
+        logger.debug("Wan status trace failed.", exc_info=True)
+
+
+def _float_metric(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed or parsed < 0:
+        return None
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -957,27 +975,64 @@ class WanService:
             started = time.perf_counter()
 
             try:
-                frames, h, w = self._backend.generate(
+                backend_result = self._backend.generate(
                     request,
                     image,
                     on_progress=on_progress,
                     should_cancel=should_cancel,
                 )
+                backend_metrics = {}
+                if isinstance(backend_result, (tuple, list)) and len(backend_result) == 4:
+                    frames, h, w, backend_metrics = backend_result
+                    backend_metrics = backend_metrics if isinstance(backend_metrics, dict) else {}
+                elif isinstance(backend_result, (tuple, list)) and len(backend_result) == 3:
+                    frames, h, w = backend_result
+                else:
+                    raise WanUnavailable("Video backend returned an invalid generation result.")
             except WanUnavailable:
                 raise
             except Exception as exc:
                 raise WanUnavailable(f"Video generation failed: {exc}") from exc
 
-            elapsed = time.perf_counter() - started
+            backend_elapsed = time.perf_counter() - started
+            step_count = max(0, int(backend_metrics.get("step_count") or request.effective_steps()))
+            load_seconds = _float_metric(backend_metrics.get("load_seconds")) or 0.0
+            preprocess_seconds = _float_metric(backend_metrics.get("preprocess_seconds")) or 0.0
+            prompt_encode_seconds = _float_metric(backend_metrics.get("prompt_encode_seconds")) or 0.0
+            image_encode_seconds = _float_metric(backend_metrics.get("image_encode_seconds")) or 0.0
+            latent_prepare_seconds = _float_metric(backend_metrics.get("latent_prepare_seconds")) or 0.0
+            denoise_seconds = _float_metric(backend_metrics.get("denoise_seconds")) or 0.0
+            high_denoise_seconds = _float_metric(backend_metrics.get("high_denoise_seconds")) or 0.0
+            low_denoise_seconds = _float_metric(backend_metrics.get("low_denoise_seconds")) or 0.0
+            pipeline_seconds = _float_metric(backend_metrics.get("pipeline_seconds")) or backend_elapsed
+            pipeline_overhead_seconds = _float_metric(backend_metrics.get("pipeline_overhead_seconds"))
+            if pipeline_overhead_seconds is None:
+                pipeline_overhead_seconds = max(0.0, pipeline_seconds - denoise_seconds)
+            vae_decode_seconds = _float_metric(backend_metrics.get("vae_decode_seconds")) or 0.0
+            manual_vae_decode = bool(backend_metrics.get("manual_vae_decode"))
+            try:
+                vae_decode_chunk_frames = max(0, int(backend_metrics.get("vae_decode_chunk_frames") or 0))
+            except (TypeError, ValueError):
+                vae_decode_chunk_frames = 0
+            video_postprocess_seconds = _float_metric(backend_metrics.get("video_postprocess_seconds")) or 0.0
+            offload_cleanup_seconds = _float_metric(backend_metrics.get("offload_cleanup_seconds")) or 0.0
+            postprocess_seconds = _float_metric(backend_metrics.get("postprocess_seconds")) or 0.0
+            steps_per_second = _float_metric(backend_metrics.get("steps_per_second"))
+            if steps_per_second is None and denoise_seconds > 0 and step_count > 0:
+                steps_per_second = step_count / denoise_seconds
+            iterations_per_second = steps_per_second
 
             output_path = self._output_path()
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
+            write_started = time.perf_counter()
             frame_count = write_frames(
                 frames,
                 output_path,
                 fps=float(getattr(request, "fps", 16) or 16),
             )
+            video_write_seconds = max(0.0, time.perf_counter() - write_started)
+            elapsed = time.perf_counter() - started
             trace_model_throughput(
                 kind="wan.video",
                 model_id=str(request.high_noise_model_id or ""),
@@ -990,7 +1045,39 @@ class WanService:
                 low_noise_model_id=request.low_noise_model_id,
                 offload=request.offload,
                 fps=int(getattr(request, "fps", 16) or 16),
+                step_count=step_count,
+                load_seconds=round(load_seconds, 3),
+                preprocess_seconds=round(preprocess_seconds, 3),
+                prompt_encode_seconds=round(prompt_encode_seconds, 3),
+                image_encode_seconds=round(image_encode_seconds, 3),
+                latent_prepare_seconds=round(latent_prepare_seconds, 3),
+                denoise_seconds=round(denoise_seconds, 3),
+                high_denoise_seconds=round(high_denoise_seconds, 3),
+                low_denoise_seconds=round(low_denoise_seconds, 3),
+                pipeline_seconds=round(pipeline_seconds, 3),
+                pipeline_overhead_seconds=round(pipeline_overhead_seconds, 3),
+                vae_decode_seconds=round(vae_decode_seconds, 3),
+                manual_vae_decode=manual_vae_decode,
+                vae_decode_chunk_frames=vae_decode_chunk_frames,
+                video_postprocess_seconds=round(video_postprocess_seconds, 3),
+                offload_cleanup_seconds=round(offload_cleanup_seconds, 3),
+                postprocess_seconds=round(postprocess_seconds, 3),
+                video_write_seconds=round(video_write_seconds, 3),
+                steps_per_second=round(steps_per_second, 6) if steps_per_second is not None else None,
+                iterations_per_second=round(iterations_per_second, 6)
+                if iterations_per_second is not None
+                else None,
             )
+
+            if steps_per_second is not None and steps_per_second > 0:
+                message = (
+                    f"{frame_count} frames at {w}x{h} in {elapsed:.1f}s; "
+                    f"{steps_per_second:.3f} steps/s ({steps_per_second:.3f} it/s, "
+                    f"{1.0 / steps_per_second:.2f} s/it); denoise {denoise_seconds:.1f}s, "
+                    f"write {video_write_seconds:.1f}s"
+                )
+            else:
+                message = f"{frame_count} frames at {w}x{h} in {elapsed:.1f}s"
 
             return WanI2VResult(
                 output_path=str(output_path),
@@ -999,6 +1086,29 @@ class WanService:
                 width=w,
                 height=h,
                 elapsed_seconds=round(elapsed, 2),
+                step_count=step_count,
+                load_seconds=round(load_seconds, 3),
+                preprocess_seconds=round(preprocess_seconds, 3),
+                prompt_encode_seconds=round(prompt_encode_seconds, 3),
+                image_encode_seconds=round(image_encode_seconds, 3),
+                latent_prepare_seconds=round(latent_prepare_seconds, 3),
+                denoise_seconds=round(denoise_seconds, 3),
+                high_denoise_seconds=round(high_denoise_seconds, 3),
+                low_denoise_seconds=round(low_denoise_seconds, 3),
+                pipeline_seconds=round(pipeline_seconds, 3),
+                pipeline_overhead_seconds=round(pipeline_overhead_seconds, 3),
+                vae_decode_seconds=round(vae_decode_seconds, 3),
+                manual_vae_decode=manual_vae_decode,
+                vae_decode_chunk_frames=vae_decode_chunk_frames,
+                video_postprocess_seconds=round(video_postprocess_seconds, 3),
+                offload_cleanup_seconds=round(offload_cleanup_seconds, 3),
+                postprocess_seconds=round(postprocess_seconds, 3),
+                video_write_seconds=round(video_write_seconds, 3),
+                steps_per_second=round(steps_per_second, 6) if steps_per_second is not None else None,
+                iterations_per_second=round(iterations_per_second, 6)
+                if iterations_per_second is not None
+                else None,
+                message=message,
             )
         finally:
             if self.supervisor is not None:

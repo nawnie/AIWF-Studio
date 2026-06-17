@@ -38,6 +38,8 @@ def test_saving_output_defaults_preserve_legacy_behavior():
     assert s.metadata_include_vae_hash is True
     assert s.metadata_include_lora_hashes is True
     assert s.metadata_include_app_version is True
+    assert s.metadata_include_optimization_profile is True
+    assert s.optimization_profile_id == "balanced_sdpa_fp16"
     assert s.pnginfo_send_to_studio is True
     assert s.pnginfo_clear_after_apply is True
 
@@ -55,6 +57,8 @@ def test_saving_output_settings_round_trip():
         metadata_include_vae_hash=False,
         metadata_include_lora_hashes=False,
         metadata_include_app_version=False,
+        metadata_include_optimization_profile=False,
+        optimization_profile_id="safe_eager_cuda",
         pnginfo_send_to_studio=False,
         pnginfo_clear_after_apply=False,
     )
@@ -70,5 +74,7 @@ def test_saving_output_settings_round_trip():
     assert restored.metadata_include_vae_hash is False
     assert restored.metadata_include_lora_hashes is False
     assert restored.metadata_include_app_version is False
+    assert restored.metadata_include_optimization_profile is False
+    assert restored.optimization_profile_id == "safe_eager_cuda"
     assert restored.pnginfo_send_to_studio is False
     assert restored.pnginfo_clear_after_apply is False
