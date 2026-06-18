@@ -51,6 +51,18 @@ PROJECT_SKILLS.md
 # benchmark planning configs, and one-off handoff files under this folder.
 _local/
 
+# GitHub main is runtime-focused. Keep development docs, tests, and helper
+# scripts local unless the user explicitly promotes one back to runtime.
+ARCHITECTURE.md
+CHANGELOG.md
+CONTRIBUTING.md
+docs/
+scripts/
+tests/
+plugins/example_hello/
+engines/*/engine_config.example.toml
+engines/*/README.md
+
 # Legacy local/non-runtime paths kept ignored so old agent habits do not dirty
 # the runtime-focused tree again.
 fundings/
