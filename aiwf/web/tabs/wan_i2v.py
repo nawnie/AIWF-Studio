@@ -195,6 +195,19 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         value="model",
                         info="On RTX 4070 Ti 16GB with FP8 safetensors, use Model offload. Sequential moves every layer over PCIe each step.",
                     )
+                    vram_reserve_enabled = gr.Checkbox(
+                        value=False,
+                        label="Reserve GPU memory",
+                        info="Caps AIWF's PyTorch CUDA allocator below total VRAM so games, training, or the desktop keep headroom.",
+                    )
+                    vram_reserve_mb = gr.Slider(
+                        0,
+                        8192,
+                        value=1536,
+                        step=128,
+                        label="VRAM reserve (MB)",
+                        info="Example: reserving 1536 MB on a 16 GB card leaves AIWF around a 15 GB allocator limit.",
+                    )
 
                 with gr.Column(scale=1, min_width=340, elem_classes=["aiwf-panel"]):
                     gr.Markdown("Resolution", elem_classes=["aiwf-section-label"])
@@ -393,6 +406,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             prompt_v,
             negative_v,
             offload_v,
+            vram_reserve_enabled_v,
+            vram_reserve_mb_v,
             width_v,
             height_v,
             frames_v,
@@ -457,6 +472,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 seed=int(seed_v),
                 runtime_mode=selected_runtime,
                 offload=offload_v,
+                vram_reserve_enabled=bool(vram_reserve_enabled_v),
+                vram_reserve_mb=int(vram_reserve_mb_v or 0),
                 high_noise_model_id=high_v or None,
                 low_noise_model_id=low_v or None,
                 high_noise_lora_id=high_lora_v or None,
@@ -517,6 +534,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 prompt,
                 negative,
                 offload,
+                vram_reserve_enabled,
+                vram_reserve_mb,
                 width,
                 height,
                 num_frames,

@@ -27,6 +27,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from aiwf.infrastructure.torch.vram_budget import apply_cuda_vram_reserve
+
 logger = logging.getLogger(__name__)
 
 _COMFY_FP8_METADATA_SUFFIXES = (
@@ -2699,6 +2701,20 @@ class WanI2VBackend:
         # Pass 7) instead of treating diffusers' pipe(**call_kwargs) as a black box.
         # Escape hatch retained in case real-hardware validation surfaces a regression.
         _use_native_denoise = _env_flag("AIWF_WAN_NATIVE_DENOISE", default=True)
+        try:
+            _reserve_device = torch.cuda.current_device() if torch.cuda.is_available() else 0
+        except Exception:
+            _reserve_device = 0
+        vram_budget = apply_cuda_vram_reserve(
+            enabled=bool(getattr(request, "vram_reserve_enabled", False)),
+            reserve_mb=int(getattr(request, "vram_reserve_mb", 0) or 0),
+            device=_reserve_device,
+            torch_module=torch,
+        )
+        if vram_budget.enabled:
+            if not vram_budget.applied:
+                raise WanUnavailable(f"VRAM reserve could not be applied: {vram_budget.message}")
+            _video_status(vram_budget.message)
 
         load_started = time.perf_counter()
         if requires_dual:
@@ -3054,6 +3070,11 @@ class WanI2VBackend:
             "postprocess_seconds": round(float(postprocess_seconds), 3),
             "steps_per_second": round(float(steps_per_second), 6) if steps_per_second is not None else None,
             "cache_mode": str(self._cache_mode or "none"),
+            "vram_reserve_enabled": bool(vram_budget.enabled),
+            "vram_reserve_mb": int(vram_budget.requested_reserve_mb),
+            "vram_limit_mb": int(vram_budget.limit_mb),
+            "vram_total_mb": int(vram_budget.total_mb),
+            "vram_limit_fraction": round(float(vram_budget.fraction), 6),
             **fp8_metrics,
         }
         return frames, h, w, metrics

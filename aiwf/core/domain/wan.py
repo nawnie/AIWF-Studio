@@ -89,6 +89,8 @@ class WanI2VRequest(BaseModel):
     runtime_mode: str = Field(default=WAN_RUNTIME_FAST_5B)
     model_id: str = WAN_TI2V_5B
     offload: str = "model"
+    vram_reserve_enabled: bool = False
+    vram_reserve_mb: int = Field(default=1536, ge=0, le=65536)
 
     @field_validator("text_encoder_path")
     @classmethod
@@ -213,4 +215,9 @@ class WanI2VResult(BaseModel):
     fp8_strict_mode: bool = False
     fp8_native_available: bool = False
     cache_mode: str = ""
+    vram_reserve_enabled: bool = False
+    vram_reserve_mb: int = Field(default=0, ge=0)
+    vram_limit_mb: int = Field(default=0, ge=0)
+    vram_total_mb: int = Field(default=0, ge=0)
+    vram_limit_fraction: float = Field(default=1.0, ge=0.0, le=1.0)
     message: str = ""

@@ -94,6 +94,8 @@ def test_request_defaults_and_helpers():
     assert r.temporal_chunks is False
     assert r.chunk_size == 24
     assert r.chunk_overlap == 0
+    assert r.vram_reserve_enabled is False
+    assert r.vram_reserve_mb == 1536
     assert r.guidance_scale == 1.0
     assert r.normalized_frames() == 49
     assert r.effective_steps() == 8
@@ -524,6 +526,11 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
             "fp8_strict_mode": True,
             "fp8_native_available": True,
             "cache_mode": "gpu_active_cpu_pinned_standby",
+            "vram_reserve_enabled": True,
+            "vram_reserve_mb": 1536,
+            "vram_limit_mb": 14848,
+            "vram_total_mb": 16384,
+            "vram_limit_fraction": 0.90625,
         },
     )
     captured: dict[str, object] = {}
@@ -574,6 +581,11 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     assert captured["fp8_strict_mode"] is True
     assert captured["fp8_native_available"] is True
     assert captured["cache_mode"] == "gpu_active_cpu_pinned_standby"
+    assert captured["vram_reserve_enabled"] is True
+    assert captured["vram_reserve_mb"] == 1536
+    assert captured["vram_limit_mb"] == 14848
+    assert captured["vram_total_mb"] == 16384
+    assert captured["vram_limit_fraction"] == 0.90625
     assert captured.get("app_version") == aiwf.__version__
     assert Path(str(captured["high_noise_model_id"])).name == high.name
     assert result.step_count == 8
@@ -610,10 +622,16 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     assert result.fp8_strict_mode is True
     assert result.fp8_native_available is True
     assert result.cache_mode == "gpu_active_cpu_pinned_standby"
+    assert result.vram_reserve_enabled is True
+    assert result.vram_reserve_mb == 1536
+    assert result.vram_limit_mb == 14848
+    assert result.vram_total_mb == 16384
+    assert result.vram_limit_fraction == 0.90625
     assert "4.000 it/s" in result.message
     assert "FP8 fast path clean" in result.message
     assert "latent=13f" in result.message
     assert "cache=gpu_active_cpu_pinned_standby" in result.message
+    assert "VRAM cap=14848/16384 MB" in result.message
 
 
 def test_wan_generation_fast_5b_uses_local_model_without_high_low(tmp_path: Path, monkeypatch):

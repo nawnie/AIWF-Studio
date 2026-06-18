@@ -1085,6 +1085,13 @@ class WanService:
             fp8_strict_mode = bool(backend_metrics.get("fp8_strict_mode"))
             fp8_native_available = bool(backend_metrics.get("fp8_native_available"))
             cache_mode = str(backend_metrics.get("cache_mode") or "").strip()
+            vram_reserve_enabled = bool(backend_metrics.get("vram_reserve_enabled"))
+            vram_reserve_mb = _int_metric(backend_metrics.get("vram_reserve_mb"))
+            vram_limit_mb = _int_metric(backend_metrics.get("vram_limit_mb"))
+            vram_total_mb = _int_metric(backend_metrics.get("vram_total_mb"))
+            vram_limit_fraction = _float_metric(backend_metrics.get("vram_limit_fraction"))
+            if vram_limit_fraction is None:
+                vram_limit_fraction = 1.0
 
             output_path = self._output_path()
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1155,6 +1162,11 @@ class WanService:
                 fp8_strict_mode=fp8_strict_mode,
                 fp8_native_available=fp8_native_available,
                 cache_mode=cache_mode,
+                vram_reserve_enabled=vram_reserve_enabled,
+                vram_reserve_mb=vram_reserve_mb,
+                vram_limit_mb=vram_limit_mb,
+                vram_total_mb=vram_total_mb,
+                vram_limit_fraction=round(vram_limit_fraction, 6),
             )
 
             if steps_per_second is not None and steps_per_second > 0:
@@ -1182,6 +1194,11 @@ class WanService:
                 )
             if cache_mode:
                 message = f"{message}; cache={cache_mode}"
+            if vram_reserve_enabled and vram_limit_mb and vram_total_mb:
+                message = (
+                    f"{message}; VRAM cap={vram_limit_mb}/{vram_total_mb} MB "
+                    f"(reserve={vram_reserve_mb} MB)"
+                )
 
             return WanI2VResult(
                 output_path=str(output_path),
@@ -1226,6 +1243,11 @@ class WanService:
                 fp8_strict_mode=fp8_strict_mode,
                 fp8_native_available=fp8_native_available,
                 cache_mode=cache_mode,
+                vram_reserve_enabled=vram_reserve_enabled,
+                vram_reserve_mb=vram_reserve_mb,
+                vram_limit_mb=vram_limit_mb,
+                vram_total_mb=vram_total_mb,
+                vram_limit_fraction=round(vram_limit_fraction, 6),
                 message=message,
             )
         finally:
