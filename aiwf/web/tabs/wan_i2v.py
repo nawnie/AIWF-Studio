@@ -7,6 +7,7 @@ import os
 
 import gradio as gr
 
+from aiwf.core.domain.audio import AudioGenerationOptions
 from aiwf.core.domain.enhance import RestoreOptions
 from aiwf.core.domain.faceswap import FaceSwapOptions
 from aiwf.core.domain.rife import RifeOptions
@@ -26,6 +27,7 @@ from aiwf.infrastructure.rife import RifeUnavailable
 from aiwf.infrastructure.video import VideoError, extract_first_frame
 from aiwf.infrastructure.wan import WanUnavailable
 from aiwf.services.rife import RifeService
+from aiwf.services.audio import AudioGenerationService, AudioUnavailable
 from aiwf.services.vsr import VsrService, VsrUnavailable
 from aiwf.services.wan import (
     WanService,
@@ -43,6 +45,7 @@ from aiwf.web.studio.resolution import (
 _SERVICES: dict[int, WanService] = {}
 _RIFE_SERVICES: dict[int, RifeService] = {}
 _VSR_SERVICES: dict[int, VsrService] = {}
+_AUDIO_SERVICES: dict[int, AudioGenerationService] = {}
 VIDEO_SIZE_PRESETS: tuple[int, ...] = (480, 568, 640, 768, 896, 1024)
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,19 @@ def _vsr_service(ctx: AppContext) -> VsrService:
     if svc is None:
         svc = VsrService(ctx.flags, ctx.settings, supervisor=ctx.supervisor)
         _VSR_SERVICES[id(ctx)] = svc
+    return svc
+
+
+def _audio_service(ctx: AppContext) -> AudioGenerationService:
+    svc = _AUDIO_SERVICES.get(id(ctx))
+    if svc is None:
+        svc = AudioGenerationService(
+            ctx.flags,
+            ctx.settings,
+            ctx.generation.backend.devices,
+            supervisor=ctx.supervisor,
+        )
+        _AUDIO_SERVICES[id(ctx)] = svc
     return svc
 
 
@@ -107,9 +123,12 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         service = _service(ctx)
         rife_service = _rife_service(ctx)
         vsr_service = _vsr_service(ctx)
+        audio_service = _audio_service(ctx)
         rife_ckpts = rife_service.list_checkpoints()
         default_rife_ckpt = rife_service.default_checkpoint()
         vsr_help = vsr_service.folder_help()
+        audio_music_models = audio_service.music_model_choices()
+        audio_sfx_models = audio_service.sfx_model_choices()
 
         def _faceswap_model_choices() -> list[tuple[str, str]]:
             return [(m.title, m.id) for m in ctx.faceswap.list_models()]
@@ -592,6 +611,43 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                                 info="Used only by Fast SDK Upscale.",
                             )
 
+                        with gr.Accordion("Audio", open=False, elem_classes=["aiwf-prompt-tools"]):
+                            audio_enabled = gr.Checkbox(
+                                value=False,
+                                label="Generate audio and mux into video",
+                                info="Runs after all visual post-processing.",
+                            )
+                            audio_prompt = gr.Textbox(
+                                label="Audio prompt",
+                                lines=3,
+                                placeholder="Blank uses the video prompt.",
+                            )
+                            with gr.Row():
+                                audio_kind = gr.Radio(
+                                    label="Type",
+                                    choices=[("Music", "music"), ("Sound effects", "sfx")],
+                                    value="music",
+                                )
+                                audio_model = gr.Dropdown(
+                                    label="Audio model",
+                                    choices=audio_music_models,
+                                    value=audio_music_models[0][1] if audio_music_models else "facebook/musicgen-small",
+                                    allow_custom_value=True,
+                                )
+                            with gr.Row():
+                                audio_duration = gr.Slider(
+                                    0,
+                                    120,
+                                    value=0,
+                                    step=1,
+                                    label="Duration (seconds)",
+                                    info="0 = match final video.",
+                                )
+                                audio_seed = gr.Number(value=-1, precision=0, label="Audio seed")
+                            with gr.Row():
+                                audio_temperature = gr.Slider(0.1, 2.0, value=1.0, step=0.05, label="Temperature")
+                                audio_cfg = gr.Slider(0.1, 10.0, value=3.0, step=0.1, label="Guidance")
+
                     run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
                     video_out = gr.Video(label="Result", interactive=False)
                     status = gr.Markdown("**Ready** — upload an image and generate.", elem_classes=["aiwf-status-bar"])
@@ -739,6 +795,18 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             show_progress=False,
         )
 
+        def _sync_audio_kind(kind_value):
+            choices = audio_sfx_models if kind_value == "sfx" else audio_music_models
+            fallback = "facebook/audiogen-medium" if kind_value == "sfx" else "facebook/musicgen-small"
+            return gr.update(choices=choices, value=choices[0][1] if choices else fallback)
+
+        audio_kind.change(
+            _sync_audio_kind,
+            inputs=[audio_kind],
+            outputs=[audio_model],
+            show_progress=False,
+        )
+
         def _release_memory_before_postprocess(label: str):
             try:
                 service.unload_models()
@@ -816,6 +884,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             vsr_mode_v,
             vsr_effect_v,
             vsr_strength_v,
+            audio_enabled_v,
+            audio_prompt_v,
+            audio_kind_v,
+            audio_model_v,
+            audio_duration_v,
+            audio_seed_v,
+            audio_temperature_v,
+            audio_cfg_v,
             progress=gr.Progress(),
         ):
             if image is None:
@@ -1049,6 +1125,38 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     logger.exception("NVIDIA RTX VSR post-processing failed")
                     status_parts.append(f"**NVIDIA RTX VSR failed** -- {exc}")
 
+            if bool(audio_enabled_v):
+                try:
+                    progress(0.0, desc="Unloading VRAM before audio generation")
+                    _release_memory_before_postprocess("Audio")
+                    audio_text = str(audio_prompt_v or prompt_v or "").strip()
+                    if not audio_text:
+                        audio_text = "cinematic ambient soundtrack matching the video"
+                    duration_value = float(audio_duration_v or 0)
+                    audio_options = AudioGenerationOptions(
+                        prompt=audio_text,
+                        kind=str(audio_kind_v or "music"),
+                        model_id=str(audio_model_v or ("facebook/audiogen-medium" if audio_kind_v == "sfx" else "facebook/musicgen-small")),
+                        duration_seconds=max(1.0, duration_value) if duration_value > 0 else 8.0,
+                        temperature=float(audio_temperature_v or 1.0),
+                        cfg_coef=float(audio_cfg_v or 3.0),
+                        seed=int(audio_seed_v if audio_seed_v is not None else -1),
+                    )
+                    progress(0.0, desc="Generating audio")
+                    audio_result, mux_result = audio_service.generate_and_mux(
+                        final_video_path,
+                        audio_options,
+                        duration_seconds=None if duration_value <= 0 else duration_value,
+                    )
+                    final_video_path = mux_result.output_path
+                    status_parts.append(f"**Audio** -- {audio_result.message}")
+                except AudioUnavailable as exc:
+                    logger.warning("Audio post-processing unavailable: %s", exc)
+                    status_parts.append(f"**Audio skipped** -- {exc}")
+                except Exception as exc:
+                    logger.exception("Audio post-processing failed")
+                    status_parts.append(f"**Audio failed** -- {exc}")
+
             return final_video_path, "\n\n".join(status_parts)
 
         run.click(
@@ -1108,6 +1216,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 vsr_mode,
                 vsr_effect,
                 vsr_strength,
+                audio_enabled,
+                audio_prompt,
+                audio_kind,
+                audio_model,
+                audio_duration,
+                audio_seed,
+                audio_temperature,
+                audio_cfg,
             ],
             outputs=[video_out, status],
             show_progress="minimal",

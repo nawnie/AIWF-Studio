@@ -14,6 +14,7 @@ from aiwf.bootstrap import AppContext
 from aiwf.web.components.checkpoints import resolve_default_checkpoint
 from aiwf.web.registry import WebRegistry
 from aiwf.web.studio import register_studio
+from aiwf.web.tabs.audio import register_audio
 from aiwf.web.tabs.enhance import register_enhance
 from aiwf.web.tabs.history import register_history
 from aiwf.web.tabs.wan_i2v import register_wan_i2v
@@ -106,6 +107,7 @@ def register_default_tabs(registry: WebRegistry) -> None:
     from aiwf.web.tabs.rife import register_rife
 
     register_rife(registry)
+    register_audio(registry)
     register_model_manager(registry)
     register_enhance(registry)
     register_segment(registry)

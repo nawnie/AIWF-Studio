@@ -83,6 +83,8 @@ class UserSettings(BaseSettings):
     enhance_output_subdir: str = "enhanced-images"
     rife_output_subdir: str = "rife-videos"
     vsr_output_subdir: str = "vsr-videos"
+    audio_output_subdir: str = "audio"
+    audio_video_output_subdir: str = "audio-videos"
     workflow_output_subdir: str = "workflow-images"
     workflows_dir: str = "workflows"
     upscale_tile_size: int = Field(default=256, ge=0, le=2048)
@@ -101,7 +103,7 @@ class UserSettings(BaseSettings):
     wildcards_dir: str = "wildcards"
     prompt_styles: list[PromptStyle] = Field(default_factory=list)
     accent_preset: str = "mint"
-    hidden_tabs: list[str] = Field(default_factory=lambda: ["Chat", "Training", "Face Swap", "Workflows"])
+    hidden_tabs: list[str] = Field(default_factory=lambda: ["Audio", "Chat", "Face Swap", "RIFE", "Training", "Workflows"])
 
     # Generation defaults — applied as the Studio tab's initial values.
     default_sampler: str = "euler_a"

@@ -56,7 +56,9 @@ This `main` branch is the stable sharing branch. It only advertises features tha
 - optional RIFE post-processing to write 30 FPS or 60 FPS output after generation
 - optional ReActor post-processing from the first key frame, an uploaded image, or a saved face model
 - optional NVIDIA RTX VSR / Video Effects SDK upscale post-processing when the SDK is installed
+- optional generated audio muxing after video when AudioCraft or Transformers MusicGen is installed
 - standalone RIFE frame interpolation tab for existing videos
+- standalone Audio tab for generating music or sound effects after a video
 - local Wan component folder support for tokenizer, text encoder, scheduler, and VAE
 - conservative default UI: GGUF only on `main`
 
@@ -153,6 +155,7 @@ These areas exist as work-in-progress or need more hardware coverage before they
 - workflow authoring
 - model conversion and quantization tools
 - plugin ecosystem
+- richer generated-audio controls and model installers
 - AMD, Intel, Linux, and lower-VRAM validation
 - installer polish and first-run onboarding
 
