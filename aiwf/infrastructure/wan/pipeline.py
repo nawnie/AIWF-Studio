@@ -416,6 +416,49 @@ def _collect_fp8_linear_metrics(*roots: Any) -> dict[str, Any]:
     return collect_fp8_linear_metrics(*roots)
 
 
+def _module_has_accelerate_hook(module: Any) -> bool:
+    """Return whether Accelerate device/offload hooks are already attached."""
+    if module is None:
+        return False
+    if getattr(module, "_hf_hook", None) is not None:
+        return True
+    try:
+        return any(getattr(child, "_hf_hook", None) is not None for child in module.modules())
+    except Exception:
+        return False
+
+
+def _install_sequential_cpu_offload_for_stage(model: Any, device: Any) -> bool:
+    """Install Accelerate submodule CPU offload on a lazily loaded Wan stage.
+
+    Diffusers can only attach sequential-offload hooks to components that exist
+    when ``pipe.enable_sequential_cpu_offload()`` is called. AIWF's low-noise
+    stage is intentionally lazy, so without this hook the first low step moves
+    the entire 14B FP8 transformer to CUDA and consumes nearly all 16 GB VRAM.
+    """
+    if model is None:
+        return False
+    if _module_has_accelerate_hook(model):
+        return True
+    if not hasattr(model, "modules"):
+        return False
+    try:
+        from accelerate import cpu_offload
+    except Exception as exc:
+        logger.warning("Accelerate cpu_offload unavailable for lazy Wan low stage: %s", exc)
+        return False
+    try:
+        import torch
+
+        target = torch.device(device)
+        offload_buffers = bool(len(getattr(model, "_parameters", {}) or {}) > 0)
+        cpu_offload(model, target, offload_buffers=offload_buffers)
+        return True
+    except Exception as exc:
+        logger.warning("Could not install sequential CPU offload on lazy Wan low stage: %s", exc)
+        return False
+
+
 class _LazyWanTransformer:
     pass
 
@@ -453,10 +496,11 @@ def _new_lazy_wan_transformer(config, *, dtype, load_model, before_load=None):
                 if self._before_load is not None:
                     self._before_load()
                 self._loaded_model = self._load_model()
-                if target_device is not None:
+                if target_device is not None and not _module_has_accelerate_hook(self._loaded_model):
                     self._loaded_model.to(target_device)
             elif target_device is not None:
-                self._loaded_model.to(target_device)
+                if not _module_has_accelerate_hook(self._loaded_model):
+                    self._loaded_model.to(target_device)
             return self._loaded_model
 
         def to(self, *args, **kwargs):
@@ -2437,9 +2481,15 @@ class WanI2VBackend:
                 except Exception:
                     pass
 
-            # cleanup handled by swap_models() inside load_to_vram(); don't duplicate it here.
             if pipe.transformer is not None and not _stage_cache_is_gpu_active_cpu_standby(cache_mode):
                 pipe.transformer = None
+            if not use_cache:
+                # In sequential/no-cache placement the low-stage proxy moves the
+                # real low transformer onto CUDA at first use. Make sure the high
+                # stage's CUDA allocations are actually released before that
+                # transfer starts; otherwise the first low step can run under
+                # severe allocator pressure instead of failing cleanly.
+                _free_cuda_memory()
 
         def _load_low_stage():
             _video_status("High stage done — swapping to low-noise transformer.")
@@ -2450,6 +2500,19 @@ class WanI2VBackend:
             low_trans = self._preloaded_low
             if use_cache:
                 self.cache.load_to_vram("wan_low")
+            elif offload == "sequential":
+                device = getattr(pipe, "_offload_device", None) or "cuda:0"
+                if _install_sequential_cpu_offload_for_stage(low_trans, device):
+                    _video_status(
+                        "Sequential offload: lazy low-noise transformer will stream submodules to VRAM "
+                        "instead of loading the full FP8 stage at once."
+                    )
+                else:
+                    raise WanUnavailable(
+                        "Sequential CPU offload could not be installed for the lazy low-noise transformer. "
+                        "Refusing to load the full FP8 low stage into VRAM because that can exhaust a 16 GB GPU. "
+                        "Try model offload/cache mode, or fix the Accelerate CPU offload install before retrying."
+                    )
             elif offload != "sequential":
                 try:
                     low_trans.to("cuda")
@@ -2506,6 +2569,10 @@ class WanI2VBackend:
         _image_guidance_scale = float(getattr(request, "image_guidance_scale", 1.0) or 1.0)
         _manual_vae_decode = _env_flag("AIWF_WAN_MANUAL_VAE_DECODE", default=False)
         _vae_decode_chunk_frames = _env_int("AIWF_WAN_VAE_CHUNK_FRAMES", 4)
+        # AIWF owns the denoise loop by default (see docs/WAN_STANDALONE_RUNTIME_PLAN.md
+        # Pass 7) instead of treating diffusers' pipe(**call_kwargs) as a black box.
+        # Escape hatch retained in case real-hardware validation surfaces a regression.
+        _use_native_denoise = _env_flag("AIWF_WAN_NATIVE_DENOISE", default=True)
 
         load_started = time.perf_counter()
         if requires_dual:
@@ -2737,7 +2804,12 @@ class WanI2VBackend:
             ]
             denoise_started = time.perf_counter()
             try:
-                output = pipe(**call_kwargs)
+                if _use_native_denoise:
+                    from aiwf.infrastructure.wan.native.denoise import run_native_wan_denoise
+
+                    output = run_native_wan_denoise(pipe, **call_kwargs)
+                else:
+                    output = pipe(**call_kwargs)
             finally:
                 pipeline_seconds = max(0.0, time.perf_counter() - denoise_started)
                 for restore in reversed(restore_hooks):

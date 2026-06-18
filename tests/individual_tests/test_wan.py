@@ -24,6 +24,7 @@ from aiwf.infrastructure.wan.pipeline import (
     _ensure_wan_attention_processors,
     _fp8_scaled_mm_failure_payload,
     _frames_from_wan_pipeline_output,
+    _install_sequential_cpu_offload_for_stage,
     _load_comfy_fp8_transformer_weights,
     _load_umt5_text_encoder,
     _load_wan_vae,
@@ -256,6 +257,17 @@ def test_lazy_wan_transformer_has_offload_sentinel_parameter():
 
     assert first.numel() == 1
     assert first.dtype == torch.bfloat16
+
+
+def test_sequential_offload_helper_treats_existing_hook_as_safe():
+    class AlreadyHooked:
+        _hf_hook = object()
+
+    assert _install_sequential_cpu_offload_for_stage(AlreadyHooked(), "cuda:0") is True
+
+
+def test_sequential_offload_helper_rejects_non_module():
+    assert _install_sequential_cpu_offload_for_stage(object(), "cuda:0") is False
 
 
 def test_resolve_model_hf_default(tmp_path: Path):

@@ -25,20 +25,29 @@ logger = logging.getLogger(__name__)
 _MAX_DEFAULT_FP8_DEQUANT_GB = 12.0
 
 
-def _native_fp8_runtime_available() -> bool:
+def _native_fp8_unavailable_reason() -> str | None:
     try:
         import torch
+    except Exception as exc:
+        return f"PyTorch could not be imported ({exc})."
 
+    try:
         if not torch.cuda.is_available():
-            return False
+            return "CUDA is not available to PyTorch. If `nvidia-smi` reports 'GPU is lost', reboot to reset the driver/GPU."
         major, minor = torch.cuda.get_device_capability()
-        return bool(
-            (int(major), int(minor)) >= (8, 9)
-            and hasattr(torch, "float8_e4m3fn")
-            and hasattr(torch, "_scaled_mm")
-        )
-    except Exception:
-        return False
+    except Exception as exc:
+        return f"CUDA capability check failed ({exc})."
+    if (int(major), int(minor)) < (8, 9):
+        return f"GPU compute capability {major}.{minor} is below Ada FP8 tensor-core support (8.9)."
+    if not hasattr(torch, "float8_e4m3fn"):
+        return "This PyTorch build has no torch.float8_e4m3fn dtype."
+    if not hasattr(torch, "_scaled_mm"):
+        return "This PyTorch build has no torch._scaled_mm FP8 matmul entry point."
+    return None
+
+
+def _native_fp8_runtime_available() -> bool:
+    return _native_fp8_unavailable_reason() is None
 
 
 def _video_status(message: str) -> None:
@@ -318,11 +327,12 @@ class WanService:
                         "experimental native FP8 compatibility path instead of expanding it to bf16."
                     )
                 elif expanded_gb > _MAX_DEFAULT_FP8_DEQUANT_GB and os.environ.get("AIWF_WAN_ALLOW_EXPENSIVE_DEQUANT") != "1":
+                    unavailable_reason = _native_fp8_unavailable_reason() or "native FP8 runtime is unavailable."
                     errors.append(
                         f"{label} transformer is ComfyUI FP8 ({path.name}). Diffusers cannot consume Comfy FP8 "
                         f"scale tensors directly, and AIWF would need to expand it to about {expanded_gb:.1f} GB "
                         "of bf16 weights for this stage. That path is disabled to prevent a native crash. "
-                        "Use a Diffusers-format bf16/fp16 transformer or wait for AIWF native Comfy FP8/GGUF runtime support."
+                        f"Native FP8 is unavailable right now: {unavailable_reason}"
                     )
                 elif expanded_gb > _MAX_DEFAULT_FP8_DEQUANT_GB:
                     warnings.append(
