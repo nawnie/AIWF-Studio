@@ -58,6 +58,26 @@ def extract_last_frame(video: Any) -> Image.Image:
         raise VideoError(f"Could not extract the last frame from video: {path}") from exc
 
 
+def extract_first_frame(video: Any) -> Image.Image:
+    """Return the first visible video frame as a PIL RGB image."""
+    path = resolve_video_path(video)
+    last_error: Exception | None = None
+
+    try:
+        frame = _extract_first_frame_cv2(path)
+        if frame is not None:
+            return frame
+    except Exception as exc:
+        last_error = exc
+
+    try:
+        return _extract_first_frame_ffmpeg(path)
+    except Exception as exc:
+        if last_error is not None:
+            raise VideoError(f"Could not extract the first frame from video: {path}") from last_error
+        raise VideoError(f"Could not extract the first frame from video: {path}") from exc
+
+
 def _extract_last_frame_cv2(path: Path) -> Image.Image | None:
     cv2 = _require_cv2()
     capture = cv2.VideoCapture(str(path))
@@ -81,6 +101,20 @@ def _extract_last_frame_cv2(path: Path) -> Image.Image | None:
             ok, frame = capture.read()
             if ok and frame is not None:
                 return _pil_from_bgr(cv2, frame)
+        return None
+    finally:
+        capture.release()
+
+
+def _extract_first_frame_cv2(path: Path) -> Image.Image | None:
+    cv2 = _require_cv2()
+    capture = cv2.VideoCapture(str(path))
+    try:
+        if not capture.isOpened():
+            raise VideoError(f"Could not open video (unsupported or corrupt): {path}")
+        frame = _read_cv2_frame_at(capture, cv2, 0)
+        if frame is not None:
+            return _pil_from_bgr(cv2, frame)
         return None
     finally:
         capture.release()
@@ -135,3 +169,37 @@ def _extract_last_frame_ffmpeg(path: Path) -> Image.Image:
                     frame_path.unlink(missing_ok=True)
 
     raise VideoError(f"No readable frames in video: {path}") from last_error
+
+
+def _extract_first_frame_ffmpeg(path: Path) -> Image.Image:
+    ffmpeg = _resolve_ffmpeg()
+    if ffmpeg is None:
+        raise VideoError("ffmpeg is not available.")
+
+    with tempfile.TemporaryDirectory(prefix="aiwf-first-frame-") as tmp_dir:
+        frame_path = Path(tmp_dir) / "frame.png"
+        try:
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(path),
+                    "-map",
+                    "0:v:0",
+                    "-an",
+                    "-frames:v",
+                    "1",
+                    str(frame_path),
+                ],
+                capture_output=True,
+                check=True,
+                timeout=180,
+            )
+            if frame_path.is_file() and frame_path.stat().st_size > 0:
+                with Image.open(frame_path) as image:
+                    return image.convert("RGB").copy()
+        except Exception as exc:
+            raise VideoError(f"No readable frames in video: {path}") from exc
+
+    raise VideoError(f"No readable frames in video: {path}")

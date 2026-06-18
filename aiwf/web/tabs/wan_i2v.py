@@ -7,6 +7,8 @@ import os
 
 import gradio as gr
 
+from aiwf.core.domain.enhance import RestoreOptions
+from aiwf.core.domain.faceswap import FaceSwapOptions
 from aiwf.core.domain.rife import RifeOptions
 from aiwf.bootstrap import AppContext
 from aiwf.core.domain.wan import (
@@ -18,7 +20,9 @@ from aiwf.core.domain.wan import (
     duration_seconds_for_frames,
     frames_for_duration_seconds,
 )
+from aiwf.infrastructure.faceswap import FaceSwapUnavailable
 from aiwf.infrastructure.rife import RifeUnavailable
+from aiwf.infrastructure.video import VideoError, extract_first_frame
 from aiwf.infrastructure.wan import WanUnavailable
 from aiwf.services.rife import RifeService
 from aiwf.services.wan import (
@@ -93,6 +97,19 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         rife_service = _rife_service(ctx)
         rife_ckpts = rife_service.list_checkpoints()
         default_rife_ckpt = rife_service.default_checkpoint()
+
+        def _faceswap_model_choices() -> list[tuple[str, str]]:
+            return [(m.title, m.id) for m in ctx.faceswap.list_models()]
+
+        def _reactor_face_model_choices() -> list[tuple[str, str]]:
+            return [(m.title, m.id) for m in ctx.faceswap.list_face_models()]
+
+        def _restorer_choices() -> list[tuple[str, str]]:
+            return [(m.title, m.id) for m in ctx.enhance.list_restorers()]
+
+        reactor_swapper_choices = _faceswap_model_choices()
+        reactor_face_model_choices = _reactor_face_model_choices()
+        reactor_restorer_choices = _restorer_choices()
 
         # Labeled (display_name, identifier) choices — read from model file headers.
         all_labeled = service.list_local_models_labeled() if hasattr(service, "list_local_models_labeled") else []
@@ -447,6 +464,80 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             rife_fast_mode = gr.Checkbox(label="Fast mode", value=False)
                             rife_ensemble = gr.Checkbox(label="Ensemble", value=True)
 
+                        with gr.Accordion("ReActor face swap", open=False, elem_classes=["aiwf-prompt-tools"]):
+                            reactor_enabled = gr.Checkbox(
+                                value=False,
+                                label="Run ReActor after generation",
+                                info="Wan/RIFE VRAM is cleared before face swap starts.",
+                            )
+                            reactor_source_mode = gr.Radio(
+                                label="Source face",
+                                choices=[
+                                    ("First key frame", "first_frame"),
+                                    ("Uploaded image", "image"),
+                                    ("Saved face model", "face_model"),
+                                ],
+                                value="first_frame",
+                            )
+                            reactor_source_image = gr.Image(
+                                label="Source face image",
+                                type="pil",
+                                sources=["upload", "clipboard"],
+                                visible=False,
+                            )
+                            reactor_face_model = gr.Dropdown(
+                                label="Saved face model",
+                                choices=reactor_face_model_choices,
+                                value=reactor_face_model_choices[0][1] if reactor_face_model_choices else None,
+                                allow_custom_value=True,
+                                visible=False,
+                                info="Looks in models/reactor/faces.",
+                            )
+                            with gr.Row():
+                                reactor_source_index = gr.Number(
+                                    value=0,
+                                    precision=0,
+                                    label="Source face #",
+                                    info="Used for first-frame or image sources.",
+                                )
+                                reactor_target_index = gr.Number(
+                                    value=-1,
+                                    precision=0,
+                                    label="Target face #",
+                                    info="-1 swaps every detected face.",
+                                )
+                            with gr.Row():
+                                reactor_model = gr.Dropdown(
+                                    label="Swapper model",
+                                    choices=reactor_swapper_choices,
+                                    value=reactor_swapper_choices[0][1] if reactor_swapper_choices else "inswapper_128",
+                                    allow_custom_value=True,
+                                    info="Install inswapper_128 on the Face Swap tab.",
+                                )
+                                reactor_mask_face = gr.Checkbox(label="Feather face mask", value=False)
+                            with gr.Row():
+                                reactor_restore_face = gr.Checkbox(label="Restore face after swap", value=True)
+                                reactor_restorer = gr.Dropdown(
+                                    label="Restorer",
+                                    choices=reactor_restorer_choices,
+                                    value=reactor_restorer_choices[0][1] if reactor_restorer_choices else None,
+                                )
+                            with gr.Row():
+                                reactor_restore_visibility = gr.Slider(
+                                    0,
+                                    1,
+                                    value=1.0,
+                                    step=0.05,
+                                    label="Restore visibility",
+                                )
+                                reactor_codeformer_weight = gr.Slider(
+                                    0,
+                                    1,
+                                    value=0.5,
+                                    step=0.05,
+                                    label="CodeFormer weight",
+                                )
+
                     run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
                     video_out = gr.Video(label="Result", interactive=False)
                     status = gr.Markdown("**Ready** — upload an image and generate.", elem_classes=["aiwf-status-bar"])
@@ -579,20 +670,42 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             show_progress=False,
         )
 
-        def _release_memory_before_rife():
+        def _sync_reactor_source_mode(mode_value):
+            mode = str(mode_value or "first_frame")
+            return (
+                gr.update(visible=mode == "image"),
+                gr.update(visible=mode == "face_model"),
+                gr.update(visible=mode != "face_model"),
+            )
+
+        reactor_source_mode.change(
+            _sync_reactor_source_mode,
+            inputs=[reactor_source_mode],
+            outputs=[reactor_source_image, reactor_face_model, reactor_source_index],
+            show_progress=False,
+        )
+
+        def _release_memory_before_postprocess(label: str):
             try:
                 service.unload_models()
             except Exception:
-                logger.exception("Failed to unload Wan models before RIFE post-processing.")
+                logger.exception("Failed to unload Wan models before %s post-processing.", label)
             try:
                 ctx.generation.backend.unload()
             except Exception:
-                logger.debug("Image backend unload before RIFE failed.", exc_info=True)
+                logger.debug("Image backend unload before %s failed.", label, exc_info=True)
             gc.collect()
             try:
                 ctx.generation.backend.devices.empty_cache()
             except Exception:
-                logger.debug("Device cache cleanup before RIFE failed.", exc_info=True)
+                logger.debug("Device cache cleanup before %s failed.", label, exc_info=True)
+
+        def _release_memory_before_reactor():
+            _release_memory_before_postprocess("ReActor")
+            try:
+                ctx.faceswap.unload()
+            except Exception:
+                logger.debug("Face swap unload before ReActor failed.", exc_info=True)
 
         def _run(
             image,
@@ -632,6 +745,18 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             rife_clear_cache_v,
             rife_fast_mode_v,
             rife_ensemble_v,
+            reactor_enabled_v,
+            reactor_source_mode_v,
+            reactor_source_image_v,
+            reactor_face_model_v,
+            reactor_source_index_v,
+            reactor_target_index_v,
+            reactor_model_v,
+            reactor_mask_face_v,
+            reactor_restore_face_v,
+            reactor_restorer_v,
+            reactor_restore_visibility_v,
+            reactor_codeformer_weight_v,
             progress=gr.Progress(),
         ):
             if image is None:
@@ -731,13 +856,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 except Exception:
                     pass
 
-            status_text = f"**Done** -- {result.message}"
+            final_video_path = result.output_path
+            status_parts = [f"**Done** -- {result.message}"]
             if bool(rife_enabled_v):
                 target_fps = int(rife_target_fps_v or 30)
                 input_fps = int(getattr(result, "fps", None) or fps_v or 16)
                 multiplier = _rife_multiplier_for_target(input_fps, target_fps)
                 progress(0.0, desc="Unloading Wan VRAM before RIFE")
-                _release_memory_before_rife()
+                _release_memory_before_postprocess("RIFE")
                 rife_options = RifeOptions(
                     ckpt_name=str(rife_ckpt_v or rife_service.default_checkpoint()),
                     multiplier=multiplier,
@@ -761,24 +887,89 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         rife_options,
                         on_progress=on_rife_progress,
                     )
-                    return (
-                        rife_result.output_path,
-                        f"{status_text}\n\n**RIFE** -- {rife_result.message}",
-                    )
+                    final_video_path = rife_result.output_path
+                    status_parts.append(f"**RIFE** -- {rife_result.message}")
                 except RifeUnavailable as exc:
                     logger.warning("RIFE post-processing unavailable: %s", exc)
-                    return (
-                        result.output_path,
-                        f"{status_text}\n\n**RIFE skipped** -- {exc}",
-                    )
+                    status_parts.append(f"**RIFE skipped** -- {exc}")
                 except Exception as exc:
                     logger.exception("RIFE post-processing failed")
-                    return (
-                        result.output_path,
-                        f"{status_text}\n\n**RIFE failed** -- {exc}",
+                    status_parts.append(f"**RIFE failed** -- {exc}")
+
+            if bool(reactor_enabled_v):
+                reactor_options = FaceSwapOptions(
+                    source_face_index=max(0, int(reactor_source_index_v or 0)),
+                    target_face_index=int(reactor_target_index_v if reactor_target_index_v is not None else -1),
+                    source_faces_index=[max(0, int(reactor_source_index_v or 0))],
+                    target_faces_index=[],
+                    model_id=str(reactor_model_v or "inswapper_128"),
+                    restore_face=bool(reactor_restore_face_v),
+                    restorer_id=reactor_restorer_v or None,
+                    restore_visibility=float(reactor_restore_visibility_v or 1.0),
+                    codeformer_weight=float(reactor_codeformer_weight_v or 0.5),
+                    mask_face=bool(reactor_mask_face_v),
+                )
+
+                restore_fn = None
+                if bool(reactor_restore_face_v) and reactor_restorer_v:
+
+                    def restore_fn(frame):
+                        return ctx.enhance.restore(
+                            frame,
+                            RestoreOptions(
+                                model_id=str(reactor_restorer_v),
+                                visibility=float(reactor_restore_visibility_v or 1.0),
+                                codeformer_weight=float(reactor_codeformer_weight_v or 0.5),
+                            ),
+                        )
+
+                def on_reactor_progress(step, total):
+                    progress(
+                        min(1.0, step / max(1, total)),
+                        desc=f"ReActor {step}/{total}",
                     )
 
-            return result.output_path, status_text
+                try:
+                    progress(0.0, desc="Unloading VRAM before ReActor")
+                    _release_memory_before_reactor()
+                    mode = str(reactor_source_mode_v or "first_frame")
+                    if mode == "face_model":
+                        if not reactor_face_model_v:
+                            raise FaceSwapUnavailable("Select a saved ReActor face model.")
+                        progress(0.0, desc="Running ReActor from saved face model")
+                        reactor_result = ctx.faceswap.swap_video_with_face_model(
+                            final_video_path,
+                            str(reactor_face_model_v),
+                            reactor_options,
+                            restore_fn=restore_fn,
+                            on_progress=on_reactor_progress,
+                        )
+                    else:
+                        if mode == "image":
+                            source_face_image = reactor_source_image_v
+                            if source_face_image is None:
+                                raise FaceSwapUnavailable("Upload a source face image for ReActor.")
+                        else:
+                            progress(0.0, desc="Extracting first key frame for ReActor")
+                            source_face_image = extract_first_frame(final_video_path)
+                        progress(0.0, desc="Running ReActor face swap")
+                        reactor_result = ctx.faceswap.swap_video(
+                            final_video_path,
+                            source_face_image,
+                            reactor_options,
+                            restore_fn=restore_fn,
+                            on_progress=on_reactor_progress,
+                        )
+                    final_video_path = reactor_result.output_path
+                    status_parts.append(f"**ReActor** -- {reactor_result.message}")
+                except (FaceSwapUnavailable, VideoError) as exc:
+                    logger.warning("ReActor post-processing unavailable: %s", exc)
+                    status_parts.append(f"**ReActor skipped** -- {exc}")
+                except Exception as exc:
+                    logger.exception("ReActor post-processing failed")
+                    status_parts.append(f"**ReActor failed** -- {exc}")
+
+            return final_video_path, "\n\n".join(status_parts)
 
         run.click(
             _run,
@@ -820,6 +1011,18 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 rife_clear_cache,
                 rife_fast_mode,
                 rife_ensemble,
+                reactor_enabled,
+                reactor_source_mode,
+                reactor_source_image,
+                reactor_face_model,
+                reactor_source_index,
+                reactor_target_index,
+                reactor_model,
+                reactor_mask_face,
+                reactor_restore_face,
+                reactor_restorer,
+                reactor_restore_visibility,
+                reactor_codeformer_weight,
             ],
             outputs=[video_out, status],
             show_progress="minimal",
@@ -829,6 +1032,17 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
             def _load_pending():
                 img = ctx.infotext_bridge.consume_image()
-                return gr.update(value=img) if img is not None else gr.update()
+                face_models = _reactor_face_model_choices()
+                swapper_models = _faceswap_model_choices()
+                source_update = gr.update(value=img) if img is not None else gr.update()
+                face_model_update = gr.update(
+                    choices=face_models,
+                    value=face_models[0][1] if face_models else None,
+                )
+                swapper_update = gr.update(
+                    choices=swapper_models,
+                    value=swapper_models[0][1] if swapper_models else "inswapper_128",
+                )
+                return source_update, face_model_update, swapper_update
 
-            tab.select(_load_pending, outputs=[source], show_progress=False)
+            tab.select(_load_pending, outputs=[source, reactor_face_model, reactor_model], show_progress=False)

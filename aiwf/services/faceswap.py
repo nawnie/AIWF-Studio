@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
@@ -22,6 +23,7 @@ from aiwf.infrastructure.video import process_video_file
 logger = logging.getLogger(__name__)
 
 FACESWAP_EXTENSIONS = {".onnx"}
+REACTOR_FACE_MODEL_EXTENSIONS = {".safetensors"}
 
 # ReActor assets repo (single-file ONNX). ~554 MB.
 _REACTOR_BASE = "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models"
@@ -67,6 +69,7 @@ class FaceSwapService:
         self.supervisor = supervisor
         self._swapper: FaceSwapper | None = None
         self._swapper_path: str | None = None
+        self._face_model_cache: dict[str, Any] = {}
 
     @contextmanager
     def _gpu_tenant(self, reason: str):
@@ -119,6 +122,73 @@ class FaceSwapService:
         # Requested id not installed but a model exists — fall back to the
         # first available so a stale/blank selection still swaps.
         return Path(models[0].path)
+
+    def face_models_dir(self) -> Path:
+        return self.flags.resolved_models_dir() / "reactor" / "faces"
+
+    def list_face_models(self) -> list[FaceSwapModelInfo]:
+        root = self.face_models_dir()
+        if not root.exists():
+            return []
+        return [
+            FaceSwapModelInfo.from_path(path)
+            for path in sorted(root.iterdir(), key=lambda p: p.name.lower())
+            if path.is_file() and path.suffix.lower() in REACTOR_FACE_MODEL_EXTENSIONS
+        ]
+
+    def resolve_face_model_path(self, model_id: str | None) -> Path | None:
+        models = self.list_face_models()
+        if not models:
+            return None
+        for model in models:
+            path = Path(model.path)
+            if model_id is None or model.id == model_id or model.title == model_id or path.name == model_id:
+                return path
+        return None
+
+    def load_face_model(self, model_id: str | None):
+        """Load a saved ReActor face embedding from ``models/reactor/faces``."""
+        path = self.resolve_face_model_path(model_id)
+        if path is None or not path.is_file():
+            raise FaceSwapUnavailable(f"No ReActor face model found in {self.face_models_dir()}.")
+        cache_key = str(path)
+        cached = self._face_model_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            import numpy as np
+            from insightface.app.common import Face
+            from safetensors import safe_open
+        except Exception as exc:  # pragma: no cover - optional dependency check
+            raise FaceSwapUnavailable(
+                "Saved ReActor face models need `insightface` and `safetensors` installed."
+            ) from exc
+
+        data: dict[str, Any] = {}
+        try:
+            with safe_open(str(path), framework="pt", device="cpu") as handle:
+                for key in handle.keys():
+                    value = handle.get_tensor(key)
+                    if hasattr(value, "detach"):
+                        value = value.detach()
+                    if hasattr(value, "cpu"):
+                        value = value.cpu()
+                    if hasattr(value, "numpy"):
+                        value = value.numpy()
+                    array = np.asarray(value)
+                    if key in {"age", "gender"} and array.size == 1:
+                        data[key] = int(array.reshape(-1)[0])
+                    elif key == "det_score" and array.size == 1:
+                        data[key] = float(array.reshape(-1)[0])
+                    else:
+                        data[key] = array
+        except Exception as exc:
+            raise FaceSwapUnavailable(f"Could not load ReActor face model: {path.name}") from exc
+
+        face = Face(data)
+        self._face_model_cache[cache_key] = face
+        return face
 
     # -- downloads -------------------------------------------------------
     def list_downloadable(self) -> list[DownloadableFaceSwap]:
@@ -207,6 +277,14 @@ class FaceSwapService:
             self._swapper_path = str(path)
         return self._swapper
 
+    @staticmethod
+    def _source_indices(options: FaceSwapOptions) -> list[int]:
+        indices = list(options.source_faces_index or [])
+        single_index = int(options.source_face_index)
+        if indices == [0] and single_index != 0:
+            return [single_index]
+        return indices
+
     def swap(
         self,
         target: Image.Image,
@@ -226,7 +304,7 @@ class FaceSwapService:
                 source,
                 source_index=options.source_face_index,
                 target_index=options.target_face_index,
-                source_faces_index=list(options.source_faces_index or []),
+                source_faces_index=self._source_indices(options),
                 target_faces_index=list(options.target_faces_index or []),
                 gender_source=int(options.gender_source),
                 gender_target=int(options.gender_target),
@@ -235,6 +313,53 @@ class FaceSwapService:
             if options.restore_face and restore_fn is not None:
                 result = restore_fn(result)
             return result
+
+    def swap_with_face_model(
+        self,
+        target: Image.Image,
+        face_model_id: str,
+        options: FaceSwapOptions | None = None,
+        *,
+        restore_fn: Callable[[Image.Image], Image.Image] | None = None,
+    ) -> Image.Image:
+        """Swap a saved ReActor face model onto ``target``."""
+        if target is None:
+            raise FaceSwapUnavailable("Provide a target image.")
+        options = options or FaceSwapOptions()
+        with self._gpu_tenant("Face swap"):
+            source_face = self.load_face_model(face_model_id)
+            swapper = self._get_swapper(options)
+            result = swapper.swap_with_source_face(
+                target,
+                source_face,
+                target_index=options.target_face_index,
+                target_faces_index=list(options.target_faces_index or []),
+                gender_target=int(options.gender_target),
+                mask_face=bool(options.mask_face),
+            )
+            if options.restore_face and restore_fn is not None:
+                result = restore_fn(result)
+            return result
+
+    def _swap_frame_with_source_face(
+        self,
+        swapper: FaceSwapper,
+        frame: Image.Image,
+        source_face,
+        options: FaceSwapOptions,
+        restore_fn: Callable[[Image.Image], Image.Image] | None,
+    ) -> Image.Image:
+        result = swapper.swap_with_source_face(
+            frame,
+            source_face,
+            target_index=options.target_face_index,
+            target_faces_index=list(options.target_faces_index or []),
+            gender_target=int(options.gender_target),
+            mask_face=bool(options.mask_face),
+        )
+        if options.restore_face and restore_fn is not None:
+            result = restore_fn(result)
+        return result
 
     def swap_video(
         self,
@@ -257,10 +382,18 @@ class FaceSwapService:
         options = options or FaceSwapOptions()
         dest = self._video_output_path(target_video, output_path)
 
-        def process_frame(frame: Image.Image, _index: int) -> Image.Image:
-            return self.swap(frame, source, options, restore_fn=restore_fn)
-
         with self._gpu_tenant("Face swap video"):
+            swapper = self._get_swapper(options)
+            source_face = swapper.source_face_from_image(
+                source,
+                source_index=options.source_face_index,
+                source_faces_index=self._source_indices(options),
+                gender_source=int(options.gender_source),
+            )
+
+            def process_frame(frame: Image.Image, _index: int) -> Image.Image:
+                return self._swap_frame_with_source_face(swapper, frame, source_face, options, restore_fn)
+
             result = process_video_file(
                 target_video,
                 dest,
@@ -276,8 +409,47 @@ class FaceSwapService:
             }
         )
 
+    def swap_video_with_face_model(
+        self,
+        target_video: str | Path,
+        face_model_id: str,
+        options: FaceSwapOptions | None = None,
+        *,
+        output_path: str | Path | None = None,
+        restore_fn: Callable[[Image.Image], Image.Image] | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+        max_frames: int | None = None,
+    ) -> VideoProcessResult:
+        """Apply a saved ReActor face model to each frame of ``target_video``."""
+        options = options or FaceSwapOptions()
+        dest = self._video_output_path(target_video, output_path)
+
+        with self._gpu_tenant("Face swap video"):
+            source_face = self.load_face_model(face_model_id)
+            swapper = self._get_swapper(options)
+
+            def process_frame(frame: Image.Image, _index: int) -> Image.Image:
+                return self._swap_frame_with_source_face(swapper, frame, source_face, options, restore_fn)
+
+            result = process_video_file(
+                target_video,
+                dest,
+                process_frame,
+                on_progress=on_progress,
+                max_frames=max_frames,
+            )
+
+        infotext = f"Face swap video: {options.model_id} | face model: {face_model_id}"
+        return result.model_copy(
+            update={
+                "infotext": infotext,
+                "message": f"Face swap video complete. {result.message}",
+            }
+        )
+
     def unload(self) -> None:
         if self._swapper is not None:
             self._swapper.unload()
         self._swapper = None
         self._swapper_path = None
+        self._face_model_cache.clear()

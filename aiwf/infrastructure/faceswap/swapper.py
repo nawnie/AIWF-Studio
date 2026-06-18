@@ -116,25 +116,18 @@ class FaceSwapper:
         # Stable left-to-right ordering so indices are predictable.
         return sorted(faces, key=lambda f: f.bbox[0])
 
-    def swap(
+    def source_face_from_image(
         self,
-        target: Image.Image,
         source: Image.Image,
         *,
         source_index: int = 0,
-        target_index: int = -1,
         source_faces_index: list[int] | None = None,
-        target_faces_index: list[int] | None = None,
         gender_source: int = 0,
-        gender_target: int = 0,
-        mask_face: bool = False,
-    ) -> Image.Image:
-        """Swap the source face onto one (or all) target faces. Returns a new image."""
+    ):
+        """Detect and return the selected source face from a PIL image."""
         self._ensure_loaded()
-        target_bgr = _to_bgr(target)
         source_bgr = _to_bgr(source)
 
-        # ----- pick the source face -----
         source_faces = _gender_filter(self._detect(source_bgr), gender_source)
         if not source_faces:
             raise FaceSwapUnavailable("No matching face found in the source image.")
@@ -142,9 +135,16 @@ class FaceSwapper:
         s_idx = src_indices[0]
         if s_idx < 0 or s_idx >= len(source_faces):
             s_idx = 0
-        source_face = source_faces[s_idx]
+        return source_faces[s_idx]
 
-        # ----- pick the target face(s) -----
+    def _target_faces(
+        self,
+        target_bgr: np.ndarray,
+        *,
+        target_index: int = -1,
+        target_faces_index: list[int] | None = None,
+        gender_target: int = 0,
+    ) -> list:
         target_faces = _gender_filter(self._detect(target_bgr), gender_target)
         if not target_faces:
             raise FaceSwapUnavailable("No matching face found in the target image.")
@@ -164,12 +164,61 @@ class FaceSwapper:
                     f"Target face index {wanted} out of range "
                     f"({len(target_faces)} face(s) detected)."
                 )
+        return targets
 
+    def swap_with_source_face(
+        self,
+        target: Image.Image,
+        source_face,
+        *,
+        target_index: int = -1,
+        target_faces_index: list[int] | None = None,
+        gender_target: int = 0,
+        mask_face: bool = False,
+    ) -> Image.Image:
+        """Swap a preselected source face onto one (or all) target faces."""
+        self._ensure_loaded()
+        target_bgr = _to_bgr(target)
+        targets = self._target_faces(
+            target_bgr,
+            target_index=target_index,
+            target_faces_index=target_faces_index,
+            gender_target=gender_target,
+        )
         result = target_bgr
         for face in targets:
             swapped = self._swapper.get(result, face, source_face, paste_back=True)
             result = _feather_face(result, swapped, face) if mask_face else swapped
         return _to_pil(result)
+
+    def swap(
+        self,
+        target: Image.Image,
+        source: Image.Image,
+        *,
+        source_index: int = 0,
+        target_index: int = -1,
+        source_faces_index: list[int] | None = None,
+        target_faces_index: list[int] | None = None,
+        gender_source: int = 0,
+        gender_target: int = 0,
+        mask_face: bool = False,
+    ) -> Image.Image:
+        """Swap the source face onto one (or all) target faces. Returns a new image."""
+        source_face = self.source_face_from_image(
+            source,
+            source_index=source_index,
+            source_faces_index=source_faces_index,
+            gender_source=gender_source,
+        )
+        return self.swap_with_source_face(
+            target,
+            source_face,
+            target_index=target_index,
+            target_faces_index=target_faces_index,
+            gender_target=gender_target,
+            mask_face=mask_face,
+        )
 
     def unload(self) -> None:
         self._analyzer = None

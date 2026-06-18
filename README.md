@@ -54,6 +54,7 @@ This `main` branch is the stable sharing branch. It only advertises features tha
 
 - Wan image-to-video through matched **GGUF High Noise + Low Noise** transformer pairs
 - optional RIFE post-processing to write 30 FPS or 60 FPS output after generation
+- optional ReActor post-processing from the first key frame, an uploaded image, or a saved face model
 - standalone RIFE frame interpolation tab for existing videos
 - local Wan component folder support for tokenizer, text encoder, scheduler, and VAE
 - conservative default UI: GGUF only on `main`
@@ -107,6 +108,8 @@ models/ControlNet/         ControlNet models
 models/sam/                SAM weights
 models/wan/GGUF/           Wan high/low GGUF transformers
 models/wan/Diffusers/      Wan shared components
+models/insightface/        ReActor inswapper ONNX models
+models/reactor/faces/      saved ReActor face models
 ```
 
 ## Wan GGUF Video Setup
