@@ -207,6 +207,54 @@ def test_wan_latent_pipeline_output_is_decoded_to_frames():
     assert calls == [(pipe, (1, 16, 5, 4, 4), {"output_type": "pil"})]
 
 
+def test_wan_chunked_vae_decode_preserves_temporal_frame_count():
+    torch = pytest.importorskip("torch")
+    from aiwf.infrastructure.torch.wan_vram import decode_wan_video_latents
+
+    class FakeVAE:
+        def __init__(self):
+            self.dtype = torch.float32
+            self.config = SimpleNamespace(
+                z_dim=16,
+                latents_mean=[0.0] * 16,
+                latents_std=[1.0] * 16,
+            )
+            self.decode_latent_sizes: list[int] = []
+
+        def enable_tiling(self):
+            pass
+
+        def enable_slicing(self):
+            pass
+
+        def decode(self, latents, return_dict=False):
+            latent_frames = int(latents.shape[2])
+            self.decode_latent_sizes.append(latent_frames)
+            video_frames = 1 + 4 * (latent_frames - 1)
+            video = torch.zeros(
+                latents.shape[0],
+                3,
+                video_frames,
+                latents.shape[3],
+                latents.shape[4],
+                dtype=latents.dtype,
+                device=latents.device,
+            )
+            return (video,)
+
+    class FakeVideoProcessor:
+        def postprocess_video(self, video, output_type):
+            return video
+
+    pipe = SimpleNamespace(vae=FakeVAE(), video_processor=FakeVideoProcessor())
+    latents = torch.zeros(1, 16, 21, 2, 2)
+
+    video = decode_wan_video_latents(pipe, latents, chunk_frames=4, output_type="tensor")
+
+    assert int(video.shape[2]) == 81
+    assert pipe.vae.decode_latent_sizes == [4, 5, 5, 5, 5, 2]
+
+
 def test_wan_scheduler_defaults_to_euler_simple():
     scheduler_mod = pytest.importorskip("diffusers.schedulers.scheduling_unipc_multistep")
     from diffusers import FlowMatchEulerDiscreteScheduler

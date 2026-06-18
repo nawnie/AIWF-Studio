@@ -184,9 +184,18 @@ def decode_wan_video_latents(
     decoded_chunks: list[torch.Tensor] = []
     for start in range(0, num_frames, chunk_frames):
         end = min(start + chunk_frames, num_frames)
-        chunk = latents[:, :, start:end, :, :]
+        decode_start = max(0, start - 1)
+        chunk = latents[:, :, decode_start:end, :, :]
         with torch.no_grad():
-            decoded_chunks.append(vae.decode(chunk, return_dict=False)[0])
+            decoded = vae.decode(chunk, return_dict=False)[0]
+        if start > 0:
+            # Wan's VAE maps L latent frames to 1 + 4 * (L - 1) video frames.
+            # Decoding every temporal chunk independently treats each chunk as
+            # a new video and loses three frames at every chunk boundary. Include
+            # the previous latent frame as decode context, then drop its one
+            # duplicate output frame so each new latent contributes four frames.
+            decoded = decoded[:, :, 1:, :, :]
+        decoded_chunks.append(decoded)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
     video = torch.cat(decoded_chunks, dim=2)
