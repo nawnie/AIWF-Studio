@@ -9,13 +9,13 @@ from aiwf.web.registry import WebRegistry
 
 
 def register_pnginfo(registry: WebRegistry) -> None:
-    @registry.tab("PNG Info", order=40)
+    @registry.tab("PNG Info", order=41)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         with gr.Column(elem_classes=["aiwf-settings"]):
             with gr.Column(elem_classes=["aiwf-page-header"]):
                 gr.Markdown("PNG metadata", elem_classes=["aiwf-section-label"])
                 gr.Markdown(
-                    "Read generation parameters from a PNG and send them to Studio.",
+                    "Read generation parameters from a PNG and send them to Image.",
                     elem_classes=["aiwf-page-intro"],
                 )
 
@@ -24,7 +24,7 @@ def register_pnginfo(registry: WebRegistry) -> None:
                     source = gr.Image(label="Source image", type="pil", sources=["upload", "clipboard"])
                     with gr.Row():
                         read_btn = gr.Button("Read from image", variant="primary", elem_classes=["aiwf-generate-btn"])
-                        send_btn = gr.Button("Send to Studio", elem_classes=["aiwf-btn-ghost"])
+                        send_btn = gr.Button("Send to Image", elem_classes=["aiwf-btn-ghost"])
                 with gr.Column(elem_classes=["aiwf-panel"]):
                     parameters = gr.Textbox(label="Parameters", lines=14, elem_classes=["aiwf-gen-info"])
                     status = gr.Markdown("**Ready** — load an image to begin.", elem_classes=["aiwf-status-bar"])
@@ -62,7 +62,7 @@ def register_pnginfo(registry: WebRegistry) -> None:
             (text) => {
                 setTimeout(() => {
                     const studioTab = [...document.querySelectorAll(".aiwf-nav-tabs .tab-nav button")]
-                        .find((button) => button.textContent.trim() === "Studio");
+                        .find((button) => button.textContent.trim() === "Image");
                     if (studioTab) {
                         studioTab.click();
                     }

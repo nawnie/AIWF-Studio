@@ -35,10 +35,45 @@ training/EveryDream2trainer/
 # Local config / logs
 config.json
 launch.json
+engines.json
+webui-user.bat
+webui.settings.bat
 *.log
 *.null_guard
 *.skill
 wan_dance_test.py
+AGENTS.md
+plan.md
+PROJECT_SKILLS.md
+
+# Local-only workspace bucket for non-runtime agent/research/support artifacts.
+# Keep new local notes, scratch docs, funding drafts, MoK findings, archives,
+# benchmark planning configs, and one-off handoff files under this folder.
+_local/
+
+# Legacy local/non-runtime paths kept ignored so old agent habits do not dirty
+# the runtime-focused tree again.
+fundings/
+moks findings/
+aiwf_studio_deep_research_*/
+aiwf_studio_deep_research_*.zip
+AIWF_Studio_Claude_Fable_5_Roadmap_Handoff.md
+prechange-*
+research-agent-plan.md
+requirements-*-*.md
+docs/benchmarks/
+docs/benchmark_log.jsonl
+docs/projectskill-list.use-cases.json
+docs/WAN_STANDALONE_RUNTIME_PLAN.md
+assets/
+outreach/
+convert_wan_to_diffusers.py
+copy_pipeline_for_debug.bat
+read_pipeline.py
+icon_file.png
+
+# Private funding/application drafts
+fundings/private/
 
 # OS / editor
 .DS_Store

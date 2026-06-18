@@ -6,7 +6,8 @@ prompt/image encoding, scheduler timestep setup, per-step high/low
 transformer boundary switching with classifier-free guidance, scheduler
 stepping, and VAE decode/postprocess. It exists so AIWF owns the actual
 generation loop instead of treating the diffusers pipeline call as a
-black box. See docs/WAN_STANDALONE_RUNTIME_PLAN.md, Pass 7.
+black box. The detailed standalone-runtime notes are local-only project
+planning material.
 
 Important: the high/low stage swap itself (background preload, VRAM/CPU
 cache eviction, disk-sequential staging) is NOT reimplemented here -- that
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
+import contextlib
 import time
 
 
@@ -76,6 +78,38 @@ def _denoise_diag_enabled() -> bool:
         return False
 
 
+def _strict_attention_enabled() -> bool:
+    try:
+        import os
+
+        return os.environ.get("AIWF_WAN_STRICT_ATTENTION", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    except Exception:
+        return False
+
+
+def _strict_sdpa_context():
+    if not _strict_attention_enabled():
+        return contextlib.nullcontext()
+    try:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+    except Exception as exc:
+        raise RuntimeError("AIWF_WAN_STRICT_ATTENTION=1 but torch.nn.attention is unavailable.") from exc
+
+    backends = []
+    for name in ("FLASH_ATTENTION", "EFFICIENT_ATTENTION", "CUDNN_ATTENTION"):
+        backend = getattr(SDPBackend, name, None)
+        if backend is not None:
+            backends.append(backend)
+    if not backends:
+        raise RuntimeError("AIWF_WAN_STRICT_ATTENTION=1 but no fused SDPA backends are available.")
+    return sdpa_kernel(backends)
+
+
 def _cuda_memory_fields() -> dict[str, float]:
     try:
         import torch
@@ -103,6 +137,57 @@ def _sync_cuda_for_diag() -> None:
         pass
 
 
+def _cache_key_for_stage(stage: str) -> str | None:
+    if stage == "high":
+        return "wan_high"
+    if stage == "low":
+        return "wan_low"
+    return None
+
+
+def _evict_active_stage_before_prompt(pipe: Any) -> None:
+    """Free cached Wan expert VRAM before UMT5 prompt encoding.
+
+    Balanced/model placement keeps only one high/low expert in VRAM at a time.
+    If a previous run or an early load left an expert resident, UMT5 can OOM
+    while Accelerate moves the text encoder to CUDA. Evicting here gives prompt
+    encoding first claim on VRAM; the selected expert is reloaded before the
+    first denoise forward.
+    """
+    cache = getattr(pipe, "_aiwf_stage_cache", None)
+    active = str(getattr(cache, "active_in_vram", "") or "")
+    if not cache or active not in {"wan_high", "wan_low"}:
+        return
+    try:
+        cache.unload_from_vram(active)
+        _trace_native_denoise(
+            "wan.native_prompt_headroom",
+            "Evicted cached Wan stage before prompt encoding",
+            stage=active,
+            **_cuda_memory_fields(),
+        )
+    except Exception:
+        pass
+
+
+def _ensure_cached_stage_on_device(pipe: Any, stage: str) -> None:
+    cache = getattr(pipe, "_aiwf_stage_cache", None)
+    key = _cache_key_for_stage(stage)
+    if not cache or key is None:
+        return
+    try:
+        if key in getattr(cache, "cpu_cache", {}) and getattr(cache, "active_in_vram", None) != key:
+            cache.load_to_vram(key)
+            _trace_native_denoise(
+                "wan.native_stage_cache_load",
+                "Loaded cached Wan stage before denoise forward",
+                stage=key,
+                **_cuda_memory_fields(),
+            )
+    except Exception as exc:
+        raise RuntimeError(f"Could not load cached Wan stage {key} to the denoise device.") from exc
+
+
 def _fp8_metrics_for(model: Any) -> dict[str, Any]:
     if not _denoise_diag_enabled():
         return {}
@@ -124,7 +209,7 @@ def _metric_delta(after: dict[str, Any], before: dict[str, Any], key: str) -> in
         return 0
 
 
-def _ensure_stage_ready(model: Any, *, device: Any, stage: str, step: int) -> tuple[Any, float]:
+def _ensure_stage_ready(model: Any, *, device: Any, stage: str, step: int, pipe: Any = None) -> tuple[Any, float]:
     """Materialize lazy high/low stage proxies on the target device before cache_context.
 
     ``_LazyWanTransformer.cache_context()`` cannot see ``hidden_states.device``.
@@ -134,6 +219,8 @@ def _ensure_stage_ready(model: Any, *, device: Any, stage: str, step: int) -> tu
     outside our timings. Force the lazy stage onto the denoise device first.
     """
     started = time.perf_counter()
+    if pipe is not None:
+        _ensure_cached_stage_on_device(pipe, stage)
     loaded = model
     ensure_loaded = getattr(model, "_ensure_loaded", None)
     if callable(ensure_loaded):
@@ -167,16 +254,14 @@ def _ensure_stage_ready(model: Any, *, device: Any, stage: str, step: int) -> tu
 def run_native_wan_denoise(pipe: Any, **kwargs: Any) -> "NativeWanDenoiseOutput":
     """Public entry point for AIWF's native Wan denoise loop.
 
-    Wraps the implementation in ``torch.no_grad()`` to mirror diffusers'
-    ``@torch.no_grad()`` decorator on ``WanImageToVideoPipeline.__call__``.
-    AIWF deliberately bypasses ``pipe.__call__`` to own the loop, but doing so
-    also bypasses that decorator. Without this guard the loop builds a full
-    autograd graph: ``prepare_latents`` runs ``vae.encode`` to produce the
-    conditioning tensor, that tensor feeds ``torch.cat([latents, condition])``
-    every step, and activations are retained for a backward pass that never
-    happens -- which OOMs real 14B 720x720/81-frame runs even though the
-    parameters are frozen (``model.eval()`` does NOT disable autograd). Also
-    records peak VRAM for the run when CUDA is available.
+    Wraps the implementation in ``torch.inference_mode()`` to mirror
+    diffusers' inference-only call contract while avoiding autograd view/version
+    overhead. AIWF deliberately bypasses ``pipe.__call__`` to own the loop, but
+    doing so also bypasses diffusers' decorator. Without this guard the loop
+    builds a full autograd graph: ``prepare_latents`` runs ``vae.encode`` to
+    produce the conditioning tensor, that tensor feeds the transformer every
+    step, and activations are retained for a backward pass that never happens.
+    Also records peak VRAM for the run when CUDA is available.
     """
     import torch
 
@@ -188,7 +273,7 @@ def run_native_wan_denoise(pipe: Any, **kwargs: Any) -> "NativeWanDenoiseOutput"
     except Exception:
         reset_peak = False
 
-    with torch.no_grad():
+    with torch.inference_mode():
         output = _run_native_wan_denoise_impl(pipe, **kwargs)
 
     if reset_peak:
@@ -281,6 +366,7 @@ def _run_native_wan_denoise_impl(
     else:
         batch_size = prompt_embeds.shape[0]
 
+    _evict_active_stage_before_prompt(pipe)
     prompt_embeds, negative_prompt_embeds = pipe.encode_prompt(
         prompt=prompt,
         negative_prompt=negative_prompt,
@@ -349,6 +435,27 @@ def _run_native_wan_denoise_impl(
         boundary_ratio * pipe.scheduler.config.num_train_timesteps if boundary_ratio is not None else None
     )
 
+    latent_model_input_cache = None
+    latent_channels = int(latents.shape[1])
+    use_preallocated_model_input = (
+        not expand_timesteps
+        and getattr(latents, "ndim", 0) == 5
+        and getattr(condition, "ndim", 0) == 5
+    )
+    if use_preallocated_model_input:
+        latent_model_input_cache = torch.empty(
+            (
+                latents.shape[0],
+                latents.shape[1] + condition.shape[1],
+                latents.shape[2],
+                latents.shape[3],
+                latents.shape[4],
+            ),
+            device=latents.device,
+            dtype=transformer_dtype,
+        )
+        latent_model_input_cache[:, latent_channels:].copy_(condition)
+
     # --- pre-loop diagnostics: resolved geometry, dtypes and stage split ---
     # This is the single most useful thing to log before a real run: it
     # surfaces wrong latent/condition shapes, dtype mismatches, an off
@@ -407,7 +514,11 @@ def _run_native_wan_denoise_impl(
             temp_ts = (first_frame_mask[0][0][:, ::2, ::2] * t).flatten()
             timestep = temp_ts.unsqueeze(0).expand(latents.shape[0], -1)
         else:
-            latent_model_input = torch.cat([latents, condition], dim=1).to(transformer_dtype)
+            if use_preallocated_model_input:
+                latent_model_input_cache[:, :latent_channels].copy_(latents)
+                latent_model_input = latent_model_input_cache
+            else:
+                latent_model_input = torch.cat([latents, condition], dim=1).to(transformer_dtype)
             timestep = t.expand(latents.shape[0])
 
         current_model, stage_ready_seconds = _ensure_stage_ready(
@@ -415,10 +526,11 @@ def _run_native_wan_denoise_impl(
             device=latent_model_input.device,
             stage=stage_name,
             step=i + 1,
+            pipe=pipe,
         )
         fp8_before = _fp8_metrics_for(current_model)
 
-        with current_model.cache_context("cond"):
+        with current_model.cache_context("cond"), _strict_sdpa_context():
             noise_pred = current_model(
                 hidden_states=latent_model_input,
                 timestep=timestep,
@@ -429,7 +541,7 @@ def _run_native_wan_denoise_impl(
             )[0]
 
         if pipe.do_classifier_free_guidance:
-            with current_model.cache_context("uncond"):
+            with current_model.cache_context("uncond"), _strict_sdpa_context():
                 noise_uncond = current_model(
                     hidden_states=latent_model_input,
                     timestep=timestep,

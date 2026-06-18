@@ -24,6 +24,7 @@ from aiwf.infrastructure.wan.pipeline import (
     _ensure_wan_attention_processors,
     _fp8_scaled_mm_failure_payload,
     _frames_from_wan_pipeline_output,
+    _install_group_offload_for_stage,
     _install_sequential_cpu_offload_for_stage,
     _load_comfy_fp8_transformer_weights,
     _load_umt5_text_encoder,
@@ -35,11 +36,12 @@ from aiwf.infrastructure.wan.pipeline import (
     _call_accepts_kwarg,
     _collect_fp8_linear_metrics,
     _cuda_supports_tensorcore_fp8,
+    _resolve_dual_stage_offload_for_hardware,
     _wan_output_type_for_pipe,
     _wan_cache_mode,
     estimate_gguf_expanded_gb,
 )
-from aiwf.services.wan import WanService
+from aiwf.services.wan import WanService, wan_model_pair_compatibility
 
 
 def _svc(tmp_path: Path) -> WanService:
@@ -90,7 +92,7 @@ def test_request_defaults_and_helpers():
     r = WanI2VRequest()
     assert r.model_id == WAN_TI2V_5B
     assert r.runtime_mode == WAN_RUNTIME_FAST_5B
-    assert r.fps == 16 and r.offload == "model"
+    assert r.fps == 16 and r.offload == "balanced"
     assert r.temporal_chunks is False
     assert r.chunk_size == 24
     assert r.chunk_overlap == 0
@@ -101,6 +103,17 @@ def test_request_defaults_and_helpers():
     assert r.effective_steps() == 8
     assert r.effective_boundary_ratio() == 0.5
     assert WanI2VRequest(width=512, height=320).max_area == 512 * 320
+
+
+def test_request_accepts_streamed_offload():
+    r = WanI2VRequest(offload="streamed")
+
+    assert r.offload == "streamed"
+
+
+def test_request_accepts_balanced_and_resident_offload():
+    assert WanI2VRequest(offload="balanced").offload == "balanced"
+    assert WanI2VRequest(offload="resident").offload == "resident"
 
 
 def test_call_accepts_kwarg_handles_explicit_and_kwargs():
@@ -182,16 +195,79 @@ def test_wan_cache_mode_prefers_gpu_swap_for_model_offload_fp8():
 
     assert _wan_cache_mode("sequential", fast_fp8_pair=True) == "none"
     assert _wan_cache_mode("group", fast_fp8_pair=True) == "none"
+    assert _wan_cache_mode("balanced", fast_fp8_pair=False) == "none"
     assert (
         _wan_cache_mode("model", fast_fp8_pair=True)
         == WanStageCacheMode.GPU_ACTIVE_CPU_PINNED_STANDBY.value
     )
+    assert (
+        _wan_cache_mode("balanced", fast_fp8_pair=True)
+        == WanStageCacheMode.GPU_ACTIVE_CPU_PINNED_STANDBY.value
+    )
+    assert (
+        _wan_cache_mode("resident", fast_fp8_pair=True)
+        == WanStageCacheMode.DUAL_GPU_RESIDENT.value
+    )
+    assert _wan_cache_mode("resident", fast_fp8_pair=False) == "none"
     assert (
         _wan_cache_mode("model", fast_fp8_pair=True, pinned_memory=False)
         == WanStageCacheMode.GPU_ACTIVE_CPU_UNPINNED_STANDBY.value
     )
     assert _wan_cache_mode("model", fast_fp8_pair=False) == "none"
     assert _wan_cache_mode("none", fast_fp8_pair=False) == "full"
+
+
+def test_resident_offload_downgrades_on_16gb_gpu(monkeypatch):
+    monkeypatch.delenv("AIWF_WAN_FORCE_RESIDENT", raising=False)
+    monkeypatch.delenv("AIWF_WAN_RESIDENT_MIN_VRAM_MB", raising=False)
+
+    with patch("aiwf.infrastructure.wan.pipeline._cuda_total_vram_mb", return_value=16376):
+        assert _resolve_dual_stage_offload_for_hardware("resident", fast_fp8_pair=True) == "balanced"
+
+
+def test_resident_offload_can_be_forced_for_research(monkeypatch):
+    monkeypatch.setenv("AIWF_WAN_FORCE_RESIDENT", "1")
+
+    with patch("aiwf.infrastructure.wan.pipeline._cuda_total_vram_mb", return_value=16376):
+        assert _resolve_dual_stage_offload_for_hardware("resident", fast_fp8_pair=True) == "resident"
+
+
+def test_wan_pair_check_allows_different_creator_names_with_same_type_and_quant():
+    check = wan_model_pair_compatibility(
+        "creator_a_wan_i2v_q4_high.gguf",
+        "different_name_wan_i2v_low_q4.gguf",
+    )
+
+    assert check.ok is True
+    assert not check.errors
+
+
+def test_wan_pair_check_blocks_file_type_and_quant_mismatch():
+    mixed_type = wan_model_pair_compatibility(
+        "wan_i2v_high_q4.gguf",
+        "wan_i2v_low_q4.safetensors",
+    )
+    mixed_quant = wan_model_pair_compatibility(
+        "wan_i2v_high_q5.gguf",
+        "wan_i2v_low_q4.gguf",
+    )
+
+    assert mixed_type.ok is False
+    assert any("different storage formats" in error for error in mixed_type.errors)
+    assert mixed_quant.ok is False
+    assert any("different quantization tiers" in error for error in mixed_quant.errors)
+
+
+def test_wan_pair_check_blocks_large_size_mismatch(tmp_path: Path):
+    high = tmp_path / "wan_high_q4.gguf"
+    low = tmp_path / "wan_low_q4.gguf"
+    high.write_bytes(b"x" * 1024)
+    low.write_bytes(b"x" * 2048)
+
+    check = wan_model_pair_compatibility(str(high), str(low))
+
+    assert check.ok is False
+    assert any("file sizes differ too much" in error for error in check.errors)
 
 
 def test_wan_latent_pipeline_output_is_decoded_to_frames():
@@ -324,6 +400,31 @@ def test_sequential_offload_helper_rejects_non_module():
     assert _install_sequential_cpu_offload_for_stage(object(), "cuda:0") is False
 
 
+def test_group_offload_helper_can_force_streamed_one_block():
+    captured = {}
+
+    class GroupOffloadTarget:
+        def enable_group_offload(self, **kwargs):
+            captured.update(kwargs)
+
+    target = GroupOffloadTarget()
+
+    assert _install_group_offload_for_stage(
+        target,
+        "cuda:0",
+        blocks=1,
+        use_stream=True,
+        record_stream=True,
+        low_cpu_mem_usage=False,
+    )
+    assert captured["offload_type"] == "block_level"
+    assert captured["num_blocks_per_group"] == 1
+    assert captured["use_stream"] is True
+    assert captured["record_stream"] is True
+    assert captured["low_cpu_mem_usage"] is False
+    assert getattr(target, "_aiwf_group_offload_stream") is True
+
+
 def test_resolve_model_hf_default(tmp_path: Path):
     s = _svc(tmp_path)
     assert s.resolve_model(None) == WAN_TI2V_5B
@@ -427,6 +528,25 @@ def test_wan_preflight_passes_with_local_hybrid_components(tmp_path: Path):
     assert result.vae == str(vae.resolve())
 
 
+def test_wan_preflight_blocks_mismatched_quant_pair(tmp_path: Path):
+    s = _svc(tmp_path)
+    _force_wan_available(s)
+    _write_component_base(s)
+    high = s.models_dir() / "Safetensor" / "maker_a_high_fp8.safetensors"
+    low = s.models_dir() / "Safetensor" / "maker_b_low_fp16.safetensors"
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan_2.1_vae.safetensors"
+    _write_fake_safetensors(high)
+    _write_fake_safetensors(low)
+    _write_fake_safetensors(vae)
+
+    result = s.preflight(
+        WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high.name, low_noise_model_id=low.name)
+    )
+
+    assert not result.ok
+    assert "different quantization tiers" in result.message()
+
+
 def test_wan_preflight_blocks_missing_component_base(tmp_path: Path):
     s = _svc(tmp_path)
     _force_wan_available(s)
@@ -474,6 +594,36 @@ def test_wan_generation_unloads_image_models_before_video_load(tmp_path: Path):
     )
 
     assert calls[:2] == ["unload", "video"]
+
+
+def test_wan_generation_unloads_video_backend_after_failure(tmp_path: Path):
+    from PIL import Image
+
+    calls: list[str] = []
+    s = _svc(tmp_path)
+    _force_wan_available(s)
+    _write_component_base(s)
+    high = s.models_dir() / "Safetensor" / "wan-high.safetensors"
+    low = s.models_dir() / "Safetensor" / "wan-low.safetensors"
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan_2.1_vae.safetensors"
+    _write_fake_safetensors(high)
+    _write_fake_safetensors(low)
+    _write_fake_safetensors(vae)
+
+    def fail_generate(*args, **kwargs):
+        calls.append("generate")
+        raise RuntimeError("Allocation on device")
+
+    s._backend.generate = fail_generate
+    s._backend.unload = lambda: calls.append("unload")
+
+    with pytest.raises(WanUnavailable, match="Allocation on device"):
+        s.generate(
+            WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high.name, low_noise_model_id=low.name),
+            Image.new("RGB", (8, 8)),
+        )
+
+    assert calls == ["generate", "unload"]
 
 
 def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
@@ -632,6 +782,7 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     assert "latent=13f" in result.message
     assert "cache=gpu_active_cpu_pinned_standby" in result.message
     assert "VRAM cap=14848/16384 MB" in result.message
+    assert "keep_free=1536 MB" in result.message
 
 
 def test_wan_generation_fast_5b_uses_local_model_without_high_low(tmp_path: Path, monkeypatch):
@@ -1130,6 +1281,36 @@ def test_fp8_scaled_linear_counts_bf16_fallback_on_cpu(monkeypatch):
     assert metrics["fp8_linear_layers"] == 1
     assert metrics["fp8_fallback_calls"] == 1
     assert metrics["fp8_fallback_layers"] == 1
+    assert metrics["fp8_backend"] == "torch_scaled_mm_e4m3fn"
+    assert metrics["fp8_backend_metadata"]["compute_entrypoint"] == "torch._scaled_mm"
+    assert metrics["fp8_linear_shape_count"] == 1
+    assert metrics["fp8_linear_shapes"][0]["input_shape"] == [2, 16]
+    assert metrics["fp8_linear_shapes"][0]["path"] == "fallback"
+
+
+def test_stage_transition_metrics_are_bounded_and_aggregated():
+    import time
+
+    from aiwf.infrastructure.wan.pipeline import AIWFModelCacheManager
+
+    cache = AIWFModelCacheManager(device="cuda")
+    cache._record_transition(
+        "swap_models",
+        time.perf_counter() - 0.001,
+        old_key="wan_high",
+        new_key="wan_low",
+        h2d_ms=12.5,
+        d2h_ms=7.25,
+        cleanup_ms=1.0,
+    )
+
+    metrics = cache.collect_transition_metrics()
+
+    assert metrics["stage_transition_count"] == 1
+    assert metrics["stage_transition_h2d_ms"] == 12.5
+    assert metrics["stage_transition_d2h_ms"] == 7.25
+    assert metrics["stage_transition_cleanup_ms"] == 1.0
+    assert metrics["stage_transition_events"][0]["operation"] == "swap_models"
 
 
 def test_aiwf_fp8_linear_load_quantized_weight_api(monkeypatch):
@@ -1152,6 +1333,8 @@ def test_aiwf_fp8_linear_load_quantized_weight_api(monkeypatch):
     assert layer.weight.dtype == torch.float8_e4m3fn
     assert layer.weight_scale.dtype == torch.float32
     assert layer.input_scale.dtype == torch.float32
+    assert layer.input_scale_reciprocal.dtype == torch.float32
+    assert layer.input_scale_reciprocal.item() == pytest.approx(2.0)
     assert layer.orig_dtype == torch.bfloat16
     assert layer.fallback_calls == 1
 

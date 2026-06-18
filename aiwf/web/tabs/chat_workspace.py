@@ -50,18 +50,12 @@ def _get_client(base_url: str = "http://127.0.0.1:11434") -> OllamaClient:
 # Status helpers
 # ---------------------------------------------------------------------------
 
-_STATUS_OK  = "🟢 Ollama connected"
-_STATUS_ERR = "🔴 Ollama not detected"
+_STATUS_OK  = "Ollama connected"
+_STATUS_ERR = "Ollama not detected"
 
 _INSTALL_NOTE = (
-    "**Ollama is not running.**\n\n"
-    "To use the chat tab:\n"
-    "1. Download Ollama from [ollama.com](https://ollama.com)\n"
-    "2. Install and run it (`ollama serve`)\n"
-    "3. Pull a model: `ollama pull llama3:8b`\n"
-    "4. Click **Refresh** above\n\n"
-    "Chat and image/video share the GPU — switching tabs "
-    "automatically unloads the current model."
+    "**Ollama is not running.** Start Ollama, pull a model, then refresh. "
+    "AIWF unloads chat models when image/video needs the GPU."
 )
 
 
@@ -78,7 +72,7 @@ def _check_ollama(client: OllamaClient) -> tuple[bool, list[str]]:
 
 def register_chat_workspace(registry: WebRegistry) -> None:
 
-    @registry.tab("Chat", order=15)
+    @registry.tab("Chat", order=3)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         client = _get_client()
 
@@ -88,7 +82,7 @@ def register_chat_workspace(registry: WebRegistry) -> None:
 
         with gr.Row():
             status_pill = gr.Markdown(value=status_text, elem_id="ollama-status")
-            refresh_btn = gr.Button("⟳ Refresh", variant="secondary", scale=0)
+            refresh_btn = gr.Button("Refresh", variant="secondary", scale=0)
 
         model_dd = gr.Dropdown(
             choices=models,
@@ -105,13 +99,12 @@ def register_chat_workspace(registry: WebRegistry) -> None:
         chatbot = gr.Chatbot(
             label="Chat",
             height=480,
-            show_copy_button=True,
-            type="messages",
+            buttons=["copy"],
         )
 
         with gr.Row():
             msg_box = gr.Textbox(
-                placeholder="Type a message and press Enter or Send…",
+                placeholder="Type a message...",
                 show_label=False,
                 scale=8,
             )
@@ -121,10 +114,9 @@ def register_chat_workspace(registry: WebRegistry) -> None:
             clear_btn  = gr.Button("Clear", variant="secondary")
             unload_btn = gr.Button("Unload model", variant="stop")
 
-        # System-prompt accordion (collapsed by default)
         with gr.Accordion("System prompt", open=False):
             system_prompt = gr.Textbox(
-                placeholder="Optional system prompt…",
+                placeholder="Optional system prompt",
                 lines=3,
                 show_label=False,
             )

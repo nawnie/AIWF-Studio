@@ -87,16 +87,15 @@ def _cn_installed_md(ctx: AppContext) -> str:
 
 
 def register_model_manager(registry: WebRegistry) -> None:
-    @registry.tab("Models", order=15)
+    @registry.tab("Models", order=10)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         catalog = ctx.models
 
         with gr.Column(elem_classes=["aiwf-models"]):
             with gr.Column(elem_classes=["aiwf-page-header"]):
-                gr.Markdown("Model Manager", elem_classes=["aiwf-section-label"])
+                gr.Markdown("Models", elem_classes=["aiwf-section-label"])
                 gr.Markdown(
-                    "Browse checkpoints and LoRAs. Safetensors headers are read when available "
-                    "so you can see training info and suggested trigger words.",
+                    "Manage downloads, checkpoints, LoRAs, and model utilities.",
                     elem_classes=["aiwf-page-intro"],
                 )
                 folder_help = gr.Markdown(catalog.models_folder_help(), elem_classes=["aiwf-page-path"])
@@ -113,8 +112,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                     with gr.Column(elem_classes=["aiwf-panel"]):
                         gr.Markdown("Quick start", elem_classes=["aiwf-section-label"])
                         gr.Markdown(
-                            "Download the smallest usable model set for each feature. "
-                            "Each button downloads all required files in sequence.",
+                            "Download the smallest usable model set for a feature.",
                             elem_classes=["aiwf-settings-paths"],
                         )
                         with gr.Row():
@@ -130,8 +128,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                     with gr.Column(elem_classes=["aiwf-panel"]):
                         gr.Markdown("Curated catalog", elem_classes=["aiwf-section-label"])
                         gr.Markdown(
-                            "Starter list of Hugging Face, CivitAI, and direct-download models. "
-                            "Pick one — the category decides which folder receives the file.",
+                            "Starter Hugging Face, CivitAI, and direct-download models.",
                             elem_classes=["aiwf-settings-paths"],
                         )
                         catalog_filter = gr.CheckboxGroup(
@@ -156,10 +153,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                     with gr.Column(elem_classes=["aiwf-panel"]):
                         gr.Markdown("Custom download", elem_classes=["aiwf-section-label"])
                         gr.Markdown(
-                            "Paste a **Hugging Face** repo (`user/model` + filename), "
-                            "**CivitAI** model page URL, or any **direct** file URL. "
-                            "Choose a category so the app saves to the correct folder. "
-                            "For **Wan Diffusers folder**, paste the Hugging Face repo and leave the file path empty.",
+                            "Paste a Hugging Face repo, CivitAI URL, or direct file URL.",
                             elem_classes=["aiwf-settings-paths"],
                         )
                         custom_source = gr.Radio(
@@ -231,9 +225,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                     with gr.Column(elem_classes=["aiwf-panel", "aiwf-lora-config"]):
                         gr.Markdown("LoRA shortcut & prompt words", elem_classes=["aiwf-section-label"])
                         gr.Markdown(
-                            "Set a short alias and trigger words. In Studio, type `*lora:youralias` "
-                            "in the prompt — when you hit **Generate**, it expands to the LoRA tag "
-                            "and these words automatically.",
+                            "Set the alias and trigger words used by `*lora:alias` in Image prompts.",
                             elem_classes=["aiwf-settings-paths"],
                         )
                         with gr.Row():
@@ -389,11 +381,8 @@ def register_model_manager(registry: WebRegistry) -> None:
                     with gr.Column(elem_classes=["aiwf-panel"]):
                         gr.Markdown("Download ControlNet models", elem_classes=["aiwf-section-label"])
                         gr.Markdown(
-                            "SD1.5 ControlNet-v1.1 **Light** checkpoints (~129 MB each) download "
-                            f"into `{ctx.controlnet.models_dir()}`. They use the same v1.1 "
-                            "preprocessors as full models but are about 5× smaller. Already-downloaded "
-                            "full fp16 checkpoints in that folder still work. Models appear in "
-                            "Studio → Advanced → ControlNet automatically.",
+                            "SD1.5 ControlNet-v1.1 Light checkpoints download "
+                            f"into `{ctx.controlnet.models_dir()}` and appear in Image Advanced.",
                             elem_classes=["aiwf-settings-paths"],
                         )
                         with gr.Row():
@@ -414,10 +403,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                     with gr.Column(elem_classes=["aiwf-panel"]):
                         gr.Markdown("Model Info Lookup", elem_classes=["aiwf-section-label"])
                         gr.Markdown(
-                            "Fetch metadata from HuggingFace, CivitAI, or Ollama. "
-                            "Enter a HF repo ID (`org/model`), a CivitAI URL or model number, "
-                            "or an Ollama model name (e.g. `llama3:8b`). "
-                            "API tokens are read from Settings → API Keys.",
+                            "Fetch metadata from Hugging Face, CivitAI, or Ollama.",
                             elem_classes=["aiwf-settings-paths"],
                         )
                         with gr.Row():
@@ -446,8 +432,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                                     elem_classes=["aiwf-section-label"],
                                 )
                                 gr.Markdown(
-                                    "All `.safetensors`, `.ckpt`, `.gguf`, and similar files "
-                                    "inside your models directory, grouped by folder.",
+                                    "Model files grouped by folder.",
                                     elem_classes=["aiwf-settings-paths"],
                                 )
                                 with gr.Row():
@@ -467,8 +452,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                                     elem_classes=["aiwf-section-label"],
                                 )
                                 gr.Markdown(
-                                    "Enter a repo ID or keyword to look up metadata. "
-                                    "Use Settings → API Keys to add your HF token for private repos.",
+                                    "Enter a repo ID or keyword. Add an HF token in Settings for private repos.",
                                     elem_classes=["aiwf-settings-paths"],
                                 )
                                 with gr.Row():
@@ -490,11 +474,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                                     elem_classes=["aiwf-section-label"],
                                 )
                                 gr.Markdown(
-                                    "Search the CivitAI model catalog (civitai.com). "
-                                    "Adult content is hosted separately on **civitai.red** and is not returned here. "
-                                    "Add your API token in **Settings → API Keys** for private/authenticated downloads. "
-                                    "Unsafe formats (.ckpt/.pt) are blocked by default — "
-                                    "change this in **Settings → Download safety**.",
+                                    "Search CivitAI. Add a token in Settings for private/authenticated downloads.",
                                     elem_classes=["aiwf-settings-paths"],
                                 )
                                 with gr.Row():
@@ -522,7 +502,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                                     )
                                 with gr.Row():
                                     civitai_nsfw = gr.Checkbox(
-                                        label="Show NSFW models (adult content is on civitai.red, not searched here)",
+                                        label="Show NSFW models",
                                         value=False,
                                         scale=3,
                                     )
@@ -537,7 +517,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                                         scale=3,
                                     )
                                 gr.Markdown(
-                                    "**Quick presets** — click to run a live query:",
+                                    "**Quick presets**",
                                     elem_classes=["aiwf-settings-paths"],
                                 )
                                 with gr.Row():
@@ -859,7 +839,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                 )
                 return
             yield (
-                f"**{item.title} installed.** It's ready in Studio → ControlNet.",
+                f"**{item.title} installed.** It's ready in Image -> ControlNet.",
                 gr.update(choices=_cn_download_choices(ctx)),
                 _cn_installed_md(ctx),
             )

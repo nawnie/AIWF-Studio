@@ -33,7 +33,7 @@ def _restorer_choices(ctx: AppContext) -> list[tuple[str, str]]:
 
 
 def register_faceswap(registry: WebRegistry) -> None:
-    @registry.tab("Face Swap", order=20)
+    @registry.tab("Face Swap", order=22)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         service = ctx.faceswap
 
@@ -41,9 +41,7 @@ def register_faceswap(registry: WebRegistry) -> None:
             with gr.Column(elem_classes=["aiwf-page-header"]):
                 gr.Markdown("Face Swap (ReActor)", elem_classes=["aiwf-section-label"])
                 gr.Markdown(
-                    "Swap a face from a **source** image onto a **target** image. "
-                    "Needs the optional `insightface` + `onnxruntime` packages and the "
-                    "`inswapper_128` model. Use responsibly and only with consent.",
+                    "Swap a source face onto a target image. Use only with consent.",
                     elem_classes=["aiwf-page-intro"],
                 )
                 gr.Markdown(service.folder_help(), elem_classes=["aiwf-page-path"])

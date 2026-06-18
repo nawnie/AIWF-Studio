@@ -10,7 +10,7 @@ sees zero fallback calls when fed the same transformer objects the loop uses.
 
 Real-hardware validation (true Wan generation quality, fp8_fallback_calls==0
 on actual FP8 weights, a 720x720/81-frame benchmark) is explicitly out of
-scope here and remains a follow-up per docs/WAN_STANDALONE_RUNTIME_PLAN.md.
+scope here and remains a follow-up for the local benchmark plan.
 """
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ class _FakeTransformer:
         self.uncond_output_value = output_value if uncond_output_value is None else uncond_output_value
         self.cache_context_calls: list[str] = []
         self.forward_calls: list[str] = []
+        self.hidden_state_ptrs: list[int] = []
         self.loaded = True  # overridden by _LazyFakeTransformer
 
     @contextmanager
@@ -56,6 +57,10 @@ class _FakeTransformer:
 
         mode = self.cache_context_calls[-1]
         self.forward_calls.append(mode)
+        try:
+            self.hidden_state_ptrs.append(int(hidden_states.data_ptr()))
+        except Exception:
+            pass
         value = self.output_value if mode == "cond" else self.uncond_output_value
         return (torch.full_like(hidden_states[:, :4], value),)
 
@@ -175,6 +180,23 @@ class _FakePipe:
         pass
 
 
+class _FakeStageCache:
+    def __init__(self, active_in_vram="wan_high"):
+        self.active_in_vram = active_in_vram
+        self.cpu_cache = {"wan_high": object(), "wan_low": object()}
+        self.unloaded: list[str] = []
+        self.loaded: list[str] = []
+
+    def unload_from_vram(self, key):
+        self.unloaded.append(key)
+        if self.active_in_vram == key:
+            self.active_in_vram = None
+
+    def load_to_vram(self, key):
+        self.loaded.append(key)
+        self.active_in_vram = key
+
+
 def _make_pipe(boundary_ratio=0.5, timesteps=(1000.0, 800.0, 400.0, 100.0), low_on_load=None):
     torch = pytest.importorskip("torch")
     high = _FakeTransformer("high", torch.float32, output_value=1.0)
@@ -182,6 +204,43 @@ def _make_pipe(boundary_ratio=0.5, timesteps=(1000.0, 800.0, 400.0, 100.0), low_
     scheduler = _FakeScheduler(timesteps)
     pipe = _FakePipe(high, low, scheduler, boundary_ratio=boundary_ratio)
     return pipe, high, low, scheduler
+
+
+def test_active_wan_stage_is_evicted_before_prompt_encoding():
+    from aiwf.infrastructure.wan.native.denoise import _evict_active_stage_before_prompt
+
+    pipe = type("Pipe", (), {})()
+    cache = _FakeStageCache(active_in_vram="wan_high")
+    pipe._aiwf_stage_cache = cache
+
+    _evict_active_stage_before_prompt(pipe)
+
+    assert cache.unloaded == ["wan_high"]
+    assert cache.active_in_vram is None
+
+
+def test_cached_high_stage_is_loaded_before_first_denoise_forward():
+    pytest.importorskip("torch")
+    from aiwf.infrastructure.wan.native.denoise import run_native_wan_denoise
+
+    pipe, _high, _low, _scheduler = _make_pipe()
+    cache = _FakeStageCache(active_in_vram=None)
+    pipe._aiwf_stage_cache = cache
+
+    run_native_wan_denoise(
+        pipe,
+        image=object(),
+        prompt="a cat",
+        negative_prompt="",
+        height=64,
+        width=64,
+        num_frames=9,
+        num_inference_steps=4,
+        guidance_scale=2.0,
+        output_type="latent",
+    )
+
+    assert cache.loaded[0] == "wan_high"
 
 
 def test_boundary_ratio_switches_between_high_and_low_stage():
@@ -459,7 +518,7 @@ def test_native_denoise_runs_under_no_grad():
 
 
 def test_latent_model_input_concatenates_condition_channels():
-    """Non-expand path must feed ``cat([latents, condition], dim=1)`` to the
+    """Non-expand path must feed latent + condition channels to the
     transformer. With 16 latent channels + 20 condition channels that is the
     36-channel Wan I2V input; this catches a regression in concat order or
     channel geometry that a CPU smoke test would otherwise miss."""
@@ -492,3 +551,36 @@ def test_latent_model_input_concatenates_condition_channels():
     channels = high.in_channels + low.in_channels
     assert channels, "no transformer forwards were recorded"
     assert all(c == 36 for c in channels), f"expected 36-channel input, saw {sorted(set(channels))}"
+
+
+def test_latent_model_input_buffer_is_reused_between_steps():
+    torch = pytest.importorskip("torch")
+    from aiwf.infrastructure.wan.native.denoise import run_native_wan_denoise
+
+    high = _GradRecordingTransformer("high", torch.float32, output_value=1.0)
+    low = _GradRecordingTransformer("low", torch.float32, output_value=3.0)
+    scheduler = _FakeScheduler((1000.0, 800.0, 400.0, 100.0))
+    pipe = _FakePipe(high, low, scheduler, boundary_ratio=0.5)
+    pipe.do_classifier_free_guidance = False
+
+    def _prep(image, batch_size, num_channels_latents, height, width, num_frames, dtype, device, generator, latents, last_image):
+        return torch.zeros(batch_size, 16, 3, 8, 8), torch.zeros(batch_size, 20, 3, 8, 8)
+
+    pipe.prepare_latents = _prep
+
+    run_native_wan_denoise(
+        pipe,
+        image=object(),
+        prompt="a cat",
+        negative_prompt="",
+        height=64,
+        width=64,
+        num_frames=9,
+        num_inference_steps=4,
+        guidance_scale=1.0,
+        output_type="latent",
+    )
+
+    ptrs = high.hidden_state_ptrs + low.hidden_state_ptrs
+    assert len(ptrs) == 4
+    assert len(set(ptrs)) == 1

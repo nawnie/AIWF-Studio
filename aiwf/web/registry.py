@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from aiwf.bootstrap import AppContext
 
 TabBuilder = Callable[["AppContext", "gr.Tab | None"], None]
-PINNED_TABS = {"Studio", "Settings"}
+PINNED_TABS = {"Image", "Settings"}
 
 
 @dataclass

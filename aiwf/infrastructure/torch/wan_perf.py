@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
+import time
 from dataclasses import asdict, dataclass
 from importlib import import_module
+from importlib import metadata
 from importlib.util import find_spec
-from typing import Iterable
+from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +245,173 @@ def describe_wan_acceleration_capabilities() -> dict[str, dict[str, object]]:
     return {capability.name: capability.to_dict() for capability in capabilities}
 
 
+def _clean_nvml_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def describe_wan_hardware_fingerprint() -> dict[str, Any]:
+    """Return static board/runtime metadata for Wan performance receipts.
+
+    This is intentionally non-invasive: no allocations, no transfer benchmark,
+    and no shelling out to ``nvidia-smi``. NVML fields are advisory because the
+    Python binding is optional.
+    """
+    fingerprint: dict[str, Any] = {
+        "os_name": platform.platform(),
+        "cpu_model": platform.processor() or platform.machine(),
+        "python": platform.python_version(),
+        "nvml_available": False,
+    }
+    try:
+        import psutil
+
+        fingerprint["physical_ram_bytes"] = int(psutil.virtual_memory().total)
+        fingerprint["pagefile_limit_bytes"] = int(psutil.swap_memory().total)
+    except Exception:
+        fingerprint["physical_ram_bytes"] = None
+        fingerprint["pagefile_limit_bytes"] = None
+
+    try:
+        import torch
+
+        fingerprint["torch_version"] = str(getattr(torch, "__version__", ""))
+        fingerprint["cuda_runtime_version"] = str(getattr(torch.version, "cuda", "") or "")
+        cuda_available = bool(torch.cuda.is_available())
+        fingerprint["cuda_available"] = cuda_available
+        if cuda_available:
+            index = int(torch.cuda.current_device())
+            props = torch.cuda.get_device_properties(index)
+            fingerprint.update(
+                {
+                    "gpu_index": index,
+                    "gpu_name": str(getattr(props, "name", "")),
+                    "compute_capability": [
+                        int(getattr(props, "major", 0)),
+                        int(getattr(props, "minor", 0)),
+                    ],
+                    "total_vram_bytes": int(getattr(props, "total_memory", 0) or 0),
+                    "multiprocessor_count": int(getattr(props, "multi_processor_count", 0) or 0),
+                    "max_threads_per_sm": getattr(props, "max_threads_per_multi_processor", None),
+                    "l2_cache_bytes": getattr(props, "l2_cache_size", None),
+                    "async_engine_count": getattr(props, "async_engine_count", None),
+                }
+            )
+    except Exception as exc:
+        fingerprint["cuda_error"] = f"{type(exc).__name__}: {exc}"
+
+    try:
+        fingerprint["triton_version"] = metadata.version("triton")
+    except metadata.PackageNotFoundError:
+        try:
+            fingerprint["triton_version"] = metadata.version("triton-windows")
+        except metadata.PackageNotFoundError:
+            fingerprint["triton_version"] = None
+
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        index = int(fingerprint.get("gpu_index") or 0)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+        pci = pynvml.nvmlDeviceGetPciInfo(handle)
+        fingerprint.update(
+            {
+                "nvml_available": True,
+                "gpu_uuid": _clean_nvml_value(pynvml.nvmlDeviceGetUUID(handle)),
+                "driver_version": _clean_nvml_value(pynvml.nvmlSystemGetDriverVersion()),
+                "pci_bus_id": _clean_nvml_value(getattr(pci, "busId", "")),
+                "pci_device_id": getattr(pci, "pciDeviceId", None),
+                "pci_subsystem_id": getattr(pci, "pciSubSystemId", None),
+            }
+        )
+        optional_calls = {
+            "vbios_version": "nvmlDeviceGetVbiosVersion",
+            "memory_bus_width_bits": "nvmlDeviceGetMemoryBusWidth",
+            "pcie_current_generation": "nvmlDeviceGetCurrPcieLinkGeneration",
+            "pcie_current_width": "nvmlDeviceGetCurrPcieLinkWidth",
+            "pcie_max_generation": "nvmlDeviceGetMaxPcieLinkGeneration",
+            "pcie_max_width": "nvmlDeviceGetMaxPcieLinkWidth",
+        }
+        for key, func_name in optional_calls.items():
+            func = getattr(pynvml, func_name, None)
+            if func is None:
+                fingerprint[key] = None
+                continue
+            try:
+                fingerprint[key] = _clean_nvml_value(func(handle))
+            except Exception:
+                fingerprint[key] = None
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+    except Exception as exc:
+        fingerprint["nvml_error"] = f"{type(exc).__name__}: {exc}"
+
+    return fingerprint
+
+
+def measure_wan_transfer_bandwidth(
+    *,
+    size_bytes: int = 64 * 1024 * 1024,
+    include_pinned: bool = True,
+) -> dict[str, Any]:
+    """Run a small opt-in H2D/D2H copy probe for PCIe sanity checks."""
+    try:
+        import torch
+    except Exception as exc:
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    if not torch.cuda.is_available():
+        return {"available": False, "error": "CUDA unavailable"}
+
+    results: list[dict[str, Any]] = []
+    count = max(1, int(size_bytes) // 4)
+    for pinned in ([False, True] if include_pinned else [False]):
+        try:
+            cpu = torch.empty(count, dtype=torch.float32, pin_memory=bool(pinned))
+            gpu = torch.empty(count, dtype=torch.float32, device="cuda")
+            back = torch.empty(count, dtype=torch.float32, pin_memory=bool(pinned))
+            torch.cuda.synchronize()
+            h2d_started = time.perf_counter()
+            gpu.copy_(cpu, non_blocking=bool(pinned))
+            torch.cuda.synchronize()
+            h2d_seconds = max(1e-9, time.perf_counter() - h2d_started)
+            d2h_started = time.perf_counter()
+            back.copy_(gpu, non_blocking=bool(pinned))
+            torch.cuda.synchronize()
+            d2h_seconds = max(1e-9, time.perf_counter() - d2h_started)
+            gb = float(size_bytes) / 1_000_000_000.0
+            results.append(
+                {
+                    "pinned": bool(pinned),
+                    "size_bytes": int(size_bytes),
+                    "h2d_gbps": round(gb / h2d_seconds, 3),
+                    "d2h_gbps": round(gb / d2h_seconds, 3),
+                }
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "pinned": bool(pinned),
+                    "size_bytes": int(size_bytes),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        finally:
+            try:
+                del cpu, gpu, back
+            except Exception:
+                pass
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+    return {"available": True, "results": results}
+
+
 def apply_wan_transformer_optimizations(transformer, *, name: str = "transformer") -> list[str]:
     """Apply the fastest attention/conv path available on this machine."""
     if transformer is None:
@@ -255,18 +425,27 @@ def apply_wan_transformer_optimizations(transformer, *, name: str = "transformer
     # patch global SDPA (which would also affect SD image generation). All are gated
     # on the backend actually being callable, so none can raise 'NoneType' is not callable.
     backend = _set_wan_sage_backend(transformer) or _set_wan_flash_backend(transformer)
+    backend_label = "torch_sdpa"
     if backend:
         active.append(backend)
+        backend_label = backend
     else:
         sage = _try_sage_attention()
         if sage:
             active.append(sage)
+            backend_label = sage
 
     try:
         import torch
 
         transformer.to(memory_format=torch.channels_last, non_blocking=True)
         active.append("channels_last")
+    except Exception:
+        pass
+
+    try:
+        transformer._aiwf_attention_backend = backend_label
+        transformer._aiwf_attention_optimizations = tuple(active)
     except Exception:
         pass
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
 
 # Default model: the 5B TI2V variant is the most VRAM-accessible Wan 2.2 model
@@ -7,8 +9,11 @@ from pydantic import BaseModel, Field, field_validator
 WAN_TI2V_5B = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 
 # Offload strategies: "sequential" (lowest VRAM, slowest), "group" (block-level
-# middle ground), "model" (fast quantized active-stage swap), "none" (fastest).
-OFFLOAD_MODES = ("sequential", "group", "model", "none")
+# middle ground), "streamed" (one-block group offload with CUDA prefetch),
+# "model" (low-VRAM quantized active-stage swap), "balanced" (active-stage swap
+# with VAE resident), "resident" (keep quantized high+low stages on GPU),
+# "none" (move the whole pipeline to GPU).
+OFFLOAD_MODES = ("sequential", "group", "streamed", "model", "balanced", "resident", "none")
 
 # Sigma (noise schedule) types for FlowMatchEulerDiscreteScheduler.
 # Controls how denoising steps are spaced across the noise level range.
@@ -88,7 +93,7 @@ class WanI2VRequest(BaseModel):
     seed: int = -1
     runtime_mode: str = Field(default=WAN_RUNTIME_FAST_5B)
     model_id: str = WAN_TI2V_5B
-    offload: str = "model"
+    offload: str = "balanced"
     vram_reserve_enabled: bool = False
     vram_reserve_mb: int = Field(default=1536, ge=0, le=65536)
 
@@ -214,6 +219,27 @@ class WanI2VResult(BaseModel):
     fp8_fallback_reasons: list[str] = Field(default_factory=list)
     fp8_strict_mode: bool = False
     fp8_native_available: bool = False
+    fp8_profile_enabled: bool = False
+    fp8_backend: str = ""
+    fp8_backend_metadata: dict[str, Any] = Field(default_factory=dict)
+    fp8_linear_shape_count: int = Field(default=0, ge=0)
+    fp8_linear_shapes: list[dict[str, Any]] = Field(default_factory=list)
+    fp8_prepare_ms: float = Field(default=0.0, ge=0.0)
+    fp8_scaled_mm_ms: float = Field(default=0.0, ge=0.0)
+    fp8_bias_ms: float = Field(default=0.0, ge=0.0)
+    fp8_fallback_ms: float = Field(default=0.0, ge=0.0)
+    attention_backends: list[str] = Field(default_factory=list)
+    attention_optimizations: list[str] = Field(default_factory=list)
+    stage_transition_count: int = Field(default=0, ge=0)
+    stage_transition_total_ms: float = Field(default=0.0, ge=0.0)
+    stage_transition_h2d_ms: float = Field(default=0.0, ge=0.0)
+    stage_transition_d2h_ms: float = Field(default=0.0, ge=0.0)
+    stage_transition_cleanup_ms: float = Field(default=0.0, ge=0.0)
+    stage_transition_events: list[dict[str, Any]] = Field(default_factory=list)
+    hardware_fingerprint: dict[str, Any] = Field(default_factory=dict)
+    transfer_probe: dict[str, Any] = Field(default_factory=dict)
+    performance_benchmark_valid: bool = True
+    performance_benchmark_notes: list[str] = Field(default_factory=list)
     cache_mode: str = ""
     vram_reserve_enabled: bool = False
     vram_reserve_mb: int = Field(default=0, ge=0)

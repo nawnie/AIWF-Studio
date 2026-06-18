@@ -104,6 +104,10 @@ def test_probe_benchmark_returns_capabilities(monkeypatch):
         "aiwf.infrastructure.torch.wan_perf.describe_wan_acceleration_capabilities",
         lambda: {"gguf_runtime": {"available": True}},
     )
+    monkeypatch.setattr(
+        "aiwf.infrastructure.torch.wan_perf.describe_wan_hardware_fingerprint",
+        lambda: {"gpu_name": "Synthetic GPU"},
+    )
 
     result = pipeline_benchmark.run_benchmark({"kind": "probe", "label": "main"})
 
@@ -111,6 +115,8 @@ def test_probe_benchmark_returns_capabilities(monkeypatch):
         "kind": "probe",
         "label": "main",
         "wan_capabilities": {"gguf_runtime": {"available": True}},
+        "hardware_fingerprint": {"gpu_name": "Synthetic GPU"},
+        "transfer_probe": {},
     }
 
 
@@ -118,6 +124,10 @@ def test_probe_receipt_writes_capabilities(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         "aiwf.infrastructure.torch.wan_perf.describe_wan_acceleration_capabilities",
         lambda: {"torchao": {"available": False}},
+    )
+    monkeypatch.setattr(
+        "aiwf.infrastructure.torch.wan_perf.describe_wan_hardware_fingerprint",
+        lambda: {"gpu_name": "Synthetic GPU"},
     )
 
     rc, receipt_path = pipeline_benchmark.run_with_receipt({"kind": "probe"}, tmp_path)

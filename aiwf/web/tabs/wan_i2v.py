@@ -16,7 +16,12 @@ from aiwf.core.domain.wan import (
     frames_for_duration_seconds,
 )
 from aiwf.infrastructure.wan import WanUnavailable
-from aiwf.services.wan import WanService
+from aiwf.services.wan import (
+    WanService,
+    wan_model_quant_family,
+    wan_model_stage_role,
+    wan_model_storage_family,
+)
 from aiwf.web.registry import WebRegistry
 from aiwf.web.studio.resolution import (
     ASPECT_RATIO_PRESETS,
@@ -53,7 +58,7 @@ def _format_it_s(steps_per_second) -> str:
 
 
 def register_wan_i2v(registry: WebRegistry) -> None:
-    @registry.tab("Video", order=18)
+    @registry.tab("Video", order=2)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         service = _service(ctx)
 
@@ -72,13 +77,59 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         high_labeled = list(dict.fromkeys(high_labeled + other_labeled + all_labeled))
         low_labeled  = list(dict.fromkeys(low_labeled  + other_labeled + all_labeled))
 
+        def _filter_stage_choices(
+            labeled: list[tuple[str, str]],
+            *,
+            stage: str,
+            peer_value: str | None,
+        ) -> list[tuple[str, str]]:
+            peer_storage = wan_model_storage_family(peer_value)
+            peer_quant = wan_model_quant_family(peer_value)
+            filtered: list[tuple[str, str]] = []
+            for label, value in labeled:
+                role = wan_model_stage_role(value)
+                if role not in {stage, "unknown"}:
+                    continue
+                storage = wan_model_storage_family(value)
+                quant = wan_model_quant_family(value)
+                if peer_storage != "unknown" and storage != "unknown" and storage != peer_storage:
+                    continue
+                if peer_quant != "unknown" and quant != "unknown" and quant != peer_quant:
+                    continue
+                filtered.append((label, value))
+            return filtered or labeled
+
+        def _valid_or_first(value: str | None, choices: list[tuple[str, str]]) -> str | None:
+            ids = [v for _, v in choices]
+            if value and value in ids:
+                return value
+            return ids[0] if ids else None
+
+        def _pair_status(high_value: str | None, low_value: str | None) -> str:
+            high_text = str(high_value or "").strip()
+            low_text = str(low_value or "").strip()
+            if not (high_text and low_text):
+                return ""
+            high_storage = wan_model_storage_family(high_text)
+            low_storage = wan_model_storage_family(low_text)
+            high_quant = wan_model_quant_family(high_text)
+            low_quant = wan_model_quant_family(low_text)
+            if high_storage != "unknown" and low_storage != "unknown" and high_storage != low_storage:
+                return f"**Model pair blocked:** {high_storage} high + {low_storage} low."
+            if high_quant != "unknown" and low_quant != "unknown" and high_quant != low_quant:
+                return f"**Model pair blocked:** {high_quant.upper()} high + {low_quant.upper()} low."
+            parts = [p for p in (high_storage, high_quant) if p != "unknown"]
+            return "**Model pair:** " + (" / ".join(parts) if parts else "stage roles only")
+
         # Load persisted defaults
         _s = ctx.settings
         _last_high = getattr(_s, "last_wan_high", "")
         _last_low  = getattr(_s, "last_wan_low", "")
         _last_vae  = getattr(_s, "last_wan_vae", "")
         _last_te   = getattr(_s, "last_wan_text_encoder", "")
-        _last_offload = getattr(_s, "last_wan_offload", "model")
+        _last_offload = getattr(_s, "last_wan_offload", "balanced")
+        _working_offload_defaults = {"balanced", "model", "sequential"}
+        _offload_default = _last_offload if _last_offload in _working_offload_defaults else "balanced"
 
         def _best_default(labeled: list[tuple[str, str]], persisted: str) -> str | None:
             ids = [v for _, v in labeled]
@@ -97,6 +148,12 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         default_te_labeled = [("Default (full precision bundled encoder)", "")] + te_labeled
         default_te = _last_te if _last_te else (service.default_text_encoder() if hasattr(service, "default_text_encoder") else "")
 
+        initial_high = _best_default(high_labeled, _last_high)
+        initial_low_choices = _filter_stage_choices(low_labeled, stage="low", peer_value=initial_high)
+        initial_low = _valid_or_first(_best_default(low_labeled, _last_low), initial_low_choices)
+        initial_high_choices = _filter_stage_choices(high_labeled, stage="high", peer_value=initial_low)
+        initial_high = _valid_or_first(initial_high, initial_high_choices)
+
         default_video_size = 480
         default_video_ratio = "1:1"
 
@@ -111,8 +168,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     elem_classes=["aiwf-mode-toggle"],
                 )
                 gr.Markdown(
-                    "Wan 2.2 image-to-video — requires a High Noise + Low Noise transformer pair. "
-                    "Models are detected automatically from file headers.",
+                    "Wan image-to-video. Use a matched High Noise + Low Noise pair.",
                     elem_classes=["aiwf-page-intro"],
                 )
                 gr.Markdown(service.folder_help(), elem_classes=["aiwf-page-path"])
@@ -126,42 +182,46 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     runtime_mode = gr.Radio(
                         label="Runtime",
                         choices=[
-                            ("Fast demo - Wan 2.2 TI2V 5B", WAN_RUNTIME_FAST_5B),
-                            ("Native high/low - quality", WAN_RUNTIME_HIGH_LOW),
-                            ("Native high/low FP8 - experimental", WAN_RUNTIME_HIGH_LOW_FP8),
+                            ("Fast: high/low FP8", WAN_RUNTIME_HIGH_LOW_FP8),
+                            ("Safe: Wan 5B demo", WAN_RUNTIME_FAST_5B),
+                            ("Test: high/low full precision", WAN_RUNTIME_HIGH_LOW),
                         ],
-                        value=WAN_RUNTIME_FAST_5B,
-                        info="Fast demo uses the standalone 5B Diffusers model. High/low modes require matching transformer pairs.",
+                        value=WAN_RUNTIME_HIGH_LOW_FP8,
+                        info="Default: FP8, Balanced 16 GB, 8 Euler/simple steps, chunks off.",
                     )
 
                     gr.Markdown("Models", elem_classes=["aiwf-section-label"])
                     high_noise = gr.Dropdown(
                         label="High noise transformer",
-                        choices=high_labeled,
-                        value=_best_default(high_labeled, _last_high),
+                        choices=initial_high_choices,
+                        value=initial_high,
                         allow_custom_value=True,
-                        info="Required — early denoising stage. FP8 or GGUF Q4_K_M recommended for 16 GB.",
+                        info="Early denoising stage. FP8 or GGUF Q4 recommended.",
                     )
                     low_noise = gr.Dropdown(
                         label="Low noise transformer",
-                        choices=low_labeled,
-                        value=_best_default(low_labeled, _last_low),
+                        choices=initial_low_choices,
+                        value=initial_low,
                         allow_custom_value=True,
-                        info="Required — late denoising stage. Must match the High Noise model series.",
+                        info="Late denoising stage. Must match the high model.",
+                    )
+                    model_pair_status = gr.Markdown(
+                        _pair_status(initial_high, initial_low),
+                        elem_classes=["aiwf-settings-paths"],
                     )
                     text_encoder = gr.Dropdown(
                         label="Text encoder (UMT5-XXL)",
                         choices=default_te_labeled,
                         value=default_te if default_te else "",
                         allow_custom_value=True,
-                        info="UMT5-XXL only — FP8 or GGUF saves ~5 GB VRAM vs full precision. Default uses bundled encoder.",
+                        info="UMT5-XXL only. FP8/GGUF saves VRAM.",
                     )
                     vae_id = gr.Dropdown(
                         label="VAE",
                         choices=vae_labeled,
                         value=preferred_vae_id,
                         allow_custom_value=True,
-                        info="Wan 2.1 VAE recommended for Wan 2.2 I2V.",
+                        info="Wan 2.1 VAE is recommended.",
                     )
 
                     gr.Markdown("Stage LoRAs", elem_classes=["aiwf-section-label"])
@@ -170,7 +230,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         choices=high_lora_choices,
                         value=None,
                         allow_custom_value=True,
-                        info="Optional. Shows LoRAs with 'high' in the filename from local and ComfyUI LoRA roots.",
+                        info="Optional high-stage LoRA.",
                     )
                     with gr.Row():
                         high_lora_scale = gr.Slider(0.0, 2.0, value=1.0, step=0.05, label="High LoRA strength")
@@ -180,33 +240,36 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         choices=low_lora_choices,
                         value=None,
                         allow_custom_value=True,
-                        info="Optional. Shows LoRAs with 'low' in the filename from local and ComfyUI LoRA roots.",
+                        info="Optional low-stage LoRA.",
                     )
 
                     gr.Markdown("Runtime", elem_classes=["aiwf-section-label"])
                     offload = gr.Dropdown(
                         label="VRAM / offload",
                         choices=[
-                            ("Model offload (16 GB + FP8 safetensors — recommended)", "model"),
-                            ("Group offload (block-level middle ground, experimental)", "group"),
-                            ("Sequential offload (8 GB fallback, ~3-10x slower)", "sequential"),
-                            ("No offload (fastest, needs 24 GB+ VRAM)", "none"),
+                            ("Balanced 16 GB: active stage swaps, VAE stays hot", "balanced"),
+                            ("Low VRAM: active stage swaps, VAE/text offload", "model"),
+                            ("Sequential: slow fallback", "sequential"),
+                            ("Test resident: high+low FP8 on GPU", "resident"),
+                            ("Test streamed blocks", "streamed"),
+                            ("Test group blocks", "group"),
+                            ("No offload: 24 GB+ VRAM", "none"),
                         ],
-                        value="model",
-                        info="On RTX 4070 Ti 16GB with FP8 safetensors, use Model offload. Sequential moves every layer over PCIe each step.",
+                        value=_offload_default,
+                        info="Use Balanced first. Use Low VRAM if it OOMs.",
                     )
                     vram_reserve_enabled = gr.Checkbox(
                         value=False,
-                        label="Reserve GPU memory",
-                        info="Caps AIWF's PyTorch CUDA allocator below total VRAM so games, training, or the desktop keep headroom.",
+                        label="Keep some VRAM free",
+                        info="Smaller reserve lets AIWF use more VRAM.",
                     )
                     vram_reserve_mb = gr.Slider(
                         0,
                         8192,
-                        value=1536,
+                        value=1024,
                         step=128,
-                        label="VRAM reserve (MB)",
-                        info="Example: reserving 1536 MB on a 16 GB card leaves AIWF around a 15 GB allocator limit.",
+                        label="Keep free (MB)",
+                        info="0 = no reserve. 1024 = keep about 1 GB free.",
                     )
 
                 with gr.Column(scale=1, min_width=340, elem_classes=["aiwf-panel"]):
@@ -274,7 +337,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             ("FlowMatch Heun (2nd-order, higher quality, ~2× slower)", "heun"),
                         ],
                         value="euler",
-                        info="Euler is the standard Wan solver. Heun uses a predictor-corrector 2nd-order step — better motion at same step count but roughly doubles inference time.",
+                        info="Heun can improve motion but roughly doubles step time.",
                     )
                     sigma_type = gr.Dropdown(
                         label="Scheduler",
@@ -284,40 +347,38 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             ("Exponential — more detail at high noise", "exponential"),
                             ("Karras — SD-style detail preservation", "karras"),
                         ],
-                        value="beta",
-                        info="Controls how denoising steps are spaced across the noise range. Beta is the best starting point for Wan.",
+                        value="simple",
+                        info="Simple is fastest; Beta is the quality check.",
                     )
                     with gr.Row():
                         flow_shift = gr.Slider(
                             0.5, 25.0, value=5.0, step=0.5, label="Flow shift",
-                            info="Wan 2.2 default: 5.0. Higher values (8-12) push more steps toward high-noise. Try 7-9 for sharper motion.",
+                            info="Default 5.0. Higher shifts more work to high-noise.",
                         )
                         seed = gr.Number(value=-1, precision=0, label="Seed (-1 = random)")
 
-                    gr.Markdown("Temporal chunk / reference", elem_classes=["aiwf-section-label"])
+                    gr.Markdown("Reference & chunks", elem_classes=["aiwf-section-label"])
                     gr.Markdown(
-                        "Temporal chunks slice Wan latent frames, not output frames. Leave this off first; enable only "
-                        "if a long/high-resolution run OOMs. 81 output frames = 21 latent frames, so a latent chunk "
-                        "size of 24 keeps that run unchunked.",
+                        "Leave chunking off unless a long or high-resolution run OOMs. Values are latent frames.",
                         elem_classes=["aiwf-settings-paths"],
                     )
                     temporal_chunks = gr.Checkbox(
                         value=False,
                         label="Enable temporal chunking",
-                        info="Off by default for speed. Every chunk reruns the transformer; this is especially slow with sequential offload.",
+                        info="Each chunk reruns the transformer.",
                     )
                     with gr.Row():
                         chunk_size = gr.Slider(
                             4, 64, value=24, step=4, label="Latent chunk size",
-                            info="Latent frames per transformer pass. 81 output frames = 21 latent frames; 24 avoids chunking that case.",
+                            info="24 avoids chunking an 81-frame run.",
                         )
                         chunk_overlap = gr.Slider(
                             0, 32, value=0, step=1, label="Latent overlap",
-                            info="Latent frames shared between adjacent chunks. Higher smooths seams but repeats transformer work.",
+                            info="Higher overlap is smoother but slower.",
                         )
                     image_guidance_scale = gr.Slider(
                         1.0, 5.0, value=1.0, step=0.1, label="Image guidance scale",
-                        info="Boost reference image conditioning. 1.0 = standard. Increase to 1.5–3.0 to reduce drift at 65–81+ frames.",
+                        info="Raise to reduce drift on longer clips.",
                     )
 
                     run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
@@ -398,6 +459,57 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             _sync_step_split,
             inputs=[high_steps, low_steps],
             outputs=[total_steps, boundary_ratio],
+            show_progress=False,
+        )
+
+        def _sync_runtime_choices(runtime_value, high_value, low_value):
+            selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW_FP8)
+            if selected_runtime == WAN_RUNTIME_FAST_5B:
+                return (
+                    gr.update(interactive=False),
+                    gr.update(interactive=False),
+                    "",
+                )
+            high_choices = _filter_stage_choices(high_labeled, stage="high", peer_value=low_value)
+            low_choices = _filter_stage_choices(low_labeled, stage="low", peer_value=high_value)
+            next_high = _valid_or_first(high_value, high_choices)
+            next_low = _valid_or_first(low_value, low_choices)
+            return (
+                gr.update(choices=high_choices, value=next_high, interactive=True),
+                gr.update(choices=low_choices, value=next_low, interactive=True),
+                _pair_status(next_high, next_low),
+            )
+
+        def _sync_low_choices(high_value, low_value, runtime_value):
+            if str(runtime_value or WAN_RUNTIME_HIGH_LOW_FP8) == WAN_RUNTIME_FAST_5B:
+                return gr.update(interactive=False), ""
+            choices = _filter_stage_choices(low_labeled, stage="low", peer_value=high_value)
+            next_low = _valid_or_first(low_value, choices)
+            return gr.update(choices=choices, value=next_low, interactive=True), _pair_status(high_value, next_low)
+
+        def _sync_high_choices(low_value, high_value, runtime_value):
+            if str(runtime_value or WAN_RUNTIME_HIGH_LOW_FP8) == WAN_RUNTIME_FAST_5B:
+                return gr.update(interactive=False), ""
+            choices = _filter_stage_choices(high_labeled, stage="high", peer_value=low_value)
+            next_high = _valid_or_first(high_value, choices)
+            return gr.update(choices=choices, value=next_high, interactive=True), _pair_status(next_high, low_value)
+
+        runtime_mode.change(
+            _sync_runtime_choices,
+            inputs=[runtime_mode, high_noise, low_noise],
+            outputs=[high_noise, low_noise, model_pair_status],
+            show_progress=False,
+        )
+        high_noise.change(
+            _sync_low_choices,
+            inputs=[high_noise, low_noise, runtime_mode],
+            outputs=[low_noise, model_pair_status],
+            show_progress=False,
+        )
+        low_noise.change(
+            _sync_high_choices,
+            inputs=[low_noise, high_noise, runtime_mode],
+            outputs=[high_noise, model_pair_status],
             show_progress=False,
         )
 
@@ -514,7 +626,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 ("last_wan_low", str(low_v or "")),
                 ("last_wan_vae", str(vae_v or "")),
                 ("last_wan_text_encoder", str(text_encoder_v or "")),
-                ("last_wan_offload", str(offload_v or "model")),
+                ("last_wan_offload", str(offload_v or "balanced")),
             ]:
                 if getattr(s, attr, None) != val:
                     setattr(s, attr, val)

@@ -13,7 +13,7 @@ def _model_choices(models) -> list[tuple[str, str]]:
 
 
 def register_enhance(registry: WebRegistry) -> None:
-    @registry.tab("Enhance", order=17)
+    @registry.tab("Enhance", order=20)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         service = ctx.enhance
         upscalers = service.list_upscalers()
@@ -23,10 +23,7 @@ def register_enhance(registry: WebRegistry) -> None:
             with gr.Column(elem_classes=["aiwf-page-header"]):
                 gr.Markdown("Enhance", elem_classes=["aiwf-section-label"])
                 gr.Markdown(
-                    "Upscale with RealESRGAN, restore faces with GFPGAN/CodeFormer, or run the "
-                    "**Old photo restore** pipeline — a staged workflow inspired by "
-                    "[Bringing Old Photos Back to Life](https://github.com/cdb-boop/ComfyUI-Bringing-Old-Photos-Back-to-Life) "
-                    "(scratch repair → global restore → face enhance → optional upscale).",
+                    "Upscale images, restore faces, or repair old photos.",
                     elem_classes=["aiwf-page-intro"],
                 )
                 folder_help = gr.Markdown(service.catalog.folder_help(), elem_classes=["aiwf-page-path"])
@@ -81,8 +78,7 @@ def register_enhance(registry: WebRegistry) -> None:
 
                 with gr.Tab("Old photos"):
                     gr.Markdown(
-                        "Multi-stage restoration for faded or damaged prints. "
-                        "Upload a scan, tune stages, then run the full pipeline.",
+                        "Multi-stage restoration for faded or damaged prints.",
                         elem_classes=["aiwf-settings-paths"],
                     )
                     photo_preset = gr.Radio(

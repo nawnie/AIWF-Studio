@@ -119,7 +119,7 @@ class UserSettings(BaseSettings):
     last_wan_low: str = ""
     last_wan_vae: str = ""
     last_wan_text_encoder: str = ""
-    last_wan_offload: str = "model"
+    last_wan_offload: str = "balanced"
 
     # Saved image format — "png" keeps infotext metadata; jpg/webp are smaller files.
     image_format: str = "png"

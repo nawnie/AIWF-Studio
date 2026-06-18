@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+_SCALED_MM_BIAS_SUPPORT: bool | None = None
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -29,6 +31,23 @@ def fp8_strict_mode_enabled() -> bool:
     if _env_flag("AIWF_WAN_ALLOW_FP8_FALLBACK", default=False):
         return False
     return _env_flag("AIWF_WAN_STRICT_FP8", default=True)
+
+
+def fp8_profile_enabled() -> bool:
+    return _env_flag("AIWF_WAN_FP8_PROFILE", default=False)
+
+
+def torch_scaled_mm_supports_bias(torch_module: Any) -> bool:
+    global _SCALED_MM_BIAS_SUPPORT
+    if _SCALED_MM_BIAS_SUPPORT is not None:
+        return _SCALED_MM_BIAS_SUPPORT
+    try:
+        schemas = torch_module._C._jit_get_schemas_for_operator("aten::_scaled_mm")
+    except Exception:
+        _SCALED_MM_BIAS_SUPPORT = False
+        return False
+    _SCALED_MM_BIAS_SUPPORT = any("Tensor? bias" in str(schema) for schema in schemas)
+    return _SCALED_MM_BIAS_SUPPORT
 
 
 def cuda_supports_tensorcore_fp8(torch_module: Any) -> bool:
@@ -187,10 +206,17 @@ class AIWFFP8Linear:
             self.register_parameter("bias", None)
         self.register_buffer("weight_scale", torch.tensor(1.0, dtype=torch.float32), persistent=True)
         self.register_buffer("input_scale", None, persistent=True)
+        self.register_buffer("input_scale_reciprocal", None, persistent=False)
         self.orig_dtype = torch.bfloat16
         self.fast_mm_calls = 0
         self.fallback_calls = 0
         self.last_fallback_reason: str | None = None
+        self.profile_enabled = fp8_profile_enabled()
+        self.prepare_seconds = 0.0
+        self.scaled_mm_seconds = 0.0
+        self.bias_seconds = 0.0
+        self.fallback_seconds = 0.0
+        self._shape_records: dict[str, dict[str, Any]] = {}
 
     def load_quantized_weight(
         self,
@@ -207,10 +233,18 @@ class AIWFFP8Linear:
         self.weight_scale = weight_scale.detach().to(dtype=torch.float32)
         if input_scale is not None:
             self.input_scale = input_scale.detach().to(dtype=torch.float32)
+            self.input_scale_reciprocal = self.input_scale.reciprocal()
+        else:
+            self.input_scale_reciprocal = None
         if bias is not None:
             self.bias = torch.nn.Parameter(bias.detach(), requires_grad=False)
         if orig_dtype is not None:
             self.orig_dtype = orig_dtype
+
+    def _profile_elapsed(self, started: float) -> float:
+        if not self.profile_enabled:
+            return 0.0
+        return max(0.0, time.perf_counter() - started)
 
     def _record_fallback(self, reason: str, *, payload: dict[str, Any] | None = None, exc: Exception | None = None) -> None:
         self.fallback_calls += 1
@@ -235,10 +269,66 @@ class AIWFFP8Linear:
                 f"Reason: {reason}"
             ) from exc
 
+    def _record_linear_shape(
+        self,
+        input_tensor: Any,
+        *,
+        rows: int,
+        padded_rows: int,
+        pad_m: int,
+        path: str,
+    ) -> None:
+        """Capture bounded Wan FP8 shape data for real-run kernel planning."""
+        try:
+            input_shape = [int(v) for v in getattr(input_tensor, "shape", ())]
+        except Exception:
+            input_shape = []
+        try:
+            is_contiguous = bool(input_tensor.is_contiguous())
+        except Exception:
+            is_contiguous = False
+        device = getattr(input_tensor, "device", None)
+        dtype = str(getattr(input_tensor, "dtype", "")).replace("torch.", "")
+        key = "|".join(
+            [
+                ",".join(str(v) for v in input_shape),
+                str(int(rows)),
+                str(int(padded_rows)),
+                str(int(self.in_features)),
+                str(int(self.out_features)),
+                dtype,
+                str(path),
+            ]
+        )
+        existing = self._shape_records.get(key)
+        if existing is not None:
+            existing["calls"] = int(existing.get("calls", 0)) + 1
+            return
+        if len(self._shape_records) >= 24:
+            return
+        self._shape_records[key] = {
+            "calls": 1,
+            "path": str(path),
+            "input_shape": input_shape,
+            "flattened_rows": int(rows),
+            "padded_rows": int(padded_rows),
+            "pad_m": int(pad_m),
+            "in_features": int(self.in_features),
+            "out_features": int(self.out_features),
+            "input_dtype": dtype,
+            "device_type": getattr(device, "type", None),
+            "is_input_contiguous": is_contiguous,
+            "has_bias": self.bias is not None,
+        }
+
+    def recorded_shape_examples(self) -> list[dict[str, Any]]:
+        return [dict(record) for record in self._shape_records.values()]
+
     def forward(self, input: Any) -> Any:
         import torch
         import torch.nn.functional as F
 
+        fallback_started = time.perf_counter()
         can_scaled_mm = (
             input.is_cuda
             and self.weight.is_cuda
@@ -247,35 +337,64 @@ class AIWFFP8Linear:
             and self.out_features % 16 == 0
         )
         if can_scaled_mm:
+            prepare_started = time.perf_counter()
             original_shape = input.shape[:-1]
-            x = input.reshape(-1, self.in_features).contiguous()
+            x = input.reshape(-1, self.in_features)
+            if not x.is_contiguous():
+                x = x.contiguous()
             m, _k = x.shape
             pad_m = (16 - m % 16) % 16
             if pad_m:
                 x = F.pad(x, (0, 0, 0, pad_m))
+            self._record_linear_shape(
+                input,
+                rows=m,
+                padded_rows=int(x.shape[0]),
+                pad_m=pad_m,
+                path="scaled_mm",
+            )
             scale_a = self._input_scale_for(x)
-            x8_source = x / scale_a if getattr(self, "input_scale", None) is not None else x
-            x8 = x8_source.clamp(-448, 448).to(torch.float8_e4m3fn).contiguous()
+            scale_a_recip = self._input_scale_reciprocal_for(x)
+            if scale_a_recip is not None:
+                x8_source = x * scale_a_recip
+                x8_source.clamp_(-448.0, 448.0)
+            else:
+                x8_source = x.clamp(-448.0, 448.0)
+            x8 = x8_source.to(torch.float8_e4m3fn)
+            if not x8.is_contiguous():
+                x8 = x8.contiguous()
             # cuBLASLt FP8 scaled matmul requires row-major lhs and
             # column-major rhs. ``self.weight.t()`` already has the required
             # column-major stride; making it contiguous changes it back to
             # row-major and forces the slow bf16 fallback.
             weight_t = self.weight.t()
+            self.prepare_seconds += self._profile_elapsed(prepare_started)
             try:
                 scale_b = self.weight_scale.to(device=x.device, dtype=torch.float32)
+                output_dtype = (
+                    input.dtype
+                    if input.dtype in (torch.float16, torch.bfloat16)
+                    else torch.bfloat16
+                )
+                bias = None
+                if self.bias is not None and torch_scaled_mm_supports_bias(torch):
+                    bias = self.bias.to(device=x.device, dtype=output_dtype)
+                mm_started = time.perf_counter()
                 y = torch._scaled_mm(
                     x8,
                     weight_t,
                     scale_a=scale_a,
                     scale_b=scale_b,
-                    out_dtype=input.dtype
-                    if input.dtype in (torch.float16, torch.bfloat16)
-                    else torch.bfloat16,
+                    bias=bias,
+                    out_dtype=output_dtype,
                 )
+                self.scaled_mm_seconds += self._profile_elapsed(mm_started)
                 if pad_m:
                     y = y[:m, :]
-                if self.bias is not None:
+                if self.bias is not None and bias is None:
+                    bias_started = time.perf_counter()
                     y = y + self.bias.to(device=y.device, dtype=y.dtype)
+                    self.bias_seconds += self._profile_elapsed(bias_started)
                 self.fast_mm_calls += 1
                 return y.reshape(*original_shape, self.out_features)
             except Exception as exc:
@@ -306,11 +425,23 @@ class AIWFFP8Linear:
             if self.out_features % 16 != 0:
                 reasons.append("out_features is not divisible by 16")
             reason = "; ".join(reasons) or "scaled_mm preconditions were not met"
+            try:
+                fallback_rows = int(input.reshape(-1, self.in_features).shape[0])
+            except Exception:
+                fallback_rows = 0
+            self._record_linear_shape(
+                input,
+                rows=fallback_rows,
+                padded_rows=fallback_rows,
+                pad_m=0,
+                path="fallback",
+            )
             self._record_fallback(
                 reason,
                 payload=fp8_generic_fallback_payload(reason, layer=self, input_tensor=input),
             )
 
+        self.fallback_seconds += self._profile_elapsed(fallback_started)
         weight = (self.weight.float() * self.weight_scale.float()).contiguous()
         return F.linear(input, weight.to(device=input.device, dtype=input.dtype), self.bias)
 
@@ -322,6 +453,12 @@ class AIWFFP8Linear:
             return torch.ones((), device=x.device, dtype=torch.float32)
         return input_scale.to(device=x.device, dtype=torch.float32)
 
+    def _input_scale_reciprocal_for(self, x: Any) -> Any | None:
+        input_scale_reciprocal = getattr(self, "input_scale_reciprocal", None)
+        if input_scale_reciprocal is None:
+            return None
+        return input_scale_reciprocal.to(device=x.device, dtype=torch.float32)
+
 
 class FP8ScaledLinear(AIWFFP8Linear):
     """Compatibility name for existing Wan FP8 loader/tests."""
@@ -332,7 +469,14 @@ def collect_fp8_linear_metrics(*roots: Any) -> dict[str, Any]:
     fast_mm_calls = 0
     fallback_calls = 0
     fallback_layers = 0
+    profile_enabled = False
+    prepare_seconds = 0.0
+    scaled_mm_seconds = 0.0
+    bias_seconds = 0.0
+    fallback_seconds = 0.0
     fallback_reasons: list[str] = []
+    shape_examples: list[dict[str, Any]] = []
+    shape_count = 0
     seen: set[int] = set()
     for root in roots:
         if root is None or not hasattr(root, "modules"):
@@ -350,6 +494,24 @@ def collect_fp8_linear_metrics(*roots: Any) -> dict[str, Any]:
             seen.add(ident)
             layers += 1
             fast_mm_calls += int(getattr(module, "fast_mm_calls", 0) or 0)
+            profile_enabled = profile_enabled or bool(getattr(module, "profile_enabled", False))
+            prepare_seconds += float(getattr(module, "prepare_seconds", 0.0) or 0.0)
+            scaled_mm_seconds += float(getattr(module, "scaled_mm_seconds", 0.0) or 0.0)
+            bias_seconds += float(getattr(module, "bias_seconds", 0.0) or 0.0)
+            fallback_seconds += float(getattr(module, "fallback_seconds", 0.0) or 0.0)
+            module_shapes = (
+                module.recorded_shape_examples()
+                if hasattr(module, "recorded_shape_examples")
+                else []
+            )
+            shape_count += len(module_shapes)
+            if len(shape_examples) < 32:
+                for example in module_shapes:
+                    if len(shape_examples) >= 32:
+                        break
+                    example = dict(example)
+                    example["layer_index"] = layers - 1
+                    shape_examples.append(example)
             module_fallbacks = int(getattr(module, "fallback_calls", 0) or 0)
             fallback_calls += module_fallbacks
             if module_fallbacks > 0:
@@ -365,4 +527,20 @@ def collect_fp8_linear_metrics(*roots: Any) -> dict[str, Any]:
         "fp8_fallback_reasons": fallback_reasons[:10],
         "fp8_strict_mode": fp8_strict_mode_enabled(),
         "fp8_native_available": torch_native_fp8_available(),
+        "fp8_profile_enabled": profile_enabled,
+        "fp8_backend": "torch_scaled_mm_e4m3fn",
+        "fp8_backend_metadata": {
+            "activation_format": "float8_e4m3fn",
+            "weight_format": "float8_e4m3fn",
+            "compute_entrypoint": "torch._scaled_mm",
+            "bias_fused_when_supported": True,
+            "strict_fallback_default": True,
+            "shape_examples_truncated": shape_count > len(shape_examples),
+        },
+        "fp8_linear_shape_count": shape_count,
+        "fp8_linear_shapes": shape_examples,
+        "fp8_prepare_ms": round(prepare_seconds * 1000.0, 3),
+        "fp8_scaled_mm_ms": round(scaled_mm_seconds * 1000.0, 3),
+        "fp8_bias_ms": round(bias_seconds * 1000.0, 3),
+        "fp8_fallback_ms": round(fallback_seconds * 1000.0, 3),
     }

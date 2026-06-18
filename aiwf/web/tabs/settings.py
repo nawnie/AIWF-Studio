@@ -21,15 +21,15 @@ from aiwf.web.registry import PINNED_TABS, WebRegistry
 from aiwf.web.theme import accent_preset_names
 
 TAB_VISIBILITY_CHOICES = [
-    "Models",
-    "Segment",
-    "Enhance",
-    "Chat",
     "Video",
-    "RIFE",
+    "Chat",
     "Training",
-    "Workflows",
+    "Models",
+    "Enhance",
+    "Segment",
     "Face Swap",
+    "RIFE",
+    "Workflows",
     "Library",
     "PNG Info",
     "History",
@@ -293,8 +293,7 @@ def register_settings(registry: WebRegistry) -> None:
             with gr.Column(elem_classes=["aiwf-page-header"]):
                 gr.Markdown("Settings", elem_classes=["aiwf-section-label"])
                 gr.Markdown(
-                    "Run AIWF like a local creative tool, not a pile of launch flags. "
-                    "This page separates live workspace preferences from the next-start launch profile.",
+                    "Manage workspace defaults and next-start launch settings.",
                     elem_classes=["aiwf-page-intro"],
                 )
 
@@ -304,7 +303,7 @@ def register_settings(registry: WebRegistry) -> None:
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
                             gr.Markdown("Live preview", elem_classes=["aiwf-section-label"])
                             gr.Markdown(
-                                "Control how often the workspace decodes preview steps during generation.",
+                                "Preview steps while a generation is running.",
                                 elem_classes=["aiwf-settings-paths"],
                             )
                             enable_live_preview = gr.Checkbox(
@@ -344,7 +343,7 @@ def register_settings(registry: WebRegistry) -> None:
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
                             gr.Markdown("Appearance & navigation", elem_classes=["aiwf-section-label"])
                             gr.Markdown(
-                                "Pick the accent mood and choose which secondary tabs stay visible. "
+                                "Choose the accent and visible tabs. "
                                 f"`{', '.join(sorted(PINNED_TABS))}` always stay on.",
                                 elem_classes=["aiwf-settings-paths"],
                             )
@@ -355,16 +354,16 @@ def register_settings(registry: WebRegistry) -> None:
                                 info="Save, then use Refresh UI to apply the new accent immediately.",
                             )
                             visible_tabs = gr.CheckboxGroup(
-                                label="Visible secondary tabs",
+                                label="Visible tabs",
                                 choices=TAB_VISIBILITY_CHOICES,
                                 value=[tab_name for tab_name in TAB_VISIBILITY_CHOICES if tab_name not in ctx.settings.hidden_tabs],
-                                info="Hide duplicate or rarely used tools without removing the feature from the project.",
+                                info="Hide rarely used tools without disabling them.",
                             )
 
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
                             gr.Markdown("Output behavior", elem_classes=["aiwf-section-label"])
                             gr.Markdown(
-                                "Choose what gets saved and where the core generation modes write their files.",
+                                "Choose what gets saved and where image runs write files.",
                                 elem_classes=["aiwf-settings-paths"],
                             )
                             save_images = gr.Checkbox(label="Save generated images", value=ctx.settings.save_images)
@@ -447,18 +446,18 @@ def register_settings(registry: WebRegistry) -> None:
                                 label="Generation profile",
                                 choices=_optimization_profile_choices(ctx),
                                 value=ctx.settings.optimization_profile_id,
-                                info="Recorded now; backend-changing optimizations remain gated by launch flags and benchmark receipts.",
+                                info="Recorded in metadata; launch flags still control runtime.",
                             )
                             optimization_diagnostics = gr.Markdown(
                                 _optimization_diagnostics_markdown(ctx),
                                 elem_classes=["aiwf-settings-hint"],
                             )
                             pnginfo_send_to_studio = gr.Checkbox(
-                                label="Switch to Studio after PNG Info Send",
+                                label="Switch to Image after PNG Info Send",
                                 value=ctx.settings.pnginfo_send_to_studio,
                             )
                             pnginfo_clear_after_apply = gr.Checkbox(
-                                label="Clear queued PNG Info after applying in Studio",
+                                label="Clear queued PNG Info after applying in Image",
                                 value=ctx.settings.pnginfo_clear_after_apply,
                             )
                             gr.Markdown("Sampler & guidance", elem_classes=["aiwf-section-label"])
@@ -484,7 +483,7 @@ def register_settings(registry: WebRegistry) -> None:
                                 maximum=1200,
                                 step=40,
                                 value=ctx.settings.gallery_height,
-                                info="Height of the image gallery panel in the Studio tab.",
+                                info="Height of the Image results gallery.",
                             )
                             gallery_columns = gr.Slider(
                                 label="Gallery columns",
@@ -526,9 +525,9 @@ def register_settings(registry: WebRegistry) -> None:
                 with gr.Tab("Generation defaults"):
                     with gr.Row(equal_height=False, elem_classes=["aiwf-settings-grid"]):
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
-                            gr.Markdown("Studio starting values", elem_classes=["aiwf-section-label"])
+                            gr.Markdown("Image starting values", elem_classes=["aiwf-section-label"])
                             gr.Markdown(
-                                "These are the initial values loaded into Studio. Save, then use Refresh UI or reopen Studio to apply.",
+                                "Initial values for the Image tab. Save, then refresh or reopen the UI.",
                                 elem_classes=["aiwf-settings-paths"],
                             )
                             with gr.Row():
@@ -592,7 +591,7 @@ def register_settings(registry: WebRegistry) -> None:
                                 lines=4,
                                 value=launch.extra_model_dirs,
                                 placeholder="One folder per line",
-                                info="Scans each folder for checkpoints, LoRAs, VAEs, embeddings, ControlNet, and enhance models on next start.",
+                                info="Scans model subfolders on next start.",
                             )
                             launch_extra_ckpt_dirs = gr.Textbox(
                                 label="Extra checkpoint folders",
@@ -604,7 +603,7 @@ def register_settings(registry: WebRegistry) -> None:
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
                             gr.Markdown("Import from another install", elem_classes=["aiwf-section-label"])
                             gr.Markdown(
-                                "Point this at another project and AIWF will add the shared model folders for you instead of making you wire each library by hand.",
+                                "Add model folders from another local install.",
                                 elem_classes=["aiwf-settings-paths"],
                             )
                             import_root = gr.Textbox(
@@ -780,7 +779,7 @@ def register_settings(registry: WebRegistry) -> None:
 
                 with gr.Tab("Engines & pipelines"):
                     gr.Markdown(
-                        "Pipelines are generation methods inside Studio. Engines are optional add-on runners for video, training, and other heavy jobs.",
+                        "Pipelines power Image generation. Engines are optional workers for video, training, and other heavy jobs.",
                         elem_classes=["aiwf-page-intro"],
                     )
 
@@ -802,7 +801,7 @@ def register_settings(registry: WebRegistry) -> None:
                                     label="ONNX models directory",
                                     value=ctx.settings.onnx_model_dir,
                                     placeholder=r"C:\models\onnx  (leave blank → models/onnx inside data_dir)",
-                                    info="Directory containing subdirectories with text_encoder/, unet/, vae_decoder/ ONNX files.",
+                                    info="Folder with text_encoder/, unet/, and vae_decoder/ subdirs.",
                                 )
                                 engine_onnx_provider = gr.Radio(
                                     label="ORT execution provider",
@@ -821,7 +820,7 @@ def register_settings(registry: WebRegistry) -> None:
                             engine_cuda_graphs = gr.Checkbox(
                                 label="CUDA Graphs (AIWF_CUDA_GRAPHS)",
                                 value=launch.cuda_graphs,
-                                info="Capture and replay the UNet forward pass. ~5–15% throughput gain on NVIDIA Ada/Ampere.",
+                                info="Capture/replay UNet forwards. Requires benchmark.",
                             )
                             engine_torchao = gr.Checkbox(
                                 label="TorchAO int8 weight-only quantization (AIWF_TORCHAO)",

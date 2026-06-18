@@ -20,7 +20,7 @@ def _service(ctx: AppContext) -> RifeService:
 
 
 def register_rife(registry: WebRegistry) -> None:
-    @registry.tab("RIFE", order=19)
+    @registry.tab("RIFE", order=23)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         service = _service(ctx)
         ckpts = service.list_checkpoints()
@@ -30,9 +30,7 @@ def register_rife(registry: WebRegistry) -> None:
             with gr.Column(elem_classes=["aiwf-page-header"]):
                 gr.Markdown("RIFE", elem_classes=["aiwf-section-label"])
                 gr.Markdown(
-                    "Optical-flow frame interpolation — doubles (or more) the frame rate of a short clip. "
-                    "Uses the same **ComfyUI-Frame-Interpolation** / Practical-RIFE stack as Comfy. "
-                    "Test here first; once it works on your Wan output we can wire it into the I2V workflow.",
+                    "Interpolate video frames with Practical-RIFE.",
                     elem_classes=["aiwf-page-intro"],
                 )
                 gr.Markdown(service.folder_help(), elem_classes=["aiwf-page-path"])
@@ -45,7 +43,7 @@ def register_rife(registry: WebRegistry) -> None:
                         choices=ckpts,
                         value=default_ckpt if default_ckpt in ckpts else (ckpts[0] if ckpts else None),
                     )
-                    multiplier = gr.Slider(2, 4, value=2, step=1, label="Multiplier", info="2 = 16→32 fps")
+                    multiplier = gr.Slider(2, 4, value=2, step=1, label="Multiplier", info="2x doubles FPS")
                     scale_factor = gr.Dropdown(
                         label="Scale factor",
                         choices=[("Full res", 1.0), ("Half res (less VRAM)", 0.5), ("Quarter res", 0.25)],

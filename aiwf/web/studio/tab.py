@@ -572,7 +572,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                             pt_meta_path = gr.Textbox(
                                 label="Safetensors path",
                                 placeholder=r"C:\models\my_model.safetensors",
-                                info="Full path to a .safetensors file. Only the header (metadata) is read — no weights loaded.",
+                                info="Reads metadata only; weights are not loaded.",
                             )
                             with gr.Row():
                                 pt_meta_btn = gr.Button("Read metadata", elem_classes=["aiwf-btn-ghost"], scale=1)

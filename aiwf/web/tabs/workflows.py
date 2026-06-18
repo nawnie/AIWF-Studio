@@ -20,7 +20,7 @@ def _format_step_log(run) -> str:
 
 
 def register_workflows(registry: WebRegistry) -> None:
-    @registry.tab("Workflows", order=18)
+    @registry.tab("Workflows", order=30)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         service = ctx.workflows
         choices = service.list_choices()
@@ -32,9 +32,7 @@ def register_workflows(registry: WebRegistry) -> None:
             with gr.Column(elem_classes=["aiwf-page-header"]):
                 gr.Markdown("Workflows", elem_classes=["aiwf-section-label"])
                 gr.Markdown(
-                    "Chain generation and enhance steps into reusable pipelines. "
-                    "Workflows are stored as JSON — edit parameters, save, and re-run anytime. "
-                    "This tab is still WIP and has not had a full reliability pass yet.",
+                    "Chain generation and enhance steps into JSON workflows. Still experimental.",
                     elem_classes=["aiwf-page-intro"],
                 )
                 gr.Markdown(
@@ -64,7 +62,7 @@ def register_workflows(registry: WebRegistry) -> None:
                         save_btn = gr.Button("Save to disk", variant="secondary")
                         delete_btn = gr.Button("Delete saved", elem_classes=["aiwf-btn-ghost"])
                     seed_image = gr.Image(
-                        label="Seed image (optional — required when the first step is not txt2img)",
+                        label="Seed image",
                         type="pil",
                         sources=["upload", "clipboard"],
                     )

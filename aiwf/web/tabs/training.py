@@ -48,16 +48,11 @@ def _probe_engines() -> dict[str, bool]:
 
 
 _NOT_CONFIGURED = (
-    "**Training engine not ready.**\n\n"
-    "Install a training add-on below, then restart AIWF Studio.\n\n"
-    "See `docs/TRAINING_ENGINE_ROADMAP.md` for details."
+    "**Training engine not ready.** Enable a training engine, then restart AIWF Studio."
 )
 
 _KOHYA_NOT_CONFIGURED = (
-    "**Kohya LoRA training is not ready yet.**\n\n"
-    "Install or configure the optional Kohya engine, set `enabled=true` for `kohya` "
-    "in `engines.json`, then restart AIWF Studio. The Training tab will stay available "
-    "even while this optional engine is missing."
+    "**Kohya is not ready.** Enable `kohya` in `engines.json`, install its engine, then restart."
 )
 
 
@@ -105,23 +100,24 @@ def _release_tenant(ctx: AppContext, reason: str, job_id: str = "") -> None:
 
 def register_training(registry: WebRegistry) -> None:
 
-    @registry.tab("Training", order=20)
+    @registry.tab("Training", order=4)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
 
         engines = _probe_engines()
         any_ready = any(engines.values())
 
-        not_configured_note = gr.Markdown(
-            value=_NOT_CONFIGURED if not any_ready else "",
-            visible=not any_ready,
-        )
+        with gr.Column(elem_classes=["aiwf-page-header"]):
+            gr.Markdown("Training", elem_classes=["aiwf-section-label"])
+            gr.Markdown("LoRA and full fine-tuning engines run as optional workers.", elem_classes=["aiwf-page-intro"])
+
+        not_configured_note = gr.Markdown(value=_NOT_CONFIGURED if not any_ready else "", visible=not any_ready)
         with gr.Row():
             enable_full_btn = gr.Button(
-                "Enable Full Training",
+                "Enable full training",
                 variant="secondary",
                 interactive=not engines["ed2"],
             )
-            enable_lora_btn = gr.Button("Enable LoRA / DreamBooth Training", variant="secondary")
+            enable_lora_btn = gr.Button("Enable LoRA / DreamBooth", variant="secondary")
         training_enable_status = gr.Markdown(
             value="Full training is enabled." if engines["ed2"] else "",
         )
@@ -144,7 +140,7 @@ def register_training(registry: WebRegistry) -> None:
 
         # ---- Dataset ----
         with gr.Group():
-            gr.Markdown("### Dataset")
+            gr.Markdown("Dataset", elem_classes=["aiwf-section-label"])
             with gr.Row():
                 dataset_dir = gr.Textbox(
                     label="Dataset directory",
@@ -156,7 +152,7 @@ def register_training(registry: WebRegistry) -> None:
 
         # ---- Base model ----
         with gr.Group():
-            gr.Markdown("### Base model")
+            gr.Markdown("Base model", elem_classes=["aiwf-section-label"])
             base_model = gr.Textbox(
                 label="Base model path or HuggingFace ID",
                 placeholder="C:\\models\\sdxl_base.safetensors  or  stabilityai/stable-diffusion-xl-base-1.0",
@@ -164,7 +160,7 @@ def register_training(registry: WebRegistry) -> None:
 
         # ---- Output ----
         with gr.Group():
-            gr.Markdown("### Output")
+            gr.Markdown("Output", elem_classes=["aiwf-section-label"])
             with gr.Row():
                 job_name   = gr.Textbox(label="Job name", value="my_lora", scale=4)
                 output_dir = gr.Textbox(
@@ -196,7 +192,7 @@ def register_training(registry: WebRegistry) -> None:
         # ---- Controls ----
         with gr.Row():
             start_btn = gr.Button(
-                "Start Training",
+                "Start training",
                 variant="primary",
                 interactive=any_ready,
             )

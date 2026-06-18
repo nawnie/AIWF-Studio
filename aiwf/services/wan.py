@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -23,6 +24,149 @@ from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
 logger = logging.getLogger(__name__)
 
 _MAX_DEFAULT_FP8_DEQUANT_GB = 12.0
+
+
+@dataclass(frozen=True)
+class WanModelPairCheck:
+    ok: bool
+    errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    high_family: str = ""
+    low_family: str = ""
+    high_storage: str = ""
+    low_storage: str = ""
+
+
+def wan_model_stage_role(model_id: str | None) -> str:
+    """Classify a Wan transformer filename as high/low/unknown.
+
+    This is intentionally filename based because the UI needs a cheap filter
+    before expensive safetensors/GGUF header reads. Backend preflight still
+    validates that the file exists and has a legal transformer format.
+    """
+    name = Path(str(model_id or "")).name.lower()
+    stem = Path(name).stem
+    has_high = "high" in stem
+    has_low = "low" in stem
+    if has_high and not has_low:
+        return "high"
+    if has_low and not has_high:
+        return "low"
+    return "unknown"
+
+
+def wan_model_storage_family(model_id: str | None) -> str:
+    suffix = Path(str(model_id or "")).suffix.lower()
+    if suffix == ".gguf":
+        return "gguf"
+    if suffix == ".safetensors":
+        return "safetensors"
+    if not suffix and model_id:
+        return "diffusers_or_folder"
+    return "unknown"
+
+
+def wan_model_quant_family(model_id: str | None) -> str:
+    name = Path(str(model_id or "")).name.lower()
+    if "fp8" in name or "f8" in name:
+        return "fp8"
+    for pattern in (
+        r"q(\d+)(?=high|low)",
+        r"(?:^|[_\-.])q(\d+)(?:[_\-.]|$)",
+        r"(?:^|[_\-.])q(\d+)_k(?:[_\-.]|$)",
+        r"(?:^|[_\-.])q(\d+)_\d(?:[_\-.]|$)",
+    ):
+        match = re.search(pattern, name)
+        if match:
+            return f"q{match.group(1)}"
+    if "bf16" in name:
+        return "bf16"
+    if "fp16" in name:
+        return "fp16"
+    return "unknown"
+
+
+def wan_model_pair_family_key(model_id: str | None) -> str:
+    name = Path(str(model_id or "")).name.lower()
+    stem = Path(name).stem
+    stem = re.sub(r"(high|low)[_\-. ]*noise", "", stem)
+    stem = stem.replace("high", "").replace("low", "")
+    stem = re.sub(r"[_\-. ]+", "_", stem)
+    return stem.strip("_")
+
+
+def wan_model_pair_compatibility(high_model_id: str | None, low_model_id: str | None) -> WanModelPairCheck:
+    high_id = str(high_model_id or "").strip()
+    low_id = str(low_model_id or "").strip()
+    if not high_id or not low_id:
+        return WanModelPairCheck(ok=True)
+
+    high_role = wan_model_stage_role(high_id)
+    low_role = wan_model_stage_role(low_id)
+    high_storage = wan_model_storage_family(high_id)
+    low_storage = wan_model_storage_family(low_id)
+    high_quant = wan_model_quant_family(high_id)
+    low_quant = wan_model_quant_family(low_id)
+    high_family = wan_model_pair_family_key(high_id)
+    low_family = wan_model_pair_family_key(low_id)
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    if high_role == "low":
+        errors.append(f"High noise selection looks like a low-noise model: {Path(high_id).name}")
+    elif high_role == "unknown":
+        warnings.append(f"High noise filename does not clearly say high: {Path(high_id).name}")
+    if low_role == "high":
+        errors.append(f"Low noise selection looks like a high-noise model: {Path(low_id).name}")
+    elif low_role == "unknown":
+        warnings.append(f"Low noise filename does not clearly say low: {Path(low_id).name}")
+
+    if high_storage != "unknown" and low_storage != "unknown" and high_storage != low_storage:
+        errors.append(
+            "High and Low noise transformers use different storage formats "
+            f"({high_storage} vs {low_storage}). Select a matched pair."
+        )
+
+    if high_quant != "unknown" and low_quant != "unknown" and high_quant != low_quant:
+        errors.append(
+            "High and Low noise transformers use different quantization tiers "
+            f"({high_quant} vs {low_quant}). Select matching Q/FP precision files."
+        )
+
+    high_size = low_size = 0
+    try:
+        high_size = Path(high_id).stat().st_size
+        low_size = Path(low_id).stat().st_size
+    except OSError:
+        pass
+    if high_size > 0 and low_size > 0:
+        smaller = min(high_size, low_size)
+        larger = max(high_size, low_size)
+        ratio = larger / max(1, smaller)
+        if ratio >= 1.35:
+            errors.append(
+                "High and Low noise transformer file sizes differ too much for a normal matched pair "
+                f"({high_size / 1024**3:.2f} GiB vs {low_size / 1024**3:.2f} GiB)."
+            )
+        elif ratio >= 1.15:
+            warnings.append(
+                "High and Low noise transformer file sizes differ noticeably "
+                f"({high_size / 1024**3:.2f} GiB vs {low_size / 1024**3:.2f} GiB)."
+            )
+
+    if errors and os.environ.get("AIWF_WAN_ALLOW_MISMATCHED_PAIR", "").strip().lower() in {"1", "true", "yes", "on"}:
+        warnings.extend(f"Ignored by AIWF_WAN_ALLOW_MISMATCHED_PAIR=1: {error}" for error in errors)
+        errors = []
+
+    return WanModelPairCheck(
+        ok=not errors,
+        errors=tuple(errors),
+        warnings=tuple(warnings),
+        high_family=high_family,
+        low_family=low_family,
+        high_storage=high_storage,
+        low_storage=low_storage,
+    )
 
 
 def _native_fp8_unavailable_reason() -> str | None:
@@ -90,6 +234,16 @@ def _str_list_metric(value) -> list[str]:
     return items
 
 
+def _dict_metric(value) -> dict:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _dict_list_metric(value) -> list[dict]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
 @dataclass(frozen=True)
 class WanPreflightResult:
     ok: bool
@@ -137,6 +291,13 @@ class WanService:
 
     def available(self) -> bool:
         return self._backend.available()
+
+    def _cleanup_failed_generation(self) -> None:
+        _video_status("Cleaning up failed Wan generation and releasing video VRAM.")
+        try:
+            self._backend.unload()
+        except Exception:
+            logger.debug("Wan backend cleanup after failed generation failed.", exc_info=True)
 
     def acceleration_capabilities(self) -> dict[str, dict[str, object]]:
         from aiwf.infrastructure.torch.wan_perf import describe_wan_acceleration_capabilities
@@ -379,6 +540,10 @@ class WanService:
 
             if high_res and low_res and Path(high_res) == Path(low_res):
                 errors.append("High noise and Low noise transformers must be different files.")
+            if high_res and low_res:
+                pair_check = wan_model_pair_compatibility(high_res, low_res)
+                errors.extend(pair_check.errors)
+                warnings.extend(pair_check.warnings)
         else:
             model_res = self.resolve_model(request.model_id)
             model_path = Path(model_res)
@@ -1040,8 +1205,10 @@ class WanService:
                 else:
                     raise WanUnavailable("Video backend returned an invalid generation result.")
             except WanUnavailable:
+                self._cleanup_failed_generation()
                 raise
             except Exception as exc:
+                self._cleanup_failed_generation()
                 raise WanUnavailable(f"Video generation failed: {exc}") from exc
 
             backend_elapsed = time.perf_counter() - started
@@ -1084,6 +1251,31 @@ class WanService:
             fp8_fallback_reasons = _str_list_metric(backend_metrics.get("fp8_fallback_reasons"))
             fp8_strict_mode = bool(backend_metrics.get("fp8_strict_mode"))
             fp8_native_available = bool(backend_metrics.get("fp8_native_available"))
+            fp8_profile_enabled = bool(backend_metrics.get("fp8_profile_enabled"))
+            fp8_backend = str(backend_metrics.get("fp8_backend") or "").strip()
+            fp8_backend_metadata = _dict_metric(backend_metrics.get("fp8_backend_metadata"))
+            fp8_linear_shape_count = _int_metric(backend_metrics.get("fp8_linear_shape_count"))
+            fp8_linear_shapes = _dict_list_metric(backend_metrics.get("fp8_linear_shapes"))
+            fp8_prepare_ms = _float_metric(backend_metrics.get("fp8_prepare_ms")) or 0.0
+            fp8_scaled_mm_ms = _float_metric(backend_metrics.get("fp8_scaled_mm_ms")) or 0.0
+            fp8_bias_ms = _float_metric(backend_metrics.get("fp8_bias_ms")) or 0.0
+            fp8_fallback_ms = _float_metric(backend_metrics.get("fp8_fallback_ms")) or 0.0
+            attention_backends = _str_list_metric(backend_metrics.get("attention_backends"))
+            attention_optimizations = _str_list_metric(backend_metrics.get("attention_optimizations"))
+            stage_transition_count = _int_metric(backend_metrics.get("stage_transition_count"))
+            stage_transition_total_ms = _float_metric(backend_metrics.get("stage_transition_total_ms")) or 0.0
+            stage_transition_h2d_ms = _float_metric(backend_metrics.get("stage_transition_h2d_ms")) or 0.0
+            stage_transition_d2h_ms = _float_metric(backend_metrics.get("stage_transition_d2h_ms")) or 0.0
+            stage_transition_cleanup_ms = _float_metric(backend_metrics.get("stage_transition_cleanup_ms")) or 0.0
+            stage_transition_events = _dict_list_metric(backend_metrics.get("stage_transition_events"))
+            hardware_fingerprint = _dict_metric(backend_metrics.get("hardware_fingerprint"))
+            transfer_probe = _dict_metric(backend_metrics.get("transfer_probe"))
+            performance_benchmark_notes: list[str] = []
+            if fp8_fallback_calls:
+                performance_benchmark_notes.append("FP8 fallback occurred; speed result is diagnostic only.")
+            if fp8_linear_layers and not fp8_strict_mode:
+                performance_benchmark_notes.append("FP8 strict mode was disabled.")
+            performance_benchmark_valid = not performance_benchmark_notes
             cache_mode = str(backend_metrics.get("cache_mode") or "").strip()
             vram_reserve_enabled = bool(backend_metrics.get("vram_reserve_enabled"))
             vram_reserve_mb = _int_metric(backend_metrics.get("vram_reserve_mb"))
@@ -1161,6 +1353,27 @@ class WanService:
                 fp8_fallback_reasons=fp8_fallback_reasons,
                 fp8_strict_mode=fp8_strict_mode,
                 fp8_native_available=fp8_native_available,
+                fp8_profile_enabled=fp8_profile_enabled,
+                fp8_backend=fp8_backend,
+                fp8_backend_metadata=fp8_backend_metadata,
+                fp8_linear_shape_count=fp8_linear_shape_count,
+                fp8_linear_shapes=fp8_linear_shapes,
+                fp8_prepare_ms=round(fp8_prepare_ms, 3),
+                fp8_scaled_mm_ms=round(fp8_scaled_mm_ms, 3),
+                fp8_bias_ms=round(fp8_bias_ms, 3),
+                fp8_fallback_ms=round(fp8_fallback_ms, 3),
+                attention_backends=attention_backends,
+                attention_optimizations=attention_optimizations,
+                stage_transition_count=stage_transition_count,
+                stage_transition_total_ms=round(stage_transition_total_ms, 3),
+                stage_transition_h2d_ms=round(stage_transition_h2d_ms, 3),
+                stage_transition_d2h_ms=round(stage_transition_d2h_ms, 3),
+                stage_transition_cleanup_ms=round(stage_transition_cleanup_ms, 3),
+                stage_transition_events=stage_transition_events,
+                hardware_fingerprint=hardware_fingerprint,
+                transfer_probe=transfer_probe,
+                performance_benchmark_valid=performance_benchmark_valid,
+                performance_benchmark_notes=performance_benchmark_notes,
                 cache_mode=cache_mode,
                 vram_reserve_enabled=vram_reserve_enabled,
                 vram_reserve_mb=vram_reserve_mb,
@@ -1186,18 +1399,30 @@ class WanService:
                 )
             elif fp8_linear_layers:
                 message = f"{message}; FP8 fast path clean ({fp8_linear_layers} layers, 0 fallbacks)"
+            if fp8_profile_enabled:
+                message = (
+                    f"{message}; FP8 profile prepare={fp8_prepare_ms:.1f}ms, "
+                    f"mm={fp8_scaled_mm_ms:.1f}ms, bias={fp8_bias_ms:.1f}ms"
+                )
             if latent_frame_count:
                 message = (
                     f"{message}; latent={latent_frame_count}f, "
                     f"chunks={'on' if temporal_chunks else 'off'}, "
                     f"xfwd/step~{transformer_forwards_per_step}"
                 )
+            if attention_backends:
+                message = f"{message}; attention={','.join(attention_backends)}"
+            if stage_transition_count:
+                message = (
+                    f"{message}; stage_swaps={stage_transition_count} "
+                    f"({stage_transition_total_ms:.0f}ms)"
+                )
             if cache_mode:
                 message = f"{message}; cache={cache_mode}"
             if vram_reserve_enabled and vram_limit_mb and vram_total_mb:
                 message = (
                     f"{message}; VRAM cap={vram_limit_mb}/{vram_total_mb} MB "
-                    f"(reserve={vram_reserve_mb} MB)"
+                    f"(keep_free={vram_reserve_mb} MB)"
                 )
 
             return WanI2VResult(
@@ -1242,6 +1467,27 @@ class WanService:
                 fp8_fallback_reasons=fp8_fallback_reasons,
                 fp8_strict_mode=fp8_strict_mode,
                 fp8_native_available=fp8_native_available,
+                fp8_profile_enabled=fp8_profile_enabled,
+                fp8_backend=fp8_backend,
+                fp8_backend_metadata=fp8_backend_metadata,
+                fp8_linear_shape_count=fp8_linear_shape_count,
+                fp8_linear_shapes=fp8_linear_shapes,
+                fp8_prepare_ms=round(fp8_prepare_ms, 3),
+                fp8_scaled_mm_ms=round(fp8_scaled_mm_ms, 3),
+                fp8_bias_ms=round(fp8_bias_ms, 3),
+                fp8_fallback_ms=round(fp8_fallback_ms, 3),
+                attention_backends=attention_backends,
+                attention_optimizations=attention_optimizations,
+                stage_transition_count=stage_transition_count,
+                stage_transition_total_ms=round(stage_transition_total_ms, 3),
+                stage_transition_h2d_ms=round(stage_transition_h2d_ms, 3),
+                stage_transition_d2h_ms=round(stage_transition_d2h_ms, 3),
+                stage_transition_cleanup_ms=round(stage_transition_cleanup_ms, 3),
+                stage_transition_events=stage_transition_events,
+                hardware_fingerprint=hardware_fingerprint,
+                transfer_probe=transfer_probe,
+                performance_benchmark_valid=performance_benchmark_valid,
+                performance_benchmark_notes=performance_benchmark_notes,
                 cache_mode=cache_mode,
                 vram_reserve_enabled=vram_reserve_enabled,
                 vram_reserve_mb=vram_reserve_mb,

@@ -5,6 +5,6 @@ from aiwf.web.studio.tab import build_studio_tab
 
 
 def register_studio(registry: WebRegistry) -> None:
-    @registry.tab("Studio", order=1)
+    @registry.tab("Image", order=1)
     def build(ctx, tab=None):
         build_studio_tab(ctx, tab)

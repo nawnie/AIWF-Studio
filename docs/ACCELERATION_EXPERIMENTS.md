@@ -173,7 +173,7 @@ Every benchmark entry must record:
 | Gain | −19% (second run vs. baseline) |
 | Output hash | SHA-256 of PNG bytes (must match baseline for lossless paths) |
 
-Log entries go in `docs/benchmark_log.jsonl` (one JSON object per line).
+Local log entries go in `_local/logs/benchmark_log.jsonl` (one JSON object per line). This file is ignored by Git.
 
 ---
 
@@ -183,5 +183,5 @@ Log entries go in `docs/benchmark_log.jsonl` (one JSON object per line).
 2. Add a row to the table at the top of this file
 3. Add a section with Flag / Status / Expected gain / Risk / File
 4. Implement behind the flag
-5. Run benchmark and append entry to `docs/benchmark_log.jsonl`
+5. Run benchmark and append entry to `_local/logs/benchmark_log.jsonl`
 6. Update Status from **Not started** → **Verified** (with date and GPU)

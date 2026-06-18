@@ -8,7 +8,7 @@ from aiwf.web.registry import WebRegistry
 
 def _format_tag_cloud(counts: list[tuple[str, int]], limit: int = 16) -> str:
     if not counts:
-        return "_No tagged images yet — add hashtags when generating in Studio._"
+        return "_No tagged images yet — add hashtags in Image._"
     chips = [f"`#{tag}` · {count}" for tag, count in counts[:limit]]
     more = len(counts) - limit
     suffix = f"  \n_+{more} more tags_" if more > 0 else ""
@@ -16,7 +16,7 @@ def _format_tag_cloud(counts: list[tuple[str, int]], limit: int = 16) -> str:
 
 
 def register_library(registry: WebRegistry) -> None:
-    @registry.tab("Library", order=20)
+    @registry.tab("Library", order=40)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         tag_service = ctx.tags
 
@@ -24,8 +24,7 @@ def register_library(registry: WebRegistry) -> None:
             with gr.Column(elem_classes=["aiwf-page-header"]):
                 gr.Markdown("Library", elem_classes=["aiwf-section-label"])
                 gr.Markdown(
-                    "Search saved outputs by hashtag. Tags are embedded in PNG metadata from Studio generations. "
-                    "Click **Refresh** to scan your output folder.",
+                    "Search saved outputs by hashtag.",
                     elem_classes=["aiwf-page-intro"],
                 )
 

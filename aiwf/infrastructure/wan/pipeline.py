@@ -210,6 +210,46 @@ def _video_status(message: str) -> None:
         logger.debug("Wan status trace failed.", exc_info=True)
 
 
+def _cuda_total_vram_mb() -> int:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        return int(getattr(props, "total_memory", 0) // (1024 * 1024))
+    except Exception:
+        return 0
+
+
+def _resident_min_vram_mb(default: int = 20 * 1024) -> int:
+    raw = os.environ.get("AIWF_WAN_RESIDENT_MIN_VRAM_MB", "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return int(default)
+
+
+def _resolve_dual_stage_offload_for_hardware(offload: str, *, fast_fp8_pair: bool) -> str:
+    if offload != "resident" or not fast_fp8_pair:
+        return offload
+    if _env_flag("AIWF_WAN_FORCE_RESIDENT", default=False):
+        return offload
+
+    total_mb = _cuda_total_vram_mb()
+    min_mb = _resident_min_vram_mb()
+    if total_mb and total_mb < min_mb:
+        _video_status(
+            "Resident mode was requested, but this GPU has "
+            f"{total_mb} MB VRAM and the current safe threshold is {min_mb} MB. "
+            "Falling back to Balanced so high/low FP8 stages swap instead of co-residing."
+        )
+        return "balanced"
+    return offload
+
+
 def _safetensors_uses_comfy_fp8_quant(path: Path) -> bool:
     if path.suffix.lower() != ".safetensors":
         return False
@@ -418,6 +458,35 @@ def _collect_fp8_linear_metrics(*roots: Any) -> dict[str, Any]:
     return collect_fp8_linear_metrics(*roots)
 
 
+def _collect_attention_metrics(*roots: Any) -> dict[str, Any]:
+    backends: list[str] = []
+    optimizations: list[str] = []
+    seen: set[int] = set()
+    for root in roots:
+        if root is None:
+            continue
+        loaded = getattr(root, "_loaded_model", None)
+        candidates = (root, loaded) if loaded is not None else (root,)
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            ident = id(candidate)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            backend = str(getattr(candidate, "_aiwf_attention_backend", "") or "").strip()
+            if backend and backend not in backends:
+                backends.append(backend)
+            for item in tuple(getattr(candidate, "_aiwf_attention_optimizations", ()) or ()):
+                text = str(item).strip()
+                if text and text not in optimizations:
+                    optimizations.append(text)
+    return {
+        "attention_backends": backends,
+        "attention_optimizations": optimizations,
+    }
+
+
 def _module_has_accelerate_hook(module: Any) -> bool:
     """Return whether Accelerate device/offload hooks are already attached."""
     if module is None:
@@ -443,7 +512,27 @@ def _wan_group_offload_blocks() -> int:
     return _env_int("AIWF_WAN_GROUP_OFFLOAD_BLOCKS", 4)
 
 
-def _install_group_offload_for_stage(model: Any, device: Any, *, blocks: int | None = None) -> bool:
+def _wan_group_offload_stream_enabled() -> bool:
+    return _env_flag("AIWF_WAN_GROUP_OFFLOAD_STREAM", default=False)
+
+
+def _wan_group_offload_record_stream() -> bool:
+    return _env_flag("AIWF_WAN_GROUP_OFFLOAD_RECORD_STREAM", default=True)
+
+
+def _wan_group_offload_low_cpu_mem_usage() -> bool:
+    return _env_flag("AIWF_WAN_GROUP_OFFLOAD_LOW_CPU_MEM", default=False)
+
+
+def _install_group_offload_for_stage(
+    model: Any,
+    device: Any,
+    *,
+    blocks: int | None = None,
+    use_stream: bool | None = None,
+    record_stream: bool | None = None,
+    low_cpu_mem_usage: bool | None = None,
+) -> bool:
     """Install Diffusers block-level group offload on a Wan transformer stage."""
     if model is None:
         return False
@@ -456,16 +545,30 @@ def _install_group_offload_for_stage(model: Any, device: Any, *, blocks: int | N
         import torch
 
         block_count = max(1, int(blocks or _wan_group_offload_blocks()))
+        stream_enabled = _wan_group_offload_stream_enabled() if use_stream is None else bool(use_stream)
+        record_stream_enabled = (
+            _wan_group_offload_record_stream() if record_stream is None else bool(record_stream)
+        )
+        low_cpu_mem = (
+            _wan_group_offload_low_cpu_mem_usage()
+            if low_cpu_mem_usage is None
+            else bool(low_cpu_mem_usage)
+        )
         enable(
             onload_device=torch.device(device),
             offload_device=torch.device("cpu"),
             offload_type="block_level",
             num_blocks_per_group=block_count,
-            use_stream=_env_flag("AIWF_WAN_GROUP_OFFLOAD_STREAM", default=False),
+            use_stream=stream_enabled,
+            record_stream=record_stream_enabled,
+            low_cpu_mem_usage=low_cpu_mem,
             non_blocking=False,
         )
         model._aiwf_group_offload = True
         model._aiwf_group_offload_blocks = block_count
+        model._aiwf_group_offload_stream = stream_enabled
+        model._aiwf_group_offload_record_stream = record_stream_enabled
+        model._aiwf_group_offload_low_cpu_mem_usage = low_cpu_mem
         return True
     except Exception as exc:
         logger.warning("Could not install Wan group offload: %s", exc)
@@ -1507,6 +1610,12 @@ def _stage_cache_is_disk_sequential(mode: str) -> bool:
     return stage_cache_is_disk_sequential(mode)
 
 
+def _stage_cache_is_dual_gpu_resident(mode: str) -> bool:
+    from aiwf.infrastructure.wan.native.memory import WanStageCacheMode
+
+    return str(mode) == WanStageCacheMode.DUAL_GPU_RESIDENT.value
+
+
 def _resolve_stage_cache_after_pin_probe(
     mode: str,
     *,
@@ -1590,11 +1699,45 @@ class AIWFModelCacheManager:
         self.cpu_cache = {}
         # Tracking what is currently occupying VRAM space
         self.active_in_vram = None
+        self.transition_events: list[dict[str, Any]] = []
         # Set to False on the first pin_memory failure so subsequent models
         # never attempt pinning.  A failed pin can leave the CUDA driver context
         # in a dirty state; retrying (especially from a background thread while
         # CUDA runs on the main thread) reproduces the 0xC0000005 AV crash.
         self._global_pin_enabled = True
+
+    def reset_transition_metrics(self) -> None:
+        self.transition_events.clear()
+
+    def _record_transition(self, operation: str, started: float, **details: Any) -> None:
+        event = {
+            "operation": str(operation),
+            "duration_ms": round(max(0.0, time.perf_counter() - started) * 1000.0, 3),
+            "active_in_vram": self.active_in_vram,
+        }
+        for key, value in details.items():
+            if isinstance(value, float):
+                event[key] = round(max(0.0, value), 3)
+            elif isinstance(value, (str, int, bool)) or value is None:
+                event[key] = value
+        self.transition_events.append(event)
+        if len(self.transition_events) > 64:
+            del self.transition_events[: len(self.transition_events) - 64]
+
+    def collect_transition_metrics(self) -> dict[str, Any]:
+        events = list(self.transition_events)
+        total_ms = sum(float(event.get("duration_ms") or 0.0) for event in events)
+        h2d_ms = sum(float(event.get("h2d_ms") or 0.0) for event in events)
+        d2h_ms = sum(float(event.get("d2h_ms") or 0.0) for event in events)
+        cleanup_ms = sum(float(event.get("cleanup_ms") or 0.0) for event in events)
+        return {
+            "stage_transition_count": len(events),
+            "stage_transition_total_ms": round(total_ms, 3),
+            "stage_transition_h2d_ms": round(h2d_ms, 3),
+            "stage_transition_d2h_ms": round(d2h_ms, 3),
+            "stage_transition_cleanup_ms": round(cleanup_ms, 3),
+            "stage_transition_events": events[-16:],
+        }
 
     def register_model(self, model_key, model_object, *, pin: bool = True):
         """
@@ -1606,6 +1749,7 @@ class AIWFModelCacheManager:
         """
         if model_key in self.cpu_cache:
             return
+        started = time.perf_counter()
         logger.info("[AIWF] Registering %s to CPU cache (pin=%s)", model_key, pin)
 
         _free_cuda_memory()
@@ -1662,6 +1806,13 @@ class AIWFModelCacheManager:
             _store_tensor(buffer)
 
         self.cpu_cache[model_key] = model_object
+        self._record_transition(
+            "register_cpu_cache",
+            started,
+            model_key=str(model_key),
+            pinned=bool(pin_state["enabled"]),
+            pin_requested=bool(pin),
+        )
 
     def _deferred_ipc_collect(self) -> None:
         """Run ipc_collect in a daemon thread — it takes 100–300 ms and need not block the swap."""
@@ -1688,36 +1839,52 @@ class AIWFModelCacheManager:
             self.load_to_vram(new_key)
             return
 
+        total_started = time.perf_counter()
         old_model = self.cpu_cache[old_key]
         new_model = self.cpu_cache[new_key]
 
         # 1. Issue non-blocking eviction of old model (GPU→CPU transfer starts).
         print(f"[AIWF] Swap {old_key} → {new_key}: evicting from VRAM...")
+        evict_started = time.perf_counter()
         old_model.to("cpu", non_blocking=True)
         self.active_in_vram = None
 
         # 2. Wait for old model's VRAM to be released (PCIe GPU→CPU done).
         torch.cuda.current_stream().synchronize()
+        d2h_ms = max(0.0, time.perf_counter() - evict_started) * 1000.0
 
         # 3. Immediately start loading the new model (CPU→GPU PCIe transfer begins).
         print(f"[AIWF] Swap: streaming {new_key} to VRAM (cleanup overlapped with transfer)...")
+        load_started = time.perf_counter()
         new_model.to(self.device, non_blocking=True)
 
         # 4. While PCIe transfer runs, do CPU-side cleanup (overlapped — free time!).
+        cleanup_started = time.perf_counter()
         gc.collect()
         if torch.cuda.is_available():
             try:
                 torch.cuda.empty_cache()
             except Exception:
                 pass
+        cleanup_ms = max(0.0, time.perf_counter() - cleanup_started) * 1000.0
 
         # 5. Wait for new model to finish arriving in VRAM.
         torch.cuda.current_stream().synchronize()
+        h2d_ms = max(0.0, time.perf_counter() - load_started) * 1000.0
         self.active_in_vram = new_key
 
         # 6. Defer ipc_collect (~100–300 ms, no urgency) so main thread returns immediately.
         t = threading.Thread(target=self._deferred_ipc_collect, daemon=True, name="aiwf-ipc-collect")
         t.start()
+        self._record_transition(
+            "swap_models",
+            total_started,
+            old_key=str(old_key),
+            new_key=str(new_key),
+            d2h_ms=d2h_ms,
+            h2d_ms=h2d_ms,
+            cleanup_ms=cleanup_ms,
+        )
 
     def load_to_vram(self, target_key):
         """
@@ -1739,12 +1906,19 @@ class AIWFModelCacheManager:
             return
 
         print(f"[AIWF] Streaming {target_key} to VRAM via PCIe (fast swap, no disk)...")
+        started = time.perf_counter()
         target_model = self.cpu_cache[target_key]
 
         target_model.to(self.device, non_blocking=True)
         self.active_in_vram = target_key
 
         torch.cuda.current_stream().synchronize()
+        self._record_transition(
+            "load_to_vram",
+            started,
+            target_key=str(target_key),
+            h2d_ms=max(0.0, time.perf_counter() - started) * 1000.0,
+        )
 
     def unload_from_vram(self, target_key):
         """
@@ -1758,6 +1932,7 @@ class AIWFModelCacheManager:
             return
 
         print(f"[AIWF] Evicting {target_key} back to CPU RAM...")
+        started = time.perf_counter()
         model = self.cpu_cache[target_key]
 
         model.to("cpu", non_blocking=True)
@@ -1771,6 +1946,12 @@ class AIWFModelCacheManager:
             except Exception:
                 pass
         gc.collect()
+        self._record_transition(
+            "unload_from_vram",
+            started,
+            target_key=str(target_key),
+            d2h_ms=max(0.0, time.perf_counter() - started) * 1000.0,
+        )
 
 
 def _tune_wan_cpu_threads() -> None:
@@ -2057,6 +2238,8 @@ class WanI2VBackend:
         chunk_overlap: int | None = None,
         temporal_chunks: bool | None = None,
     ):
+        import torch
+
         # Dual high/low is the only supported layout for Wan 2.2 I2V.
         if not (high_noise_model_id and low_noise_model_id):
             raise WanUnavailable(
@@ -2070,6 +2253,21 @@ class WanI2VBackend:
         _cache_chunk_size = int(chunk_size or 24)
         _cache_chunk_overlap = int(chunk_overlap or 0)
         _cache_temporal_chunks = bool(temporal_chunks)
+        fast_fp8_pair = (
+            (
+                _torch_native_fp8_available()
+                and _is_native_comfy_fp8_transformer(high_noise_model_id)
+                and _is_native_comfy_fp8_transformer(low_noise_model_id)
+            )
+            or (
+                _is_gguf_transformer(high_noise_model_id)
+                and _is_gguf_transformer(low_noise_model_id)
+            )
+        )
+        offload = _resolve_dual_stage_offload_for_hardware(
+            offload,
+            fast_fp8_pair=fast_fp8_pair,
+        )
         key = (
             "dual",
             high_noise_model_id,
@@ -2107,17 +2305,6 @@ class WanI2VBackend:
         )
         _video_status(
             f"Loading video pipeline with local base components and dual transformers ({Path(high_noise_model_id).name} / {Path(low_noise_model_id).name})."
-        )
-        fast_fp8_pair = (
-            (
-                _torch_native_fp8_available()
-                and _is_native_comfy_fp8_transformer(high_noise_model_id)
-                and _is_native_comfy_fp8_transformer(low_noise_model_id)
-            )
-            or (
-                _is_gguf_transformer(high_noise_model_id)
-                and _is_gguf_transformer(low_noise_model_id)
-            )
         )
         cache_mode = _wan_cache_mode(
             offload,
@@ -2168,42 +2355,86 @@ class WanI2VBackend:
 
         if offload == "sequential":
             pipe.enable_sequential_cpu_offload()
-        elif offload == "group":
+        elif offload in {"group", "streamed"}:
+            streamed = offload == "streamed"
+            blocks = 1 if streamed else _wan_group_offload_blocks()
+            stream_enabled = True if streamed else _wan_group_offload_stream_enabled()
             if not _install_group_offload_for_stage(
                 pipe.transformer,
                 "cuda:0",
-                blocks=_wan_group_offload_blocks(),
+                blocks=blocks,
+                use_stream=stream_enabled,
+                record_stream=True if streamed else None,
+                low_cpu_mem_usage=_wan_group_offload_low_cpu_mem_usage() if streamed else None,
             ):
                 raise WanUnavailable(
                     "Diffusers group offload could not be installed for the high-noise Wan transformer. "
                     "Use model or sequential offload for this run."
                 )
             _video_status(
-                "Using block-level group offload for the high-noise transformer "
-                f"({_wan_group_offload_blocks()} blocks/group, stream=off)."
+                f"Using {'streamed ' if streamed else ''}block-level group offload "
+                f"for the high-noise transformer ({blocks} blocks/group, "
+                f"stream={'on' if stream_enabled else 'off'})."
             )
             pipe._aiwf_execution_device = torch.device("cuda")
-        elif offload == "model":
-            if fast_fp8_pair:
-                _video_status(
-                    "Using fast quantized placement: keeping the active Wan transformer on GPU while offloading text encoder/VAE."
+        elif offload in {"model", "balanced", "resident"}:
+            if offload == "resident" and not fast_fp8_pair:
+                raise WanUnavailable(
+                    "Resident speed mode requires a quantized Wan high/low pair (native FP8 safetensors or GGUF). "
+                    "Use Balanced or Low VRAM model offload for full-precision transformers."
                 )
+            if fast_fp8_pair:
+                if offload == "balanced":
+                    _video_status(
+                        "Using balanced quantized placement: active Wan stage swaps, VAE stays on GPU, text encoder offloads."
+                    )
+                elif offload == "resident":
+                    _video_status(
+                        "Using resident quantized placement: high and low Wan transformers stay on GPU; text encoder/VAE offload."
+                    )
+                else:
+                    _video_status(
+                        "Using low-VRAM quantized placement: active Wan stage stays on GPU while text encoder/VAE offload."
+                    )
                 original_seq = getattr(pipe, "model_cpu_offload_seq", None)
                 original_exclude = list(getattr(pipe, "_exclude_from_cpu_offload", []) or [])
                 # Build safe offload seq - some manual Wan assemblies don't have image_encoder
                 seq_parts = ["text_encoder"]
                 if hasattr(pipe, "image_encoder") and getattr(pipe, "image_encoder", None) is not None:
                     seq_parts.append("image_encoder")
-                seq_parts.append("vae")
+                if offload != "balanced":
+                    seq_parts.append("vae")
+                transformer_excludes = {"transformer", "transformer_2"}
+                if offload == "balanced":
+                    transformer_excludes.add("vae")
                 pipe.model_cpu_offload_seq = "->".join(seq_parts)
                 pipe._exclude_from_cpu_offload = sorted(
-                    set(original_exclude).union({"transformer", "transformer_2"})
+                    set(original_exclude).union(transformer_excludes)
                 )
                 try:
                     pipe.enable_model_cpu_offload()
                 finally:
                     if original_seq:
                         pipe.model_cpu_offload_seq = original_seq
+                if offload == "balanced":
+                    try:
+                        pipe.vae.to("cuda")
+                    except Exception as exc:
+                        raise WanUnavailable(
+                            "Balanced mode could not keep the Wan VAE resident on GPU. "
+                            "Use Low VRAM model offload for this run."
+                        ) from exc
+                elif offload == "resident":
+                    try:
+                        pipe.transformer.to("cuda")
+                        if getattr(pipe, "transformer_2", None) is not None:
+                            pipe.transformer_2.to("cuda")
+                    except Exception as exc:
+                        raise WanUnavailable(
+                            "Resident mode could not keep both Wan FP8 stages on GPU. "
+                            "Use Balanced or Low VRAM model offload for this run."
+                        ) from exc
+                    pipe._aiwf_execution_device = torch.device("cuda")
             else:
                 pipe.enable_model_cpu_offload()
         else:
@@ -2221,36 +2452,34 @@ class WanI2VBackend:
         )
         if _stage_cache_is_gpu_active_cpu_standby(cache_mode):
             _free_cuda_memory()
-            if _stage_cache_is_disk_sequential(cache_mode):
-                # Disk-sequential mode: pin_memory failed, meaning wan_high (~14GB) is
-                # stored in ordinary (unpinned) CPU RAM.  If we load it to VRAM NOW,
-                # encode_prompt will OOM because the text encoder also needs VRAM (UMT5
-                # is ~4-5 GB) and 14 + 5 > 16 GB.
-                #
-                # Instead, register a one-shot pre-forward hook on the real transformer.
-                # The hook fires just before the FIRST denoising forward call (after
-                # encode_prompt has finished and released its VRAM), loads wan_high then,
-                # and immediately removes itself so it never fires again.
-                _loaded = [False]
+            # In active-stage cache modes, do not put wan_high in VRAM before
+            # prompt encoding. UMT5 temporarily needs several GB on CUDA, and a
+            # resident 14B FP8 expert leaves too little headroom on 16 GB cards.
+            # Native denoise reloads the stage before its first transformer call;
+            # the pre-forward hook covers the non-native diffusers call path.
+            _loaded = [False]
 
-                def _deferred_vram_load(module, args, _cache=self.cache):
-                    if not _loaded[0]:
-                        _loaded[0] = True
+            def _deferred_vram_load(module, args, _cache=self.cache):
+                if not _loaded[0]:
+                    _loaded[0] = True
+                    if getattr(_cache, "active_in_vram", None) != "wan_high":
                         _video_status(
-                            "Disk-sequential: deferred wan_high VRAM load "
-                            "(after encode_prompt released its VRAM)."
+                            "Deferred wan_high VRAM load after prompt encoding "
+                            "(preserves text-encoder headroom)."
                         )
                         _cache.load_to_vram("wan_high")
 
-                pipe.transformer.register_forward_pre_hook(_deferred_vram_load)
+            pipe.transformer.register_forward_pre_hook(_deferred_vram_load)
+            if _stage_cache_is_disk_sequential(cache_mode):
                 _video_status(
                     "Disk-sequential: wan_high VRAM load deferred to first denoising step "
                     "(encode_prompt needs that VRAM first)."
                 )
             else:
-                # Normal path: pre-load to VRAM now that text encoder / VAE offload
-                # hooks are installed and the previous pipeline is fully evicted.
-                self.cache.load_to_vram("wan_high")
+                _video_status(
+                    "Wan active-stage cache: wan_high VRAM load deferred until denoising "
+                    "so prompt encoding has enough headroom."
+                )
 
         for method in ("enable_tiling", "enable_slicing"):
             try:
@@ -2326,23 +2555,40 @@ class WanI2VBackend:
 
         if offload == "sequential":
             pipe.enable_sequential_cpu_offload()
-        elif offload == "group":
+        elif offload in {"group", "streamed"}:
+            streamed = offload == "streamed"
+            blocks = 1 if streamed else _wan_group_offload_blocks()
+            stream_enabled = True if streamed else _wan_group_offload_stream_enabled()
             if not _install_group_offload_for_stage(
                 getattr(pipe, "transformer", None),
                 "cuda:0",
-                blocks=_wan_group_offload_blocks(),
+                blocks=blocks,
+                use_stream=stream_enabled,
+                record_stream=True if streamed else None,
+                low_cpu_mem_usage=_wan_group_offload_low_cpu_mem_usage() if streamed else None,
             ):
                 raise WanUnavailable(
                     "Diffusers group offload could not be installed for the Wan 5B transformer. "
                     "Use model or sequential offload for this run."
                 )
             _video_status(
-                "Using block-level group offload for Wan 5B "
-                f"({_wan_group_offload_blocks()} blocks/group, stream=off)."
+                f"Using {'streamed ' if streamed else ''}block-level group offload "
+                f"for Wan 5B ({blocks} blocks/group, stream={'on' if stream_enabled else 'off'})."
             )
             pipe._aiwf_execution_device = torch.device("cuda")
         elif offload == "model":
             pipe.enable_model_cpu_offload()
+        elif offload == "balanced":
+            pipe.enable_model_cpu_offload()
+            try:
+                pipe.vae.to("cuda")
+            except Exception as exc:
+                raise WanUnavailable(
+                    "Balanced mode could not keep the Wan 5B VAE resident on GPU. "
+                    "Use Low VRAM model offload for this run."
+                ) from exc
+        elif offload == "resident":
+            pipe.to("cuda")
         else:
             pipe.to("cuda")
 
@@ -2417,6 +2663,7 @@ class WanI2VBackend:
         )
 
         use_cache = _stage_cache_uses_cpu_standby(cache_mode)
+        dual_gpu_resident = _stage_cache_is_dual_gpu_resident(cache_mode)
         pin_tensors = _stage_cache_pins_tensors(cache_mode) and self._pinned_memory
         _video_status("Building local Wan A14B I2V pipeline components.")
         _video_status("Preparing empty high-noise transformer stage.")
@@ -2499,6 +2746,7 @@ class WanI2VBackend:
                         "so the low-noise stage can stay in RAM instead of loading from disk."
                     )
             pipe._aiwf_cache_mode = cache_mode
+            pipe._aiwf_stage_cache = self.cache
             if cache_mode == "full":
                 self.cache.load_to_vram("wan_high")
 
@@ -2568,6 +2816,21 @@ class WanI2VBackend:
             if use_cache:
                 self.cache.register_model("wan_low", preloaded_low, pin=pin_tensors)
 
+        if dual_gpu_resident:
+            pipe.transformer_2 = self._preloaded_low
+            pipe.register_to_config(boundary_ratio=float(boundary_ratio))
+            pipe._aiwf_cache_mode = cache_mode
+            pipe._aiwf_stage_cache = self.cache
+            _video_status(
+                "Resident mode: high and low Wan transformers are materialized together; "
+                "boundary swap is disabled for this run."
+            )
+            logger.info(
+                "Configured resident dual-stage Wan pipeline: high=%s, low=%s, boundary_ratio=%s (from base %s)",
+                Path(high_path).name, Path(low_path).name, boundary_ratio, Path(base).name
+            )
+            return pipe
+
         def _release_high_stage():
             _video_status(
                 "High-noise stage complete; releasing high transformer for low-stage headroom."
@@ -2623,15 +2886,22 @@ class WanI2VBackend:
                         "Refusing to load the full FP8 low stage into VRAM because that can exhaust a 16 GB GPU. "
                         "Try model offload/cache mode, or fix the Accelerate CPU offload install before retrying."
                     )
-            elif offload == "group":
+            elif offload in {"group", "streamed"}:
+                streamed = offload == "streamed"
+                blocks = 1 if streamed else _wan_group_offload_blocks()
+                stream_enabled = True if streamed else _wan_group_offload_stream_enabled()
                 if _install_group_offload_for_stage(
                     low_trans,
                     "cuda:0",
-                    blocks=_wan_group_offload_blocks(),
+                    blocks=blocks,
+                    use_stream=stream_enabled,
+                    record_stream=True if streamed else None,
+                    low_cpu_mem_usage=_wan_group_offload_low_cpu_mem_usage() if streamed else None,
                 ):
                     _video_status(
-                        "Group offload: lazy low-noise transformer will stream block groups to VRAM "
-                        f"({_wan_group_offload_blocks()} blocks/group)."
+                        f"{'Streamed group' if streamed else 'Group'} offload: "
+                        "lazy low-noise transformer will stream block groups to VRAM "
+                        f"({blocks} blocks/group, stream={'on' if stream_enabled else 'off'})."
                     )
                 else:
                     raise WanUnavailable(
@@ -2660,6 +2930,7 @@ class WanI2VBackend:
         # Typical values for Wan2.2 14B I2V high/low splits are around 0.875
         pipe.register_to_config(boundary_ratio=float(boundary_ratio))
         pipe._aiwf_cache_mode = cache_mode
+        pipe._aiwf_stage_cache = self.cache
 
         logger.info(
             "Configured dual-stage Wan pipeline: high=%s, low=%s, boundary_ratio=%s (from base %s)",
@@ -2672,6 +2943,7 @@ class WanI2VBackend:
         _require_wan()
         import torch
 
+        self.cache.reset_transition_metrics()
         requires_dual = (
             request.requires_dual_transformers()
             if callable(getattr(request, "requires_dual_transformers", None))
@@ -2697,8 +2969,8 @@ class WanI2VBackend:
         _image_guidance_scale = float(getattr(request, "image_guidance_scale", 1.0) or 1.0)
         _manual_vae_decode = _env_flag("AIWF_WAN_MANUAL_VAE_DECODE", default=False)
         _vae_decode_chunk_frames = _env_int("AIWF_WAN_VAE_CHUNK_FRAMES", 4)
-        # AIWF owns the denoise loop by default (see docs/WAN_STANDALONE_RUNTIME_PLAN.md
-        # Pass 7) instead of treating diffusers' pipe(**call_kwargs) as a black box.
+        # AIWF owns the denoise loop by default instead of treating
+        # diffusers' pipe(**call_kwargs) as a black box.
         # Escape hatch retained in case real-hardware validation surfaces a regression.
         _use_native_denoise = _env_flag("AIWF_WAN_NATIVE_DENOISE", default=True)
         try:
@@ -2989,6 +3261,11 @@ class WanI2VBackend:
                 for restore in reversed(restore_hooks):
                     restore()
         except Exception as exc:
+            try:
+                _video_status("Wan generation failed; unloading cached video pipeline to release VRAM.")
+                self.unload()
+            except Exception:
+                logger.debug("Wan backend cleanup after failed generation failed.", exc_info=True)
             if cancelled[0]:
                 raise WanUnavailable("Generation cancelled by user.") from exc
             raise
@@ -3044,6 +3321,27 @@ class WanI2VBackend:
             getattr(pipe, "transformer_2", None),
             getattr(self, "_preloaded_low", None),
         )
+        attention_metrics = _collect_attention_metrics(
+            getattr(pipe, "transformer", None),
+            getattr(pipe, "transformer_2", None),
+            getattr(self, "_preloaded_low", None),
+        )
+        transition_metrics = self.cache.collect_transition_metrics()
+        try:
+            from aiwf.infrastructure.torch.wan_perf import (
+                describe_wan_hardware_fingerprint,
+                measure_wan_transfer_bandwidth,
+            )
+
+            hardware_fingerprint = describe_wan_hardware_fingerprint()
+            transfer_probe = (
+                measure_wan_transfer_bandwidth()
+                if _env_flag("AIWF_WAN_TRANSFER_PROBE", default=False)
+                else {}
+            )
+        except Exception as exc:
+            hardware_fingerprint = {"error": f"{type(exc).__name__}: {exc}"}
+            transfer_probe = {}
         metrics = {
             "step_count": int(completed_steps),
             "load_seconds": round(float(load_seconds), 3),
@@ -3076,6 +3374,10 @@ class WanI2VBackend:
             "vram_total_mb": int(vram_budget.total_mb),
             "vram_limit_fraction": round(float(vram_budget.fraction), 6),
             **fp8_metrics,
+            **attention_metrics,
+            **transition_metrics,
+            "hardware_fingerprint": hardware_fingerprint,
+            "transfer_probe": transfer_probe,
         }
         return frames, h, w, metrics
 

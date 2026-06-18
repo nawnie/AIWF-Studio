@@ -26,9 +26,7 @@ def build_segment_panel(ctx: AppContext) -> None:
         with gr.Column(elem_classes=["aiwf-page-header"]):
             gr.Markdown("Segment (SAM)", elem_classes=["aiwf-section-label"])
             gr.Markdown(
-                "Generate inpaint masks with Segment Anything. "
-                "Pick a **mask target** from the list, use **click points** on the image, "
-                "or choose Custom for advanced prompts. Masks can feed Studio inpaint and workflows.",
+                "Generate inpaint masks with presets, click points, or a custom prompt.",
                 elem_classes=["aiwf-page-intro"],
             )
             gr.Markdown(service.folder_help(), elem_classes=["aiwf-page-path"])
@@ -136,6 +134,6 @@ def build_segment_panel(ctx: AppContext) -> None:
 
 
 def register_segment(registry: WebRegistry) -> None:
-    @registry.tab("Segment", order=16)
+    @registry.tab("Segment", order=21)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         build_segment_panel(ctx)

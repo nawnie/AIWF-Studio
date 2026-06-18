@@ -11,7 +11,7 @@ from aiwf.web.registry import WebRegistry
 
 
 def register_history(registry: WebRegistry) -> None:
-    @registry.tab("History", order=70)
+    @registry.tab("History", order=42)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         service = ctx.generation
 
@@ -44,8 +44,7 @@ def register_history(registry: WebRegistry) -> None:
             with gr.Column(elem_classes=["aiwf-page-header"]):
                 gr.Markdown("History", elem_classes=["aiwf-section-label"])
                 gr.Markdown(
-                    "Recent generations from this session, newest first. Select an image to see its "
-                    "parameters, copy the infotext, or re-run a text-to-image job.",
+                    "Recent generations from this session.",
                     elem_classes=["aiwf-page-intro"],
                 )
 
@@ -129,7 +128,7 @@ def register_history(registry: WebRegistry) -> None:
             if job.request.mode != GenerationMode.TXT2IMG:
                 raise gr.Error(
                     "Only text-to-image jobs can be re-run here (img2img/inpaint need their source "
-                    "image). Use the infotext with PNG Info → Send instead."
+                    "image). Use PNG Info -> Send to Image instead."
                 )
             finished = service.submit(job.request)
             if finished.result is None or not finished.result.images:

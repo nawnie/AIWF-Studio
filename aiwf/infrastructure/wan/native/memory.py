@@ -10,6 +10,7 @@ from pathlib import Path
 class WanStageCacheMode(str, Enum):
     NONE = "none"
     FULL = "full"
+    DUAL_GPU_RESIDENT = "dual_gpu_resident"
     GPU_ACTIVE_CPU_PINNED_STANDBY = "gpu_active_cpu_pinned_standby"
     GPU_ACTIVE_CPU_UNPINNED_STANDBY = "gpu_active_cpu_unpinned_standby"
     DISK_SEQUENTIAL = "disk_sequential"
@@ -72,7 +73,9 @@ def select_initial_stage_cache_mode(
     fast_quantized_pair: bool,
     pinned_memory: bool = True,
 ) -> WanStageCacheMode:
-    if offload == "model" and fast_quantized_pair:
+    if offload == "resident" and fast_quantized_pair:
+        return WanStageCacheMode.DUAL_GPU_RESIDENT
+    if offload in {"model", "balanced"} and fast_quantized_pair:
         if pinned_memory:
             return WanStageCacheMode.GPU_ACTIVE_CPU_PINNED_STANDBY
         return WanStageCacheMode.GPU_ACTIVE_CPU_UNPINNED_STANDBY

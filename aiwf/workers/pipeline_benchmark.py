@@ -53,8 +53,11 @@ _FLAG_ENV = (
     "AIWF_WAN_GGUF_RUNTIME",
     "AIWF_WAN_NATIVE_DENOISE",
     "AIWF_WAN_DENOISE_DIAG",
+    "AIWF_WAN_STRICT_ATTENTION",
     "AIWF_WAN_STRICT_FP8",
     "AIWF_WAN_ALLOW_FP8_FALLBACK",
+    "AIWF_WAN_FP8_PROFILE",
+    "AIWF_WAN_TRANSFER_PROBE",
     "AIWF_WAN_MANUAL_VAE_DECODE",
     "AIWF_WAN_VAE_CHUNK_FRAMES",
     "AIWF_WAN_TEMPORAL_CHUNKS",
@@ -62,6 +65,8 @@ _FLAG_ENV = (
     "AIWF_WAN_CHUNK_OVERLAP",
     "AIWF_WAN_GROUP_OFFLOAD_BLOCKS",
     "AIWF_WAN_GROUP_OFFLOAD_STREAM",
+    "AIWF_WAN_GROUP_OFFLOAD_RECORD_STREAM",
+    "AIWF_WAN_GROUP_OFFLOAD_LOW_CPU_MEM",
     "AIWF_CUDA_VRAM_RESERVE_MB",
     "AIWF_WAN_VRAM_RESERVE_MB",
     "AIWF_WAN_CPU_CACHE_SAFETY_GB",
@@ -323,9 +328,30 @@ def run_wan_i2v_benchmark(config: dict[str, Any]) -> dict[str, Any]:
     request = WanI2VRequest.model_validate(dict(config.get("request") or {}))
     image = _load_image(config, "init_image", "image")
 
+    old_env = {
+        "AIWF_WAN_STRICT_FP8": os.environ.get("AIWF_WAN_STRICT_FP8"),
+        "AIWF_WAN_ALLOW_FP8_FALLBACK": os.environ.get("AIWF_WAN_ALLOW_FP8_FALLBACK"),
+        "AIWF_WAN_FP8_PROFILE": os.environ.get("AIWF_WAN_FP8_PROFILE"),
+    }
+    os.environ["AIWF_WAN_STRICT_FP8"] = "1"
+    os.environ["AIWF_WAN_FP8_PROFILE"] = "1"
+    os.environ.pop("AIWF_WAN_ALLOW_FP8_FALLBACK", None)
     started = time.perf_counter()
-    result = service.generate(request, image)
+    try:
+        result = service.generate(request, image)
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     elapsed = time.perf_counter() - started
+    if result.fp8_fallback_calls:
+        reason = result.fp8_fallback_reasons[0] if result.fp8_fallback_reasons else "unknown reason"
+        raise RuntimeError(
+            "Invalid Wan FP8 performance benchmark: "
+            f"{result.fp8_fallback_calls} FP8 fallback calls ({reason})."
+        )
     frames = max(1, int(result.frame_count))
     return {
         "kind": "wan_i2v",
@@ -366,6 +392,27 @@ def run_wan_i2v_benchmark(config: dict[str, Any]) -> dict[str, Any]:
         "fp8_fallback_reasons": result.fp8_fallback_reasons,
         "fp8_strict_mode": result.fp8_strict_mode,
         "fp8_native_available": result.fp8_native_available,
+        "fp8_profile_enabled": result.fp8_profile_enabled,
+        "fp8_backend": result.fp8_backend,
+        "fp8_backend_metadata": result.fp8_backend_metadata,
+        "fp8_linear_shape_count": result.fp8_linear_shape_count,
+        "fp8_linear_shapes": result.fp8_linear_shapes,
+        "fp8_prepare_ms": result.fp8_prepare_ms,
+        "fp8_scaled_mm_ms": result.fp8_scaled_mm_ms,
+        "fp8_bias_ms": result.fp8_bias_ms,
+        "fp8_fallback_ms": result.fp8_fallback_ms,
+        "attention_backends": result.attention_backends,
+        "attention_optimizations": result.attention_optimizations,
+        "stage_transition_count": result.stage_transition_count,
+        "stage_transition_total_ms": result.stage_transition_total_ms,
+        "stage_transition_h2d_ms": result.stage_transition_h2d_ms,
+        "stage_transition_d2h_ms": result.stage_transition_d2h_ms,
+        "stage_transition_cleanup_ms": result.stage_transition_cleanup_ms,
+        "stage_transition_events": result.stage_transition_events,
+        "hardware_fingerprint": result.hardware_fingerprint,
+        "transfer_probe": result.transfer_probe,
+        "performance_benchmark_valid": result.performance_benchmark_valid,
+        "performance_benchmark_notes": result.performance_benchmark_notes,
         "cache_mode": result.cache_mode,
         "vram_reserve_enabled": result.vram_reserve_enabled,
         "vram_reserve_mb": result.vram_reserve_mb,
@@ -390,13 +437,23 @@ def run_benchmark(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_probe(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    from aiwf.infrastructure.torch.wan_perf import describe_wan_acceleration_capabilities
+    from aiwf.infrastructure.torch.wan_perf import (
+        describe_wan_acceleration_capabilities,
+        describe_wan_hardware_fingerprint,
+        measure_wan_transfer_bandwidth,
+    )
 
     config = config or {}
     return {
         "kind": "probe",
         "label": str(config.get("label") or ""),
         "wan_capabilities": describe_wan_acceleration_capabilities(),
+        "hardware_fingerprint": describe_wan_hardware_fingerprint(),
+        "transfer_probe": (
+            measure_wan_transfer_bandwidth()
+            if os.environ.get("AIWF_WAN_TRANSFER_PROBE", "").strip().lower() in {"1", "true", "yes", "on"}
+            else {}
+        ),
     }
 
 
