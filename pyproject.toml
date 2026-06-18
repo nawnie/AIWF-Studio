@@ -1,9 +1,24 @@
 [project]
 name = "aiwf-studio"
 version = "0.1.0"
-description = "AIWF Studio — a structured rebuild of Stable Diffusion WebUI"
+description = "Local-first AI image generation studio for Stable Diffusion, ControlNet, inpainting, enhancement, and Wan GGUF video"
 requires-python = ">=3.10"
 readme = "README.md"
+keywords = [
+    "stable-diffusion",
+    "ai-image-generation",
+    "diffusers",
+    "gradio",
+    "controlnet",
+    "inpainting",
+    "image-to-video",
+    "wan",
+    "gguf",
+    "local-ai",
+    "generative-ai",
+    "nvidia",
+    "windows",
+]
 
 [project.scripts]
 aiwf = "aiwf.app:main"
