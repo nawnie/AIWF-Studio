@@ -55,6 +55,7 @@ This `main` branch is the stable sharing branch. It only advertises features tha
 - Wan image-to-video through matched **GGUF High Noise + Low Noise** transformer pairs
 - optional RIFE post-processing to write 30 FPS or 60 FPS output after generation
 - optional ReActor post-processing from the first key frame, an uploaded image, or a saved face model
+- optional NVIDIA RTX VSR / Video Effects SDK upscale post-processing when the SDK is installed
 - standalone RIFE frame interpolation tab for existing videos
 - local Wan component folder support for tokenizer, text encoder, scheduler, and VAE
 - conservative default UI: GGUF only on `main`

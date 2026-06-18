@@ -10,6 +10,7 @@ import gradio as gr
 from aiwf.core.domain.enhance import RestoreOptions
 from aiwf.core.domain.faceswap import FaceSwapOptions
 from aiwf.core.domain.rife import RifeOptions
+from aiwf.core.domain.vsr import VsrOptions
 from aiwf.bootstrap import AppContext
 from aiwf.core.domain.wan import (
     SIGMA_TYPES,
@@ -25,6 +26,7 @@ from aiwf.infrastructure.rife import RifeUnavailable
 from aiwf.infrastructure.video import VideoError, extract_first_frame
 from aiwf.infrastructure.wan import WanUnavailable
 from aiwf.services.rife import RifeService
+from aiwf.services.vsr import VsrService, VsrUnavailable
 from aiwf.services.wan import (
     WanService,
     wan_model_quant_family,
@@ -40,6 +42,7 @@ from aiwf.web.studio.resolution import (
 
 _SERVICES: dict[int, WanService] = {}
 _RIFE_SERVICES: dict[int, RifeService] = {}
+_VSR_SERVICES: dict[int, VsrService] = {}
 VIDEO_SIZE_PRESETS: tuple[int, ...] = (480, 568, 640, 768, 896, 1024)
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,14 @@ def _rife_service(ctx: AppContext) -> RifeService:
     if svc is None:
         svc = RifeService(ctx.flags, ctx.settings, ctx.generation.backend.devices, supervisor=ctx.supervisor)
         _RIFE_SERVICES[id(ctx)] = svc
+    return svc
+
+
+def _vsr_service(ctx: AppContext) -> VsrService:
+    svc = _VSR_SERVICES.get(id(ctx))
+    if svc is None:
+        svc = VsrService(ctx.flags, ctx.settings, supervisor=ctx.supervisor)
+        _VSR_SERVICES[id(ctx)] = svc
     return svc
 
 
@@ -95,8 +106,10 @@ def register_wan_i2v(registry: WebRegistry) -> None:
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         service = _service(ctx)
         rife_service = _rife_service(ctx)
+        vsr_service = _vsr_service(ctx)
         rife_ckpts = rife_service.list_checkpoints()
         default_rife_ckpt = rife_service.default_checkpoint()
+        vsr_help = vsr_service.folder_help()
 
         def _faceswap_model_choices() -> list[tuple[str, str]]:
             return [(m.title, m.id) for m in ctx.faceswap.list_models()]
@@ -538,6 +551,47 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                                     label="CodeFormer weight",
                                 )
 
+                        with gr.Accordion("Upscale", open=False, elem_classes=["aiwf-prompt-tools"]):
+                            vsr_enabled = gr.Checkbox(
+                                value=False,
+                                label="Run NVIDIA RTX VSR after generation",
+                                info="Uses NVIDIA Video Effects SDK when installed.",
+                            )
+                            gr.Markdown(vsr_help, elem_classes=["aiwf-settings-paths"])
+                            with gr.Row():
+                                vsr_scale = gr.Dropdown(
+                                    label="Scale",
+                                    choices=[
+                                        ("1.5x", 1.5),
+                                        ("2x", 2.0),
+                                        ("3x", 3.0),
+                                        ("4x", 4.0),
+                                    ],
+                                    value=2.0,
+                                )
+                                vsr_mode = gr.Radio(
+                                    label="VSR mode",
+                                    choices=[("Strong", 1), ("Weak", 0)],
+                                    value=1,
+                                )
+                            vsr_effect = gr.Radio(
+                                label="Effect",
+                                choices=[
+                                    ("RTX VSR SuperRes", "SuperRes"),
+                                    ("Fast SDK Upscale", "Upscale"),
+                                ],
+                                value="SuperRes",
+                                info="SuperRes is the quality path; Upscale is faster and lighter.",
+                            )
+                            vsr_strength = gr.Slider(
+                                0,
+                                1,
+                                value=0.6,
+                                step=0.05,
+                                label="Upscale sharpness",
+                                info="Used only by Fast SDK Upscale.",
+                            )
+
                     run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
                     video_out = gr.Video(label="Result", interactive=False)
                     status = gr.Markdown("**Ready** — upload an image and generate.", elem_classes=["aiwf-status-bar"])
@@ -757,6 +811,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             reactor_restorer_v,
             reactor_restore_visibility_v,
             reactor_codeformer_weight_v,
+            vsr_enabled_v,
+            vsr_scale_v,
+            vsr_mode_v,
+            vsr_effect_v,
+            vsr_strength_v,
             progress=gr.Progress(),
         ):
             if image is None:
@@ -969,6 +1028,27 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     logger.exception("ReActor post-processing failed")
                     status_parts.append(f"**ReActor failed** -- {exc}")
 
+            if bool(vsr_enabled_v):
+                try:
+                    progress(0.0, desc="Unloading VRAM before NVIDIA RTX VSR")
+                    _release_memory_before_postprocess("NVIDIA RTX VSR")
+                    vsr_options = VsrOptions(
+                        effect=str(vsr_effect_v or "SuperRes"),
+                        scale=float(vsr_scale_v or 2.0),
+                        mode=int(vsr_mode_v if vsr_mode_v is not None else 1),
+                        strength=float(vsr_strength_v or 0.6),
+                    )
+                    progress(0.0, desc="Running NVIDIA RTX VSR upscale")
+                    vsr_result = vsr_service.upscale(final_video_path, vsr_options)
+                    final_video_path = vsr_result.output_path
+                    status_parts.append(f"**NVIDIA RTX VSR** -- {vsr_result.message}")
+                except VsrUnavailable as exc:
+                    logger.warning("NVIDIA RTX VSR post-processing unavailable: %s", exc)
+                    status_parts.append(f"**NVIDIA RTX VSR skipped** -- {exc}")
+                except Exception as exc:
+                    logger.exception("NVIDIA RTX VSR post-processing failed")
+                    status_parts.append(f"**NVIDIA RTX VSR failed** -- {exc}")
+
             return final_video_path, "\n\n".join(status_parts)
 
         run.click(
@@ -1023,6 +1103,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 reactor_restorer,
                 reactor_restore_visibility,
                 reactor_codeformer_weight,
+                vsr_enabled,
+                vsr_scale,
+                vsr_mode,
+                vsr_effect,
+                vsr_strength,
             ],
             outputs=[video_out, status],
             show_progress="minimal",

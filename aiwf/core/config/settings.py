@@ -82,6 +82,7 @@ class UserSettings(BaseSettings):
     inpaint_output_subdir: str = "inpaint-images"
     enhance_output_subdir: str = "enhanced-images"
     rife_output_subdir: str = "rife-videos"
+    vsr_output_subdir: str = "vsr-videos"
     workflow_output_subdir: str = "workflow-images"
     workflows_dir: str = "workflows"
     upscale_tile_size: int = Field(default=256, ge=0, le=2048)
