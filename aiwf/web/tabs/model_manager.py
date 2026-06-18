@@ -133,7 +133,6 @@ def register_model_manager(registry: WebRegistry) -> None:
                             qs_rife_btn   = gr.Button(
                                 "Frame interpolation",
                                 variant="secondary",
-                                interactive=enable_wip_tabs,
                             )
                             qs_seg_btn    = gr.Button("Segmentation (SAM)",    variant="secondary")
                             qs_fs_btn     = gr.Button(

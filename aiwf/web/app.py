@@ -103,6 +103,9 @@ def register_default_tabs(registry: WebRegistry) -> None:
 
     register_studio(registry)
     register_wan_i2v(registry)
+    from aiwf.web.tabs.rife import register_rife
+
+    register_rife(registry)
     register_model_manager(registry)
     register_enhance(registry)
     register_segment(registry)
@@ -112,14 +115,12 @@ def register_default_tabs(registry: WebRegistry) -> None:
     if enable_wip_tabs:
         from aiwf.web.tabs.chat_workspace import register_chat_workspace
         from aiwf.web.tabs.faceswap import register_faceswap
-        from aiwf.web.tabs.rife import register_rife
         from aiwf.web.tabs.training import register_training
         from aiwf.web.tabs.workflows import register_workflows
 
         register_chat_workspace(registry)
         register_training(registry)
         register_faceswap(registry)
-        register_rife(registry)
         register_workflows(registry)
     register_settings(registry)
 

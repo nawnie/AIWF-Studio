@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import gc
 import logging
+import math
 import os
 
 import gradio as gr
 
+from aiwf.core.domain.rife import RifeOptions
 from aiwf.bootstrap import AppContext
 from aiwf.core.domain.wan import (
     SIGMA_TYPES,
@@ -15,7 +18,9 @@ from aiwf.core.domain.wan import (
     duration_seconds_for_frames,
     frames_for_duration_seconds,
 )
+from aiwf.infrastructure.rife import RifeUnavailable
 from aiwf.infrastructure.wan import WanUnavailable
+from aiwf.services.rife import RifeService
 from aiwf.services.wan import (
     WanService,
     wan_model_quant_family,
@@ -30,6 +35,7 @@ from aiwf.web.studio.resolution import (
 )
 
 _SERVICES: dict[int, WanService] = {}
+_RIFE_SERVICES: dict[int, RifeService] = {}
 VIDEO_SIZE_PRESETS: tuple[int, ...] = (480, 568, 640, 768, 896, 1024)
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,14 @@ def _service(ctx: AppContext) -> WanService:
             supervisor=ctx.supervisor,
         )
         _SERVICES[id(ctx)] = svc
+    return svc
+
+
+def _rife_service(ctx: AppContext) -> RifeService:
+    svc = _RIFE_SERVICES.get(id(ctx))
+    if svc is None:
+        svc = RifeService(ctx.flags, ctx.settings, ctx.generation.backend.devices, supervisor=ctx.supervisor)
+        _RIFE_SERVICES[id(ctx)] = svc
     return svc
 
 
@@ -66,10 +80,19 @@ def _experimental_wan_formats_enabled() -> bool:
     }
 
 
+def _rife_multiplier_for_target(input_fps: int | float, target_fps: int | float) -> int:
+    safe_input = max(1.0, float(input_fps or 1))
+    safe_target = max(1.0, float(target_fps or safe_input))
+    return max(2, min(8, int(math.ceil(safe_target / safe_input))))
+
+
 def register_wan_i2v(registry: WebRegistry) -> None:
     @registry.tab("Video", order=2)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         service = _service(ctx)
+        rife_service = _rife_service(ctx)
+        rife_ckpts = rife_service.list_checkpoints()
+        default_rife_ckpt = rife_service.default_checkpoint()
 
         # Labeled (display_name, identifier) choices — read from model file headers.
         all_labeled = service.list_local_models_labeled() if hasattr(service, "list_local_models_labeled") else []
@@ -389,6 +412,41 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         info="Raise to reduce drift on longer clips.",
                     )
 
+                    with gr.Accordion("Post-processing", open=False, elem_classes=["aiwf-prompt-tools"]):
+                        rife_enabled = gr.Checkbox(
+                            value=False,
+                            label="Run RIFE after generation",
+                            info="Wan VRAM is unloaded before interpolation starts.",
+                        )
+                        rife_target_fps = gr.Radio(
+                            label="RIFE output FPS",
+                            choices=[("30 FPS", 30), ("60 FPS", 60)],
+                            value=30,
+                            info="AIWF preserves duration and writes the final video at this FPS.",
+                        )
+                        rife_ckpt = gr.Dropdown(
+                            label="RIFE model",
+                            choices=rife_ckpts,
+                            value=default_rife_ckpt if default_rife_ckpt in rife_ckpts else (rife_ckpts[0] if rife_ckpts else None),
+                        )
+                        with gr.Row():
+                            rife_scale_factor = gr.Dropdown(
+                                label="Scale",
+                                choices=[("Full resolution", 1.0), ("Half resolution", 0.5)],
+                                value=1.0,
+                            )
+                            rife_clear_cache = gr.Slider(
+                                1,
+                                100,
+                                value=50,
+                                step=1,
+                                label="Cache clear interval",
+                                info="Higher favors throughput when VRAM is free.",
+                            )
+                        with gr.Row():
+                            rife_fast_mode = gr.Checkbox(label="Fast mode", value=False)
+                            rife_ensemble = gr.Checkbox(label="Ensemble", value=True)
+
                     run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
                     video_out = gr.Video(label="Result", interactive=False)
                     status = gr.Markdown("**Ready** — upload an image and generate.", elem_classes=["aiwf-status-bar"])
@@ -521,6 +579,21 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             show_progress=False,
         )
 
+        def _release_memory_before_rife():
+            try:
+                service.unload_models()
+            except Exception:
+                logger.exception("Failed to unload Wan models before RIFE post-processing.")
+            try:
+                ctx.generation.backend.unload()
+            except Exception:
+                logger.debug("Image backend unload before RIFE failed.", exc_info=True)
+            gc.collect()
+            try:
+                ctx.generation.backend.devices.empty_cache()
+            except Exception:
+                logger.debug("Device cache cleanup before RIFE failed.", exc_info=True)
+
         def _run(
             image,
             prompt_v,
@@ -552,6 +625,13 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_overlap_v,
             temporal_chunks_v,
             image_guidance_scale_v,
+            rife_enabled_v,
+            rife_target_fps_v,
+            rife_ckpt_v,
+            rife_scale_factor_v,
+            rife_clear_cache_v,
+            rife_fast_mode_v,
+            rife_ensemble_v,
             progress=gr.Progress(),
         ):
             if image is None:
@@ -651,7 +731,54 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 except Exception:
                     pass
 
-            return result.output_path, f"**Done** -- {result.message}"
+            status_text = f"**Done** -- {result.message}"
+            if bool(rife_enabled_v):
+                target_fps = int(rife_target_fps_v or 30)
+                input_fps = int(getattr(result, "fps", None) or fps_v or 16)
+                multiplier = _rife_multiplier_for_target(input_fps, target_fps)
+                progress(0.0, desc="Unloading Wan VRAM before RIFE")
+                _release_memory_before_rife()
+                rife_options = RifeOptions(
+                    ckpt_name=str(rife_ckpt_v or rife_service.default_checkpoint()),
+                    multiplier=multiplier,
+                    scale_factor=float(rife_scale_factor_v or 1.0),
+                    fast_mode=bool(rife_fast_mode_v),
+                    ensemble=bool(rife_ensemble_v),
+                    clear_cache_every_n_frames=int(rife_clear_cache_v or 50),
+                    target_fps=float(target_fps),
+                )
+
+                def on_rife_progress(step, total):
+                    progress(
+                        min(1.0, step / max(1, total)),
+                        desc=f"RIFE {target_fps} FPS {step}/{total}",
+                    )
+
+                try:
+                    progress(0.0, desc=f"Running RIFE x{multiplier} -> {target_fps} FPS")
+                    rife_result = rife_service.interpolate(
+                        result.output_path,
+                        rife_options,
+                        on_progress=on_rife_progress,
+                    )
+                    return (
+                        rife_result.output_path,
+                        f"{status_text}\n\n**RIFE** -- {rife_result.message}",
+                    )
+                except RifeUnavailable as exc:
+                    logger.warning("RIFE post-processing unavailable: %s", exc)
+                    return (
+                        result.output_path,
+                        f"{status_text}\n\n**RIFE skipped** -- {exc}",
+                    )
+                except Exception as exc:
+                    logger.exception("RIFE post-processing failed")
+                    return (
+                        result.output_path,
+                        f"{status_text}\n\n**RIFE failed** -- {exc}",
+                    )
+
+            return result.output_path, status_text
 
         run.click(
             _run,
@@ -686,6 +813,13 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 chunk_overlap,
                 temporal_chunks,
                 image_guidance_scale,
+                rife_enabled,
+                rife_target_fps,
+                rife_ckpt,
+                rife_scale_factor,
+                rife_clear_cache,
+                rife_fast_mode,
+                rife_ensemble,
             ],
             outputs=[video_out, status],
             show_progress="minimal",

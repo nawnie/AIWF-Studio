@@ -26,6 +26,7 @@ TAB_VISIBILITY_CHOICES = [
     "Models",
     "Enhance",
     "Segment",
+    "RIFE",
     "Library",
     "PNG Info",
     "History",

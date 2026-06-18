@@ -199,6 +199,36 @@ def interpolate_tensor_frames(
     return postprocess_frames(out)
 
 
+def _resample_interpolated_frames(
+    frames,
+    *,
+    input_frame_count: int,
+    input_fps: float,
+    virtual_output_fps: float,
+    target_fps: float | None,
+):
+    if target_fps is None:
+        return frames, virtual_output_fps
+    safe_target = max(1.0, float(target_fps))
+    safe_input_fps = max(1.0, float(input_fps))
+    duration_seconds = max(0.0, (max(2, int(input_frame_count)) - 1) / safe_input_fps)
+    target_count = max(2, int(round(duration_seconds * safe_target)) + 1)
+    source_count = int(frames.shape[0])
+    if source_count <= 1 or target_count == source_count:
+        return frames, safe_target
+
+    import torch
+
+    indices = torch.linspace(
+        0,
+        source_count - 1,
+        steps=target_count,
+        device=frames.device,
+    ).round().to(dtype=torch.long)
+    indices = indices.clamp_(0, source_count - 1)
+    return frames.index_select(0, indices), safe_target
+
+
 def interpolate_video_file(
     input_path: str | Path,
     output_path: str | Path,
@@ -210,6 +240,7 @@ def interpolate_video_file(
     ensemble: bool = True,
     clear_cache_every_n_frames: int = 10,
     max_input_frames: int | None = None,
+    target_fps: float | None = None,
     device=None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[Path, int, int, float, float, int, int]:
@@ -249,9 +280,17 @@ def interpolate_video_file(
         clear_cache_every_n_frames=clear_cache_every_n_frames,
         device=device,
         vfi_root=vfi_root,
+        on_synth_progress=on_progress,
+    )
+    virtual_out_fps = in_fps * float(multiplier)
+    out_tensor, out_fps = _resample_interpolated_frames(
+        out_tensor,
+        input_frame_count=in_count,
+        input_fps=in_fps,
+        virtual_output_fps=virtual_out_fps,
+        target_fps=target_fps,
     )
     out_count = int(out_tensor.shape[0])
-    out_fps = in_fps * float(multiplier)
 
     dest = Path(output_path)
     dest.parent.mkdir(parents=True, exist_ok=True)

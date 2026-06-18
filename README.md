@@ -53,6 +53,8 @@ This `main` branch is the stable sharing branch. It only advertises features tha
 ### Video
 
 - Wan image-to-video through matched **GGUF High Noise + Low Noise** transformer pairs
+- optional RIFE post-processing to write 30 FPS or 60 FPS output after generation
+- standalone RIFE frame interpolation tab for existing videos
 - local Wan component folder support for tokenizer, text encoder, scheduler, and VAE
 - conservative default UI: GGUF only on `main`
 
@@ -144,7 +146,6 @@ These areas exist as work-in-progress or need more hardware coverage before they
 - training engines
 - Ollama or llama.cpp chat workspace
 - Face Swap tab
-- RIFE interpolation
 - workflow authoring
 - model conversion and quantization tools
 - plugin ecosystem

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import re
@@ -307,6 +308,23 @@ class WanService:
             self._backend.unload()
         except Exception:
             logger.debug("Wan backend cleanup after failed generation failed.", exc_info=True)
+
+    def unload_models(self) -> None:
+        """Release cached Wan models before another GPU video stage starts."""
+        _video_status("Unloading Wan video pipeline and clearing VRAM.")
+        try:
+            self._backend.unload()
+        finally:
+            gc.collect()
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    if hasattr(torch.cuda, "ipc_collect"):
+                        torch.cuda.ipc_collect()
+            except Exception:
+                logger.debug("Wan CUDA cache cleanup failed.", exc_info=True)
 
     def acceleration_capabilities(self) -> dict[str, dict[str, object]]:
         from aiwf.infrastructure.torch.wan_perf import describe_wan_acceleration_capabilities

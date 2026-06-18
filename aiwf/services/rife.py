@@ -89,6 +89,7 @@ class RifeService:
                     ensemble=options.ensemble,
                     clear_cache_every_n_frames=options.clear_cache_every_n_frames,
                     max_input_frames=options.max_input_frames,
+                    target_fps=options.target_fps,
                     device=self.devices.device(),
                     on_progress=on_progress,
                 )
