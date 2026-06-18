@@ -39,8 +39,13 @@ def _env_int(name: str, default: int) -> int:
 
 
 def temporal_chunks_enabled() -> bool:
-    """Default on — set AIWF_WAN_TEMPORAL_CHUNKS=0 to disable."""
-    return _env_flag("AIWF_WAN_TEMPORAL_CHUNKS", default=True)
+    """Return the environment default for temporal chunking.
+
+    Chunking is opt-in because each chunk reruns the full transformer forward.
+    Under sequential offload that means repeatedly streaming the same Wan stage
+    across PCIe inside every denoise step.
+    """
+    return _env_flag("AIWF_WAN_TEMPORAL_CHUNKS", default=False)
 
 
 def default_chunk_size() -> int:
@@ -50,6 +55,35 @@ def default_chunk_size() -> int:
 def default_chunk_overlap() -> int:
     # Increased from 4 → 8: wider blend zone reduces visible seam area.
     return _env_int("AIWF_WAN_CHUNK_OVERLAP", 8)
+
+
+def latent_frame_count_for_output_frames(num_frames: int, *, temporal_scale: int = 4) -> int:
+    return ((max(1, int(num_frames)) - 1) // max(1, int(temporal_scale))) + 1
+
+
+def estimate_temporal_chunk_count(
+    latent_frames: int,
+    *,
+    chunk_size: int,
+    overlap: int,
+    enabled: bool,
+) -> int:
+    latent_frames = max(1, int(latent_frames))
+    if not enabled:
+        return 1
+    chunk_size = max(1, int(chunk_size))
+    overlap = max(0, min(int(overlap), chunk_size - 1))
+    if latent_frames <= chunk_size:
+        return 1
+    count = 0
+    start = 0
+    while start < latent_frames:
+        count += 1
+        end = min(start + chunk_size, latent_frames)
+        if end >= latent_frames:
+            break
+        start += chunk_size - overlap
+    return max(1, count)
 
 
 def _tokens_per_frame(hidden_states, patch_size: tuple[int, int, int]) -> int:
@@ -241,11 +275,12 @@ def install_temporal_chunk_forward(
     name: str = "transformer",
     chunk_size: int | None = None,
     overlap: int | None = None,
+    enabled: bool | None = None,
 ) -> bool:
     """Wrap ``WanTransformer3DModel.forward`` with temporal chunk blending."""
     if transformer is None or getattr(transformer, "_aiwf_temporal_chunks", False):
         return False
-    if not temporal_chunks_enabled():
+    if not (temporal_chunks_enabled() if enabled is None else bool(enabled)):
         return False
 
     chunk_size = chunk_size if chunk_size is not None else default_chunk_size()

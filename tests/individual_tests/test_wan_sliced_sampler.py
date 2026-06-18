@@ -3,8 +3,18 @@ from __future__ import annotations
 import pytest
 
 
-def test_temporal_chunks_enabled_by_default():
+def test_temporal_chunks_disabled_by_default(monkeypatch):
     from aiwf.infrastructure.wan.sliced_sampler import temporal_chunks_enabled
+
+    monkeypatch.delenv("AIWF_WAN_TEMPORAL_CHUNKS", raising=False)
+
+    assert temporal_chunks_enabled() is False
+
+
+def test_temporal_chunks_can_be_enabled_by_env(monkeypatch):
+    from aiwf.infrastructure.wan.sliced_sampler import temporal_chunks_enabled
+
+    monkeypatch.setenv("AIWF_WAN_TEMPORAL_CHUNKS", "1")
 
     assert temporal_chunks_enabled() is True
 
@@ -53,7 +63,7 @@ def test_install_temporal_chunk_forward_wraps_module():
     from aiwf.infrastructure.wan.sliced_sampler import install_temporal_chunk_forward
 
     model = DummyTransformer()
-    assert install_temporal_chunk_forward(model, name="test")
+    assert install_temporal_chunk_forward(model, name="test", enabled=True)
     assert getattr(model, "_aiwf_temporal_chunks", False)
     x = torch.zeros(1, 2, 20, 4, 4)
     y = model.forward(
@@ -63,3 +73,15 @@ def test_install_temporal_chunk_forward_wraps_module():
         return_dict=False,
     )[0]
     assert y.shape == x.shape
+
+
+def test_temporal_chunk_count_estimates_latent_splits():
+    from aiwf.infrastructure.wan.sliced_sampler import (
+        estimate_temporal_chunk_count,
+        latent_frame_count_for_output_frames,
+    )
+
+    assert latent_frame_count_for_output_frames(81) == 21
+    assert estimate_temporal_chunk_count(21, chunk_size=16, overlap=8, enabled=True) == 2
+    assert estimate_temporal_chunk_count(21, chunk_size=24, overlap=0, enabled=True) == 1
+    assert estimate_temporal_chunk_count(21, chunk_size=16, overlap=8, enabled=False) == 1

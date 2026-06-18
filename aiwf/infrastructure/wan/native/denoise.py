@@ -248,7 +248,7 @@ def _run_native_wan_denoise_impl(
     if transformer is None and transformer_2 is None:
         raise RuntimeError("Wan pipeline has neither transformer nor transformer_2 loaded.")
 
-    device = pipe._execution_device
+    device = getattr(pipe, "_aiwf_execution_device", None) or pipe._execution_device
 
     # --- frame-count / spatial alignment (mirrors diffusers __call__) ---
     vae_scale_factor_temporal = getattr(pipe, "vae_scale_factor_temporal", 4)

@@ -6,9 +6,9 @@ from pydantic import BaseModel, Field, field_validator
 # and does image->video through WanImageToVideoPipeline.
 WAN_TI2V_5B = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 
-# Offload strategies (low VRAM -> high VRAM): "sequential" (8 GB, slowest),
-# "model" (12-16 GB), "none" (keep on GPU, fastest, needs the most VRAM).
-OFFLOAD_MODES = ("sequential", "model", "none")
+# Offload strategies: "sequential" (lowest VRAM, slowest), "group" (block-level
+# middle ground), "model" (fast quantized active-stage swap), "none" (fastest).
+OFFLOAD_MODES = ("sequential", "group", "model", "none")
 
 # Sigma (noise schedule) types for FlowMatchEulerDiscreteScheduler.
 # Controls how denoising steps are spaced across the noise level range.
@@ -71,10 +71,11 @@ class WanI2VRequest(BaseModel):
     flow_shift: float = Field(default=5.0, ge=0.5, le=25.0)
     sigma_type: str = Field(default="beta")  # simple | beta | exponential | karras
     sampler: str = Field(default="euler")  # euler | heun
-    # Temporal chunk denoise settings (only active when num_frames > chunk_size).
-    # Larger overlap = smoother seams, slightly more VRAM per step.
-    chunk_size: int = Field(default=16, ge=4, le=64)
-    chunk_overlap: int = Field(default=8, ge=0, le=32)
+    # Temporal chunk denoise settings. This slices latent frames, not output
+    # frames. It is opt-in because every chunk reruns the full transformer.
+    temporal_chunks: bool = False
+    chunk_size: int = Field(default=24, ge=4, le=64)
+    chunk_overlap: int = Field(default=0, ge=0, le=32)
     # Image guidance scale: boosts reference image conditioning relative to text.
     # 1.0 = standard Wan behavior. Increase (1.5-3.0) to reduce drift at long frame counts.
     image_guidance_scale: float = Field(default=1.0, ge=1.0, le=10.0)
@@ -115,6 +116,13 @@ class WanI2VRequest(BaseModel):
     def _validate_sampler(cls, v: str) -> str:
         if v not in SAMPLER_TYPES:
             raise ValueError(f"sampler must be one of {SAMPLER_TYPES}, got {v!r}")
+        return v
+
+    @field_validator("offload")
+    @classmethod
+    def _validate_offload(cls, v: str) -> str:
+        if v not in OFFLOAD_MODES:
+            raise ValueError(f"offload must be one of {OFFLOAD_MODES}, got {v!r}")
         return v
 
     @field_validator("runtime_mode")
@@ -185,6 +193,12 @@ class WanI2VResult(BaseModel):
     vae_decode_seconds: float = Field(default=0.0, ge=0.0)
     manual_vae_decode: bool = False
     vae_decode_chunk_frames: int = Field(default=0, ge=0)
+    latent_frame_count: int = Field(default=0, ge=0)
+    temporal_chunks: bool = False
+    temporal_chunk_size: int = Field(default=0, ge=0)
+    temporal_chunk_overlap: int = Field(default=0, ge=0)
+    transformer_chunks_per_forward: int = Field(default=1, ge=1)
+    transformer_forwards_per_step: int = Field(default=1, ge=1)
     video_postprocess_seconds: float = Field(default=0.0, ge=0.0)
     offload_cleanup_seconds: float = Field(default=0.0, ge=0.0)
     postprocess_seconds: float = Field(default=0.0, ge=0.0)

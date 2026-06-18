@@ -422,9 +422,51 @@ def _module_has_accelerate_hook(module: Any) -> bool:
         return False
     if getattr(module, "_hf_hook", None) is not None:
         return True
+    if getattr(module, "_diffusers_hook", None) is not None:
+        return True
+    if getattr(module, "_aiwf_group_offload", False):
+        return True
     try:
-        return any(getattr(child, "_hf_hook", None) is not None for child in module.modules())
+        return any(
+            getattr(child, "_hf_hook", None) is not None
+            or getattr(child, "_diffusers_hook", None) is not None
+            or getattr(child, "_aiwf_group_offload", False)
+            for child in module.modules()
+        )
     except Exception:
+        return False
+
+
+def _wan_group_offload_blocks() -> int:
+    return _env_int("AIWF_WAN_GROUP_OFFLOAD_BLOCKS", 4)
+
+
+def _install_group_offload_for_stage(model: Any, device: Any, *, blocks: int | None = None) -> bool:
+    """Install Diffusers block-level group offload on a Wan transformer stage."""
+    if model is None:
+        return False
+    if getattr(model, "_aiwf_group_offload", False):
+        return True
+    enable = getattr(model, "enable_group_offload", None)
+    if not callable(enable):
+        return False
+    try:
+        import torch
+
+        block_count = max(1, int(blocks or _wan_group_offload_blocks()))
+        enable(
+            onload_device=torch.device(device),
+            offload_device=torch.device("cpu"),
+            offload_type="block_level",
+            num_blocks_per_group=block_count,
+            use_stream=_env_flag("AIWF_WAN_GROUP_OFFLOAD_STREAM", default=False),
+            non_blocking=False,
+        )
+        model._aiwf_group_offload = True
+        model._aiwf_group_offload_blocks = block_count
+        return True
+    except Exception as exc:
+        logger.warning("Could not install Wan group offload: %s", exc)
         return False
 
 
@@ -1513,6 +1555,7 @@ def _apply_wan_attention_optimizations(
     *,
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
+    temporal_chunks: bool | None = None,
 ) -> None:
     """Apply Wan-specific attention/conv optimizations (SDP flash, sageattention, channels_last)."""
     from aiwf.infrastructure.torch.wan_perf import apply_wan_transformer_optimizations
@@ -1521,7 +1564,13 @@ def _apply_wan_attention_optimizations(
     active = apply_wan_transformer_optimizations(transformer, name=name)
     if active:
         _video_status(f"{name} optimizations: {', '.join(active)}")
-    if install_temporal_chunk_forward(transformer, name=name, chunk_size=chunk_size, overlap=chunk_overlap):
+    if install_temporal_chunk_forward(
+        transformer,
+        name=name,
+        chunk_size=chunk_size,
+        overlap=chunk_overlap,
+        enabled=temporal_chunks,
+    ):
         _video_status(
             f"{name}: temporal chunk denoise active "
             f"(chunk={getattr(transformer, '_aiwf_chunk_size', '?')}, "
@@ -1818,6 +1867,7 @@ class WanI2VBackend:
         lora_adapter: str,
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
+        temporal_chunks: bool | None = None,
     ) -> tuple[list[str], list[str]]:
         import torch
 
@@ -1837,7 +1887,13 @@ class WanI2VBackend:
             _video_status(f"Applying {label} LoRA: {Path(lora_path).name}")
         _apply_transformer_lora(target, lora_path, adapter_name=lora_adapter, weight=lora_scale)
         _ensure_wan_attention_processors(target, label)
-        _apply_wan_attention_optimizations(target, label, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        _apply_wan_attention_optimizations(
+            target,
+            label,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            temporal_chunks=temporal_chunks,
+        )
         return list(miss), list(unex)
 
     def _run_low_preload_worker(self) -> None:
@@ -1856,6 +1912,7 @@ class WanI2VBackend:
                 lora_adapter="wan_low_lora",
                 chunk_size=spec.get("chunk_size"),
                 chunk_overlap=spec.get("chunk_overlap"),
+                temporal_chunks=spec.get("temporal_chunks"),
             )
             if miss or unex:
                 logger.warning(
@@ -1927,6 +1984,7 @@ class WanI2VBackend:
         *,
         chunk_size: int,
         chunk_overlap: int,
+        temporal_chunks: bool,
     ) -> None:
         """Start low-stage preload only when the pipeline did not already do it."""
         if self._preloaded_low is not None:
@@ -1942,6 +2000,7 @@ class WanI2VBackend:
                 "disk_sequential": _stage_cache_is_disk_sequential(self._cache_mode),
                 "chunk_size": chunk_size,
                 "chunk_overlap": chunk_overlap,
+                "temporal_chunks": temporal_chunks,
             }
         self._maybe_start_background_low_preload()
 
@@ -1994,6 +2053,7 @@ class WanI2VBackend:
         text_encoder_path: str = "",
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
+        temporal_chunks: bool | None = None,
     ):
         # Dual high/low is the only supported layout for Wan 2.2 I2V.
         if not (high_noise_model_id and low_noise_model_id):
@@ -2005,8 +2065,9 @@ class WanI2VBackend:
         # NOTE: flow_shift, sigma_type, and sampler are NOT part of the cache key.
         # They affect only the scheduler (a cheap Python object rebuilt each run).
         # text_encoder_path IS in the cache key — a different encoder requires a reload.
-        _cache_chunk_size = int(chunk_size or 16)
-        _cache_chunk_overlap = int(chunk_overlap or 8)
+        _cache_chunk_size = int(chunk_size or 24)
+        _cache_chunk_overlap = int(chunk_overlap or 0)
+        _cache_temporal_chunks = bool(temporal_chunks)
         key = (
             "dual",
             high_noise_model_id,
@@ -2020,6 +2081,7 @@ class WanI2VBackend:
             components_base or "auto",
             offload,
             text_encoder_path or "",
+            _cache_temporal_chunks,
             _cache_chunk_size,
             _cache_chunk_overlap,
         )
@@ -2077,6 +2139,7 @@ class WanI2VBackend:
             text_encoder_path=text_encoder_path or "",
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            temporal_chunks=_cache_temporal_chunks,
         )
 
         _sampler = str(sampler or "euler")
@@ -2103,6 +2166,21 @@ class WanI2VBackend:
 
         if offload == "sequential":
             pipe.enable_sequential_cpu_offload()
+        elif offload == "group":
+            if not _install_group_offload_for_stage(
+                pipe.transformer,
+                "cuda:0",
+                blocks=_wan_group_offload_blocks(),
+            ):
+                raise WanUnavailable(
+                    "Diffusers group offload could not be installed for the high-noise Wan transformer. "
+                    "Use model or sequential offload for this run."
+                )
+            _video_status(
+                "Using block-level group offload for the high-noise transformer "
+                f"({_wan_group_offload_blocks()} blocks/group, stream=off)."
+            )
+            pipe._aiwf_execution_device = torch.device("cuda")
         elif offload == "model":
             if fast_fp8_pair:
                 _video_status(
@@ -2132,7 +2210,13 @@ class WanI2VBackend:
         _ensure_wan_attention_processors(pipe.transformer, "high-noise transformer")
         # Apply SageAttention / flash SDPA / channels_last to the FP8 transformer.
         # This was previously only done on the GGUF path — FP8 was silently missing it.
-        _apply_wan_attention_optimizations(pipe.transformer, "high-noise transformer", chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        _apply_wan_attention_optimizations(
+            pipe.transformer,
+            "high-noise transformer",
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            temporal_chunks=_cache_temporal_chunks,
+        )
         if _stage_cache_is_gpu_active_cpu_standby(cache_mode):
             _free_cuda_memory()
             if _stage_cache_is_disk_sequential(cache_mode):
@@ -2240,6 +2324,21 @@ class WanI2VBackend:
 
         if offload == "sequential":
             pipe.enable_sequential_cpu_offload()
+        elif offload == "group":
+            if not _install_group_offload_for_stage(
+                getattr(pipe, "transformer", None),
+                "cuda:0",
+                blocks=_wan_group_offload_blocks(),
+            ):
+                raise WanUnavailable(
+                    "Diffusers group offload could not be installed for the Wan 5B transformer. "
+                    "Use model or sequential offload for this run."
+                )
+            _video_status(
+                "Using block-level group offload for Wan 5B "
+                f"({_wan_group_offload_blocks()} blocks/group, stream=off)."
+            )
+            pipe._aiwf_execution_device = torch.device("cuda")
         elif offload == "model":
             pipe.enable_model_cpu_offload()
         else:
@@ -2279,6 +2378,7 @@ class WanI2VBackend:
         text_encoder_path: str = "",
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
+        temporal_chunks: bool | None = None,
     ):
         """Load a WanImageToVideoPipeline configured with transformer (high-noise) + transformer_2 (low-noise)."""
         import torch
@@ -2360,7 +2460,13 @@ class WanI2VBackend:
         _ensure_wan_attention_processors(pipe.transformer, "high-noise transformer")
 
         # Apply memory-efficient attention (SDP + channels_last) to the loaded high stage.
-        _apply_wan_attention_optimizations(pipe.transformer, "high-noise transformer", chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        _apply_wan_attention_optimizations(
+            pipe.transformer,
+            "high-noise transformer",
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            temporal_chunks=temporal_chunks,
+        )
 
         if use_cache:
             self.cache.register_model("wan_high", pipe.transformer, pin=pin_tensors)
@@ -2428,6 +2534,7 @@ class WanI2VBackend:
                 "disk_sequential": disk_sequential,
                 "chunk_size": chunk_size,
                 "chunk_overlap": chunk_overlap,
+                "temporal_chunks": temporal_chunks,
             }
             _video_status(
                 "Deferring low-noise load: will preload to CPU in background during high-stage denoising."
@@ -2446,6 +2553,7 @@ class WanI2VBackend:
                 lora_adapter="wan_low_lora",
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                temporal_chunks=temporal_chunks,
             )
             if miss_l_pre or unex_l_pre:
                 logger.warning(
@@ -2513,6 +2621,21 @@ class WanI2VBackend:
                         "Refusing to load the full FP8 low stage into VRAM because that can exhaust a 16 GB GPU. "
                         "Try model offload/cache mode, or fix the Accelerate CPU offload install before retrying."
                     )
+            elif offload == "group":
+                if _install_group_offload_for_stage(
+                    low_trans,
+                    "cuda:0",
+                    blocks=_wan_group_offload_blocks(),
+                ):
+                    _video_status(
+                        "Group offload: lazy low-noise transformer will stream block groups to VRAM "
+                        f"({_wan_group_offload_blocks()} blocks/group)."
+                    )
+                else:
+                    raise WanUnavailable(
+                        "Diffusers group offload could not be installed for the lazy low-noise transformer. "
+                        "Use model or sequential offload for this run."
+                    )
             elif offload != "sequential":
                 try:
                     low_trans.to("cuda")
@@ -2564,8 +2687,11 @@ class WanI2VBackend:
         _flow_shift = float(getattr(request, "flow_shift", 5.0) or 5.0)
         _te_path = str(getattr(request, "text_encoder_path", "") or "")
 
-        _chunk_size = int(getattr(request, "chunk_size", 16) or 16)
-        _chunk_overlap = int(getattr(request, "chunk_overlap", 8) or 8)
+        _chunk_size = int(getattr(request, "chunk_size", 24) or 24)
+        _chunk_overlap = int(getattr(request, "chunk_overlap", 0) or 0)
+        _temporal_chunks = bool(getattr(request, "temporal_chunks", False))
+        if os.environ.get("AIWF_WAN_TEMPORAL_CHUNKS", "").strip():
+            _temporal_chunks = _env_flag("AIWF_WAN_TEMPORAL_CHUNKS", default=_temporal_chunks)
         _image_guidance_scale = float(getattr(request, "image_guidance_scale", 1.0) or 1.0)
         _manual_vae_decode = _env_flag("AIWF_WAN_MANUAL_VAE_DECODE", default=False)
         _vae_decode_chunk_frames = _env_int("AIWF_WAN_VAE_CHUNK_FRAMES", 4)
@@ -2593,6 +2719,7 @@ class WanI2VBackend:
                 text_encoder_path=_te_path,
                 chunk_size=_chunk_size,
                 chunk_overlap=_chunk_overlap,
+                temporal_chunks=_temporal_chunks,
             )
         else:
             if _te_path:
@@ -2651,6 +2778,7 @@ class WanI2VBackend:
                 request,
                 chunk_size=_chunk_size,
                 chunk_overlap=_chunk_overlap,
+                temporal_chunks=_temporal_chunks,
             )
 
         num_frames = int(getattr(request, "num_frames", 49))
@@ -2659,6 +2787,20 @@ class WanI2VBackend:
         _prompt = str(getattr(request, "prompt", "") or "")
         _negative_prompt = str(getattr(request, "negative_prompt", "") or "")
         _guidance_scale = float(getattr(request, "guidance_scale", 1.0) or 1.0)
+        from aiwf.infrastructure.wan.sliced_sampler import (
+            estimate_temporal_chunk_count,
+            latent_frame_count_for_output_frames,
+        )
+
+        latent_frame_count = latent_frame_count_for_output_frames(num_frames)
+        transformer_chunks_per_forward = estimate_temporal_chunk_count(
+            latent_frame_count,
+            chunk_size=_chunk_size,
+            overlap=_chunk_overlap,
+            enabled=_temporal_chunks,
+        )
+        cfg_passes_per_step = 2 if _guidance_scale > 1.0 else 1
+        transformer_forwards_per_step = transformer_chunks_per_forward * cfg_passes_per_step
         step_summary = (
             f"{total_steps} steps (high={high_steps}/low={low_steps})"
             if requires_dual
@@ -2670,6 +2812,22 @@ class WanI2VBackend:
             f"{step_summary}, "
             f"guidance={_guidance_scale:g}, shift={_flow_shift:g}, seed={seed}."
         )
+        _video_status(
+            "Wan temporal plan: "
+            f"{num_frames} output frames -> {latent_frame_count} latent frames; "
+            f"temporal chunks={'on' if _temporal_chunks else 'off'} "
+            f"(chunk={_chunk_size}, overlap={_chunk_overlap}); "
+            f"~{transformer_forwards_per_step} transformer forward stream(s)/step."
+        )
+        if (
+            str(getattr(request, "offload", "") or "").lower() == "sequential"
+            and transformer_chunks_per_forward > 1
+        ):
+            _video_status(
+                "Performance warning: sequential offload plus temporal chunks streams "
+                f"the transformer {transformer_chunks_per_forward} times per conditional pass. "
+                "Disable chunks or raise latent chunk size above the latent frame count for speed."
+            )
         preprocess_seconds = max(0.0, time.perf_counter() - preprocess_started)
 
         cancelled = [False]
@@ -2885,6 +3043,12 @@ class WanI2VBackend:
             "vae_decode_seconds": round(float(hook_timings.get("vae_decode_seconds", 0.0)), 3),
             "manual_vae_decode": bool(_manual_vae_decode),
             "vae_decode_chunk_frames": int(_vae_decode_chunk_frames if _manual_vae_decode else 0),
+            "latent_frame_count": int(latent_frame_count),
+            "temporal_chunks": bool(_temporal_chunks),
+            "temporal_chunk_size": int(_chunk_size if _temporal_chunks else 0),
+            "temporal_chunk_overlap": int(_chunk_overlap if _temporal_chunks else 0),
+            "transformer_chunks_per_forward": int(transformer_chunks_per_forward),
+            "transformer_forwards_per_step": int(transformer_forwards_per_step),
             "video_postprocess_seconds": round(float(hook_timings.get("video_postprocess_seconds", 0.0)), 3),
             "offload_cleanup_seconds": round(float(hook_timings.get("offload_cleanup_seconds", 0.0)), 3),
             "postprocess_seconds": round(float(postprocess_seconds), 3),
@@ -2895,6 +3059,9 @@ class WanI2VBackend:
         return frames, h, w, metrics
 
     def _real_device(self, pipe) -> str:
+        explicit = getattr(pipe, "_aiwf_execution_device", None)
+        if explicit is not None:
+            return str(explicit)
         try:
             import torch
             dev = next(pipe.transformer.parameters()).device

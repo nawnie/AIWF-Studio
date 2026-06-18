@@ -19,6 +19,18 @@ def _env_flag(name: str, *, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def fp8_strict_mode_enabled() -> bool:
+    """Return whether FP8 layers should refuse slow bf16 fallback.
+
+    Strict mode is the runtime default. The fallback path exists for diagnostics
+    and CPU tests, but in a real Wan render it reconstructs full-precision
+    weights inside the forward call and can quietly destroy performance.
+    """
+    if _env_flag("AIWF_WAN_ALLOW_FP8_FALLBACK", default=False):
+        return False
+    return _env_flag("AIWF_WAN_STRICT_FP8", default=True)
+
+
 def cuda_supports_tensorcore_fp8(torch_module: Any) -> bool:
     """Return whether the active CUDA device has native FP8 tensor-core support."""
     try:
@@ -217,7 +229,7 @@ class AIWFFP8Linear:
             logger.warning("%s fallback: %s", self.__class__.__name__, reason)
             self._fallback_tracer(payload)
             self._scaled_mm_warned = True
-        if _env_flag("AIWF_WAN_STRICT_FP8", default=False):
+        if fp8_strict_mode_enabled():
             raise self._strict_exception_cls(
                 "Wan strict FP8 mode refused slow bf16 fallback. "
                 f"Reason: {reason}"
@@ -351,6 +363,6 @@ def collect_fp8_linear_metrics(*roots: Any) -> dict[str, Any]:
         "fp8_fallback_calls": fallback_calls,
         "fp8_fallback_layers": fallback_layers,
         "fp8_fallback_reasons": fallback_reasons[:10],
-        "fp8_strict_mode": _env_flag("AIWF_WAN_STRICT_FP8", default=False),
+        "fp8_strict_mode": fp8_strict_mode_enabled(),
         "fp8_native_available": torch_native_fp8_available(),
     }

@@ -98,11 +98,12 @@ def test_pass5_high_low_modes_still_require_both_transformers(tmp_path: Path):
         assert any("Select a Low noise transformer" in error for error in result.errors)
 
 
-def test_pass5_fp8_metric_aggregation_deduplicates_shared_modules():
+def test_pass5_fp8_metric_aggregation_deduplicates_shared_modules(monkeypatch):
     torch = pytest.importorskip("torch")
     if not hasattr(torch, "float8_e4m3fn"):
         pytest.skip("torch float8 unavailable")
 
+    monkeypatch.setenv("AIWF_WAN_ALLOW_FP8_FALLBACK", "1")
     from aiwf.infrastructure.quant.fp8_linear import AIWFFP8Linear
 
     layer = AIWFFP8Linear(16, 32)

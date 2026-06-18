@@ -91,6 +91,9 @@ def test_request_defaults_and_helpers():
     assert r.model_id == WAN_TI2V_5B
     assert r.runtime_mode == WAN_RUNTIME_FAST_5B
     assert r.fps == 16 and r.offload == "model"
+    assert r.temporal_chunks is False
+    assert r.chunk_size == 24
+    assert r.chunk_overlap == 0
     assert r.guidance_scale == 1.0
     assert r.normalized_frames() == 49
     assert r.effective_steps() == 8
@@ -176,6 +179,7 @@ def test_wan_cache_mode_prefers_gpu_swap_for_model_offload_fp8():
     from aiwf.infrastructure.wan.native.memory import WanStageCacheMode
 
     assert _wan_cache_mode("sequential", fast_fp8_pair=True) == "none"
+    assert _wan_cache_mode("group", fast_fp8_pair=True) == "none"
     assert (
         _wan_cache_mode("model", fast_fp8_pair=True)
         == WanStageCacheMode.GPU_ACTIVE_CPU_PINNED_STANDBY.value
@@ -502,6 +506,12 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
             "vae_decode_seconds": 0.7,
             "manual_vae_decode": True,
             "vae_decode_chunk_frames": 4,
+            "latent_frame_count": 13,
+            "temporal_chunks": False,
+            "temporal_chunk_size": 0,
+            "temporal_chunk_overlap": 0,
+            "transformer_chunks_per_forward": 1,
+            "transformer_forwards_per_step": 1,
             "video_postprocess_seconds": 0.1,
             "offload_cleanup_seconds": 0.2,
             "postprocess_seconds": 0.2,
@@ -544,6 +554,12 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     assert captured["vae_decode_seconds"] == 0.7
     assert captured["manual_vae_decode"] is True
     assert captured["vae_decode_chunk_frames"] == 4
+    assert captured["latent_frame_count"] == 13
+    assert captured["temporal_chunks"] is False
+    assert captured["temporal_chunk_size"] == 0
+    assert captured["temporal_chunk_overlap"] == 0
+    assert captured["transformer_chunks_per_forward"] == 1
+    assert captured["transformer_forwards_per_step"] == 1
     assert captured["video_postprocess_seconds"] == 0.1
     assert captured["offload_cleanup_seconds"] == 0.2
     assert captured["postprocess_seconds"] == 0.2
@@ -574,6 +590,12 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     assert result.vae_decode_seconds == 0.7
     assert result.manual_vae_decode is True
     assert result.vae_decode_chunk_frames == 4
+    assert result.latent_frame_count == 13
+    assert result.temporal_chunks is False
+    assert result.temporal_chunk_size == 0
+    assert result.temporal_chunk_overlap == 0
+    assert result.transformer_chunks_per_forward == 1
+    assert result.transformer_forwards_per_step == 1
     assert result.video_postprocess_seconds == 0.1
     assert result.offload_cleanup_seconds == 0.2
     assert result.postprocess_seconds == 0.2
@@ -590,6 +612,7 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     assert result.cache_mode == "gpu_active_cpu_pinned_standby"
     assert "4.000 it/s" in result.message
     assert "FP8 fast path clean" in result.message
+    assert "latent=13f" in result.message
     assert "cache=gpu_active_cpu_pinned_standby" in result.message
 
 
@@ -748,15 +771,15 @@ def test_orient_umt5_gguf_tensor_transposes_swapped_embedding_shape():
 def test_materialize_wan_transformer_passes_temporal_chunk_settings(tmp_path: Path):
     torch = pytest.importorskip("torch")
     target = torch.nn.Module()
-    seen: list[tuple[int | None, int | None]] = []
+    seen: list[tuple[int | None, int | None, bool | None]] = []
 
     def load_state_dict(_state_dict, *, strict=False, assign=False):
         return [], []
 
     target.load_state_dict = load_state_dict
 
-    def capture_optimizations(_target, _label, *, chunk_size=None, chunk_overlap=None):
-        seen.append((chunk_size, chunk_overlap))
+    def capture_optimizations(_target, _label, *, chunk_size=None, chunk_overlap=None, temporal_chunks=None):
+        seen.append((chunk_size, chunk_overlap, temporal_chunks))
 
     backend = WanI2VBackend()
     with patch("aiwf.infrastructure.wan.pipeline._safetensors_uses_comfy_fp8_quant", return_value=False), patch(
@@ -777,11 +800,12 @@ def test_materialize_wan_transformer_passes_temporal_chunk_settings(tmp_path: Pa
             lora_adapter="wan_low_lora",
             chunk_size=12,
             chunk_overlap=3,
+            temporal_chunks=True,
         )
 
     assert missing == []
     assert unexpected == []
-    assert seen == [(12, 3)]
+    assert seen == [(12, 3, True)]
 
 
 def test_low_preload_worker_passes_temporal_chunk_settings():
@@ -795,11 +819,12 @@ def test_low_preload_worker_passes_temporal_chunk_settings():
         "pin_tensors": False,
         "chunk_size": 20,
         "chunk_overlap": 6,
+        "temporal_chunks": True,
     }
-    seen: list[tuple[int | None, int | None]] = []
+    seen: list[tuple[int | None, int | None, bool | None]] = []
 
     def fake_materialize(_target, _path, **kwargs):
-        seen.append((kwargs.get("chunk_size"), kwargs.get("chunk_overlap")))
+        seen.append((kwargs.get("chunk_size"), kwargs.get("chunk_overlap"), kwargs.get("temporal_chunks")))
         return [], []
 
     with patch("aiwf.infrastructure.wan.pipeline._empty_wan_transformer", return_value=torch.nn.Module()):
@@ -807,7 +832,7 @@ def test_low_preload_worker_passes_temporal_chunk_settings():
             backend._run_low_preload_worker()
 
     assert backend._low_preload_error is None
-    assert seen == [(20, 6)]
+    assert seen == [(20, 6, True)]
 
 
 def test_prepare_low_preload_skips_duplicate_when_low_is_ready():
@@ -825,6 +850,7 @@ def test_prepare_low_preload_skips_duplicate_when_low_is_ready():
             ),
             chunk_size=16,
             chunk_overlap=8,
+            temporal_chunks=False,
         )
 
     assert started == []
@@ -845,6 +871,7 @@ def test_prepare_low_preload_sets_spec_when_low_is_not_ready():
             ),
             chunk_size=20,
             chunk_overlap=6,
+            temporal_chunks=True,
         )
 
     assert started == [True]
@@ -857,6 +884,7 @@ def test_prepare_low_preload_sets_spec_when_low_is_not_ready():
         "disk_sequential": False,
         "chunk_size": 20,
         "chunk_overlap": 6,
+        "temporal_chunks": True,
     }
 
 
@@ -876,6 +904,7 @@ def test_prepare_low_preload_marks_unpinned_cpu_standby_cache():
             ),
             chunk_size=16,
             chunk_overlap=8,
+            temporal_chunks=False,
         )
 
     assert started == [True]
@@ -897,6 +926,7 @@ def test_disk_sequential_low_preload_does_not_start_background_thread():
         ),
         chunk_size=16,
         chunk_overlap=8,
+        temporal_chunks=False,
     )
 
     assert backend._low_preload_spec["use_cache"] is True
@@ -925,10 +955,10 @@ def test_wan_pipeline_cache_key_includes_temporal_chunk_settings():
             pass
 
     backend = WanI2VBackend()
-    loads: list[tuple[int | None, int | None]] = []
+    loads: list[tuple[int | None, int | None, bool | None]] = []
 
     def fake_load_dual_pipeline(**kwargs):
-        loads.append((kwargs.get("chunk_size"), kwargs.get("chunk_overlap")))
+        loads.append((kwargs.get("chunk_size"), kwargs.get("chunk_overlap"), kwargs.get("temporal_chunks")))
         return DummyPipe()
 
     ensure_kwargs = dict(
@@ -965,15 +995,17 @@ def test_wan_pipeline_cache_key_includes_temporal_chunk_settings():
         "_load_dual_pipeline",
         side_effect=fake_load_dual_pipeline,
     ):
-        first = backend._ensure(**ensure_kwargs, chunk_size=16, chunk_overlap=8)
-        second = backend._ensure(**ensure_kwargs, chunk_size=16, chunk_overlap=8)
-        third = backend._ensure(**ensure_kwargs, chunk_size=20, chunk_overlap=8)
-        fourth = backend._ensure(**ensure_kwargs, chunk_size=20, chunk_overlap=4)
+        first = backend._ensure(**ensure_kwargs, chunk_size=16, chunk_overlap=8, temporal_chunks=False)
+        second = backend._ensure(**ensure_kwargs, chunk_size=16, chunk_overlap=8, temporal_chunks=False)
+        third = backend._ensure(**ensure_kwargs, chunk_size=16, chunk_overlap=8, temporal_chunks=True)
+        fourth = backend._ensure(**ensure_kwargs, chunk_size=20, chunk_overlap=8, temporal_chunks=True)
+        fifth = backend._ensure(**ensure_kwargs, chunk_size=20, chunk_overlap=4, temporal_chunks=True)
 
     assert first is second
     assert third is not first
     assert fourth is not third
-    assert loads == [(16, 8), (20, 8), (20, 4)]
+    assert fifth is not fourth
+    assert loads == [(16, 8, False), (16, 8, True), (20, 8, True), (20, 4, True)]
 
 
 def test_dequantize_comfy_fp8_state_dict_scales_weights():
@@ -1059,11 +1091,12 @@ def test_fp8_scaled_linear_uses_column_major_weight_for_scaled_mm():
     assert layer.fallback_calls == 0
 
 
-def test_fp8_scaled_linear_counts_bf16_fallback_on_cpu():
+def test_fp8_scaled_linear_counts_bf16_fallback_on_cpu(monkeypatch):
     torch = pytest.importorskip("torch")
     if not hasattr(torch, "float8_e4m3fn"):
         pytest.skip("torch float8 unavailable")
 
+    monkeypatch.setenv("AIWF_WAN_ALLOW_FP8_FALLBACK", "1")
     layer = _new_fp8_scaled_linear(16, 32, bias=False)
     weight = torch.randn(32, 16).clamp(-2, 2).to(dtype=torch.float8_e4m3fn)
     layer.weight = torch.nn.Parameter(weight, requires_grad=False)
@@ -1081,11 +1114,12 @@ def test_fp8_scaled_linear_counts_bf16_fallback_on_cpu():
     assert metrics["fp8_fallback_layers"] == 1
 
 
-def test_aiwf_fp8_linear_load_quantized_weight_api():
+def test_aiwf_fp8_linear_load_quantized_weight_api(monkeypatch):
     torch = pytest.importorskip("torch")
     if not hasattr(torch, "float8_e4m3fn"):
         pytest.skip("torch float8 unavailable")
 
+    monkeypatch.setenv("AIWF_WAN_ALLOW_FP8_FALLBACK", "1")
     from aiwf.infrastructure.quant.fp8_linear import AIWFFP8Linear
 
     layer = AIWFFP8Linear(16, 32, bias=False, strict_exception_cls=WanUnavailable)
@@ -1109,7 +1143,8 @@ def test_fp8_scaled_linear_strict_mode_raises_on_fallback(monkeypatch):
     if not hasattr(torch, "float8_e4m3fn"):
         pytest.skip("torch float8 unavailable")
 
-    monkeypatch.setenv("AIWF_WAN_STRICT_FP8", "1")
+    monkeypatch.delenv("AIWF_WAN_ALLOW_FP8_FALLBACK", raising=False)
+    monkeypatch.delenv("AIWF_WAN_STRICT_FP8", raising=False)
     layer = _new_fp8_scaled_linear(16, 32, bias=False)
     weight = torch.randn(32, 16).clamp(-2, 2).to(dtype=torch.float8_e4m3fn)
     layer.weight = torch.nn.Parameter(weight, requires_grad=False)

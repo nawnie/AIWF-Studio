@@ -1064,6 +1064,12 @@ class WanService:
                 vae_decode_chunk_frames = max(0, int(backend_metrics.get("vae_decode_chunk_frames") or 0))
             except (TypeError, ValueError):
                 vae_decode_chunk_frames = 0
+            latent_frame_count = _int_metric(backend_metrics.get("latent_frame_count"))
+            temporal_chunks = bool(backend_metrics.get("temporal_chunks"))
+            temporal_chunk_size = _int_metric(backend_metrics.get("temporal_chunk_size"))
+            temporal_chunk_overlap = _int_metric(backend_metrics.get("temporal_chunk_overlap"))
+            transformer_chunks_per_forward = _int_metric(backend_metrics.get("transformer_chunks_per_forward")) or 1
+            transformer_forwards_per_step = _int_metric(backend_metrics.get("transformer_forwards_per_step")) or 1
             video_postprocess_seconds = _float_metric(backend_metrics.get("video_postprocess_seconds")) or 0.0
             offload_cleanup_seconds = _float_metric(backend_metrics.get("offload_cleanup_seconds")) or 0.0
             postprocess_seconds = _float_metric(backend_metrics.get("postprocess_seconds")) or 0.0
@@ -1127,6 +1133,12 @@ class WanService:
                 vae_decode_seconds=round(vae_decode_seconds, 3),
                 manual_vae_decode=manual_vae_decode,
                 vae_decode_chunk_frames=vae_decode_chunk_frames,
+                latent_frame_count=latent_frame_count,
+                temporal_chunks=temporal_chunks,
+                temporal_chunk_size=temporal_chunk_size,
+                temporal_chunk_overlap=temporal_chunk_overlap,
+                transformer_chunks_per_forward=transformer_chunks_per_forward,
+                transformer_forwards_per_step=transformer_forwards_per_step,
                 video_postprocess_seconds=round(video_postprocess_seconds, 3),
                 offload_cleanup_seconds=round(offload_cleanup_seconds, 3),
                 postprocess_seconds=round(postprocess_seconds, 3),
@@ -1162,6 +1174,12 @@ class WanService:
                 )
             elif fp8_linear_layers:
                 message = f"{message}; FP8 fast path clean ({fp8_linear_layers} layers, 0 fallbacks)"
+            if latent_frame_count:
+                message = (
+                    f"{message}; latent={latent_frame_count}f, "
+                    f"chunks={'on' if temporal_chunks else 'off'}, "
+                    f"xfwd/step~{transformer_forwards_per_step}"
+                )
             if cache_mode:
                 message = f"{message}; cache={cache_mode}"
 
@@ -1186,6 +1204,12 @@ class WanService:
                 vae_decode_seconds=round(vae_decode_seconds, 3),
                 manual_vae_decode=manual_vae_decode,
                 vae_decode_chunk_frames=vae_decode_chunk_frames,
+                latent_frame_count=latent_frame_count,
+                temporal_chunks=temporal_chunks,
+                temporal_chunk_size=temporal_chunk_size,
+                temporal_chunk_overlap=temporal_chunk_overlap,
+                transformer_chunks_per_forward=transformer_chunks_per_forward,
+                transformer_forwards_per_step=transformer_forwards_per_step,
                 video_postprocess_seconds=round(video_postprocess_seconds, 3),
                 offload_cleanup_seconds=round(offload_cleanup_seconds, 3),
                 postprocess_seconds=round(postprocess_seconds, 3),

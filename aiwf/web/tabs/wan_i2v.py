@@ -188,6 +188,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         label="VRAM / offload",
                         choices=[
                             ("Model offload (16 GB + FP8 safetensors — recommended)", "model"),
+                            ("Group offload (block-level middle ground, experimental)", "group"),
                             ("Sequential offload (8 GB fallback, ~3-10x slower)", "sequential"),
                             ("No offload (fastest, needs 24 GB+ VRAM)", "none"),
                         ],
@@ -282,21 +283,24 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
                     gr.Markdown("Temporal chunk / reference", elem_classes=["aiwf-section-label"])
                     gr.Markdown(
-                        "Controls how the denoiser slices long clips. **Frame context overlap** = how many frames "
-                        "each chunk borrows from the previous chunk — larger values reduce brightness seams and help "
-                        "the model 'remember' recent motion. **Image guidance** boosts how strongly the initial "
-                        "reference image is applied; increase this (1.5–3.0) if the video drifts away from the source "
-                        "at high frame counts.",
+                        "Temporal chunks slice Wan latent frames, not output frames. Leave this off first; enable only "
+                        "if a long/high-resolution run OOMs. 81 output frames = 21 latent frames, so a latent chunk "
+                        "size of 24 keeps that run unchunked.",
                         elem_classes=["aiwf-settings-paths"],
+                    )
+                    temporal_chunks = gr.Checkbox(
+                        value=False,
+                        label="Enable temporal chunking",
+                        info="Off by default for speed. Every chunk reruns the transformer; this is especially slow with sequential offload.",
                     )
                     with gr.Row():
                         chunk_size = gr.Slider(
-                            4, 64, value=16, step=4, label="Chunk size (frames)",
-                            info="Frames processed per transformer pass. Smaller = less VRAM per step but more seams. 16 is optimal for 16 GB.",
+                            4, 64, value=24, step=4, label="Latent chunk size",
+                            info="Latent frames per transformer pass. 81 output frames = 21 latent frames; 24 avoids chunking that case.",
                         )
                         chunk_overlap = gr.Slider(
-                            0, 32, value=8, step=1, label="Frame context overlap",
-                            info="Frames shared between adjacent chunks. Higher = smoother seams + better temporal memory of recent motion. 8 recommended.",
+                            0, 32, value=0, step=1, label="Latent overlap",
+                            info="Latent frames shared between adjacent chunks. Higher smooths seams but repeats transformer work.",
                         )
                     image_guidance_scale = gr.Slider(
                         1.0, 5.0, value=1.0, step=0.1, label="Image guidance scale",
@@ -411,6 +415,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             low_lora_scale_v,
             chunk_size_v,
             chunk_overlap_v,
+            temporal_chunks_v,
             image_guidance_scale_v,
             progress=gr.Progress(),
         ):
@@ -461,8 +466,9 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 boundary_ratio=0.5,
                 vae_id=vae_v or None,
                 text_encoder_path=_te_path,
-                chunk_size=int(chunk_size_v or 16),
-                chunk_overlap=int(chunk_overlap_v or 8),
+                temporal_chunks=bool(temporal_chunks_v),
+                chunk_size=int(chunk_size_v or 24),
+                chunk_overlap=int(chunk_overlap_v or 0),
                 image_guidance_scale=float(image_guidance_scale_v or 1.0),
             )
 
@@ -533,6 +539,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 low_lora_scale,
                 chunk_size,
                 chunk_overlap,
+                temporal_chunks,
                 image_guidance_scale,
             ],
             outputs=[video_out, status],
