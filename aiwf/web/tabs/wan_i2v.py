@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import gradio as gr
 
@@ -10,7 +11,6 @@ from aiwf.core.domain.wan import (
     SAMPLER_TYPES,
     WAN_RUNTIME_FAST_5B,
     WAN_RUNTIME_HIGH_LOW,
-    WAN_RUNTIME_HIGH_LOW_FP8,
     WanI2VRequest,
     duration_seconds_for_frames,
     frames_for_duration_seconds,
@@ -57,6 +57,15 @@ def _format_it_s(steps_per_second) -> str:
     return f"{rate:.3f} it/s ({1.0 / rate:.2f} s/it)"
 
 
+def _experimental_wan_formats_enabled() -> bool:
+    return os.environ.get("AIWF_WAN_ENABLE_EXPERIMENTAL_FORMATS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def register_wan_i2v(registry: WebRegistry) -> None:
     @registry.tab("Video", order=2)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
@@ -76,6 +85,9 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         other_labeled = [c for c in all_labeled if c not in high_labeled and c not in low_labeled]
         high_labeled = list(dict.fromkeys(high_labeled + other_labeled + all_labeled))
         low_labeled  = list(dict.fromkeys(low_labeled  + other_labeled + all_labeled))
+        if not _experimental_wan_formats_enabled():
+            high_labeled = [c for c in high_labeled if wan_model_storage_family(c[1]) == "gguf"]
+            low_labeled = [c for c in low_labeled if wan_model_storage_family(c[1]) == "gguf"]
 
         def _filter_stage_choices(
             labeled: list[tuple[str, str]],
@@ -114,6 +126,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             low_storage = wan_model_storage_family(low_text)
             high_quant = wan_model_quant_family(high_text)
             low_quant = wan_model_quant_family(low_text)
+            if not _experimental_wan_formats_enabled() and (high_storage != "gguf" or low_storage != "gguf"):
+                return "**Model pair blocked:** stable Video currently accepts GGUF high/low pairs only."
             if high_storage != "unknown" and low_storage != "unknown" and high_storage != low_storage:
                 return f"**Model pair blocked:** {high_storage} high + {low_storage} low."
             if high_quant != "unknown" and low_quant != "unknown" and high_quant != low_quant:
@@ -168,7 +182,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     elem_classes=["aiwf-mode-toggle"],
                 )
                 gr.Markdown(
-                    "Wan image-to-video. Use a matched High Noise + Low Noise pair.",
+                    "Wan image-to-video. Stable sharing build: matched GGUF High Noise + Low Noise pairs only.",
                     elem_classes=["aiwf-page-intro"],
                 )
                 gr.Markdown(service.folder_help(), elem_classes=["aiwf-page-path"])
@@ -182,12 +196,10 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     runtime_mode = gr.Radio(
                         label="Runtime",
                         choices=[
-                            ("Fast: high/low FP8", WAN_RUNTIME_HIGH_LOW_FP8),
-                            ("Safe: Wan 5B demo", WAN_RUNTIME_FAST_5B),
-                            ("Test: high/low full precision", WAN_RUNTIME_HIGH_LOW),
+                            ("Stable: high/low GGUF", WAN_RUNTIME_HIGH_LOW),
                         ],
-                        value=WAN_RUNTIME_HIGH_LOW_FP8,
-                        info="Default: FP8, Balanced 16 GB, 8 Euler/simple steps, chunks off.",
+                        value=WAN_RUNTIME_HIGH_LOW,
+                        info="Only the GGUF path is exposed on main; FP8 and resident tests live on dev.",
                     )
 
                     gr.Markdown("Models", elem_classes=["aiwf-section-label"])
@@ -196,14 +208,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         choices=initial_high_choices,
                         value=initial_high,
                         allow_custom_value=True,
-                        info="Early denoising stage. FP8 or GGUF Q4 recommended.",
+                        info="Early denoising stage. GGUF only on stable main.",
                     )
                     low_noise = gr.Dropdown(
                         label="Low noise transformer",
                         choices=initial_low_choices,
                         value=initial_low,
                         allow_custom_value=True,
-                        info="Late denoising stage. Must match the high model.",
+                        info="Late denoising stage. Must match the high GGUF.",
                     )
                     model_pair_status = gr.Markdown(
                         _pair_status(initial_high, initial_low),
@@ -214,7 +226,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         choices=default_te_labeled,
                         value=default_te if default_te else "",
                         allow_custom_value=True,
-                        info="UMT5-XXL only. FP8/GGUF saves VRAM.",
+                        info="UMT5-XXL only. Use GGUF/FP8 text encoders only if already tested locally.",
                     )
                     vae_id = gr.Dropdown(
                         label="VAE",
@@ -247,13 +259,9 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     offload = gr.Dropdown(
                         label="VRAM / offload",
                         choices=[
-                            ("Balanced 16 GB: active stage swaps, VAE stays hot", "balanced"),
-                            ("Low VRAM: active stage swaps, VAE/text offload", "model"),
+                            ("Balanced 16 GB: active GGUF stage swaps, VAE stays hot", "balanced"),
+                            ("Low VRAM: active GGUF stage swaps, VAE/text offload", "model"),
                             ("Sequential: slow fallback", "sequential"),
-                            ("Test resident: high+low FP8 on GPU", "resident"),
-                            ("Test streamed blocks", "streamed"),
-                            ("Test group blocks", "group"),
-                            ("No offload: 24 GB+ VRAM", "none"),
                         ],
                         value=_offload_default,
                         info="Use Balanced first. Use Low VRAM if it OOMs.",
@@ -463,7 +471,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         )
 
         def _sync_runtime_choices(runtime_value, high_value, low_value):
-            selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW_FP8)
+            selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
                 return (
                     gr.update(interactive=False),
@@ -481,14 +489,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             )
 
         def _sync_low_choices(high_value, low_value, runtime_value):
-            if str(runtime_value or WAN_RUNTIME_HIGH_LOW_FP8) == WAN_RUNTIME_FAST_5B:
+            if str(runtime_value or WAN_RUNTIME_HIGH_LOW) == WAN_RUNTIME_FAST_5B:
                 return gr.update(interactive=False), ""
             choices = _filter_stage_choices(low_labeled, stage="low", peer_value=high_value)
             next_low = _valid_or_first(low_value, choices)
             return gr.update(choices=choices, value=next_low, interactive=True), _pair_status(high_value, next_low)
 
         def _sync_high_choices(low_value, high_value, runtime_value):
-            if str(runtime_value or WAN_RUNTIME_HIGH_LOW_FP8) == WAN_RUNTIME_FAST_5B:
+            if str(runtime_value or WAN_RUNTIME_HIGH_LOW) == WAN_RUNTIME_FAST_5B:
                 return gr.update(interactive=False), ""
             choices = _filter_stage_choices(high_labeled, stage="high", peer_value=low_value)
             next_high = _valid_or_first(high_value, choices)
@@ -558,6 +566,12 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     "Select BOTH a High noise model and a Low noise model. Wan 2.2 image-to-video "
                     "high/low modes run a two-stage transformer pair."
                 )
+            if selected_runtime != WAN_RUNTIME_FAST_5B and not _experimental_wan_formats_enabled():
+                if wan_model_storage_family(high_v) != "gguf" or wan_model_storage_family(low_v) != "gguf":
+                    raise gr.Error(
+                        "Stable Video currently supports GGUF high/low transformer pairs only. "
+                        "FP8/safetensors video experiments are kept on the dev branch."
+                    )
             # Warn if user somehow selected a t5xxl file (shouldn't happen via dropdown but allow_custom_value=True)
             _te_path = str(text_encoder_v or "").strip()
             if _te_path and ("t5xxl" in _te_path.lower()) and not any(k in _te_path.lower() for k in ("umt5", "nsfw_wan")):

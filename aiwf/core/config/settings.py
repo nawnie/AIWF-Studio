@@ -100,7 +100,9 @@ class UserSettings(BaseSettings):
     wildcards_dir: str = "wildcards"
     prompt_styles: list[PromptStyle] = Field(default_factory=list)
     accent_preset: str = "mint"
-    hidden_tabs: list[str] = Field(default_factory=list)
+    hidden_tabs: list[str] = Field(
+        default_factory=lambda: ["Chat", "Training", "Face Swap", "RIFE", "Workflows"]
+    )
 
     # Generation defaults — applied as the Studio tab's initial values.
     default_sampler: str = "euler_a"

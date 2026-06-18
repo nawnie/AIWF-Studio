@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 from pathlib import Path
 
@@ -22,14 +23,9 @@ from aiwf.web.theme import accent_preset_names
 
 TAB_VISIBILITY_CHOICES = [
     "Video",
-    "Chat",
-    "Training",
     "Models",
     "Enhance",
     "Segment",
-    "Face Swap",
-    "RIFE",
-    "Workflows",
     "Library",
     "PNG Info",
     "History",
@@ -273,6 +269,9 @@ def _security_markdown() -> str:
 def register_settings(registry: WebRegistry) -> None:
     @registry.tab("Settings", order=90)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
+        enable_experimental_settings = os.environ.get(
+            "AIWF_ENABLE_EXPERIMENTAL_SETTINGS", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         launch = _launch_form_values(ctx)
         saved_launch = ctx.load_launch_settings()
         from aiwf.core.domain.models import SCHEDULE_TYPES
@@ -726,6 +725,7 @@ def register_settings(registry: WebRegistry) -> None:
                             launch_fp8 = gr.Checkbox(
                                 label="FP8 UNet weights (experimental)",
                                 value=launch.fp8,
+                                interactive=enable_experimental_settings,
                                 info="Halves UNet VRAM — recommended for SDXL on 8GB cards. Tiny quality cost.",
                             )
                             launch_async_offload = gr.Checkbox(
@@ -746,6 +746,7 @@ def register_settings(registry: WebRegistry) -> None:
                             launch_directml = gr.Checkbox(
                                 label="DirectML — AMD/Intel GPU on Windows",
                                 value=launch.directml,
+                                interactive=enable_experimental_settings,
                                 info="Requires `pip install torch-directml`. NVIDIA cards should leave this off.",
                             )
 
@@ -789,14 +790,17 @@ def register_settings(registry: WebRegistry) -> None:
                             engine_backend = gr.Radio(
                                 label="Image pipeline",
                                 choices=_pipeline_choices(ctx),
-                                value=launch.inference_backend,
+                                value="diffusers" if not enable_experimental_settings else launch.inference_backend,
+                                interactive=enable_experimental_settings,
                                 info="Diffusers is the default reference path. ONNX Runtime uses AIWF's own sampler path.",
                             )
                             pipeline_status = gr.Markdown(
                                 _pipeline_status_markdown(ctx),
                                 elem_classes=["aiwf-settings-paths"],
                             )
-                            with gr.Group(visible=(launch.inference_backend == "onnx")) as onnx_group:
+                            with gr.Group(
+                                visible=(enable_experimental_settings and launch.inference_backend == "onnx")
+                            ) as onnx_group:
                                 engine_onnx_dir = gr.Textbox(
                                     label="ONNX models directory",
                                     value=ctx.settings.onnx_model_dir,
@@ -820,21 +824,25 @@ def register_settings(registry: WebRegistry) -> None:
                             engine_cuda_graphs = gr.Checkbox(
                                 label="CUDA Graphs (AIWF_CUDA_GRAPHS)",
                                 value=launch.cuda_graphs,
+                                interactive=enable_experimental_settings,
                                 info="Capture/replay UNet forwards. Requires benchmark.",
                             )
                             engine_torchao = gr.Checkbox(
                                 label="TorchAO int8 weight-only quantization (AIWF_TORCHAO)",
                                 value=launch.torchao,
+                                interactive=enable_experimental_settings,
                                 info="Halves UNet weight memory. Requires torchao installed.",
                             )
                             engine_fp8 = gr.Checkbox(
                                 label="FP8 weight-only quantization (AIWF_FP8)",
                                 value=launch.fp8_quant,
+                                interactive=enable_experimental_settings,
                                 info="Requires NVIDIA Ada Lovelace (RTX 40xx) or newer and torchao.",
                             )
                             engine_torch_compile = gr.Checkbox(
                                 label="torch.compile reduce-overhead (AIWF_TORCH_COMPILE)",
                                 value=launch.torch_compile,
+                                interactive=enable_experimental_settings,
                                 info="Fuses ops in the UNet. First run is slow; subsequent runs are faster.",
                             )
                             engine_channels_last = gr.Checkbox(
@@ -1041,7 +1049,7 @@ def register_settings(registry: WebRegistry) -> None:
 
         # ── Engine tab ──────────────────────────────────────────────────────
         def _toggle_onnx_group(backend_val: str):
-            return gr.update(visible=(backend_val == "onnx"))
+            return gr.update(visible=(enable_experimental_settings and backend_val == "onnx"))
 
         engine_backend.change(
             _toggle_onnx_group,
@@ -1061,6 +1069,9 @@ def register_settings(registry: WebRegistry) -> None:
 
             # Persist pipeline and optimization flags to the next-start profile.
             saved = ctx.load_launch_settings() or LaunchSettings.from_runtime_flags(ctx.flags)
+            if not enable_experimental_settings:
+                backend = "diffusers"
+                cuda_graphs = torchao = fp8 = torch_compile = False
             settings = saved.model_copy(
                 update={
                     "inference_backend": backend,
@@ -1258,11 +1269,11 @@ def register_settings(registry: WebRegistry) -> None:
                 medvram=bool(medvram),
                 lowvram=bool(lowvram),
                 no_half=bool(no_half),
-                fp8=bool(fp8),
+                fp8=bool(fp8) if enable_experimental_settings else False,
                 async_offload=bool(async_offload),
                 pinned_memory=bool(pinned_memory),
                 cuda_malloc=bool(cuda_malloc),
-                directml=bool(directml),
+                directml=bool(directml) if enable_experimental_settings else False,
                 inference_backend=engine_profile.inference_backend,
                 onnx_provider=engine_profile.onnx_provider,
                 cuda_graphs=engine_profile.cuda_graphs,

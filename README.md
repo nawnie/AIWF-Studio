@@ -1,54 +1,82 @@
 # AIWF Studio
 
-AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. The goal is not to port old internals forward. The goal is to ship a local-first creative tool with explicit wiring, typed models, predictable behavior, and room to grow.
+**Local-first AI image generation for Windows, NVIDIA GPUs, Stable Diffusion, ControlNet, inpainting, enhancement, and Wan GGUF image-to-video.**
 
-## What makes this different
+AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. It is designed as a serious local creative workspace: explicit wiring, typed requests, predictable model folders, and no legacy global `shared` state.
 
-- No global `shared` state.
-- No mystery callbacks or monkey-patched extension hooks.
-- UI actions call services, not torch code directly.
-- Requests flow through typed domain models instead of ad-hoc dicts.
-- The app is designed to run from its own repo-local folders instead of silently leaning on a neighboring legacy install.
+This `main` branch is the stable sharing branch. It only advertises features that are intended to work for normal local use. Experimental work lives on `dev`.
 
-## Current feature set
+## What Works On Main
 
-### Studio
+### Image Generation
 
 - txt2img, img2img, and inpaint
-- live preview, continuous generation, interrupt
-- hires fix, CFG, steps, sampler, clip skip, VAE selection
-- tags, PNG metadata, seed reuse, before/after compare
-- dynamic prompts, wildcards, prompt files, Compel support
-- style presets with editable templates
-- single-unit ControlNet in Studio Advanced
-- SAM-assisted masking for inpaint
-- ReActor-style face swap on results
+- Stable Diffusion 1.5 and SDXL checkpoint loading through Diffusers
+- sampler, scheduler, steps, CFG, seed, size, VAE, clip skip, and hires fix controls
+- live preview, interrupt, continuous generation, and job history
+- prompt styles, wildcards, prompt files, dynamic prompt syntax, and Compel support
+- LoRA selection and keyword expansion from the local model catalog
+- PNG metadata and PNG Info import back into the Image tab
 
-### Extra tabs
+### Inpaint And Masking
 
-- Models
-- Segment
-- Enhance
-- Chat
-- Video
-- RIFE
-- Training
-- Workflows
-- Face Swap
-- Library
-- PNG Info
-- History
-- Settings
+- inpaint image/mask editor flow
+- keep-original / last-result source handling
+- SAM-assisted mask presets when SAM models are installed locally
+- outpaint canvas expansion
+
+### ControlNet
+
+- single ControlNet unit in the Image advanced panel
+- local ControlNet model selection
+- built-in lightweight preprocessors where available
+
+### Models
+
+- local checkpoint, LoRA, VAE, ControlNet, SAM, and enhancement model scanning
+- model aliases and trigger-word helpers
+- curated download entries for common local model folders
+- import helpers for model folders from another local install
+
+### Enhance
+
+- image upscale
+- GFPGAN / CodeFormer style restoration when models are installed
+- old-photo restore pipeline
+- tiled upscale controls for local VRAM limits
+
+### Segment
+
+- SAM mask generation when SAM weights are installed
+- text-guided boxes through GroundingDINO when the optional dependency is available
+
+### Video
+
+- Wan image-to-video through matched **GGUF High Noise + Low Noise** transformer pairs
+- local Wan component folder support for tokenizer, text encoder, scheduler, and VAE
+- conservative default UI: GGUF only on `main`
+
+FP8 Wan, resident high/low mode, streamed block offload, and other video experiments are intentionally not exposed on this branch.
+
+### Library, History, And Settings
+
+- generated-output history
+- library search over saved outputs
+- saved workspace settings
+- launch settings for GPU/network/runtime behavior
+- Tailscale-friendly remote access information
 
 ### API
 
 - native `/api/v1`
-- A1111-style `/sdapi/v1` adapter
+- A1111-style `/sdapi/v1` compatibility adapter
 
-## Quick start
+## Quick Start
+
+Run:
 
 ```bat
-webui-user.bat
+webui.bat
 ```
 
 Or:
@@ -57,7 +85,7 @@ Or:
 python launch.py
 ```
 
-By default the app uses dedicated local folders inside this repo:
+AIWF Studio creates and uses local runtime folders:
 
 ```text
 models/
@@ -67,86 +95,66 @@ wildcards/
 workflows/
 ```
 
-Put checkpoints in:
+Common model locations:
 
 ```text
-models/Stable-diffusion/
+models/Stable-diffusion/   checkpoints
+models/Loras/              LoRAs
+models/VAE/                VAEs
+models/ControlNet/         ControlNet models
+models/sam/                SAM weights
+models/wan/GGUF/           Wan high/low GGUF transformers
+models/wan/Diffusers/      Wan shared components
 ```
 
-Put LoRAs in:
+## Wan GGUF Video Setup
+
+For the stable Video tab, use a matched pair:
 
 ```text
-models/Loras/
+models/wan/GGUF/
+  ...high...gguf
+  ...low...gguf
 ```
 
-Put VAEs in:
+You also need local Wan shared components under:
 
 ```text
-models/VAE/
+models/wan/Diffusers/Wan2.2-TI2V-5B-Diffusers/
 ```
 
-## Remote access and security
+The Video tab blocks FP8/safetensors high-low transformer experiments on `main` so shared users get the least fragile path first.
 
-AIWF Studio includes Tailscale-aware connection info in Settings, which is the preferred remote path when you want phone or tablet access without exposing the app broadly.
+## Remote Access
 
-Security guidance:
+Use Tailscale when possible. If you launch with network listening enabled, add authentication before using AIWF outside a trusted local network.
 
-- `--listen` makes the UI reachable from other devices on your network.
-- Add `username:password` auth before using remote access outside a trusted desk setup.
-- Treat Gradio public share links as convenience tools, not private tunnels.
-- Tailscale is the safest built-in option for routine remote use.
+## Project Shape
 
-## Workflows status
+- `main` is the stable runtime branch for users.
+- `dev` keeps broader experiments, tests, docs, and active research work.
+- runtime data such as models, outputs, local configs, and agent notes are ignored.
 
-The Workflows tab is still a work in progress. It is useful, but it should be treated as experimental until it gets a deeper validation pass.
+## WIP And Help Wanted
 
-## Active roadmap
+These areas exist as work-in-progress or need more hardware coverage before they should be treated as stable:
 
-- extension management
-- broader theme and workspace customization
-- more mature workflow authoring
-- deeper training-engine setup flows
+- Wan FP8 high/low video speed path
+- Wan resident / streamed offload modes
+- training engines
+- Ollama or llama.cpp chat workspace
+- Face Swap tab
+- RIFE interpolation
+- workflow authoring
+- model conversion and quantization tools
+- plugin ecosystem
+- AMD, Intel, Linux, and lower-VRAM validation
+- installer polish and first-run onboarding
 
-## Credits and thanks
+## Credits
 
-This project is clean-room code, but it is absolutely standing in conversation with the wider local-image community.
+AIWF Studio is clean-room code, but it is built in conversation with the local AI community: Stable Diffusion, Diffusers, ControlNet, Segment Anything, GroundingDINO, Real-ESRGAN, GFPGAN, CodeFormer, Wan, ComfyUI-GGUF, and the AUTOMATIC1111 web UI ecosystem.
 
-- [AUTOMATIC1111 / stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui)
-- [ControlNet](https://github.com/lllyasviel/ControlNet)
-- [sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet)
-- [ReActor](https://github.com/Gourieff/sd-webui-reactor)
-- [Segment Anything](https://github.com/facebookresearch/segment-anything)
-- [Grounding DINO](https://github.com/IDEA-Research/GroundingDINO)
-- [Diffusers](https://github.com/huggingface/diffusers)
-- [GFPGAN](https://github.com/TencentARC/GFPGAN)
-- [CodeFormer](https://github.com/sczhou/CodeFormer)
-- [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
+## Come Build This
 
-See [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md) for the fuller attribution trail.
-
-## Clean-room rule
-
-Allowed:
-
-- studying behavior
-- reading public docs
-- reimplementing compatible ideas
-
-Not allowed:
-
-- copying incompatible source
-- importing abandoned plugin code wholesale
-- recreating legacy global-state architecture
-
-## Development
-
-```powershell
-python -m pytest tests/ -q
-python -m aiwf.app
-```
-
-## Repo notes
-
-- `venv/` is local only and should not ship in the public repo.
-- `models/` and `outputs/` are user-local runtime data.
-- `AGENTS.md` is for local build sessions, not end-user repo content.
+This project is now bigger than one person, even with AI help. If you care about local-first creative AI, consumer GPU workflows, open tooling, clean Python architecture, or making powerful generation tools easier for regular people to run, help create this with us ✨

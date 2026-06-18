@@ -194,6 +194,15 @@ def _native_fp8_runtime_available() -> bool:
     return _native_fp8_unavailable_reason() is None
 
 
+def _wan_experimental_formats_enabled() -> bool:
+    return os.environ.get("AIWF_WAN_ENABLE_EXPERIMENTAL_FORMATS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _video_status(message: str) -> None:
     print(f"[AIWF] Video: {message}", flush=True)
     try:
@@ -541,6 +550,14 @@ class WanService:
             if high_res and low_res and Path(high_res) == Path(low_res):
                 errors.append("High noise and Low noise transformers must be different files.")
             if high_res and low_res:
+                if not _wan_experimental_formats_enabled():
+                    high_storage = wan_model_storage_family(high_res)
+                    low_storage = wan_model_storage_family(low_res)
+                    if high_storage != "gguf" or low_storage != "gguf":
+                        errors.append(
+                            "Stable Wan Video supports GGUF high/low transformer pairs only. "
+                            "FP8/safetensors and resident experiments are kept on the dev branch."
+                        )
                 pair_check = wan_model_pair_compatibility(high_res, low_res)
                 errors.extend(pair_check.errors)
                 warnings.extend(pair_check.warnings)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import queue
 import threading
 from pathlib import Path
@@ -89,6 +90,18 @@ def _cn_installed_md(ctx: AppContext) -> str:
 def register_model_manager(registry: WebRegistry) -> None:
     @registry.tab("Models", order=10)
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
+        enable_wip_model_ops = os.environ.get("AIWF_ENABLE_WIP_MODEL_OPS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        enable_wip_tabs = os.environ.get("AIWF_ENABLE_WIP_TABS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         catalog = ctx.models
 
         with gr.Column(elem_classes=["aiwf-models"]):
@@ -117,9 +130,17 @@ def register_model_manager(registry: WebRegistry) -> None:
                         )
                         with gr.Row():
                             qs_video_btn  = gr.Button("Video (Wan 2.2 I2V)",  variant="secondary")
-                            qs_rife_btn   = gr.Button("Frame interpolation",   variant="secondary")
+                            qs_rife_btn   = gr.Button(
+                                "Frame interpolation",
+                                variant="secondary",
+                                interactive=enable_wip_tabs,
+                            )
                             qs_seg_btn    = gr.Button("Segmentation (SAM)",    variant="secondary")
-                            qs_fs_btn     = gr.Button("Face swap (ReActor)",   variant="secondary")
+                            qs_fs_btn     = gr.Button(
+                                "Face swap (ReActor)",
+                                variant="secondary",
+                                interactive=enable_wip_tabs,
+                            )
                         with gr.Row():
                             qs_sd_btn     = gr.Button("Text-to-image SD1.5",   variant="secondary")
                             qs_sdxl_btn   = gr.Button("Text-to-image SDXL",    variant="secondary")
@@ -261,6 +282,11 @@ def register_model_manager(registry: WebRegistry) -> None:
                     mix_command_state = gr.State(None)
                     with gr.Column(elem_classes=["aiwf-panel"]):
                         gr.Markdown("LoRA fuse", elem_classes=["aiwf-section-label"])
+                        if not enable_wip_model_ops:
+                            gr.Markdown(
+                                "Model mixing is disabled on stable `main`. Use the `dev` branch after backing up models.",
+                                elem_classes=["aiwf-settings-paths"],
+                            )
                         mix_base = gr.Dropdown(
                             label="Base checkpoint",
                             choices=catalog.checkpoint_choices(),
@@ -288,8 +314,16 @@ def register_model_manager(registry: WebRegistry) -> None:
                                     mix_lora_slots.extend([mix_lora_pick, mix_lora_weight])
                         mix_lora_output = gr.Textbox(label="Output folder name", value="fused_lora_model")
                         with gr.Row():
-                            mix_lora_check = gr.Button("Check LoRA fuse", elem_classes=["aiwf-btn-ghost"])
-                            mix_lora_run = gr.Button("Run LoRA fuse", variant="primary")
+                            mix_lora_check = gr.Button(
+                                "Check LoRA fuse",
+                                elem_classes=["aiwf-btn-ghost"],
+                                interactive=enable_wip_model_ops,
+                            )
+                            mix_lora_run = gr.Button(
+                                "Run LoRA fuse",
+                                variant="primary",
+                                interactive=enable_wip_model_ops,
+                            )
 
                     with gr.Column(elem_classes=["aiwf-panel"]):
                         gr.Markdown("Checkpoint blend", elem_classes=["aiwf-section-label"])
@@ -309,14 +343,27 @@ def register_model_manager(registry: WebRegistry) -> None:
                         blend_ratio = gr.Slider(0.0, 1.0, value=0.5, step=0.01, label="Second checkpoint weight")
                         blend_output = gr.Textbox(label="Output checkpoint name", value="blended_model")
                         with gr.Row():
-                            blend_check = gr.Button("Check blend", elem_classes=["aiwf-btn-ghost"])
-                            blend_run = gr.Button("Run blend", variant="primary")
+                            blend_check = gr.Button(
+                                "Check blend",
+                                elem_classes=["aiwf-btn-ghost"],
+                                interactive=enable_wip_model_ops,
+                            )
+                            blend_run = gr.Button(
+                                "Run blend",
+                                variant="primary",
+                                interactive=enable_wip_model_ops,
+                            )
                     mix_status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
 
                 with gr.Tab("Conversion & Quantization", elem_classes=["aiwf-model-tab"]):
                     conversion_command_state = gr.State(None)
                     with gr.Column(elem_classes=["aiwf-panel"]):
                         gr.Markdown("Model type change", elem_classes=["aiwf-section-label"])
+                        if not enable_wip_model_ops:
+                            gr.Markdown(
+                                "Conversion and quantization jobs are disabled on stable `main`. Use `dev` for experiments.",
+                                elem_classes=["aiwf-settings-paths"],
+                            )
                         convert_source = gr.Textbox(
                             label="Source path",
                             placeholder=str(ctx.flags.resolved_ckpt_dir()),
@@ -337,9 +384,21 @@ def register_model_manager(registry: WebRegistry) -> None:
                         )
                         convert_output = gr.Textbox(label="Output name", value="converted_model")
                         with gr.Row():
-                            convert_inspect = gr.Button("Inspect source", elem_classes=["aiwf-btn-ghost"])
-                            convert_check = gr.Button("Check conversion", elem_classes=["aiwf-btn-ghost"])
-                            convert_run = gr.Button("Run conversion", variant="primary")
+                            convert_inspect = gr.Button(
+                                "Inspect source",
+                                elem_classes=["aiwf-btn-ghost"],
+                                interactive=enable_wip_model_ops,
+                            )
+                            convert_check = gr.Button(
+                                "Check conversion",
+                                elem_classes=["aiwf-btn-ghost"],
+                                interactive=enable_wip_model_ops,
+                            )
+                            convert_run = gr.Button(
+                                "Run conversion",
+                                variant="primary",
+                                interactive=enable_wip_model_ops,
+                            )
                         convert_status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
 
                     quant_command_state = gr.State(None)
@@ -373,8 +432,16 @@ def register_model_manager(registry: WebRegistry) -> None:
                         )
                         quant_output = gr.Textbox(label="Output name", value="quantized_model")
                         with gr.Row():
-                            quant_check = gr.Button("Check quantization", elem_classes=["aiwf-btn-ghost"])
-                            quant_run = gr.Button("Run quantization job", variant="primary")
+                            quant_check = gr.Button(
+                                "Check quantization",
+                                elem_classes=["aiwf-btn-ghost"],
+                                interactive=enable_wip_model_ops,
+                            )
+                            quant_run = gr.Button(
+                                "Run quantization job",
+                                variant="primary",
+                                interactive=enable_wip_model_ops,
+                            )
                         quant_status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
 
                 with gr.Tab("ControlNet", elem_classes=["aiwf-model-tab"]):
