@@ -31,9 +31,13 @@ from aiwf.services.audio import AudioGenerationService, AudioUnavailable
 from aiwf.services.vsr import VsrService, VsrUnavailable
 from aiwf.services.wan import (
     WanService,
+)
+from aiwf.services.wan_models import (
     wan_model_quant_family,
     wan_model_stage_role,
     wan_model_storage_family,
+    wan_selectable_loras,
+    wan_selectable_transformers,
 )
 from aiwf.web.registry import WebRegistry
 from aiwf.web.studio.resolution import (
@@ -185,8 +189,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         if not all_labeled:
             all_labeled = [(m, m) for m in service.list_local_models()]
 
-        high_lora_choices = service.list_local_loras("high") if hasattr(service, "list_local_loras") else []
-        low_lora_choices = service.list_local_loras("low") if hasattr(service, "list_local_loras") else []
+        all_lora_choices = service.list_local_loras() if hasattr(service, "list_local_loras") else []
 
         # Sort high/low noise models to the top of each dropdown; unknown-role in both.
         high_labeled = [c for c in all_labeled if "high" in c[0].lower() or "high" in c[1].lower()]
@@ -201,24 +204,26 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         def _filter_stage_choices(
             labeled: list[tuple[str, str]],
             *,
+            runtime_value: str,
             stage: str,
             peer_value: str | None,
         ) -> list[tuple[str, str]]:
-            peer_storage = wan_model_storage_family(peer_value)
-            peer_quant = wan_model_quant_family(peer_value)
-            filtered: list[tuple[str, str]] = []
-            for label, value in labeled:
-                role = wan_model_stage_role(value)
-                if role not in {stage, "unknown"}:
-                    continue
-                storage = wan_model_storage_family(value)
-                quant = wan_model_quant_family(value)
-                if peer_storage != "unknown" and storage != "unknown" and storage != peer_storage:
-                    continue
-                if peer_quant != "unknown" and quant != "unknown" and quant != peer_quant:
-                    continue
-                filtered.append((label, value))
-            return filtered or labeled
+            ids = [value for _label, value in labeled]
+            allowed = set(
+                wan_selectable_transformers(
+                    ids,
+                    runtime_mode=str(runtime_value or WAN_RUNTIME_HIGH_LOW),
+                    want_role=stage,
+                    peer_id=peer_value,
+                )
+            )
+            return [(label, value) for label, value in labeled if value in allowed] or labeled
+
+        def _filter_lora_choices(runtime_value: str) -> list[str]:
+            return wan_selectable_loras(
+                all_lora_choices,
+                runtime_mode=str(runtime_value or WAN_RUNTIME_FAST_5B),
+            )
 
         def _valid_or_first(value: str | None, choices: list[tuple[str, str]]) -> str | None:
             ids = [v for _, v in choices]
@@ -293,9 +298,20 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         default_te = _last_te if _last_te else (service.default_text_encoder() if hasattr(service, "default_text_encoder") else "")
 
         initial_high = _best_default(high_labeled, _last_high)
-        initial_low_choices = _filter_stage_choices(low_labeled, stage="low", peer_value=initial_high)
+        initial_lora_choices = _filter_lora_choices(WAN_RUNTIME_FAST_5B)
+        initial_low_choices = _filter_stage_choices(
+            low_labeled,
+            runtime_value=WAN_RUNTIME_FAST_5B,
+            stage="low",
+            peer_value=initial_high,
+        )
         initial_low = _valid_or_first(_best_default(low_labeled, _last_low), initial_low_choices)
-        initial_high_choices = _filter_stage_choices(high_labeled, stage="high", peer_value=initial_low)
+        initial_high_choices = _filter_stage_choices(
+            high_labeled,
+            runtime_value=WAN_RUNTIME_FAST_5B,
+            stage="high",
+            peer_value=initial_low,
+        )
         initial_high = _valid_or_first(initial_high, initial_high_choices)
 
         default_video_size = 480
@@ -372,7 +388,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     gr.Markdown("Stage LoRAs", elem_classes=["aiwf-section-label"])
                     high_lora = gr.Dropdown(
                         label="High noise LoRA",
-                        choices=high_lora_choices,
+                        choices=initial_lora_choices,
                         value=None,
                         allow_custom_value=True,
                         info="Optional high-stage LoRA.",
@@ -382,7 +398,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         low_lora_scale = gr.Slider(0.0, 2.0, value=1.0, step=0.05, label="Low LoRA strength")
                     low_lora = gr.Dropdown(
                         label="Low noise LoRA",
-                        choices=low_lora_choices,
+                        choices=initial_lora_choices,
                         value=None,
                         allow_custom_value=True,
                         info="Optional low-stage LoRA.",
@@ -891,15 +907,28 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
         def _sync_runtime_choices(runtime_value, high_value, low_value, vae_value):
             selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
+            lora_choices = _filter_lora_choices(selected_runtime)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
                 return (
                     gr.update(interactive=False),
                     gr.update(interactive=False),
                     "",
                     gr.update(value=_preferred_vae_for_runtime(selected_runtime, vae_value)),
+                    gr.update(choices=lora_choices, value=None),
+                    gr.update(choices=lora_choices, value=None),
                 )
-            high_choices = _filter_stage_choices(high_labeled, stage="high", peer_value=low_value)
-            low_choices = _filter_stage_choices(low_labeled, stage="low", peer_value=high_value)
+            high_choices = _filter_stage_choices(
+                high_labeled,
+                runtime_value=selected_runtime,
+                stage="high",
+                peer_value=low_value,
+            )
+            low_choices = _filter_stage_choices(
+                low_labeled,
+                runtime_value=selected_runtime,
+                stage="low",
+                peer_value=high_value,
+            )
             next_high = _valid_or_first(high_value, high_choices)
             next_low = _valid_or_first(low_value, low_choices)
             return (
@@ -907,26 +936,40 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 gr.update(choices=low_choices, value=next_low, interactive=True),
                 _pair_status(next_high, next_low),
                 gr.update(value=_preferred_vae_for_runtime(selected_runtime, vae_value)),
+                gr.update(choices=lora_choices),
+                gr.update(choices=lora_choices),
             )
 
         def _sync_low_choices(high_value, low_value, runtime_value):
-            if str(runtime_value or WAN_RUNTIME_HIGH_LOW) == WAN_RUNTIME_FAST_5B:
+            selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
+            if selected_runtime == WAN_RUNTIME_FAST_5B:
                 return gr.update(interactive=False), ""
-            choices = _filter_stage_choices(low_labeled, stage="low", peer_value=high_value)
+            choices = _filter_stage_choices(
+                low_labeled,
+                runtime_value=selected_runtime,
+                stage="low",
+                peer_value=high_value,
+            )
             next_low = _valid_or_first(low_value, choices)
             return gr.update(choices=choices, value=next_low, interactive=True), _pair_status(high_value, next_low)
 
         def _sync_high_choices(low_value, high_value, runtime_value):
-            if str(runtime_value or WAN_RUNTIME_HIGH_LOW) == WAN_RUNTIME_FAST_5B:
+            selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
+            if selected_runtime == WAN_RUNTIME_FAST_5B:
                 return gr.update(interactive=False), ""
-            choices = _filter_stage_choices(high_labeled, stage="high", peer_value=low_value)
+            choices = _filter_stage_choices(
+                high_labeled,
+                runtime_value=selected_runtime,
+                stage="high",
+                peer_value=low_value,
+            )
             next_high = _valid_or_first(high_value, choices)
             return gr.update(choices=choices, value=next_high, interactive=True), _pair_status(next_high, low_value)
 
         runtime_mode.change(
             _sync_runtime_choices,
             inputs=[runtime_mode, high_noise, low_noise, vae_id],
-            outputs=[high_noise, low_noise, model_pair_status, vae_id],
+            outputs=[high_noise, low_noise, model_pair_status, vae_id, high_lora, low_lora],
             show_progress=False,
         )
         high_noise.change(
