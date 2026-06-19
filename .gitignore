@@ -30,6 +30,7 @@ datasets/
 
 # Optional local engine checkouts
 engines/ComfyUI-Frame-Interpolation/
+engines/nvidia-ai/
 engines/nvidia-vfx-sdk-samples/
 engines/nvidia-vfx-sdk/
 engines/rtx-video-sdk/
@@ -49,6 +50,7 @@ wan_dance_test.py
 AGENTS.md
 plan.md
 PROJECT_SKILLS.md
+.codex/
 
 # Local-only workspace bucket for non-runtime agent/research/support artifacts.
 # Keep new local notes, scratch docs, funding drafts, MoK findings, archives,
