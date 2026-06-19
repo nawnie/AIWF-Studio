@@ -2354,6 +2354,14 @@ class WanI2VBackend:
                 self.cache.unload_from_vram(self.cache.active_in_vram)
         except Exception:
             pass
+        try:
+            if self._pipe is not None:
+                for attr in ("transformer", "transformer_2"):
+                    model = getattr(self._pipe, attr, None)
+                    if _module_has_accelerate_hook(model):
+                        setattr(self._pipe, attr, None)
+        except Exception:
+            pass
         self._pipe = None
         self._key = None
         self._cache_mode = "none"
@@ -3076,10 +3084,11 @@ class WanI2VBackend:
                     if _stage_cache_is_gpu_active_cpu_standby(cache_mode):
                         pipe.transformer = None
             elif pipe.transformer is not None:
-                try:
-                    pipe.transformer.to("cpu")
-                except Exception:
-                    pass
+                if not _module_has_accelerate_hook(pipe.transformer):
+                    try:
+                        pipe.transformer.to("cpu")
+                    except Exception:
+                        pass
 
             if pipe.transformer is not None and not _stage_cache_is_gpu_active_cpu_standby(cache_mode):
                 pipe.transformer = None

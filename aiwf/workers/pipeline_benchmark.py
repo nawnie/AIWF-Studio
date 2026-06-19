@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import time
+import traceback
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -353,7 +354,8 @@ def run_wan_i2v_benchmark(config: dict[str, Any]) -> dict[str, Any]:
             f"{result.fp8_fallback_calls} FP8 fallback calls ({reason})."
         )
     frames = max(1, int(result.frame_count))
-    return {
+    capabilities = service.acceleration_capabilities()
+    payload = {
         "kind": "wan_i2v",
         "elapsed_seconds": elapsed,
         "units": frames,
@@ -421,8 +423,13 @@ def run_wan_i2v_benchmark(config: dict[str, Any]) -> dict[str, Any]:
         "vram_limit_fraction": result.vram_limit_fraction,
         "output_path": result.output_path,
         "request": request.model_dump(mode="json"),
-        "capabilities": service.acceleration_capabilities(),
+        "capabilities": capabilities,
     }
+    try:
+        service.unload_models()
+    except Exception as exc:
+        _log(f"Wan cleanup warning: {exc}")
+    return payload
 
 
 def run_benchmark(config: dict[str, Any]) -> dict[str, Any]:
@@ -488,6 +495,8 @@ def run_with_receipt(config: dict[str, Any], out_dir: Path) -> tuple[int, Path]:
     except Exception as exc:
         receipt["status"] = "failed"
         receipt["error"] = str(exc)
+        receipt["error_type"] = type(exc).__name__
+        receipt["traceback"] = traceback.format_exc()
         receipt["typed_receipt"] = _typed_receipt(
             benchmark_id=benchmark_id,
             created_at=created_at,

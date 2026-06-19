@@ -137,6 +137,93 @@ def _sync_cuda_for_diag() -> None:
         pass
 
 
+def _module_has_offload_hook(module: Any) -> bool:
+    if module is None:
+        return False
+    if getattr(module, "_hf_hook", None) is not None:
+        return True
+    if getattr(module, "_diffusers_hook", None) is not None:
+        return True
+    if getattr(module, "_aiwf_group_offload", False):
+        return True
+    try:
+        for child in module.modules():
+            if (
+                getattr(child, "_hf_hook", None) is not None
+                or getattr(child, "_diffusers_hook", None) is not None
+                or getattr(child, "_aiwf_group_offload", False)
+            ):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _first_module_tensor_device(module: Any) -> Any:
+    if module is None:
+        return None
+    for iterator_name in ("parameters", "buffers"):
+        iterator = getattr(module, iterator_name, None)
+        if not callable(iterator):
+            continue
+        try:
+            for tensor in iterator():
+                device = getattr(tensor, "device", None)
+                if device is not None:
+                    return device
+        except Exception:
+            continue
+    return None
+
+
+@contextlib.contextmanager
+def _component_on_device(module: Any, device: Any, *, label: str):
+    """Temporarily place plain CPU components on the execution device."""
+    if module is None or _module_has_offload_hook(module):
+        yield
+        return
+
+    try:
+        import torch
+    except Exception:
+        yield
+        return
+
+    target = torch.device(device)
+    original = _first_module_tensor_device(module)
+    moved = original is not None and original != target
+    if moved:
+        started = time.perf_counter()
+        module.to(target)
+        _sync_cuda_for_diag()
+        _trace_native_denoise(
+            "wan.native_component_onload",
+            "Moved Wan component to execution device",
+            component=label,
+            device=str(target),
+            seconds=round(max(0.0, time.perf_counter() - started), 3),
+            **_cuda_memory_fields(),
+        )
+    try:
+        yield
+    finally:
+        if moved:
+            started = time.perf_counter()
+            try:
+                module.to(original)
+                if target.type == "cuda" and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            finally:
+                _trace_native_denoise(
+                    "wan.native_component_offload",
+                    "Returned Wan component to original device",
+                    component=label,
+                    device=str(original),
+                    seconds=round(max(0.0, time.perf_counter() - started), 3),
+                    **_cuda_memory_fields(),
+                )
+
+
 def _cache_key_for_stage(stage: str) -> str | None:
     if stage == "high":
         return "wan_high"
@@ -376,16 +463,17 @@ def _run_native_wan_denoise_impl(
         batch_size = prompt_embeds.shape[0]
 
     _evict_active_stage_before_prompt(pipe)
-    prompt_embeds, negative_prompt_embeds = pipe.encode_prompt(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        do_classifier_free_guidance=pipe.do_classifier_free_guidance,
-        num_videos_per_prompt=num_videos_per_prompt,
-        prompt_embeds=prompt_embeds,
-        negative_prompt_embeds=negative_prompt_embeds,
-        max_sequence_length=max_sequence_length,
-        device=device,
-    )
+    with _component_on_device(getattr(pipe, "text_encoder", None), device, label="text_encoder"):
+        prompt_embeds, negative_prompt_embeds = pipe.encode_prompt(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            do_classifier_free_guidance=pipe.do_classifier_free_guidance,
+            num_videos_per_prompt=num_videos_per_prompt,
+            prompt_embeds=prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
+            max_sequence_length=max_sequence_length,
+            device=device,
+        )
 
     transformer_dtype = transformer.dtype if transformer is not None else transformer_2.dtype
     prompt_embeds = prompt_embeds.to(transformer_dtype)
@@ -396,10 +484,11 @@ def _run_native_wan_denoise_impl(
     # dual-stage 14B transformers have image_dim=None and skip this.
     if transformer is not None and transformer.config.image_dim is not None:
         if image_embeds is None:
-            if last_image is None:
-                image_embeds = pipe.encode_image(image, device)
-            else:
-                image_embeds = pipe.encode_image([image, last_image], device)
+            with _component_on_device(getattr(pipe, "image_encoder", None), device, label="image_encoder"):
+                if last_image is None:
+                    image_embeds = pipe.encode_image(image, device)
+                else:
+                    image_embeds = pipe.encode_image([image, last_image], device)
         image_embeds = image_embeds.repeat(batch_size, 1, 1)
         image_embeds = image_embeds.to(transformer_dtype)
 
@@ -419,19 +508,20 @@ def _run_native_wan_denoise_impl(
             device, dtype=torch.float32
         )
 
-    latents_outputs = pipe.prepare_latents(
-        image_tensor,
-        batch_size * num_videos_per_prompt,
-        num_channels_latents,
-        height,
-        width,
-        num_frames,
-        torch.float32,
-        device,
-        generator,
-        latents,
-        last_image_tensor,
-    )
+    with _component_on_device(getattr(pipe, "vae", None), device, label="vae_encode"):
+        latents_outputs = pipe.prepare_latents(
+            image_tensor,
+            batch_size * num_videos_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            num_frames,
+            torch.float32,
+            device,
+            generator,
+            latents,
+            last_image_tensor,
+        )
     expand_timesteps = bool(getattr(pipe.config, "expand_timesteps", False))
     first_frame_mask = None
     if expand_timesteps:
@@ -615,9 +705,10 @@ def _run_native_wan_denoise_impl(
             1, pipe.vae.config.z_dim, 1, 1, 1
         ).to(latents.device, latents.dtype)
         latents = latents / latents_std + latents_mean
-        video = pipe.vae.decode(latents, return_dict=False)[0]
-        _emit_phase("Post-processing video frames")
-        video = pipe.video_processor.postprocess_video(video, output_type=output_type)
+        with _component_on_device(getattr(pipe, "vae", None), latents.device, label="vae_decode"):
+            video = pipe.vae.decode(latents, return_dict=False)[0]
+            _emit_phase("Post-processing video frames")
+            video = pipe.video_processor.postprocess_video(video, output_type=output_type)
     else:
         _emit_phase("Denoise complete; returning latents")
         video = latents

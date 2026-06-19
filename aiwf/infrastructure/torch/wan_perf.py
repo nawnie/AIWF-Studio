@@ -446,6 +446,7 @@ def apply_wan_transformer_optimizations(transformer, *, name: str = "transformer
     if transformer is None:
         return []
 
+    existing = list(getattr(transformer, "_aiwf_attention_optimizations", ()) or ())
     active = bootstrap_wan_cuda_settings()
 
     # Attention backend priority (Comfy parity): diffusers SAGE -> diffusers FLASH ->
@@ -467,8 +468,12 @@ def apply_wan_transformer_optimizations(transformer, *, name: str = "transformer
     try:
         import torch
 
-        transformer.to(memory_format=torch.channels_last, non_blocking=True)
-        active.append("channels_last")
+        if getattr(transformer, "_aiwf_group_offload", False):
+            if "channels_last" in existing and "channels_last" not in active:
+                active.append("channels_last")
+        else:
+            transformer.to(memory_format=torch.channels_last, non_blocking=True)
+            active.append("channels_last")
     except Exception:
         pass
 
