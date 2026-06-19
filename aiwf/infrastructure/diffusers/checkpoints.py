@@ -30,8 +30,16 @@ SKIP_DIR_NAMES = {
     "esrgan",
     "realesrgan",
     "deepbooru",
+    "diffusion_models",
     "karlo",
     "controlnet",
+    "clip",
+    "clip_vision",
+    "sam",
+    "textencoder",
+    "text_encoder",
+    "text-encoder",
+    "wan",
 }
 
 
@@ -45,6 +53,8 @@ def resolve_search_roots(flags: RuntimeFlags) -> list[Path]:
 
     def add_root(path: Path) -> None:
         resolved = path.resolve()
+        if resolved.name.lower() in SKIP_DIR_NAMES:
+            return
         key = os.path.normcase(str(resolved))
         if resolved.exists() and key not in seen_keys:
             seen_keys.add(key)

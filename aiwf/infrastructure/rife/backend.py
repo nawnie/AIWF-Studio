@@ -25,8 +25,7 @@ CKPT_NAME_VER_DICT: dict[str, str] = {
 }
 
 DEFAULT_VFI_SEARCH_PATHS: tuple[Path, ...] = (
-    Path(r"C:\Users\Shawn\Documents\ComfyUI\custom_nodes\comfyui-frame-interpolation"),
-    Path(r"F:\ComfyUI\custom_nodes\comfyui-frame-interpolation"),
+    Path(__file__).resolve().parents[3] / "engines" / "ComfyUI-Frame-Interpolation",
 )
 
 
@@ -242,6 +241,7 @@ def interpolate_video_file(
     max_input_frames: int | None = None,
     target_fps: float | None = None,
     device=None,
+    vfi_root: Path | None = None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[Path, int, int, float, float, int, int]:
     """Interpolate a video file; returns (out_path, in_frames, out_frames, in_fps, out_fps, w, h)."""
@@ -253,7 +253,7 @@ def interpolate_video_file(
     if not src.is_file():
         raise RifeUnavailable(f"Video not found: {src}")
 
-    vfi_root = resolve_vfi_root()
+    vfi_root = vfi_root or resolve_vfi_root()
     if vfi_root is None:
         raise RifeUnavailable(
             "ComfyUI-Frame-Interpolation not found. Install it under Comfy custom_nodes "

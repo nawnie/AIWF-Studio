@@ -29,6 +29,10 @@ datasets/
 *.mov
 
 # Optional local engine checkouts
+engines/ComfyUI-Frame-Interpolation/
+engines/nvidia-vfx-sdk-samples/
+engines/nvidia-vfx-sdk/
+engines/rtx-video-sdk/
 engines/ed2/EveryDream2trainer/
 training/EveryDream2trainer/
 
@@ -51,17 +55,9 @@ PROJECT_SKILLS.md
 # benchmark planning configs, and one-off handoff files under this folder.
 _local/
 
-# GitHub main is runtime-focused. Keep development docs, tests, and helper
-# scripts local unless the user explicitly promotes one back to runtime.
-ARCHITECTURE.md
-CHANGELOG.md
-CONTRIBUTING.md
-docs/
-scripts/
-tests/
+# GitHub main should show the maintainability story: docs, tests, and helper
+# scripts are tracked unless they are generated, private, or engine-local.
 plugins/example_hello/
-engines/*/engine_config.example.toml
-engines/*/README.md
 
 # Legacy local/non-runtime paths kept ignored so old agent habits do not dirty
 # the runtime-focused tree again.

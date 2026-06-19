@@ -26,6 +26,157 @@ def _save_safetensors(state: dict[str, Any], path: Path, metadata: dict[str, str
     save_file(state, str(path), metadata=metadata)
 
 
+_FP8_LINEAR_NAME_TOKENS = (
+    ".q.",
+    ".k.",
+    ".v.",
+    ".o.",
+    ".q_proj.",
+    ".k_proj.",
+    ".v_proj.",
+    ".o_proj.",
+    ".out_proj.",
+    ".to_q.",
+    ".to_k.",
+    ".to_v.",
+    ".to_out.",
+    ".proj.",
+    ".proj_in.",
+    ".proj_out.",
+    ".linear",
+    ".fc",
+    ".ffn.",
+    ".mlp.",
+    ".gate.",
+    ".up.",
+    ".down.",
+    ".dense",
+)
+
+_FP8_EXCLUDED_NAME_TOKENS = (
+    "embed",
+    "embedding",
+    "positional",
+    "norm",
+    "ln_",
+    "patch",
+    "conv",
+)
+
+
+def _fp8_scale_key(weight_key: str) -> str:
+    return weight_key.removesuffix(".weight") + ".weight_scale"
+
+
+def _looks_like_linear_weight(key: str, tensor: Any) -> bool:
+    if not key.endswith(".weight"):
+        return False
+    if not getattr(tensor, "is_floating_point", lambda: False)():
+        return False
+    if len(getattr(tensor, "shape", ())) != 2:
+        return False
+    lowered = f".{key.lower()}"
+    if any(token in lowered for token in _FP8_EXCLUDED_NAME_TOKENS):
+        return False
+    return any(token in lowered for token in _FP8_LINEAR_NAME_TOKENS)
+
+
+def _quantize_fp8_weight(tensor: Any) -> tuple[Any, Any]:
+    import torch
+
+    working = tensor.detach().to(dtype=torch.float32)
+    if working.numel() == 0:
+        scale = torch.tensor(1.0, dtype=torch.float32)
+    else:
+        amax = working.abs().max()
+        scale = torch.where(amax > 0, amax / 448.0, torch.ones_like(amax)).to(dtype=torch.float32)
+    qweight = (working / scale.clamp_min(1e-12)).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    return qweight, scale.reshape(())
+
+
+def _quantize_aiwf_fp8_ready(args: argparse.Namespace) -> int:
+    source = Path(args.source)
+    output = Path(args.output)
+    if source.suffix.lower() != ".safetensors":
+        raise RuntimeError("AIWF FP8-ready export currently supports safetensors sources only.")
+
+    import torch
+
+    if not hasattr(torch, "float8_e4m3fn"):
+        raise RuntimeError("This PyTorch build does not expose torch.float8_e4m3fn.")
+
+    _log(f"Loading safetensors source: {source}")
+    state = _read_safetensors(source)
+    candidate_keys = {
+        key for key, tensor in state.items()
+        if _looks_like_linear_weight(key, tensor)
+    }
+    generated_scale_keys = {_fp8_scale_key(key) for key in candidate_keys}
+
+    converted: dict[str, Any] = {}
+    fp8_tensor_count = 0
+    preserved_tensor_count = 0
+    skipped_existing_scale_count = 0
+    _log(f"Converting {len(candidate_keys)} linear weights to AIWF FP8-ready tensors")
+    for key, tensor in state.items():
+        if key in generated_scale_keys:
+            skipped_existing_scale_count += 1
+            continue
+        if key in candidate_keys:
+            qweight, scale = _quantize_fp8_weight(tensor)
+            converted[key] = qweight
+            converted[_fp8_scale_key(key)] = scale
+            fp8_tensor_count += 1
+            continue
+        converted[key] = tensor
+        preserved_tensor_count += 1
+
+    metadata = read_safetensors_metadata(source)
+    metadata.update(
+        {
+            "aiwf.operation": "quantize_aiwf_fp8_ready",
+            "aiwf.source": str(source),
+            "aiwf.target": args.target,
+            "aiwf.quant": "aiwf_fp8_ready",
+            "aiwf.architecture": args.architecture,
+            "aiwf.fp8.format": "float8_e4m3fn",
+            "aiwf.fp8.scale": "per_tensor_absmax_div_448",
+            "aiwf.fp8.scope": "heuristic_linear_2d_weight_tensors",
+        }
+    )
+    warnings = [
+        "AIWF FP8-ready export is intended for AIWF native FP8 loaders that consume `.weight` plus `.weight_scale` sidecars.",
+        "Only likely linear 2D `.weight` tensors were quantized; embeddings, convs, norms, biases, and non-floating tensors were preserved.",
+    ]
+    if fp8_tensor_count == 0:
+        warnings.append("No likely linear FP8 candidate tensors were found; output is effectively a preserved safetensors copy.")
+    if skipped_existing_scale_count:
+        warnings.append(f"Skipped {skipped_existing_scale_count} existing scale tensor(s) replaced by fresh AIWF weight scales.")
+
+    _log(f"Saving AIWF FP8-ready package: {output}")
+    _save_safetensors(converted, output, metadata)
+    write_model_op_receipt(
+        args.receipt,
+        {
+            "operation": "quantize_aiwf_fp8_ready",
+            "source": str(source),
+            "output": str(output),
+            "target": args.target,
+            "quant": "aiwf_fp8_ready",
+            "architecture": args.architecture,
+            "fp8_format": "float8_e4m3fn",
+            "scale_policy": "per_tensor_absmax_div_448",
+            "fp8_tensor_count": fp8_tensor_count,
+            "scale_tensor_count": fp8_tensor_count,
+            "preserved_tensor_count": preserved_tensor_count,
+            "skipped_existing_scale_count": skipped_existing_scale_count,
+            "warnings": warnings,
+        },
+    )
+    _log(f"Receipt written: {args.receipt}")
+    return 0
+
+
 def checkpoint_blend(args: argparse.Namespace) -> int:
     left = Path(args.left)
     right = Path(args.right)
@@ -169,6 +320,8 @@ def quantize(args: argparse.Namespace) -> int:
     source = Path(args.source)
     output = Path(args.output)
     quant = str(args.quant).lower()
+    if quant == "aiwf_fp8_ready":
+        return _quantize_aiwf_fp8_ready(args)
     if quant in {"fp16", "bf16"}:
         if source.suffix.lower() != ".safetensors":
             raise RuntimeError(f"{quant.upper()} export currently supports safetensors sources only.")
@@ -210,6 +363,15 @@ def quantize(args: argparse.Namespace) -> int:
         return 0
     if quant in {"nvfp4", "fp8", "int8"}:
         _log(f"{quant.upper()} receipt requested for {source}")
+        warnings = [
+            "This receipt records intent only; destructive quantized export is disabled until quality validation lands.",
+        ]
+        if quant == "fp8":
+            warnings.append(
+                "Plain FP8 storage does not guarantee speed unless the runtime uses FP8 activations and scaled matmul."
+            )
+        if quant == "nvfp4":
+            warnings.append("NVFP4 is storage/compression only on RTX 4070 Ti SUPER, not a speed promise.")
         write_model_op_receipt(
             args.receipt,
             {
@@ -219,10 +381,7 @@ def quantize(args: argparse.Namespace) -> int:
                 "target": args.target,
                 "quant": quant,
                 "architecture": args.architecture,
-                "warnings": [
-                    "This receipt records intent only; destructive quantized export is disabled until quality validation lands.",
-                    "NVFP4 is storage/compression only on RTX 4070 Ti SUPER, not a speed promise.",
-                ],
+                "warnings": warnings,
             },
         )
         _log(f"Receipt written: {args.receipt}")

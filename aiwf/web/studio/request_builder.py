@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import gradio as gr
 
-from aiwf.core.domain.controlnet import ControlNetUnit
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest
 from aiwf.core.domain.models import normalize_schedule_id_for_sampler
 from aiwf.core.tags import parse_tags
 from aiwf.infrastructure.diffusers.mask import inpaint_session_background, resolve_inpaint_mask
-from aiwf.infrastructure.diffusers.controlnet_pipe import assert_controlnet_checkpoint_compatible
 from aiwf.services.controlnet import ControlNetService
 from aiwf.web.studio.catalogs import StudioCatalogs
+from aiwf.web.studio.controlnet_stack import StudioControlNetSlot, build_controlnet_stack
 from aiwf.web.studio.helpers import generation_style_fields, mode_from_label
 from aiwf.web.studio.session import StudioSession
 
@@ -64,6 +63,24 @@ def build_generation_request(
     cn_threshold_a,
     cn_threshold_b,
     inpaint_source_choice: str,
+    cn2_enable: bool = False,
+    cn2_model_id: str | None = None,
+    cn2_module: str | None = None,
+    cn2_image=None,
+    cn2_weight=1.0,
+    cn2_guidance_start=0.0,
+    cn2_guidance_end=1.0,
+    cn2_threshold_a=100.0,
+    cn2_threshold_b=200.0,
+    cn3_enable: bool = False,
+    cn3_model_id: str | None = None,
+    cn3_module: str | None = None,
+    cn3_image=None,
+    cn3_weight=1.0,
+    cn3_guidance_start=0.0,
+    cn3_guidance_end=1.0,
+    cn3_threshold_a=100.0,
+    cn3_threshold_b=200.0,
     controlnet: ControlNetService | None = None,
     checkpoint_architecture: str | None = None,
 ):
@@ -188,37 +205,55 @@ def build_generation_request(
             checkpoint_id=ckpt_id,
         )
 
-    if controlnet is not None:
-        try:
-            controlnet.validate_enabled(
-                enabled=bool(cn_enable),
-                mode=mode,
-                model_id=cn_model_id,
-                control_image=cn_image,
-            )
-        except ValueError as exc:
-            raise gr.Error(str(exc)) from exc
-        if cn_enable and checkpoint_architecture and cn_model_id:
-            resolved = controlnet.resolve_model(cn_model_id)
-            if resolved is not None:
-                try:
-                    assert_controlnet_checkpoint_compatible(resolved.path, checkpoint_architecture)
-                except ValueError as exc:
-                    raise gr.Error(str(exc)) from exc
-
     control_images = None
-    if cn_enable and cn_model_id and cn_image is not None and mode in ("txt2img", "img2img"):
-        unit = ControlNetUnit(
-            enabled=True,
-            model=cn_model_id,
-            module=cn_module or "none",
-            weight=float(cn_weight),
-            guidance_start=float(cn_guidance_start),
-            guidance_end=float(cn_guidance_end),
-            threshold_a=float(cn_threshold_a),
-            threshold_b=float(cn_threshold_b),
+    try:
+        units, control_images_list = build_controlnet_stack(
+            slots=[
+                StudioControlNetSlot(
+                    "ControlNet unit 1",
+                    bool(cn_enable),
+                    cn_model_id,
+                    cn_module,
+                    cn_image,
+                    float(cn_weight),
+                    float(cn_guidance_start),
+                    float(cn_guidance_end),
+                    float(cn_threshold_a),
+                    float(cn_threshold_b),
+                ),
+                StudioControlNetSlot(
+                    "ControlNet unit 2",
+                    bool(cn2_enable),
+                    cn2_model_id,
+                    cn2_module,
+                    cn2_image,
+                    float(cn2_weight),
+                    float(cn2_guidance_start),
+                    float(cn2_guidance_end),
+                    float(cn2_threshold_a),
+                    float(cn2_threshold_b),
+                ),
+                StudioControlNetSlot(
+                    "ControlNet unit 3",
+                    bool(cn3_enable),
+                    cn3_model_id,
+                    cn3_module,
+                    cn3_image,
+                    float(cn3_weight),
+                    float(cn3_guidance_start),
+                    float(cn3_guidance_end),
+                    float(cn3_threshold_a),
+                    float(cn3_threshold_b),
+                ),
+            ],
+            mode=mode,
+            controlnet=controlnet,
+            checkpoint_architecture=checkpoint_architecture,
         )
-        request = request.model_copy(update={"controlnet_units": [unit]})
-        control_images = [cn_image]
+    except ValueError as exc:
+        raise gr.Error(str(exc)) from exc
+    if units:
+        request = request.model_copy(update={"controlnet_units": units})
+        control_images = control_images_list
 
     return request, init_images, mask_images, before_image, mode, control_images

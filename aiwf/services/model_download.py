@@ -31,6 +31,7 @@ CATEGORY_LABELS: dict[ModelCategory, str] = {
     "lora": "LoRA",
     "vae": "VAE",
     "controlnet": "ControlNet",
+    "preprocessor": "ControlNet preprocessor",
     "upscaler": "Upscaler",
     "esrgan": "ESRGAN upscaler",
     "gfpgan": "GFPGAN restorer",
@@ -54,6 +55,7 @@ CATEGORY_FOLDERS: dict[ModelCategory, tuple[str, ...]] = {
     "lora": ("Loras",),
     "vae": ("VAE",),
     "controlnet": ("ControlNet",),
+    "preprocessor": ("ControlNet", "Annotators"),
     "upscaler": ("RealESRGAN",),
     "esrgan": ("ESRGAN",),
     "gfpgan": ("GFPGAN",),
@@ -77,6 +79,7 @@ CATEGORY_EXTENSION_RULES: dict[ModelCategory, tuple[str, ...]] = {
     "lora": (".safetensors", ".ckpt", ".pt"),
     "vae": (".safetensors", ".ckpt", ".pt"),
     "controlnet": (".safetensors", ".bin", ".pt", ".pth"),
+    "preprocessor": (".safetensors", ".bin", ".ckpt", ".onnx", ".pt", ".pth"),
     "upscaler": (".pth", ".safetensors"),
     "esrgan": (".pth", ".safetensors"),
     "gfpgan": (".pth",),
@@ -450,8 +453,14 @@ class ModelDownloadService:
     def destination_for(self, category: ModelCategory, filename: str) -> Path:
         return self.destination_dir(category) / filename
 
+    def snapshot_destination_for(self, category: ModelCategory, repo_id: str) -> Path:
+        name = repo_id.split("/")[-1]
+        if category == "preprocessor" and name.lower() == "annotators":
+            return self.destination_dir(category)
+        return self.destination_dir(category) / name
+
     def _validate_destination_filename(self, category: ModelCategory, filename: str) -> None:
-        if category == "wan_diffusers":
+        if category in {"controlnet", "preprocessor", "wan_diffusers"} and not filename:
             return
         allowed = CATEGORY_EXTENSION_RULES.get(category)
         if not allowed or not filename:
@@ -476,7 +485,8 @@ class ModelDownloadService:
     def is_catalog_installed(self, entry: CatalogEntry) -> bool:
         filename = entry.filename or self._catalog_filename_hint(entry)
         if not filename:
-            return entry.snapshot and self.destination_for(entry.category, entry.repo_id.split("/")[-1]).is_dir()
+            target = self.snapshot_destination_for(entry.category, entry.repo_id)
+            return entry.snapshot and target.is_dir() and any(target.iterdir())
         return self.destination_for(entry.category, filename).is_file()
 
     def _catalog_filename_hint(self, entry: CatalogEntry) -> str:
@@ -495,7 +505,11 @@ class ModelDownloadService:
         category: ModelCategory | None = None,
     ) -> ParsedRemote:
         if source == "huggingface":
-            return _parse_hf_reference(url_or_repo, filename, allow_snapshot=category == "wan_diffusers")
+            return _parse_hf_reference(
+                url_or_repo,
+                filename,
+                allow_snapshot=category in {"controlnet", "preprocessor", "wan_diffusers"},
+            )
         if source == "civitai":
             return _parse_civitai_reference(url_or_repo)
         return _parse_direct_url(url_or_repo)
@@ -524,8 +538,10 @@ class ModelDownloadService:
         if self.flags.block_private_download_urls and remote.source == "direct" and is_private_url(remote.url):
             raise ValueError("Private, loopback, and local-network download URLs are blocked by Settings.")
         if remote.snapshot:
-            if category != "wan_diffusers":
-                raise ValueError("Full repository downloads are only supported for Diffusers folder categories.")
+            if category not in {"controlnet", "preprocessor", "wan_diffusers"}:
+                raise ValueError(
+                    "Full repository downloads are only supported for Diffusers folder, ControlNet, and preprocessor categories."
+                )
             return self._download_hf_snapshot(remote, category, on_progress=on_progress)
         self._validate_destination_filename(category, remote.filename)
         dest = self.destination_for(category, remote.filename)
@@ -586,7 +602,7 @@ class ModelDownloadService:
         if not remote.repo_id:
             raise ValueError("Hugging Face repository is required for a Diffusers folder download.")
         token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
-        target = self.destination_dir(category) / remote.repo_id.split("/")[-1]
+        target = self.snapshot_destination_for(category, remote.repo_id)
         target.mkdir(parents=True, exist_ok=True)
         snapshot_download(repo_id=remote.repo_id, local_dir=str(target), token=token)
         if on_progress:

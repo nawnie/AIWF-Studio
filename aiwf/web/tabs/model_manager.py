@@ -28,14 +28,6 @@ def _model_op_tenant(preflight: PreflightResult) -> EngineTenant | None:
     return None
 
 
-def _cn_download_choices(ctx: AppContext) -> list[tuple[str, str]]:
-    choices = []
-    for item in ctx.controlnet.list_downloadable():
-        mark = "  ✓ installed" if ctx.controlnet.is_installed(item) else ""
-        choices.append((f"{item.title} · {item.size_mb}MB{mark}", item.key))
-    return choices
-
-
 def _catalog_choices(ctx: AppContext, categories: list[str] | None = None) -> list[tuple[str, str]]:
     allowed = set(categories or CATEGORY_LABELS.keys())
     choices: list[tuple[str, str]] = []
@@ -73,18 +65,44 @@ def _run_download(worker, progress_q: queue.Queue, result: dict) -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
+CONTROLNET_CATALOG_CATEGORIES = ["controlnet", "preprocessor"]
+
+
+def _cn_download_choices(ctx: AppContext) -> list[tuple[str, str]]:
+    return _catalog_choices(ctx, CONTROLNET_CATALOG_CATEGORIES)
+
+
 def _cn_installed_md(ctx: AppContext) -> str:
-    installed = [item for item in ctx.controlnet.list_downloadable() if ctx.controlnet.is_installed(item)]
-    extra = [
-        m
-        for m in ctx.controlnet.list_models()
-        if not any(Path(m.path).name == i.filename for i in installed)
+    catalog_items = [
+        item
+        for item in ctx.model_download.list_catalog()
+        if item.category in CONTROLNET_CATALOG_CATEGORIES
     ]
-    if not installed and not extra:
-        return "_No ControlNet models yet. Pick one above and download._"
-    lines = [f"- **{item.title}** → `{item.filename}`" for item in installed]
-    lines += [f"- {m.title} → `{m.path}`" for m in extra]
-    return "**Installed ControlNet models**  \n" + "  \n".join(lines)
+    installed = [item for item in catalog_items if ctx.model_download.is_catalog_installed(item)]
+    models = ctx.controlnet.list_models()
+    annotators_dir = ctx.controlnet.annotators_dir()
+    annotators = sorted(
+        path
+        for path in annotators_dir.glob("*")
+        if path.is_file() and path.suffix.lower() in {".ckpt", ".onnx", ".pt", ".pth", ".safetensors"}
+    )
+    if not installed and not models and not annotators:
+        return "_No ControlNet models or annotators yet. Pick one above and download._"
+    lines: list[str] = []
+    if installed:
+        lines.append("**Installed catalog entries**")
+        for item in installed:
+            folder = ctx.model_download.destination_dir(item.category)
+            lines.append(f"- **{item.title}** -> `{folder}`")
+    if models:
+        lines.append("**Detected generation models**")
+        lines += [f"- {m.title} -> `{m.path}`" for m in models]
+    if annotators:
+        lines.append("**Detected preprocessor weights**")
+        lines += [f"- {path.name} -> `{path}`" for path in annotators[:40]]
+        if len(annotators) > 40:
+            lines.append(f"- ...and {len(annotators) - 40} more")
+    return "  \n".join(lines)
 
 
 def register_model_manager(registry: WebRegistry) -> None:
@@ -422,7 +440,8 @@ def register_model_manager(registry: WebRegistry) -> None:
                             choices=[
                                 ("BF16 compatibility", "bf16"),
                                 ("FP16 compatibility", "fp16"),
-                                ("FP8 experiment", "fp8"),
+                                ("FP8 storage experiment", "fp8"),
+                                ("AIWF FP8-ready package", "aiwf_fp8_ready"),
                                 ("INT8 experiment", "int8"),
                                 ("NVFP4 storage/compression only", "nvfp4"),
                                 ("GGUF later lane", "gguf"),
@@ -447,8 +466,8 @@ def register_model_manager(registry: WebRegistry) -> None:
                     with gr.Column(elem_classes=["aiwf-panel"]):
                         gr.Markdown("Download ControlNet models", elem_classes=["aiwf-section-label"])
                         gr.Markdown(
-                            "SD1.5 ControlNet-v1.1 Light checkpoints download "
-                            f"into `{ctx.controlnet.models_dir()}` and appear in Image Advanced.",
+                            "Download SD1.5, SDXL, and preprocessor/annotator assets "
+                            f"into `{ctx.controlnet.models_dir()}`. Generation models appear in Image Advanced.",
                             elem_classes=["aiwf-settings-paths"],
                         )
                         with gr.Row():
@@ -854,10 +873,10 @@ def register_model_manager(registry: WebRegistry) -> None:
         def _cn_download(key):
             if not key:
                 raise gr.Error("Pick a ControlNet model to download.")
-            item = ctx.controlnet.find_downloadable(key)
+            item = ctx.model_download.find_catalog(key)
             if item is None:
                 raise gr.Error("Unknown ControlNet model.")
-            if ctx.controlnet.is_installed(item):
+            if ctx.model_download.is_catalog_installed(item):
                 yield (
                     f"**{item.title}** is already installed.",
                     gr.update(choices=_cn_download_choices(ctx)),
@@ -870,7 +889,7 @@ def register_model_manager(registry: WebRegistry) -> None:
 
             def worker():
                 try:
-                    ctx.controlnet.download_model(
+                    ctx.model_download.download_catalog(
                         key,
                         on_progress=lambda done, total: progress_q.put((done, total)),
                     )

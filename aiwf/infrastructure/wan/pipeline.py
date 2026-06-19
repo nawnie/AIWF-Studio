@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import inspect
+import re
 import threading
 import time
 from pathlib import Path
@@ -197,6 +198,57 @@ WAN_I2V_A14B_TRANSFORMER_CONFIG = {
     "text_dim": 4096,
     "rope_max_seq_len": 1024,
     "pos_embed_seq_len": None,
+}
+
+WAN_TI2V_5B_TRANSFORMER_CONFIG = {
+    "added_kv_proj_dim": None,
+    "attention_head_dim": 128,
+    "cross_attn_norm": True,
+    "eps": 1e-06,
+    "ffn_dim": 14336,
+    "freq_dim": 256,
+    "in_channels": 48,
+    "num_attention_heads": 24,
+    "num_layers": 30,
+    "out_channels": 48,
+    "patch_size": [1, 2, 2],
+    "qk_norm": "rms_norm_across_heads",
+    "text_dim": 4096,
+    "rope_max_seq_len": 1024,
+    "pos_embed_seq_len": None,
+}
+
+WAN_TI2V_5B_VAE_CONFIG = {
+    "attn_scales": [],
+    "base_dim": 160,
+    "decoder_base_dim": 256,
+    "dim_mult": [1, 2, 4, 4],
+    "dropout": 0.0,
+    "in_channels": 12,
+    "is_residual": True,
+    "latents_mean": [
+        -0.2289, -0.0052, -0.1323, -0.2339, -0.2799, 0.0174, 0.1838, 0.1557,
+        -0.1382, 0.0542, 0.2813, 0.0891, 0.157, -0.0098, 0.0375, -0.1825,
+        -0.2246, -0.1207, -0.0698, 0.5109, 0.2665, -0.2108, -0.2158, 0.2502,
+        -0.2055, -0.0322, 0.1109, 0.1567, -0.0729, 0.0899, -0.2799, -0.123,
+        -0.0313, -0.1649, 0.0117, 0.0723, -0.2839, -0.2083, -0.052, 0.3748,
+        0.0152, 0.1957, 0.1433, -0.2944, 0.3573, -0.0548, -0.1681, -0.0667,
+    ],
+    "latents_std": [
+        0.4765, 1.0364, 0.4514, 1.1677, 0.5313, 0.499, 0.4818, 0.5013,
+        0.8158, 1.0344, 0.5894, 1.0901, 0.6885, 0.6165, 0.8454, 0.4978,
+        0.5759, 0.3523, 0.7135, 0.6804, 0.5833, 1.4146, 0.8986, 0.5659,
+        0.7069, 0.5338, 0.4889, 0.4917, 0.4069, 0.4999, 0.6866, 0.4093,
+        0.5709, 0.6065, 0.6415, 0.4944, 0.5726, 1.2042, 0.5458, 1.6887,
+        0.3971, 1.06, 0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744,
+    ],
+    "num_res_blocks": 2,
+    "out_channels": 12,
+    "patch_size": 2,
+    "scale_factor_spatial": 16,
+    "scale_factor_temporal": 4,
+    "temperal_downsample": [False, True, True],
+    "z_dim": 48,
 }
 
 
@@ -751,6 +803,12 @@ def _load_comfy_fp8_transformer_weights(transformer, path: Path, *, torch_dtype)
                 weight = handle.get_tensor(raw_key)
                 scale = handle.get_tensor(scale_key).to(dtype=torch.float32)
                 module.weight = torch.nn.Parameter(weight, requires_grad=False)
+                if scale.numel() != 1:
+                    raise WanUnavailable(
+                        f"FP8 tensor '{raw_key}' has a per-channel weight scale "
+                        f"({scale.numel()} values); this build only supports a single per-tensor "
+                        "scale. Re-export with per-tensor FP8 scaling, or use the GGUF variant."
+                    )
                 module.weight_scale = scale.reshape(()).to(dtype=torch.float32)
                 loaded_fp8_state_keys.add(renamed_key)
                 loaded_fp8_state_keys.add(f"{module_path}.weight_scale")
@@ -868,6 +926,67 @@ def _apply_wan_transformer_key_renames(sd: dict) -> dict:
     return renamed
 
 
+_WAN_VAE_FIXED_KEY_RENAMES = {
+    "conv1.weight": "quant_conv.weight",
+    "conv1.bias": "quant_conv.bias",
+    "conv2.weight": "post_quant_conv.weight",
+    "conv2.bias": "post_quant_conv.bias",
+    "encoder.conv1.weight": "encoder.conv_in.weight",
+    "encoder.conv1.bias": "encoder.conv_in.bias",
+    "encoder.head.0.gamma": "encoder.norm_out.gamma",
+    "encoder.head.2.weight": "encoder.conv_out.weight",
+    "encoder.head.2.bias": "encoder.conv_out.bias",
+    "decoder.conv1.weight": "decoder.conv_in.weight",
+    "decoder.conv1.bias": "decoder.conv_in.bias",
+    "decoder.head.0.gamma": "decoder.norm_out.gamma",
+    "decoder.head.2.weight": "decoder.conv_out.weight",
+    "decoder.head.2.bias": "decoder.conv_out.bias",
+}
+
+
+def _remap_wan_vae_residual_key(rest: str) -> str:
+    rest = rest.replace("residual.0.gamma", "norm1.gamma")
+    rest = rest.replace("residual.2.", "conv1.")
+    rest = rest.replace("residual.3.gamma", "norm2.gamma")
+    rest = rest.replace("residual.6.", "conv2.")
+    rest = rest.replace("shortcut.", "conv_shortcut.")
+    return rest
+
+
+def _remap_wan_vae_key(key: str) -> str:
+    """Map Comfy/original Wan VAE keys to diffusers AutoencoderKLWan keys."""
+    if key in _WAN_VAE_FIXED_KEY_RENAMES:
+        return _WAN_VAE_FIXED_KEY_RENAMES[key]
+
+    match = re.match(r"^(encoder|decoder)\.middle\.(\d+)\.(.+)$", key)
+    if match:
+        side, block_index, rest = match.groups()
+        if block_index == "1":
+            return f"{side}.mid_block.attentions.0.{rest}"
+        resnet_index = "0" if block_index == "0" else "1"
+        return f"{side}.mid_block.resnets.{resnet_index}.{_remap_wan_vae_residual_key(rest)}"
+
+    match = re.match(r"^encoder\.downsamples\.(\d+)\.downsamples\.(\d+)\.(.+)$", key)
+    if match:
+        block_index, sub_index, rest = match.groups()
+        if sub_index in {"0", "1"}:
+            return f"encoder.down_blocks.{block_index}.resnets.{sub_index}.{_remap_wan_vae_residual_key(rest)}"
+        return f"encoder.down_blocks.{block_index}.downsampler.{rest}"
+
+    match = re.match(r"^decoder\.upsamples\.(\d+)\.upsamples\.(\d+)\.(.+)$", key)
+    if match:
+        block_index, sub_index, rest = match.groups()
+        if sub_index in {"0", "1", "2"}:
+            return f"decoder.up_blocks.{block_index}.resnets.{sub_index}.{_remap_wan_vae_residual_key(rest)}"
+        return f"decoder.up_blocks.{block_index}.upsampler.{rest}"
+
+    return key
+
+
+def _remap_wan_vae_state_dict(sd: dict) -> dict:
+    return {_remap_wan_vae_key(key): value for key, value in sd.items()}
+
+
 def estimate_gguf_expanded_gb(path: Path) -> float:
     """Rough host RAM needed to fully dequantize a GGUF for diffusers load."""
     from aiwf.infrastructure.wan.transformer_runtime import estimate_gguf_expanded_gb as _estimate
@@ -897,7 +1016,10 @@ def _load_gguf_state_dict(path: Path, *, torch_dtype=None) -> dict:
 
     reader = gguf.GGUFReader(str(path))
     total = len(reader.tensors)
-    _video_status(f"Dequantizing GGUF {path.name} ({total} tensors, est. ~{expanded_gb:.0f} GB RAM) — this is slow; FP8 safetensors are much faster.")
+    _video_status(
+        f"Dequantizing GGUF {path.name} ({total} tensors, est. ~{expanded_gb:.0f} GB RAM) "
+        "-- this is slow; FP8 safetensors are much faster."
+    )
     sd: dict[str, torch.Tensor] = {}
     for index, tensor in enumerate(reader.tensors, start=1):
         name = tensor.name
@@ -948,7 +1070,7 @@ def _default_wan_search_roots() -> list[Path]:
     Uses (in priority):
     - CWD-based (for normal launches from project root)
     - Source-relative: resolve from this file's location up to project root (aiwf/infrastructure/wan -> project)
-    - Common fallbacks under the user's home Desktop layout (portable, no hard-coded username)
+    - Source-relative paths from the installed project tree
     """
     roots: list[Path] = []
     # 1. CWD relative (typical when launched via launch.py / webui.bat from project root)
@@ -965,15 +1087,6 @@ def _default_wan_search_roots() -> list[Path]:
         roots.append(project_root / "models" / "wan")
     except Exception:
         pass
-
-    # 3. Portable Desktop fallbacks (covers common Windows dev layout without baking a username)
-    home = Path.home()
-    for base in (
-        home / "Desktop" / "AIWF-Studio",
-        home / "Desktop" / "AIWF-Studio - Copy",
-    ):
-        roots.append(base / "models" / "wan" / "Diffusers")
-        roots.append(base / "models" / "wan")
 
     # Dedup while preserving order
     seen: set[Path] = set()
@@ -1043,9 +1156,27 @@ def _load_wan_vae(vae_or_base: str, torch_dtype) -> "AutoencoderKLWan":
             vae = AutoencoderKLWan.from_single_file(str(p), torch_dtype=torch_dtype)
             return vae
         except Exception as exc:
+            try:
+                from safetensors.torch import load_file as _load_st
+
+                sd = _load_st(str(p), device="cpu")
+                z_dim = int(getattr(sd.get("conv2.weight"), "shape", [0])[0] or 0)
+                if z_dim == 48:
+                    _video_status(f"Loading Wan 2.2 TI2V VAE file with local 48-channel config: {p.name}")
+                    vae = AutoencoderKLWan.from_config(dict(WAN_TI2V_5B_VAE_CONFIG), torch_dtype=torch_dtype)
+                    sd = _remap_wan_vae_state_dict(sd)
+                    missing, unexpected = vae.load_state_dict(sd, strict=False, assign=True)
+                    if missing:
+                        logger.warning("Wan 2.2 TI2V VAE loaded with missing keys: %s", missing[:20])
+                    if unexpected:
+                        logger.debug("Wan 2.2 TI2V VAE ignored unexpected keys: %s", unexpected[:20])
+                    vae.eval()
+                    return vae
+            except Exception:
+                logger.debug("Could not load %s with Wan 2.2 TI2V VAE fallback.", p, exc_info=True)
             raise WanUnavailable(
                 f"Selected VAE '{p.name}' could not be loaded as a Wan VAE. "
-                "Choose a Wan VAE file such as 'wan_2.1_vae.safetensors' instead of a generic SD VAE."
+                "Choose a Wan VAE file such as 'wan2.1_vae.safetensors' instead of a generic SD VAE."
             ) from exc
 
     # If it's a dir that looks like a vae folder itself (has config.json + weights)
@@ -1173,6 +1304,13 @@ def _remap_ggml_to_hf_umt5(key: str) -> str:
     # Order matters — longest/most-specific patterns first
     _REMAP = [
         ("enc.blk.", "encoder.block."),
+        # UMT5 encoder final norm. The GGUF stores this as `enc.output_norm.weight`,
+        # but HF UMT5EncoderModel nests the stack under `.encoder`, so the real key is
+        # `encoder.final_layer_norm.weight`. The generic `output_norm`->`final_layer_norm`
+        # rule below loses the `encoder.` prefix and the weight silently stays on `meta`
+        # (then zero-filled), which zeroes the text-encoder output norm and corrupts ALL
+        # prompt conditioning (black/garbled video). Map the prefixed form explicitly.
+        ("enc.output_norm", "encoder.final_layer_norm"),
         ("token_embd", "shared"),
         ("output_norm", "final_layer_norm"),
         ("attn_q", "layer.0.SelfAttention.q"),
@@ -1210,26 +1348,21 @@ def _orient_umt5_gguf_tensor(key: str, tensor, expected_shape: tuple[int, ...]):
 
 
 def _materialize_meta_tensors(model, dtype) -> int:
-    """Replace any remaining meta tensors with real zero tensors on CPU.
+    """Materialize leftover meta tensors after a strict=False load.
 
-    After load_state_dict(strict=False, assign=True), parameters that were NOT
-    in the state dict remain as meta tensors (no data). This causes a crash when
-    diffusers tries to move the model to CPU via enable_model_cpu_offload().
-    Materializing them as zeros is safe: missing encoder weights produce
-    degraded but not crashing output.
+    After load_state_dict(strict=False, assign=True), anything NOT present in the
+    state dict stays a meta tensor (no data). Two very different cases:
+
+    * **Buffers** (position ids, derived masks, etc.) are recomputable/benign, so we
+      zero-fill them — this is what keeps enable_model_cpu_offload() from crashing.
+    * **Parameters** (weights/biases) must come from the file. Zero-filling a real
+      weight silently corrupts output — e.g. a single zeroed ``encoder.final_layer_norm``
+      destroys all prompt conditioning and yields black/garbled video. So if any
+      parameter is still meta we FAIL LOUD with the exact key names instead of
+      producing a broken-but-running text encoder.
     """
     import torch
-    count = 0
-    for name, param in list(model.named_parameters()):
-        if param.is_meta:
-            real = torch.zeros(param.shape, dtype=dtype, device="cpu")
-            # Walk the module path to set the attribute
-            parts = name.split(".")
-            mod = model
-            for part in parts[:-1]:
-                mod = getattr(mod, part)
-            setattr(mod, parts[-1], torch.nn.Parameter(real, requires_grad=False))
-            count += 1
+    buf_count = 0
     for name, buf in list(model.named_buffers()):
         if buf.is_meta:
             real = torch.zeros(buf.shape, dtype=dtype, device="cpu")
@@ -1238,14 +1371,25 @@ def _materialize_meta_tensors(model, dtype) -> int:
             for part in parts[:-1]:
                 mod = getattr(mod, part)
             setattr(mod, parts[-1], real)
-            count += 1
-    if count:
-        logger.warning(
-            "UMT5 text encoder: %d meta tensor(s) materialized as zeros — "
-            "some weights did not load from the file.",
-            count,
+            buf_count += 1
+
+    meta_params = [name for name, param in model.named_parameters() if param.is_meta]
+    if meta_params:
+        logger.error(
+            "UMT5 text encoder: %d weight(s) did not load from the file and would be "
+            "zeroed (corrupting all conditioning): %s",
+            len(meta_params),
+            meta_params[:20],
         )
-    return count
+        raise WanUnavailable(
+            "Text encoder file is missing required weights "
+            f"({len(meta_params)} tensor(s), e.g. {meta_params[:5]}). "
+            "The file is likely an incompatible or truncated UMT5/T5 export — pick a "
+            "different text encoder (a Wan UMT5-XXL .safetensors or .gguf)."
+        )
+    if buf_count:
+        logger.debug("UMT5 text encoder: %d benign buffer(s) zero-filled.", buf_count)
+    return buf_count
 
 
 def _load_standalone_umt5_text_encoder(path: str, torch_dtype):
@@ -1844,7 +1988,7 @@ class AIWFModelCacheManager:
         new_model = self.cpu_cache[new_key]
 
         # 1. Issue non-blocking eviction of old model (GPU→CPU transfer starts).
-        print(f"[AIWF] Swap {old_key} → {new_key}: evicting from VRAM...")
+        print(f"[AIWF] Swap {old_key} -> {new_key}: evicting from VRAM...")
         evict_started = time.perf_counter()
         old_model.to("cpu", non_blocking=True)
         self.active_in_vram = None
@@ -1853,7 +1997,18 @@ class AIWFModelCacheManager:
         torch.cuda.current_stream().synchronize()
         d2h_ms = max(0.0, time.perf_counter() - evict_started) * 1000.0
 
-        # 3. Immediately start loading the new model (CPU→GPU PCIe transfer begins).
+        # 3. If VRAM is still tight after eviction, return the freed pool to the allocator
+        #    BEFORE streaming the new stage in, so two large stages are never committed at
+        #    once (prevents OOM on 16 GB cards). Normally skipped — when the eviction freed
+        #    plenty, we keep the eviction/stream overlap that makes swaps fast.
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            if total_bytes and free_bytes < 0.40 * total_bytes:
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        # 4. Immediately start loading the new model (CPU→GPU PCIe transfer begins).
         print(f"[AIWF] Swap: streaming {new_key} to VRAM (cleanup overlapped with transfer)...")
         load_started = time.perf_counter()
         new_model.to(self.device, non_blocking=True)
@@ -2148,7 +2303,7 @@ class WanI2VBackend:
         if self._low_preload_spec is None:
             raise WanUnavailable("Low-noise transformer was not configured for this pipeline.")
         if not self._low_preload_started:
-            _video_status("Low-noise transformer not preloaded yet — loading now before boundary swap.")
+            _video_status("Low-noise transformer not preloaded yet -- loading now before boundary swap.")
             self._run_low_preload_worker()
             return
         if not self._low_preload_done.is_set():
@@ -2205,6 +2360,13 @@ class WanI2VBackend:
         self._preloaded_low = None
         self.cache.cpu_cache.clear()
         self.cache.active_in_vram = None
+        try:
+            from aiwf.infrastructure.torch.wan_perf import restore_wan_attention_patch
+
+            if restore_wan_attention_patch():
+                _video_status("Restored default torch attention after Wan run.")
+        except Exception:
+            logger.debug("Wan attention cleanup failed.", exc_info=True)
         _free_cuda_memory()
 
     def _aspect_resize(self, pipe, image, max_area: int):
@@ -2497,6 +2659,8 @@ class WanI2VBackend:
         *,
         model_id: str,
         vae_id: str | None = None,
+        components_base: str | None = None,
+        text_encoder_path: str = "",
         offload: str,
         flow_shift: float,
         sigma_type: str = "beta",
@@ -2504,11 +2668,15 @@ class WanI2VBackend:
     ):
         import torch
         from diffusers import WanImageToVideoPipeline
+        from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
+        from transformers import AutoTokenizer
 
         key = (
             "single_5b",
             model_id,
             vae_id or "default",
+            components_base or "auto",
+            text_encoder_path or "base",
             offload,
             sampler,
             sigma_type,
@@ -2522,13 +2690,72 @@ class WanI2VBackend:
             self.unload()
 
         _require_wan()
-        _video_status(f"Loading standalone Wan 5B Diffusers pipeline: {model_id}")
-        load_kwargs: dict[str, Any] = {"torch_dtype": torch.bfloat16}
-        if Path(str(model_id)).exists():
-            load_kwargs["local_files_only"] = True
-        pipe = WanImageToVideoPipeline.from_pretrained(str(model_id), **load_kwargs)
+        model_path = Path(str(model_id))
+        if model_path.is_file():
+            base = components_base or _find_wan_components_base()
+            if base is None:
+                raise WanUnavailable(
+                    "Standalone Wan 5B transformer needs a local components base with text_encoder, "
+                    "tokenizer, and scheduler. See docs/WAN_LOCAL_COMPONENTS.md."
+                )
+            base_path = Path(base)
+            _video_status(f"Using local video base for Wan 5B: {base_path}")
+            if vae_id:
+                vae = _load_wan_vae(vae_id, torch_dtype=torch.float32)
+            else:
+                vae = _load_wan_vae(str(base_path), torch_dtype=torch.float32)
+            if text_encoder_path:
+                text_encoder = _load_standalone_umt5_text_encoder(text_encoder_path, torch_dtype=torch.bfloat16)
+            else:
+                text_encoder = _load_umt5_text_encoder(base_path / "text_encoder", torch_dtype=torch.bfloat16)
+            tokenizer = AutoTokenizer.from_pretrained(str(base_path / "tokenizer"), local_files_only=True)
+            scheduler = UniPCMultistepScheduler.from_pretrained(
+                str(base_path / "scheduler"), local_files_only=True
+            )
 
-        if vae_id:
+            _video_status(f"Building Wan 5B pipeline from standalone transformer: {model_path.name}")
+            transformer = _empty_wan_transformer(WAN_TI2V_5B_TRANSFORMER_CONFIG)
+            if model_path.suffix.lower() == ".gguf":
+                miss, unex = _load_gguf_transformer_weights(
+                    transformer, model_path, torch_dtype=torch.bfloat16
+                )
+            elif model_path.suffix.lower() == ".safetensors" and _safetensors_uses_comfy_fp8_quant(model_path):
+                miss, unex = _load_comfy_fp8_transformer_weights(
+                    transformer, model_path, torch_dtype=torch.bfloat16
+                )
+            else:
+                sd = _load_transformer_state_dict(str(model_path), label="Fast 5B transformer")
+                miss, unex = transformer.load_state_dict(sd, strict=False, assign=True)
+                del sd
+            if miss or unex:
+                logger.warning(
+                    "Wan 5B weights (%s) vs base: %d missing %d unexpected",
+                    model_path.name,
+                    len(miss),
+                    len(unex),
+                )
+            pipe = WanImageToVideoPipeline(
+                transformer=transformer,
+                transformer_2=None,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                vae=vae,
+                scheduler=scheduler,
+                expand_timesteps=True,
+            )
+        else:
+            if model_path.exists() and not (model_path / "transformer" / "config.json").is_file():
+                raise WanUnavailable(
+                    "Fast 5B selected a shared component base, not a full pipeline. "
+                    "Select the standalone Wan TI2V 5B transformer file instead."
+                )
+            _video_status(f"Loading standalone Wan 5B Diffusers pipeline: {model_id}")
+            load_kwargs: dict[str, Any] = {"torch_dtype": torch.bfloat16}
+            if model_path.exists():
+                load_kwargs["local_files_only"] = True
+            pipe = WanImageToVideoPipeline.from_pretrained(str(model_id), **load_kwargs)
+
+        if vae_id and not model_path.is_file():
             _video_status(f"Using explicit Wan VAE for 5B path: {Path(vae_id).name}")
             pipe.vae = _load_wan_vae(vae_id, torch_dtype=torch.float32)
 
@@ -2865,7 +3092,7 @@ class WanI2VBackend:
                 _free_cuda_memory()
 
         def _load_low_stage():
-            _video_status("High stage done — swapping to low-noise transformer.")
+            _video_status("High stage done -- swapping to low-noise transformer.")
 
             self._ensure_low_preloaded()
             # swap_models() (called inside load_to_vram) handles gc + empty_cache overlapped
@@ -3010,14 +3237,11 @@ class WanI2VBackend:
                 temporal_chunks=_temporal_chunks,
             )
         else:
-            if _te_path:
-                _video_status(
-                    "Fast 5B mode uses the selected Diffusers pipeline text encoder; "
-                    "standalone text_encoder_path override is ignored in this pass."
-                )
             pipe = self._ensure_single_5b(
                 model_id=str(getattr(request, "model_id", "") or ""),
                 vae_id=getattr(request, "vae_id", None),
+                components_base=getattr(request, "components_base", None),
+                text_encoder_path=_te_path,
                 offload=str(getattr(request, "offload", "model") or "model"),
                 flow_shift=_flow_shift,
                 sigma_type=_sigma_type,
@@ -3096,7 +3320,7 @@ class WanI2VBackend:
         )
 
         _video_status(
-            f"Generating {num_frames} frames at {w}×{h} — "
+            f"Generating {num_frames} frames at {w}x{h} -- "
             f"{step_summary}, "
             f"guidance={_guidance_scale:g}, shift={_flow_shift:g}, seed={seed}."
         )
@@ -3159,6 +3383,29 @@ class WanI2VBackend:
 
             return _restore
 
+        def _emit_generate_progress(
+            step: int,
+            total: int,
+            steps_per_second: float | None = None,
+            message: str | None = None,
+        ) -> None:
+            if on_progress is None:
+                return
+            try:
+                on_progress(step, total, steps_per_second, message)
+            except TypeError:
+                try:
+                    on_progress(step, total, steps_per_second)
+                except TypeError:
+                    try:
+                        on_progress(step, total)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
         def _trace_step_rate(step: int, steps_per_second: float | None, seconds_per_step: float | None) -> None:
             try:
                 from aiwf.dev.diagnostics import trace_safe
@@ -3198,17 +3445,14 @@ class WanI2VBackend:
             steps_per_second = current_step / elapsed_steps if elapsed_steps > 0 else None
             seconds_per_step = elapsed_steps / current_step if current_step > 0 and elapsed_steps > 0 else None
             _trace_step_rate(current_step, steps_per_second, seconds_per_step)
-            if on_progress is not None:
-                try:
-                    on_progress(current_step, total_steps, steps_per_second)
-                except TypeError:
-                    try:
-                        on_progress(current_step, total_steps)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+            _emit_generate_progress(current_step, total_steps, steps_per_second)
             return callback_kwargs
+
+        def _phase_progress(message: str) -> None:
+            current_step = max(0, min(total_steps, progress_steps))
+            elapsed_steps = max(0.0, time.perf_counter() - denoise_started) if denoise_started else 0.0
+            steps_per_second = current_step / elapsed_steps if current_step > 0 and elapsed_steps > 0 else None
+            _emit_generate_progress(current_step, total_steps, steps_per_second, message)
 
         try:
             output_type = "latent" if _manual_vae_decode else _wan_output_type_for_pipe(pipe)
@@ -3225,13 +3469,15 @@ class WanI2VBackend:
                 output_type=output_type,
                 callback_on_step_end=_step_callback,
             )
-            if _call_accepts_kwarg(pipe.__call__, "image_guidance_scale"):
-                call_kwargs["image_guidance_scale"] = _image_guidance_scale
-            elif _image_guidance_scale != 1.0:
-                logger.warning(
-                    "Installed Diffusers Wan pipeline does not support image_guidance_scale; requested %.3f ignored.",
-                    _image_guidance_scale,
-                )
+            # Wan 2.2's dual high/low pair supports a SEPARATE low-noise CFG via
+            # `guidance_scale_2` (honored by both diffusers 0.38's WanImageToVideoPipeline
+            # and AIWF's native denoise loop). The UI's low-noise guidance slider maps
+            # here. It is only meaningful on the dual path (a boundary_ratio is set); the
+            # single 5B path uses one `guidance_scale`. diffusers 0.38 has NO
+            # `image_guidance_scale` for Wan (that arg is InstructPix2Pix-only), so we
+            # never send it — passing the value through the real knob instead of dropping it.
+            if requires_dual and _image_guidance_scale and float(_image_guidance_scale) > 1.0:
+                call_kwargs["guidance_scale_2"] = float(_image_guidance_scale)
             restore_hooks = [
                 hook
                 for hook in (
@@ -3253,8 +3499,16 @@ class WanI2VBackend:
                 if _use_native_denoise:
                     from aiwf.infrastructure.wan.native.denoise import run_native_wan_denoise
 
+                    call_kwargs["aiwf_on_phase_progress"] = _phase_progress
+                    _emit_generate_progress(
+                        0,
+                        total_steps,
+                        None,
+                        "Starting denoise; GGUF first step can take several minutes",
+                    )
                     output = run_native_wan_denoise(pipe, **call_kwargs)
                 else:
+                    _emit_generate_progress(0, total_steps, None, "Starting denoise")
                     output = pipe(**call_kwargs)
             finally:
                 pipeline_seconds = max(0.0, time.perf_counter() - denoise_started)
@@ -3291,12 +3545,14 @@ class WanI2VBackend:
             try:
                 from aiwf.infrastructure.torch.wan_vram import decode_wan_video_latents
 
+                _phase_progress("Decoding video frames")
                 decoded = decode_wan_video_latents(
                     pipe,
                     output_frames,
                     chunk_frames=_vae_decode_chunk_frames,
                     output_type="pil",
                 )
+                _phase_progress("Post-processing video frames")
                 frames = _flatten_wan_video_frames(decoded)
             finally:
                 for restore in reversed(restore_hooks):

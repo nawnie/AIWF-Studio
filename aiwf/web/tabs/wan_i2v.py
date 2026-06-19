@@ -11,7 +11,7 @@ from aiwf.core.domain.audio import AudioGenerationOptions
 from aiwf.core.domain.enhance import RestoreOptions
 from aiwf.core.domain.faceswap import FaceSwapOptions
 from aiwf.core.domain.rife import RifeOptions
-from aiwf.core.domain.vsr import VsrOptions
+from aiwf.core.domain.vsr import VideoFxAigsOptions, VideoFxDenoiseOptions, VideoFxRelightOptions, VsrOptions
 from aiwf.bootstrap import AppContext
 from aiwf.core.domain.wan import (
     SIGMA_TYPES,
@@ -47,6 +47,42 @@ _RIFE_SERVICES: dict[int, RifeService] = {}
 _VSR_SERVICES: dict[int, VsrService] = {}
 _AUDIO_SERVICES: dict[int, AudioGenerationService] = {}
 VIDEO_SIZE_PRESETS: tuple[int, ...] = (480, 568, 640, 768, 896, 1024)
+VSR_UPSCALE_MODE_CHOICES = [
+    ("Low", 1),
+    ("Medium", 2),
+    ("High", 3),
+    ("Ultra", 4),
+]
+VSR_CLEANUP_MODE_CHOICES = [
+    ("Denoise Low", 8),
+    ("Denoise Medium", 9),
+    ("Denoise High", 10),
+    ("Denoise Ultra", 11),
+    ("Deblur Low", 12),
+    ("Deblur Medium", 13),
+    ("Deblur High", 14),
+    ("Deblur Ultra", 15),
+    ("High bitrate Low", 16),
+    ("High bitrate Medium", 17),
+    ("High bitrate High", 18),
+    ("High bitrate Ultra", 19),
+]
+AIGS_COMP_CHOICES = [
+    ("Background blur", 6),
+    ("Matte mask", 0),
+    ("Mask overlay", 1),
+    ("Green background", 2),
+    ("White background", 3),
+    ("Original frame", 4),
+    ("Background image", 5),
+]
+RELIGHT_BG_MODE_CHOICES = [
+    ("Original background", 0),
+    ("Blur original background", 1),
+    ("HDR background", 2),
+    ("Background image", 3),
+    ("Blur background image", 4),
+]
 logger = logging.getLogger(__name__)
 
 
@@ -127,6 +163,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         rife_ckpts = rife_service.list_checkpoints()
         default_rife_ckpt = rife_service.default_checkpoint()
         vsr_help = vsr_service.folder_help()
+        relight_hdr_choices = vsr_service.relighting_hdr_choices()
         audio_music_models = audio_service.music_model_choices()
         audio_sfx_models = audio_service.sfx_model_choices()
 
@@ -226,9 +263,30 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         vae_labeled = service.list_local_vaes_labeled() if hasattr(service, "list_local_vaes_labeled") else []
         if not vae_labeled:
             vae_labeled = [("Default VAE", "")]
-        preferred_vae_id = _last_vae or next(
-            (v for _, v in vae_labeled if v and "wan" in v.lower() and "vae" in v.lower()), None
-        ) or (vae_labeled[0][1] if vae_labeled else None)
+        def _preferred_vae_for_runtime(runtime_value: str, current_value: str | None = None) -> str | None:
+            ids = [v for _, v in vae_labeled if v]
+            if current_value and current_value in ids:
+                current_lower = current_value.lower()
+                if runtime_value == WAN_RUNTIME_FAST_5B and "wan2.2" in current_lower:
+                    return current_value
+                if runtime_value != WAN_RUNTIME_FAST_5B and any(
+                    token in current_lower for token in ("wan2.1_vae", "wan_2.1_vae", "wan21_vae")
+                ):
+                    return current_value
+            if runtime_value == WAN_RUNTIME_FAST_5B:
+                return next((v for v in ids if "wan2.2" in v.lower() and "vae" in v.lower()), None) or (
+                    ids[0] if ids else None
+                )
+            return next(
+                (
+                    v
+                    for v in ids
+                    if any(token in v.lower() for token in ("wan2.1_vae", "wan_2.1_vae", "wan21_vae"))
+                ),
+                None,
+            ) or next((v for v in ids if "wan" in v.lower() and "vae" in v.lower()), None) or (ids[0] if ids else None)
+
+        preferred_vae_id = _preferred_vae_for_runtime(WAN_RUNTIME_FAST_5B, _last_vae)
 
         te_labeled = service.list_local_text_encoders_labeled() if hasattr(service, "list_local_text_encoders_labeled") else []
         default_te_labeled = [("Default (full precision bundled encoder)", "")] + te_labeled
@@ -254,7 +312,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     elem_classes=["aiwf-mode-toggle"],
                 )
                 gr.Markdown(
-                    "Wan image-to-video. Stable sharing build: matched GGUF High Noise + Low Noise pairs only.",
+                    "Wan image-to-video. Fast 5B TI2V or matched GGUF High Noise + Low Noise pairs.",
                     elem_classes=["aiwf-page-intro"],
                 )
                 gr.Markdown(service.folder_help(), elem_classes=["aiwf-page-path"])
@@ -268,10 +326,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     runtime_mode = gr.Radio(
                         label="Runtime",
                         choices=[
-                            ("Stable: high/low GGUF", WAN_RUNTIME_HIGH_LOW),
+                            ("Fast: 5B TI2V", WAN_RUNTIME_FAST_5B),
+                            ("Stable: 14B high/low GGUF", WAN_RUNTIME_HIGH_LOW),
                         ],
-                        value=WAN_RUNTIME_HIGH_LOW,
-                        info="Only the GGUF path is exposed on main; FP8 and resident tests live on dev.",
+                        value=WAN_RUNTIME_FAST_5B,
+                        info="5B uses Wan 2.2 VAE and a single TI2V transformer. 14B requires matched GGUF high/low.",
                     )
 
                     gr.Markdown("Models", elem_classes=["aiwf-section-label"])
@@ -280,17 +339,19 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         choices=initial_high_choices,
                         value=initial_high,
                         allow_custom_value=True,
-                        info="Early denoising stage. GGUF only on stable main.",
+                        interactive=False,
+                        info="Early denoising stage for the 14B GGUF runtime.",
                     )
                     low_noise = gr.Dropdown(
                         label="Low noise transformer",
                         choices=initial_low_choices,
                         value=initial_low,
                         allow_custom_value=True,
-                        info="Late denoising stage. Must match the high GGUF.",
+                        interactive=False,
+                        info="Late denoising stage. Must match the selected 14B high GGUF.",
                     )
                     model_pair_status = gr.Markdown(
-                        _pair_status(initial_high, initial_low),
+                        "",
                         elem_classes=["aiwf-settings-paths"],
                     )
                     text_encoder = gr.Dropdown(
@@ -305,7 +366,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         choices=vae_labeled,
                         value=preferred_vae_id,
                         allow_custom_value=True,
-                        info="Wan 2.1 VAE is recommended.",
+                        info="5B TI2V uses Wan 2.2 VAE. 14B high/low usually uses Wan 2.1 VAE.",
                     )
 
                     gr.Markdown("Stage LoRAs", elem_classes=["aiwf-section-label"])
@@ -427,7 +488,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             ("Exponential — more detail at high noise", "exponential"),
                             ("Karras — SD-style detail preservation", "karras"),
                         ],
-                        value="simple",
+                        value="beta",
                         info="Simple is fastest; Beta is the quality check.",
                     )
                     with gr.Row():
@@ -457,8 +518,9 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             info="Higher overlap is smoother but slower.",
                         )
                     image_guidance_scale = gr.Slider(
-                        1.0, 5.0, value=1.0, step=0.1, label="Image guidance scale",
-                        info="Raise to reduce drift on longer clips.",
+                        1.0, 5.0, value=1.0, step=0.1, label="Low-noise guidance (CFG)",
+                        info="Dual high/low models only: separate CFG for the low-noise stage. "
+                             "1.0 = reuse the main guidance scale; raise to sharpen detail late in denoise.",
                     )
 
                     with gr.Accordion("Post-processing", open=False, elem_classes=["aiwf-prompt-tools"]):
@@ -570,17 +632,28 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                                     label="CodeFormer weight",
                                 )
 
-                        with gr.Accordion("Upscale", open=False, elem_classes=["aiwf-prompt-tools"]):
+                        with gr.Accordion("NVIDIA VideoFX", open=False, elem_classes=["aiwf-prompt-tools"]):
                             vsr_enabled = gr.Checkbox(
                                 value=False,
-                                label="Run NVIDIA RTX VSR after generation",
-                                info="Uses NVIDIA Video Effects SDK when installed.",
+                                label="Run upscale or cleanup",
+                                info="Uses NVIDIA Video Effects SDK sample runners when installed.",
                             )
                             gr.Markdown(vsr_help, elem_classes=["aiwf-settings-paths"])
+                            vsr_effect = gr.Radio(
+                                label="Mode family",
+                                choices=[
+                                    ("RTX VSR upscale", "SuperRes"),
+                                    ("Fast SDK upscale", "Upscale"),
+                                    ("Same-size cleanup", "Cleanup"),
+                                ],
+                                value="SuperRes",
+                                info="Cleanup forces same-size output for denoise/deblur/high-bitrate modes.",
+                            )
                             with gr.Row():
                                 vsr_scale = gr.Dropdown(
                                     label="Scale",
                                     choices=[
+                                        ("Same size", 1.0),
                                         ("1.5x", 1.5),
                                         ("2x", 2.0),
                                         ("3x", 3.0),
@@ -589,27 +662,114 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                                     value=2.0,
                                 )
                                 vsr_mode = gr.Radio(
-                                    label="VSR mode",
-                                    choices=[("Strong", 1), ("Weak", 0)],
-                                    value=1,
+                                    label="Quality / cleanup mode",
+                                    choices=VSR_UPSCALE_MODE_CHOICES,
+                                    value=3,
                                 )
-                            vsr_effect = gr.Radio(
-                                label="Effect",
-                                choices=[
-                                    ("RTX VSR SuperRes", "SuperRes"),
-                                    ("Fast SDK Upscale", "Upscale"),
-                                ],
-                                value="SuperRes",
-                                info="SuperRes is the quality path; Upscale is faster and lighter.",
-                            )
                             vsr_strength = gr.Slider(
                                 0,
                                 1,
                                 value=0.6,
                                 step=0.05,
-                                label="Upscale sharpness",
-                                info="Used only by Fast SDK Upscale.",
+                                label="Fast upscale sharpness",
+                                info="Used only by Fast SDK upscale.",
+                                interactive=False,
                             )
+
+                            gr.Markdown("Denoise", elem_classes=["aiwf-section-label"])
+                            with gr.Row():
+                                videofx_denoise_enabled = gr.Checkbox(
+                                    value=False,
+                                    label="Run dedicated denoise",
+                                    info="Runs before AIGS and upscale.",
+                                )
+                                videofx_denoise_strength = gr.Slider(
+                                    0,
+                                    1,
+                                    value=0.8,
+                                    step=0.05,
+                                    label="Denoise strength",
+                                )
+
+                            gr.Markdown("Background", elem_classes=["aiwf-section-label"])
+                            videofx_aigs_enabled = gr.Checkbox(
+                                value=False,
+                                label="Run AI Green Screen",
+                                info="Background blur, matte, green/white background, or background replacement.",
+                            )
+                            with gr.Row():
+                                videofx_aigs_comp = gr.Dropdown(
+                                    label="Output",
+                                    choices=AIGS_COMP_CHOICES,
+                                    value=6,
+                                )
+                                videofx_aigs_blur = gr.Slider(
+                                    0,
+                                    1,
+                                    value=0.45,
+                                    step=0.05,
+                                    label="Blur strength",
+                                )
+                            with gr.Row():
+                                videofx_aigs_bg = gr.Image(
+                                    label="Background image",
+                                    sources=["upload"],
+                                    type="filepath",
+                                )
+                                videofx_aigs_cuda_graph = gr.Checkbox(
+                                    value=False,
+                                    label="CUDA graph",
+                                    info="Experimental SDK optimization for AIGS.",
+                                )
+
+                            gr.Markdown("Relight", elem_classes=["aiwf-section-label"])
+                            videofx_relight_enabled = gr.Checkbox(
+                                value=False,
+                                label="Run relighting",
+                                info="Uses NVIDIA Video Relighting with an HDR illumination preset.",
+                            )
+                            with gr.Row():
+                                videofx_relight_hdr = gr.Dropdown(
+                                    label="HDR preset",
+                                    choices=relight_hdr_choices,
+                                    value=next((v for label, v in relight_hdr_choices if label.lower() == "default"), None)
+                                    or (relight_hdr_choices[0][1] if relight_hdr_choices else None),
+                                    allow_custom_value=True,
+                                )
+                                videofx_relight_bg_mode = gr.Dropdown(
+                                    label="Background",
+                                    choices=RELIGHT_BG_MODE_CHOICES,
+                                    value=0,
+                                )
+                            with gr.Row():
+                                videofx_relight_pan = gr.Slider(
+                                    -180,
+                                    180,
+                                    value=-90,
+                                    step=1,
+                                    label="Pan",
+                                )
+                                videofx_relight_vfov = gr.Slider(
+                                    10,
+                                    140,
+                                    value=60,
+                                    step=1,
+                                    label="Vertical FOV",
+                                )
+                            with gr.Row():
+                                videofx_relight_bg = gr.Image(
+                                    label="Relight background image",
+                                    sources=["upload"],
+                                    type="filepath",
+                                )
+                                videofx_relight_bg_text = gr.Textbox(
+                                    label="Background color",
+                                    placeholder="gray or 0x202020",
+                                )
+                                videofx_relight_autorotate = gr.Checkbox(
+                                    value=False,
+                                    label="Autorotate HDR",
+                                )
 
                         with gr.Accordion("Audio", open=False, elem_classes=["aiwf-prompt-tools"]):
                             audio_enabled = gr.Checkbox(
@@ -729,13 +889,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             show_progress=False,
         )
 
-        def _sync_runtime_choices(runtime_value, high_value, low_value):
+        def _sync_runtime_choices(runtime_value, high_value, low_value, vae_value):
             selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
                 return (
                     gr.update(interactive=False),
                     gr.update(interactive=False),
                     "",
+                    gr.update(value=_preferred_vae_for_runtime(selected_runtime, vae_value)),
                 )
             high_choices = _filter_stage_choices(high_labeled, stage="high", peer_value=low_value)
             low_choices = _filter_stage_choices(low_labeled, stage="low", peer_value=high_value)
@@ -745,6 +906,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 gr.update(choices=high_choices, value=next_high, interactive=True),
                 gr.update(choices=low_choices, value=next_low, interactive=True),
                 _pair_status(next_high, next_low),
+                gr.update(value=_preferred_vae_for_runtime(selected_runtime, vae_value)),
             )
 
         def _sync_low_choices(high_value, low_value, runtime_value):
@@ -763,8 +925,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
         runtime_mode.change(
             _sync_runtime_choices,
-            inputs=[runtime_mode, high_noise, low_noise],
-            outputs=[high_noise, low_noise, model_pair_status],
+            inputs=[runtime_mode, high_noise, low_noise, vae_id],
+            outputs=[high_noise, low_noise, model_pair_status, vae_id],
             show_progress=False,
         )
         high_noise.change(
@@ -807,6 +969,33 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             show_progress=False,
         )
 
+        def _sync_videofx_effect(effect_value):
+            effect = str(effect_value or "SuperRes")
+            if effect == "Cleanup":
+                return (
+                    gr.update(choices=VSR_CLEANUP_MODE_CHOICES, value=10, interactive=True),
+                    gr.update(value=1.0, interactive=False),
+                    gr.update(interactive=False),
+                )
+            if effect == "Upscale":
+                return (
+                    gr.update(choices=VSR_UPSCALE_MODE_CHOICES, value=3, interactive=False),
+                    gr.update(value=2.0, interactive=True),
+                    gr.update(interactive=True),
+                )
+            return (
+                gr.update(choices=VSR_UPSCALE_MODE_CHOICES, value=3, interactive=True),
+                gr.update(value=2.0, interactive=True),
+                gr.update(interactive=False),
+            )
+
+        vsr_effect.change(
+            _sync_videofx_effect,
+            inputs=[vsr_effect],
+            outputs=[vsr_mode, vsr_scale, vsr_strength],
+            show_progress=False,
+        )
+
         def _release_memory_before_postprocess(label: str):
             try:
                 service.unload_models()
@@ -828,6 +1017,13 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 ctx.faceswap.unload()
             except Exception:
                 logger.debug("Face swap unload before ReActor failed.", exc_info=True)
+
+        def _uploaded_file_path(value) -> str | None:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return value
+            return getattr(value, "name", None) or getattr(value, "path", None)
 
         def _run(
             image,
@@ -884,6 +1080,21 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             vsr_mode_v,
             vsr_effect_v,
             vsr_strength_v,
+            videofx_denoise_enabled_v,
+            videofx_denoise_strength_v,
+            videofx_aigs_enabled_v,
+            videofx_aigs_comp_v,
+            videofx_aigs_blur_v,
+            videofx_aigs_bg_v,
+            videofx_aigs_cuda_graph_v,
+            videofx_relight_enabled_v,
+            videofx_relight_hdr_v,
+            videofx_relight_bg_mode_v,
+            videofx_relight_pan_v,
+            videofx_relight_vfov_v,
+            videofx_relight_bg_v,
+            videofx_relight_bg_text_v,
+            videofx_relight_autorotate_v,
             audio_enabled_v,
             audio_prompt_v,
             audio_kind_v,
@@ -955,15 +1166,33 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 image_guidance_scale=float(image_guidance_scale_v or 1.0),
             )
 
-            def on_progress(step, tot, steps_per_second=None):
+            def on_progress(step, tot, steps_per_second=None, message=None):
                 rate_text = _format_it_s(steps_per_second)
-                desc = f"Video step {step}/{tot}"
+                message_text = str(message or "").strip()
+                if message_text:
+                    desc = message_text
+                    if rate_text:
+                        desc = f"{desc} - {rate_text}"
+                    lower = message_text.lower()
+                    if "writing" in lower:
+                        ratio = 0.97
+                    elif "saved" in lower or "complete" in lower:
+                        ratio = 0.99
+                    elif "decoding" in lower or "post-processing" in lower:
+                        ratio = 0.93
+                    elif "denoise" in lower:
+                        ratio = 0.08
+                    else:
+                        ratio = 0.03
+                    progress(ratio, desc=desc)
+                    return
+                desc = f"Video denoise {step}/{tot}"
                 if rate_text:
                     desc = f"{desc} - {rate_text}"
-                progress(min(1.0, step / max(1, tot)), desc=desc)
+                progress(min(0.90, step / max(1, tot)), desc=desc)
 
             runtime_label = "Wan 5B demo" if selected_runtime == WAN_RUNTIME_FAST_5B else "Wan 14B dual-stage I2V"
-            progress(0.0, desc=f"Loading + encoding for {runtime_label} (watch terminal for [AIWF] Video: and step messages, then 'Video step X/Y' will appear)")
+            progress(0.02, desc=f"Preparing {runtime_label}: loading models and encoding inputs")
             try:
                 result = service.generate(request, image, on_progress=on_progress)
             except WanUnavailable as exc:
@@ -1104,26 +1333,97 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     logger.exception("ReActor post-processing failed")
                     status_parts.append(f"**ReActor failed** -- {exc}")
 
+            if bool(videofx_denoise_enabled_v):
+                try:
+                    progress(0.0, desc="Unloading VRAM before NVIDIA VideoFX Denoise")
+                    _release_memory_before_postprocess("NVIDIA VideoFX Denoise")
+                    denoise_options = VideoFxDenoiseOptions(
+                        strength=float(videofx_denoise_strength_v or 0.8),
+                    )
+                    progress(0.0, desc="Running NVIDIA VideoFX Denoise")
+                    denoise_result = vsr_service.denoise(final_video_path, denoise_options)
+                    final_video_path = denoise_result.output_path
+                    status_parts.append(f"**NVIDIA Denoise** -- {denoise_result.message}")
+                except VsrUnavailable as exc:
+                    logger.warning("NVIDIA VideoFX Denoise unavailable: %s", exc)
+                    status_parts.append(f"**NVIDIA Denoise skipped** -- {exc}")
+                except Exception as exc:
+                    logger.exception("NVIDIA VideoFX Denoise failed")
+                    status_parts.append(f"**NVIDIA Denoise failed** -- {exc}")
+
+            if bool(videofx_aigs_enabled_v):
+                try:
+                    progress(0.0, desc="Unloading VRAM before NVIDIA AI Green Screen")
+                    _release_memory_before_postprocess("NVIDIA AI Green Screen")
+                    comp_mode = int(videofx_aigs_comp_v or 6)
+                    bg_path = _uploaded_file_path(videofx_aigs_bg_v)
+                    if comp_mode == 5 and not bg_path:
+                        raise VsrUnavailable("Upload a background image or choose a different AI Green Screen output.")
+                    aigs_options = VideoFxAigsOptions(
+                        comp_mode=comp_mode,
+                        blur_strength=float(videofx_aigs_blur_v or 0.45),
+                        background_file=bg_path,
+                        cuda_graph=bool(videofx_aigs_cuda_graph_v),
+                    )
+                    progress(0.0, desc="Running NVIDIA AI Green Screen")
+                    aigs_result = vsr_service.aigs(final_video_path, aigs_options)
+                    final_video_path = aigs_result.output_path
+                    status_parts.append(f"**NVIDIA AI Green Screen** -- {aigs_result.message}")
+                except VsrUnavailable as exc:
+                    logger.warning("NVIDIA AI Green Screen unavailable: %s", exc)
+                    status_parts.append(f"**NVIDIA AI Green Screen skipped** -- {exc}")
+                except Exception as exc:
+                    logger.exception("NVIDIA AI Green Screen failed")
+                    status_parts.append(f"**NVIDIA AI Green Screen failed** -- {exc}")
+
+            if bool(videofx_relight_enabled_v):
+                try:
+                    progress(0.0, desc="Unloading VRAM before NVIDIA Relighting")
+                    _release_memory_before_postprocess("NVIDIA Relighting")
+                    bg_mode = int(videofx_relight_bg_mode_v or 0)
+                    bg_path = _uploaded_file_path(videofx_relight_bg_v)
+                    bg_value = bg_path or str(videofx_relight_bg_text_v or "").strip() or None
+                    if bg_mode in {3, 4} and not bg_value:
+                        raise VsrUnavailable("Upload a background image or enter a background color for relighting.")
+                    relight_options = VideoFxRelightOptions(
+                        hdr_file=str(videofx_relight_hdr_v or ""),
+                        background_mode=bg_mode,
+                        background=bg_value,
+                        pan_degrees=float(videofx_relight_pan_v or -90),
+                        vfov_degrees=float(videofx_relight_vfov_v or 60),
+                        autorotate=bool(videofx_relight_autorotate_v),
+                    )
+                    progress(0.0, desc="Running NVIDIA Relighting")
+                    relight_result = vsr_service.relight(final_video_path, relight_options)
+                    final_video_path = relight_result.output_path
+                    status_parts.append(f"**NVIDIA Relighting** -- {relight_result.message}")
+                except VsrUnavailable as exc:
+                    logger.warning("NVIDIA Relighting unavailable: %s", exc)
+                    status_parts.append(f"**NVIDIA Relighting skipped** -- {exc}")
+                except Exception as exc:
+                    logger.exception("NVIDIA Relighting failed")
+                    status_parts.append(f"**NVIDIA Relighting failed** -- {exc}")
+
             if bool(vsr_enabled_v):
                 try:
-                    progress(0.0, desc="Unloading VRAM before NVIDIA RTX VSR")
-                    _release_memory_before_postprocess("NVIDIA RTX VSR")
+                    progress(0.0, desc="Unloading VRAM before NVIDIA VideoFX upscale/cleanup")
+                    _release_memory_before_postprocess("NVIDIA VideoFX")
                     vsr_options = VsrOptions(
                         effect=str(vsr_effect_v or "SuperRes"),
                         scale=float(vsr_scale_v or 2.0),
                         mode=int(vsr_mode_v if vsr_mode_v is not None else 1),
                         strength=float(vsr_strength_v or 0.6),
                     )
-                    progress(0.0, desc="Running NVIDIA RTX VSR upscale")
+                    progress(0.0, desc="Running NVIDIA VideoFX upscale/cleanup")
                     vsr_result = vsr_service.upscale(final_video_path, vsr_options)
                     final_video_path = vsr_result.output_path
-                    status_parts.append(f"**NVIDIA RTX VSR** -- {vsr_result.message}")
+                    status_parts.append(f"**NVIDIA VideoFX** -- {vsr_result.message}")
                 except VsrUnavailable as exc:
-                    logger.warning("NVIDIA RTX VSR post-processing unavailable: %s", exc)
-                    status_parts.append(f"**NVIDIA RTX VSR skipped** -- {exc}")
+                    logger.warning("NVIDIA VideoFX post-processing unavailable: %s", exc)
+                    status_parts.append(f"**NVIDIA VideoFX skipped** -- {exc}")
                 except Exception as exc:
-                    logger.exception("NVIDIA RTX VSR post-processing failed")
-                    status_parts.append(f"**NVIDIA RTX VSR failed** -- {exc}")
+                    logger.exception("NVIDIA VideoFX post-processing failed")
+                    status_parts.append(f"**NVIDIA VideoFX failed** -- {exc}")
 
             if bool(audio_enabled_v):
                 try:
@@ -1159,7 +1459,16 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
             return final_video_path, "\n\n".join(status_parts)
 
-        run.click(
+        def _clear_previous_video():
+            return gr.update(value=None), "**Generating** -- preparing Wan video..."
+
+        run_event = run.click(
+            _clear_previous_video,
+            outputs=[video_out, status],
+            show_progress="hidden",
+            queue=False,
+        )
+        run_event.then(
             _run,
             inputs=[
                 source,
@@ -1216,6 +1525,21 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 vsr_mode,
                 vsr_effect,
                 vsr_strength,
+                videofx_denoise_enabled,
+                videofx_denoise_strength,
+                videofx_aigs_enabled,
+                videofx_aigs_comp,
+                videofx_aigs_blur,
+                videofx_aigs_bg,
+                videofx_aigs_cuda_graph,
+                videofx_relight_enabled,
+                videofx_relight_hdr,
+                videofx_relight_bg_mode,
+                videofx_relight_pan,
+                videofx_relight_vfov,
+                videofx_relight_bg,
+                videofx_relight_bg_text,
+                videofx_relight_autorotate,
                 audio_enabled,
                 audio_prompt,
                 audio_kind,
@@ -1227,6 +1551,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             ],
             outputs=[video_out, status],
             show_progress="minimal",
+            show_progress_on=[status],
         )
 
         if tab is not None:

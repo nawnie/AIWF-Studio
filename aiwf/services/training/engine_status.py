@@ -39,7 +39,7 @@ _ENGINE_DEFAULTS = {
     },
     "ed2": {
         "label": "ED2 Full Fine-tune",
-        "repo_dir": "training/EveryDream2trainer",
+        "repo_dir": "engines/ed2/EveryDream2trainer",
         "venv_dir": "engines/ed2/.venv",
         "worker_script": "engines/ed2/worker.py",
         "entry_script": "train.py",

@@ -12,7 +12,6 @@ from aiwf.dev.diagnostics import (
     trace_studio_generate,
     trace_studio_request_built,
 )
-from aiwf.core.domain.controlnet import ControlNetUnit
 from aiwf.core.domain.enhance import RestoreOptions
 from aiwf.core.domain.faceswap import FaceSwapOptions
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest, JobState
@@ -31,11 +30,11 @@ from aiwf.infrastructure.diffusers.mask import (
     prepare_outpaint,
     resolve_inpaint_mask,
 )
-from aiwf.infrastructure.diffusers.controlnet_pipe import assert_controlnet_checkpoint_compatible
 from aiwf.infrastructure.faceswap import FaceSwapUnavailable
 from aiwf.web.components.checkpoints import checkpoint_dropdown, format_model_status, refresh_checkpoints
 from aiwf.web.components.results import format_generation_outputs, results_gallery
 from aiwf.web.studio.catalogs import StudioCatalogs
+from aiwf.web.studio.controlnet_stack import StudioControlNetSlot, build_controlnet_stack
 from aiwf.web.studio.constants import EMPTY_CANVAS, MODE_TITLES, MODES, TOOLBAR_HINTS
 from aiwf.web.studio.generation_runner import GenerationRunner
 from aiwf.web.studio.handlers import compare as compare_handlers
@@ -66,8 +65,12 @@ from aiwf.web.studio.helpers import (
 )
 from aiwf.web.studio.mode_ui import apply_mode_ui, on_mode_change
 from aiwf.web.studio.session import StudioSession
+from aiwf.web.studio.summaries import (
+    model_help_markdown as _model_help_md,
+    result_summary_markdown as _result_summary_md,
+)
 
-def _result_summary_md(job, new_seed, job_status):
+def _legacy_result_summary_md(job, new_seed, job_status):
     """Rich post-generation summary: prompt, steps, CFG, sampler, size, timing,
     speed, and LoRAs — shown in the Studio status area after each render."""
     import re as _re
@@ -109,7 +112,7 @@ def _result_summary_md(job, new_seed, job_status):
     return "  \n".join(lines)
 
 
-def _model_help_md(ckpt_title):
+def _legacy_model_help_md(ckpt_title):
     """One-line guidance for the selected model (distilled vs standard)."""
     from aiwf.core.model_profile import detect_model_profile
 
@@ -740,35 +743,81 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                     build_segment_panel(ctx)
                 with gr.Accordion("ControlNet", open=False, elem_classes=["aiwf-prompt-tools", "aiwf-controlnet-panel"]):
                     gr.Markdown(
-                        "Guide txt2img / img2img with a control image (edges, pose, depth…). "
-                        "Download models in **Models → ControlNet**. SD1.5 ControlNet pairs with SD1.5 checkpoints only.",
+                        "Guide txt2img / img2img with up to three stacked control images (edges, pose, depth...). "
+                        "Download models in **Models -> ControlNet**. Match SD1.5 ControlNets with SD1.5 checkpoints and SDXL ControlNets with SDXL checkpoints.",
                         elem_classes=["aiwf-settings-paths"],
                     )
-                    cn_enable = gr.Checkbox(label="Enable ControlNet", value=False)
+                    cn_enable = gr.Checkbox(label="Enable ControlNet unit 1", value=False)
                     _cn_models = ctx.controlnet.list_models()
                     cn_model = gr.Dropdown(
-                        label="ControlNet model",
+                        label="Unit 1 model",
                         choices=[(m.title, m.id) for m in _cn_models],
                         value=(_cn_models[0].id if _cn_models else None),
                     )
                     cn_module = gr.Dropdown(
-                        label="Preprocessor",
+                        label="Unit 1 preprocessor",
                         choices=ctx.controlnet.list_modules(),
                         value="canny",
                         info="`none` = use your image as-is (precomputed control map)",
                     )
-                    cn_image = gr.Image(label="Control image", type="pil", sources=["upload", "clipboard"])
+                    cn_image = gr.Image(label="Unit 1 control image", type="pil", sources=["upload", "clipboard"])
                     with gr.Row():
                         cn_weight = gr.Slider(0, 2, value=1.0, step=0.05, label="Weight")
                         cn_guidance_start = gr.Slider(0, 1, value=0.0, step=0.01, label="Guidance start")
                         cn_guidance_end = gr.Slider(0, 1, value=1.0, step=0.01, label="Guidance end")
                     with gr.Row():
-                        cn_threshold_a = gr.Slider(1, 255, value=100, step=1, label="Canny low")
-                        cn_threshold_b = gr.Slider(1, 255, value=200, step=1, label="Canny high")
+                        cn_threshold_a = gr.Slider(1, 255, value=100, step=1, label="Threshold A")
+                        cn_threshold_b = gr.Slider(1, 255, value=200, step=1, label="Threshold B")
                     with gr.Row():
                         cn_refresh = gr.Button("Refresh models", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
-                        cn_preview_btn = gr.Button("Preview control map", elem_classes=["aiwf-btn-ghost"])
-                    cn_preview = gr.Image(label="Control map preview", type="pil", interactive=False)
+                        cn_preview_btn = gr.Button("Preview unit 1", elem_classes=["aiwf-btn-ghost"])
+                    cn_preview = gr.Image(label="Unit 1 control map preview", type="pil", interactive=False)
+                    with gr.Accordion("ControlNet unit 2", open=False, elem_classes=["aiwf-controlnet-unit"]):
+                        cn2_enable = gr.Checkbox(label="Enable ControlNet unit 2", value=False)
+                        cn2_model = gr.Dropdown(
+                            label="Unit 2 model",
+                            choices=[(m.title, m.id) for m in _cn_models],
+                            value=(_cn_models[0].id if _cn_models else None),
+                        )
+                        cn2_module = gr.Dropdown(
+                            label="Unit 2 preprocessor",
+                            choices=ctx.controlnet.list_modules(),
+                            value="depth",
+                            info="`none` = use your image as-is (precomputed control map)",
+                        )
+                        cn2_image = gr.Image(label="Unit 2 control image", type="pil", sources=["upload", "clipboard"])
+                        with gr.Row():
+                            cn2_weight = gr.Slider(0, 2, value=0.8, step=0.05, label="Weight")
+                            cn2_guidance_start = gr.Slider(0, 1, value=0.0, step=0.01, label="Guidance start")
+                            cn2_guidance_end = gr.Slider(0, 1, value=1.0, step=0.01, label="Guidance end")
+                        with gr.Row():
+                            cn2_threshold_a = gr.Slider(1, 255, value=100, step=1, label="Threshold A")
+                            cn2_threshold_b = gr.Slider(1, 255, value=200, step=1, label="Threshold B")
+                        cn2_preview_btn = gr.Button("Preview unit 2", elem_classes=["aiwf-btn-ghost"])
+                        cn2_preview = gr.Image(label="Unit 2 control map preview", type="pil", interactive=False)
+                    with gr.Accordion("ControlNet unit 3", open=False, elem_classes=["aiwf-controlnet-unit"]):
+                        cn3_enable = gr.Checkbox(label="Enable ControlNet unit 3", value=False)
+                        cn3_model = gr.Dropdown(
+                            label="Unit 3 model",
+                            choices=[(m.title, m.id) for m in _cn_models],
+                            value=(_cn_models[0].id if _cn_models else None),
+                        )
+                        cn3_module = gr.Dropdown(
+                            label="Unit 3 preprocessor",
+                            choices=ctx.controlnet.list_modules(),
+                            value="openpose",
+                            info="`none` = use your image as-is (precomputed control map)",
+                        )
+                        cn3_image = gr.Image(label="Unit 3 control image", type="pil", sources=["upload", "clipboard"])
+                        with gr.Row():
+                            cn3_weight = gr.Slider(0, 2, value=0.6, step=0.05, label="Weight")
+                            cn3_guidance_start = gr.Slider(0, 1, value=0.0, step=0.01, label="Guidance start")
+                            cn3_guidance_end = gr.Slider(0, 1, value=1.0, step=0.01, label="Guidance end")
+                        with gr.Row():
+                            cn3_threshold_a = gr.Slider(1, 255, value=100, step=1, label="Threshold A")
+                            cn3_threshold_b = gr.Slider(1, 255, value=200, step=1, label="Threshold B")
+                        cn3_preview_btn = gr.Button("Preview unit 3", elem_classes=["aiwf-btn-ghost"])
+                        cn3_preview = gr.Image(label="Unit 3 control map preview", type="pil", interactive=False)
                 txt2img_advanced = gr.Column(elem_classes=["aiwf-advanced-mode", "aiwf-side-advanced-mode"])
                 with txt2img_advanced:
                     with gr.Accordion("Hires fix", open=False, elem_classes=["aiwf-prompt-tools", "aiwf-hires-panel"]):
@@ -966,11 +1015,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
     )
 
     def _on_checkpoint_change(ckpt_title, ckpt_map):
-        """Load the selected checkpoint immediately when the user clicks a model in the dropdown.
-
-        This gives instant feedback (logs + progress) instead of lazy-loading only on Generate.
-        The actual heavy work (from_single_file, attention opts, VAE, embeddings, etc.) happens here.
-        """
+        """Remember the selected checkpoint without loading model weights."""
         help_md = _model_help_md(ckpt_title)
         if not ckpt_title or not ckpt_map:
             return gr.update(), help_md
@@ -978,18 +1023,17 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         if ckpt_id is None:
             return gr.update(value=f"**Error:** unknown checkpoint {ckpt_title}"), help_md
         try:
-            ctx.generation.load_checkpoint(ckpt_id)
+            ctx.generation.remember_checkpoint_selection(ckpt_id)
             base_status = format_model_status(ctx)
-            return gr.update(value=f"**Loaded:** {ckpt_title}\n\n{base_status}"), help_md
+            return gr.update(value=f"**Selected:** {ckpt_title}\n\n{base_status}"), help_md
         except Exception as exc:
-            # Inner load_checkpoint already logged details; just surface to UI status.
-            return gr.update(value=f"**Load failed:** {ckpt_title} — {exc}"), help_md
+            return gr.update(value=f"**Selection failed:** {ckpt_title}: {exc}"), help_md
 
     checkpoint.change(
         _on_checkpoint_change,
         inputs=[checkpoint, state],
         outputs=[model_status, model_help],
-        show_progress=True,
+        show_progress=False,
     )
 
     def stop_generation():
@@ -1448,7 +1492,19 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         value = current if current in ids else (models[0].id if models else None)
         return gr.update(choices=[(m.title, m.id) for m in models], value=value)
 
-    cn_refresh.click(_cn_models_update, inputs=[cn_model], outputs=[cn_model], show_progress=False)
+    def _cn_models_update_all(current1=None, current2=None, current3=None):
+        return (
+            _cn_models_update(current1),
+            _cn_models_update(current2),
+            _cn_models_update(current3),
+        )
+
+    cn_refresh.click(
+        _cn_models_update_all,
+        inputs=[cn_model, cn2_model, cn3_model],
+        outputs=[cn_model, cn2_model, cn3_model],
+        show_progress=False,
+    )
 
     def _cn_preview(image, module, threshold_a, threshold_b):
         if image is None:
@@ -1465,6 +1521,18 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         _cn_preview,
         inputs=[cn_image, cn_module, cn_threshold_a, cn_threshold_b],
         outputs=[cn_preview],
+        show_progress="minimal",
+    )
+    cn2_preview_btn.click(
+        _cn_preview,
+        inputs=[cn2_image, cn2_module, cn2_threshold_a, cn2_threshold_b],
+        outputs=[cn2_preview],
+        show_progress="minimal",
+    )
+    cn3_preview_btn.click(
+        _cn_preview,
+        inputs=[cn3_image, cn3_module, cn3_threshold_a, cn3_threshold_b],
+        outputs=[cn3_preview],
         show_progress="minimal",
     )
 
@@ -1840,6 +1908,24 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         cn_guidance_end,
         cn_threshold_a,
         cn_threshold_b,
+        cn2_enable,
+        cn2_model_id,
+        cn2_module,
+        cn2_image,
+        cn2_weight,
+        cn2_guidance_start,
+        cn2_guidance_end,
+        cn2_threshold_a,
+        cn2_threshold_b,
+        cn3_enable,
+        cn3_model_id,
+        cn3_module,
+        cn3_image,
+        cn3_weight,
+        cn3_guidance_start,
+        cn3_guidance_end,
+        cn3_threshold_a,
+        cn3_threshold_b,
         inpaint_source_choice,
     ):
         if not ckpt_map or not ckpt_title:
@@ -1959,43 +2045,59 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                 checkpoint_id=ckpt_id,
             )
 
+        control_images = None
         try:
-            ctx.controlnet.validate_enabled(
-                enabled=bool(cn_enable),
+            checkpoint_architecture = None
+            if ckpt_id:
+                checkpoint_architecture = ctx.generation.resolve_checkpoint(ckpt_id).architecture
+            units, control_images_list = build_controlnet_stack(
+                slots=[
+                    StudioControlNetSlot(
+                        "ControlNet unit 1",
+                        bool(cn_enable),
+                        cn_model_id,
+                        cn_module,
+                        cn_image,
+                        float(cn_weight),
+                        float(cn_guidance_start),
+                        float(cn_guidance_end),
+                        float(cn_threshold_a),
+                        float(cn_threshold_b),
+                    ),
+                    StudioControlNetSlot(
+                        "ControlNet unit 2",
+                        bool(cn2_enable),
+                        cn2_model_id,
+                        cn2_module,
+                        cn2_image,
+                        float(cn2_weight),
+                        float(cn2_guidance_start),
+                        float(cn2_guidance_end),
+                        float(cn2_threshold_a),
+                        float(cn2_threshold_b),
+                    ),
+                    StudioControlNetSlot(
+                        "ControlNet unit 3",
+                        bool(cn3_enable),
+                        cn3_model_id,
+                        cn3_module,
+                        cn3_image,
+                        float(cn3_weight),
+                        float(cn3_guidance_start),
+                        float(cn3_guidance_end),
+                        float(cn3_threshold_a),
+                        float(cn3_threshold_b),
+                    ),
+                ],
                 mode=mode,
-                model_id=cn_model_id,
-                control_image=cn_image,
+                controlnet=ctx.controlnet,
+                checkpoint_architecture=checkpoint_architecture,
             )
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
-        if cn_enable and cn_model_id and ckpt_id:
-            cn_model = ctx.controlnet.resolve_model(cn_model_id)
-            if cn_model is not None:
-                try:
-                    checkpoint = ctx.generation.resolve_checkpoint(ckpt_id)
-                    assert_controlnet_checkpoint_compatible(cn_model.path, checkpoint.architecture)
-                except ValueError as exc:
-                    raise gr.Error(str(exc)) from exc
-
-        control_images = None
-        if (
-            cn_enable
-            and cn_model_id
-            and cn_image is not None
-            and mode in ("txt2img", "img2img")
-        ):
-            unit = ControlNetUnit(
-                enabled=True,
-                model=cn_model_id,
-                module=cn_module or "none",
-                weight=float(cn_weight),
-                guidance_start=float(cn_guidance_start),
-                guidance_end=float(cn_guidance_end),
-                threshold_a=float(cn_threshold_a),
-                threshold_b=float(cn_threshold_b),
-            )
-            request = request.model_copy(update={"controlnet_units": [unit]})
-            control_images = [cn_image]
+        if units:
+            request = request.model_copy(update={"controlnet_units": units})
+            control_images = control_images_list
 
         trace_studio_request_built(
             mode=mode,
@@ -2190,6 +2292,24 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         cn_guidance_end,
         cn_threshold_a,
         cn_threshold_b,
+        cn2_enable,
+        cn2_model,
+        cn2_module,
+        cn2_image,
+        cn2_weight,
+        cn2_guidance_start,
+        cn2_guidance_end,
+        cn2_threshold_a,
+        cn2_threshold_b,
+        cn3_enable,
+        cn3_model,
+        cn3_module,
+        cn3_image,
+        cn3_weight,
+        cn3_guidance_start,
+        cn3_guidance_end,
+        cn3_threshold_a,
+        cn3_threshold_b,
         inpaint_source,
         continuous_enabled,
         cooldown_wait,
@@ -2306,6 +2426,24 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                     cn_guidance_end,
                     cn_threshold_a,
                     cn_threshold_b,
+                    cn2_enable,
+                    cn2_model,
+                    cn2_module,
+                    cn2_image,
+                    cn2_weight,
+                    cn2_guidance_start,
+                    cn2_guidance_end,
+                    cn2_threshold_a,
+                    cn2_threshold_b,
+                    cn3_enable,
+                    cn3_model,
+                    cn3_module,
+                    cn3_image,
+                    cn3_weight,
+                    cn3_guidance_start,
+                    cn3_guidance_end,
+                    cn3_threshold_a,
+                    cn3_threshold_b,
                     inpaint_source,
                 )
 
@@ -2595,6 +2733,24 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         cn_guidance_end,
         cn_threshold_a,
         cn_threshold_b,
+        cn2_enable,
+        cn2_model,
+        cn2_module,
+        cn2_image,
+        cn2_weight,
+        cn2_guidance_start,
+        cn2_guidance_end,
+        cn2_threshold_a,
+        cn2_threshold_b,
+        cn3_enable,
+        cn3_model,
+        cn3_module,
+        cn3_image,
+        cn3_weight,
+        cn3_guidance_start,
+        cn3_guidance_end,
+        cn3_threshold_a,
+        cn3_threshold_b,
         inpaint_source,
         continuous_toggle,
         cooldown_seconds,
@@ -2625,7 +2781,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         show_progress="minimal",
     )
 
-    def _on_studio_tab_select(mode_label, cn_current, current_ckpt):
+    def _on_studio_tab_select(mode_label, cn_current, cn2_current, cn3_current, current_ckpt):
         mode = mode_from_label(mode_label)
         ckpt_update, new_map = refresh_checkpoints(
             ctx, rescan=True, current_value=current_ckpt
@@ -2635,13 +2791,15 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
             format_model_status(ctx),
             new_map,
             _cn_models_update(cn_current),
+            _cn_models_update(cn2_current),
+            _cn_models_update(cn3_current),
             _pnginfo_pending_hint(),
         )
 
     if tab is not None:
         tab.select(
             _on_studio_tab_select,
-            inputs=[mode_toggle, cn_model, checkpoint],
-            outputs=[checkpoint, model_status, state, cn_model, pnginfo_hint],
+            inputs=[mode_toggle, cn_model, cn2_model, cn3_model, checkpoint],
+            outputs=[checkpoint, model_status, state, cn_model, cn2_model, cn3_model, pnginfo_hint],
             show_progress=False,
         )

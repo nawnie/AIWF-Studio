@@ -10,6 +10,7 @@ from PIL import Image
 
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.controlnet import ControlNetModelInfo, ControlNetUnit
+from aiwf.infrastructure.controlnet.catalog import iter_controlnet_model_paths, resolve_controlnet_roots
 from aiwf.infrastructure.controlnet.images import decode_control_image
 from aiwf.infrastructure.controlnet.preprocess import (
     PREPROCESS_MODULES,
@@ -17,7 +18,6 @@ from aiwf.infrastructure.controlnet.preprocess import (
     preprocess_control_image,
 )
 
-CONTROLNET_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}
 # Preprocessor vocabulary is owned by the preprocess module (single source of truth).
 CONTROLNET_MODULES = list(PREPROCESS_MODULES)
 
@@ -125,30 +125,6 @@ DOWNLOADABLE_CONTROLNETS: list[DownloadableControlNet] = [
     ),
 ]
 
-
-def resolve_controlnet_roots(flags: RuntimeFlags) -> list[Path]:
-    import os
-
-    roots: list[Path] = []
-    seen: set[str] = set()
-    model_roots = [flags.resolved_models_dir(), *flags.resolved_extra_model_dirs()]
-
-    def add(path: Path) -> None:
-        resolved = path.resolve()
-        key = os.path.normcase(str(resolved))
-        if resolved.exists() and key not in seen:
-            seen.add(key)
-            roots.append(resolved)
-
-    for models_dir in model_roots:
-        if models_dir.name.lower() == "controlnet":
-            add(models_dir)
-        for candidate in (models_dir / "ControlNet", models_dir / "controlnet", models_dir / "control_net"):
-            add(candidate)
-
-    return roots
-
-
 class ControlNetService:
     """Catalog and request surface for ControlNet without coupling UI/API to diffusers."""
 
@@ -158,22 +134,15 @@ class ControlNetService:
     def models_dir(self) -> Path:
         return self.flags.resolved_models_dir() / "ControlNet"
 
+    def annotators_dir(self) -> Path:
+        return self.models_dir() / "Annotators"
+
     def ensure_dir(self) -> None:
         self.models_dir().mkdir(parents=True, exist_ok=True)
+        self.annotators_dir().mkdir(parents=True, exist_ok=True)
 
     def list_models(self) -> list[ControlNetModelInfo]:
-        files: list[Path] = []
-        seen: set[str] = set()
-        for root in resolve_controlnet_roots(self.flags):
-            for path in root.rglob("*"):
-                if not path.is_file() or path.suffix.lower() not in CONTROLNET_EXTENSIONS:
-                    continue
-                resolved = str(path.resolve()).lower()
-                if resolved in seen:
-                    continue
-                seen.add(resolved)
-                files.append(path)
-        return [ControlNetModelInfo.from_path(path) for path in sorted(files, key=lambda item: item.name.lower())]
+        return [ControlNetModelInfo.from_path(path) for path in iter_controlnet_model_paths(self.flags)]
 
     def model_ids(self) -> list[str]:
         return [model.id for model in self.list_models()]
@@ -229,6 +198,7 @@ class ControlNetService:
             processor_res=int(processor_res),
             threshold_a=float(threshold_a),
             threshold_b=float(threshold_b),
+            annotator_dir=str(self.annotators_dir()),
         )
         return preprocess_control_image(image, module or "none", params)
 

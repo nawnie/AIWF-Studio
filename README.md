@@ -140,8 +140,17 @@ Use Tailscale when possible. If you launch with network listening enabled, add a
 ## Project Shape
 
 - `main` is the stable runtime branch for users.
-- `dev` keeps broader experiments, tests, docs, and active research work.
+- `dev` keeps broader experiments and active research work.
+- `docs/`, `tests/`, and `scripts/` are part of the public maintainability story.
 - runtime data such as models, outputs, local configs, and agent notes are ignored.
+
+Useful project docs:
+
+- `ARCHITECTURE.md`
+- `CONTRIBUTING.md`
+- `docs/DEPENDENCY_POLICY.md`
+- `docs/ENGINE_ISOLATION.md`
+- `docs/TRAINING_ENGINE_ROADMAP.md`
 
 ## WIP And Help Wanted
 

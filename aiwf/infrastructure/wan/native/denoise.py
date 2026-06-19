@@ -312,6 +312,7 @@ def _run_native_wan_denoise_impl(
     attention_kwargs: dict[str, Any] | None = None,
     callback_on_step_end: Callable[..., Any] | None = None,
     callback_on_step_end_tensor_inputs: Sequence[str] = ("latents",),
+    aiwf_on_phase_progress: Callable[[str], Any] | None = None,
     max_sequence_length: int = 512,
     **_extra: Any,
 ) -> NativeWanDenoiseOutput:
@@ -332,6 +333,14 @@ def _run_native_wan_denoise_impl(
     transformer_2 = getattr(pipe, "transformer_2", None)
     if transformer is None and transformer_2 is None:
         raise RuntimeError("Wan pipeline has neither transformer nor transformer_2 loaded.")
+
+    def _emit_phase(message: str) -> None:
+        if aiwf_on_phase_progress is None:
+            return
+        try:
+            aiwf_on_phase_progress(message)
+        except Exception:
+            pass
 
     device = getattr(pipe, "_aiwf_execution_device", None) or pipe._execution_device
 
@@ -487,6 +496,8 @@ def _run_native_wan_denoise_impl(
     except Exception:
         pass
 
+    _emit_phase("Denoising video; first GGUF step can take several minutes")
+
     for i, t in enumerate(timesteps):
         step_started = time.perf_counter()
         if pipe.interrupt:
@@ -592,6 +603,8 @@ def _run_native_wan_denoise_impl(
         latents = (1 - first_frame_mask) * condition + first_frame_mask * latents
 
     if output_type != "latent":
+        _emit_phase("Denoise complete; decoding video frames")
+        _emit_phase("Decoding video frames")
         latents = latents.to(pipe.vae.dtype)
         latents_mean = (
             torch.tensor(pipe.vae.config.latents_mean)
@@ -603,8 +616,10 @@ def _run_native_wan_denoise_impl(
         ).to(latents.device, latents.dtype)
         latents = latents / latents_std + latents_mean
         video = pipe.vae.decode(latents, return_dict=False)[0]
+        _emit_phase("Post-processing video frames")
         video = pipe.video_processor.postprocess_video(video, output_type=output_type)
     else:
+        _emit_phase("Denoise complete; returning latents")
         video = latents
 
     pipe.maybe_free_model_hooks()

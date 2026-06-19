@@ -4,18 +4,17 @@ import html
 import logging
 import os
 import platform
-import threading
 from functools import lru_cache
 from pathlib import Path
 
 import gradio as gr
 
 from aiwf.bootstrap import AppContext
-from aiwf.web.components.checkpoints import resolve_default_checkpoint
 from aiwf.web.registry import WebRegistry
 from aiwf.web.studio import register_studio
 from aiwf.web.tabs.audio import register_audio
 from aiwf.web.tabs.enhance import register_enhance
+from aiwf.web.tabs.faceswap import register_faceswap
 from aiwf.web.tabs.history import register_history
 from aiwf.web.tabs.wan_i2v import register_wan_i2v
 from aiwf.web.tabs.library import register_library
@@ -33,25 +32,6 @@ _STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 def _static_text(name: str) -> str:
     path = _STATIC_DIR / name
     return path.read_text(encoding="utf-8") if path.exists() else ""
-
-
-def _preload_default_checkpoint(ctx: AppContext) -> None:
-    try:
-        checkpoints = ctx.generation.list_checkpoints()
-        target = resolve_default_checkpoint(checkpoints, ctx.settings.last_checkpoint_id)
-        if target is None:
-            return
-        can_preload = getattr(ctx.generation.backend, "can_preload_checkpoint_locally", None)
-        if callable(can_preload) and not can_preload(target.id):
-            logger.info(
-                "Skipping background checkpoint preload for %s: local Diffusers config cache is not available.",
-                target.title,
-            )
-            return
-        ctx.generation.load_checkpoint(target.id)
-        logger.info("Preloaded checkpoint: %s", target.title)
-    except Exception:
-        logger.exception("Background checkpoint preload failed")
 
 
 def _topbar_runtime_html(ctx: AppContext) -> str:
@@ -111,18 +91,15 @@ def register_default_tabs(registry: WebRegistry) -> None:
     register_model_manager(registry)
     register_enhance(registry)
     register_segment(registry)
+    register_faceswap(registry)
     register_library(registry)
     register_pnginfo(registry)
     register_history(registry)
     if enable_wip_tabs:
         from aiwf.web.tabs.chat_workspace import register_chat_workspace
-        from aiwf.web.tabs.faceswap import register_faceswap
-        from aiwf.web.tabs.training import register_training
         from aiwf.web.tabs.workflows import register_workflows
 
         register_chat_workspace(registry)
-        register_training(registry)
-        register_faceswap(registry)
         register_workflows(registry)
     register_settings(registry)
 
@@ -191,16 +168,6 @@ def create_web_ui(ctx: AppContext) -> tuple[gr.Blocks, object, str, str]:
             elem_classes=["aiwf-topbar-wrap"],
         )
         registry.mount(ctx)
-
-        def startup():
-            threading.Thread(
-                target=_preload_default_checkpoint,
-                args=(ctx,),
-                name="aiwf-checkpoint-preload",
-                daemon=True,
-            ).start()
-
-        demo.load(fn=startup, inputs=None, outputs=None, show_progress=False)
 
     return (
         demo,

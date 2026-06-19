@@ -15,8 +15,10 @@ VENV = ROOT / "venv"
 REQUIREMENTS = ROOT / "requirements.txt"
 ENGINES_CONFIG = ROOT / "engines.json"
 TORCH_INDEX = os.environ.get("TORCH_INDEX_URL", "https://download.pytorch.org/whl/cu124")
+PYPI_INDEX = os.environ.get("PYPI_INDEX_URL", "https://pypi.org/simple")
 TORCH_CUDA_VERSION = os.environ.get("TORCH_CUDA_VERSION", "2.6.0+cu124")
 TORCHVISION_CUDA_VERSION = os.environ.get("TORCHVISION_CUDA_VERSION", "0.21.0+cu124")
+TORCHAUDIO_CUDA_VERSION = os.environ.get("TORCHAUDIO_CUDA_VERSION", "2.6.0+cu124")
 XFORMERS_PACKAGE = os.environ.get("XFORMERS_PACKAGE", "xformers==0.0.29.post3")
 
 
@@ -187,7 +189,7 @@ def _build_engine_registry() -> list[EngineSpec]:
         label="EveryDream2 full trainer",
         worker_script=ROOT / "engines" / "ed2" / "worker.py",
         venv_dir=_engine_venv_dir("ed2", cfg, "engines/ed2/.venv"),
-        repo_dir=_engine_path("ed2", "repo_dir", cfg, "training/EveryDream2trainer"),
+        repo_dir=_engine_path("ed2", "repo_dir", cfg, "engines/ed2/EveryDream2trainer"),
         repo_requirements="requirements.txt",
         extra_requirements=ROOT / "engines" / "ed2" / "requirements.txt",
         skip_flag="--skip-ed2",
@@ -291,8 +293,11 @@ def install_cuda_torch(py: str) -> None:
             "--force-reinstall",
             f"torch=={TORCH_CUDA_VERSION}",
             f"torchvision=={TORCHVISION_CUDA_VERSION}",
+            f"torchaudio=={TORCHAUDIO_CUDA_VERSION}",
             "--index-url",
             TORCH_INDEX,
+            "--extra-index-url",
+            PYPI_INDEX,
         ]
     )
 

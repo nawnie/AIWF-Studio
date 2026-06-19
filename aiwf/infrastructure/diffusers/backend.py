@@ -60,6 +60,7 @@ from aiwf.infrastructure.diffusers.controlnet_pipe import (
     assert_controlnet_checkpoint_compatible,
     build_controlnet_pipeline,
 )
+from aiwf.infrastructure.controlnet.catalog import iter_controlnet_model_paths, resolve_controlnet_roots
 from aiwf.infrastructure.controlnet.images import decode_control_image
 from aiwf.infrastructure.controlnet.preprocess import PreprocessParams, preprocess_control_image
 from aiwf.infrastructure.diffusers.model_arch import (
@@ -517,6 +518,16 @@ class DiffusersBackend:
 
         dtype = self.devices.dtype(self.flags.no_half)
         path = Path(checkpoint.path)
+        # An inpaint checkpoint has a 9-channel UNet conv_in; loading it through the
+        # 4-channel txt2img pipeline raises a cryptic
+        # "conv_in.weight expected [320,4,3,3], got [320,9,3,3]" ValueError. Detection
+        # already happened at scan time — branch on it and give an actionable message
+        # instead. (Inpaint checkpoints load via _load_inpaint_checkpoint in Inpaint mode.)
+        if is_inpaint_architecture(checkpoint.architecture):
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' is an inpaint checkpoint (9-channel UNet) and can't be "
+                "loaded for txt2img/img2img. Switch to Inpaint mode, or pick a standard checkpoint."
+            )
         pipeline_cls = (
             StableDiffusionXLPipeline
             if is_sdxl_architecture(checkpoint.architecture)
@@ -600,7 +611,7 @@ class DiffusersBackend:
         if hasattr(pipe, "safety_checker"):
             pipe.safety_checker = None
 
-        self._txt2img = pipe
+        self._inpaint = pipe
         self._inpaint_active = checkpoint
         return pipe
 
@@ -785,10 +796,16 @@ class DiffusersBackend:
         parsed_prompt: str,
         generator,
         callback,
-        unit: ControlNetUnit,
-        control_image: Image.Image,
+        units: list[ControlNetUnit],
+        control_images: list[Image.Image],
         init_images: list[Image.Image] | None,
     ):
+        if not units or not control_images:
+            raise ValueError("ControlNet requires at least one active unit and control image.")
+        multi = len(units) > 1
+        scales = [float(unit.weight) for unit in units]
+        starts = [float(unit.guidance_start) for unit in units]
+        ends = [float(unit.guidance_end) for unit in units]
         prompt_kwargs = build_prompt_kwargs(
             pipe,
             parsed_prompt,
@@ -803,9 +820,9 @@ class DiffusersBackend:
             generator=generator,
             callback_on_step_end=callback,
             callback_on_step_end_tensor_inputs=["latents"],
-            controlnet_conditioning_scale=float(unit.weight),
-            control_guidance_start=float(unit.guidance_start),
-            control_guidance_end=float(unit.guidance_end),
+            controlnet_conditioning_scale=scales if multi else scales[0],
+            control_guidance_start=starts if multi else starts[0],
+            control_guidance_end=ends if multi else ends[0],
         )
         if request.mode == GenerationMode.IMG2IMG:
             assert init_images is not None
@@ -813,26 +830,30 @@ class DiffusersBackend:
             width, height = align_to_multiple_of_8(base.width, base.height)
             if base.size != (width, height):
                 base = base.resize((width, height), Image.Resampling.LANCZOS)
-            control = control_image.resize((width, height), Image.Resampling.LANCZOS)
+            controls = [
+                image.resize((width, height), Image.Resampling.LANCZOS)
+                for image in control_images
+            ]
             output = pipe(
                 **common,
                 image=base,
-                control_image=control,
+                control_image=controls if multi else controls[0],
                 strength=request.denoising_strength,
             )
             return output, width, height
 
         width, height = align_to_multiple_of_8(request.width, request.height)
-        control = control_image.resize((width, height), Image.Resampling.LANCZOS)
+        controls = [
+            image.resize((width, height), Image.Resampling.LANCZOS)
+            for image in control_images
+        ]
         output = pipe(
             **common,
-            image=control,
+            image=controls if multi else controls[0],
             width=width,
             height=height,
         )
         return output, width, height
-
-    _CONTROLNET_EXTS = {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}
 
     def _controlnet_dir(self) -> Path:
         return self.flags.resolved_models_dir() / "ControlNet"
@@ -840,34 +861,31 @@ class DiffusersBackend:
     def _resolve_controlnet_path(self, model_id: str | None) -> Path | None:
         if not model_id:
             return None
-        root = self._controlnet_dir()
-        if not root.exists():
-            return None
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or path.suffix.lower() not in self._CONTROLNET_EXTS:
-                continue
+        for path in iter_controlnet_model_paths(self.flags):
             if path.stem == model_id or path.name == model_id:
                 return path
         return None
 
-    def _prepare_controlnet(
+    def _prepare_controlnets(
         self,
         request: GenerationRequest,
         control_images: list[Image.Image] | None,
-    ) -> tuple[ControlNetUnit, Image.Image, Path] | None:
-        """Resolve the first usable ControlNet unit into (unit, control_image, path).
+    ) -> list[tuple[ControlNetUnit, Image.Image, Path]]:
+        """Resolve usable ControlNet units into (unit, control_image, path) tuples.
 
-        Returns None when ControlNet is not active or cannot be satisfied.
+        Returns an empty list when ControlNet is not active or cannot be satisfied.
         """
         if request.mode not in (GenerationMode.TXT2IMG, GenerationMode.IMG2IMG):
-            return None
+            return []
         supplied = list(control_images or [])
+        prepared: list[tuple[ControlNetUnit, Image.Image, Path]] = []
         for index, unit in enumerate(request.controlnet_units or []):
             if not unit.enabled or not unit.model:
                 continue
             path = self._resolve_controlnet_path(unit.model)
             if path is None:
-                logger.warning("ControlNet model %s not found in %s", unit.model, self._controlnet_dir())
+                roots = ", ".join(str(root) for root in resolve_controlnet_roots(self.flags)) or str(self._controlnet_dir())
+                logger.warning("ControlNet model %s not found in %s", unit.model, roots)
                 continue
             control = supplied[index] if index < len(supplied) else decode_control_image(unit.image)
             if control is None:
@@ -881,10 +899,11 @@ class DiffusersBackend:
                         processor_res=unit.processor_res,
                         threshold_a=unit.threshold_a,
                         threshold_b=unit.threshold_b,
+                        annotator_dir=str(self._controlnet_dir() / "Annotators"),
                     ),
                 )
-            return unit, control.convert("RGB"), path
-        return None
+            prepared.append((unit, control.convert("RGB"), path))
+        return prepared
 
     def generate(
         self,
@@ -939,22 +958,28 @@ class DiffusersBackend:
         if self._img2img is not None and adapter_names:
             apply_loras(self._img2img, parsed.loras, self.list_loras())
 
-        controlnet = self._prepare_controlnet(request, control_images)
-        if any(unit.enabled for unit in (request.controlnet_units or [])) and controlnet is None:
+        controlnets = self._prepare_controlnets(request, control_images)
+        if any(unit.enabled for unit in (request.controlnet_units or [])) and not controlnets:
             raise ValueError(
                 "ControlNet was enabled but could not run — check that the model file exists "
                 "under models/ControlNet and a control image was provided."
             )
         cn_pipe = None
-        if controlnet is not None:
-            cn_unit, cn_image, cn_path = controlnet
-            assert_controlnet_checkpoint_compatible(cn_path, checkpoint.architecture)
+        cn_units: list[ControlNetUnit] = []
+        cn_images: list[Image.Image] = []
+        if controlnets:
+            cn_units = [unit for unit, _image, _path in controlnets]
+            cn_images = [image for _unit, image, _path in controlnets]
+            cn_paths = [path for _unit, _image, path in controlnets]
+            for cn_path in cn_paths:
+                assert_controlnet_checkpoint_compatible(cn_path, checkpoint.architecture)
             if request.enable_hr:
                 logger.warning("Hires fix is ignored while ControlNet is active.")
             dtype = self.devices.dtype(self.flags.no_half)
-            cn_model = self._controlnet_cache.load(str(cn_path), dtype=dtype)
+            cn_models = [self._controlnet_cache.load(str(path), dtype=dtype) for path in cn_paths]
+            cn_model_arg = cn_models if len(cn_models) > 1 else cn_models[0]
             cn_pipe = build_controlnet_pipeline(
-                pipe, cn_model, img2img=request.mode == GenerationMode.IMG2IMG
+                pipe, cn_model_arg, img2img=request.mode == GenerationMode.IMG2IMG
             )
             cn_pipe = self._place_pipeline(cn_pipe, prefer_offload=self._wants_offload(checkpoint.architecture))
 
@@ -1002,8 +1027,8 @@ class DiffusersBackend:
                         parsed.prompt,
                         generator,
                         callback,
-                        cn_unit,
-                        cn_image,
+                        cn_units,
+                        cn_images,
                         init_images,
                     )
                     batch_images = output.images

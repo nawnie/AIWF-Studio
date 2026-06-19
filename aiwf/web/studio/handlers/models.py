@@ -20,11 +20,11 @@ def on_checkpoint_change(ctx: AppContext, ckpt_title: str | None, ckpt_map: dict
     if ckpt_id is None:
         return gr.update(value=f"**Error:** unknown checkpoint {ckpt_title}")
     try:
-        ctx.generation.load_checkpoint(ckpt_id)
+        ctx.generation.remember_checkpoint_selection(ckpt_id)
         base_status = format_model_status(ctx)
-        return gr.update(value=f"**Loaded:** {ckpt_title}\n\n{base_status}")
+        return gr.update(value=f"**Selected:** {ckpt_title}\n\n{base_status}")
     except Exception as exc:
-        return gr.update(value=f"**Load failed:** {ckpt_title} — {exc}")
+        return gr.update(value=f"**Selection failed:** {ckpt_title}: {exc}")
 
 
 def refresh_vaes(ctx: AppContext, current=None):

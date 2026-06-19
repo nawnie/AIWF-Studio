@@ -79,7 +79,24 @@ def suggest_lora_keywords(metadata: dict[str, str], *, limit: int = 8) -> str:
     if not isinstance(frequencies, dict):
         return ""
 
-    ranked = sorted(frequencies.items(), key=lambda item: (-float(item[1]), str(item[0])))
+    flattened: dict[str, float] = {}
+    for tag, count in frequencies.items():
+        if isinstance(count, dict):
+            for nested_tag, nested_count in count.items():
+                try:
+                    flattened[str(nested_tag)] = flattened.get(str(nested_tag), 0.0) + float(nested_count)
+                except (TypeError, ValueError):
+                    continue
+            continue
+        try:
+            flattened[str(tag)] = flattened.get(str(tag), 0.0) + float(count)
+        except (TypeError, ValueError):
+            continue
+
+    if not flattened:
+        return ""
+
+    ranked = sorted(flattened.items(), key=lambda item: (-item[1], item[0]))
     tags = [str(tag) for tag, _count in ranked[:limit]]
     return ", ".join(tags)
 

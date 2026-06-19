@@ -24,7 +24,7 @@ class RifeService:
         self.supervisor = supervisor
 
     def folder_help(self) -> str:
-        root = resolve_vfi_root()
+        root = self._vfi_root()
         models_dir = self.flags.resolved_models_dir() / "rife"
         lines = [
             f"RIFE uses **ComfyUI-Frame-Interpolation** (Practical-RIFE). "
@@ -42,7 +42,11 @@ class RifeService:
         return "  \n".join(lines)
 
     def list_checkpoints(self) -> list[str]:
-        return list_rife_checkpoints(resolve_vfi_root())
+        return list_rife_checkpoints(self._vfi_root())
+
+    def _vfi_root(self) -> Path | None:
+        local = self.flags.data_dir / "engines" / "ComfyUI-Frame-Interpolation"
+        return resolve_vfi_root(extra_roots=[local])
 
     def default_checkpoint(self) -> str:
         choices = self.list_checkpoints()
@@ -91,6 +95,7 @@ class RifeService:
                     max_input_frames=options.max_input_frames,
                     target_fps=options.target_fps,
                     device=self.devices.device(),
+                    vfi_root=self._vfi_root(),
                     on_progress=on_progress,
                 )
             except RifeUnavailable:

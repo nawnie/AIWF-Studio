@@ -81,8 +81,11 @@ class WanI2VRequest(BaseModel):
     temporal_chunks: bool = False
     chunk_size: int = Field(default=24, ge=4, le=64)
     chunk_overlap: int = Field(default=0, ge=0, le=32)
-    # Image guidance scale: boosts reference image conditioning relative to text.
-    # 1.0 = standard Wan behavior. Increase (1.5-3.0) to reduce drift at long frame counts.
+    # Low-noise stage CFG for Wan 2.2 dual high/low pairs (maps to diffusers'
+    # `guidance_scale_2`). 1.0 = reuse `guidance_scale` for both stages. Only applied on
+    # the dual transformer path; ignored by the single 5B path. (Despite the legacy field
+    # name, diffusers 0.38 has no Wan `image_guidance_scale` — that arg is InstructPix2Pix
+    # only — so this is plumbed through the real low-noise guidance knob.)
     image_guidance_scale: float = Field(default=1.0, ge=1.0, le=10.0)
     # Explicit text encoder path. "" = use the encoder inside components_base/text_encoder/
     # (full-precision UMT5-XXL, largest). Point to a file from models/Textencoder/ to use
@@ -182,7 +185,7 @@ class WanI2VRequest(BaseModel):
 class WanI2VResult(BaseModel):
     output_path: str
     frame_count: int = Field(default=0, ge=0)
-    fps: int = Field(default=24, ge=1)
+    fps: int = Field(default=16, ge=1)  # Wan renders at 16 fps; service also falls back to 16
     width: int = Field(default=0, ge=0)
     height: int = Field(default=0, ge=0)
     elapsed_seconds: float = 0.0

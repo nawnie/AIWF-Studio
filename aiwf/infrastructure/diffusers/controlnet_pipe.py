@@ -1,9 +1,10 @@
 """ControlNet pipeline construction for the diffusers backend.
 
 Isolated here so the rest of the backend stays readable. Loads a
-``ControlNetModel`` from a single-file checkpoint (cached by path) and builds a
-ControlNet pipeline that reuses an already-loaded base pipeline's components, so
-switching ControlNet on/off never reloads the base checkpoint.
+``ControlNetModel`` from a single-file checkpoint or Diffusers folder (cached by
+path) and builds a ControlNet pipeline that reuses an already-loaded base
+pipeline's components, so switching ControlNet on/off never reloads the base
+checkpoint.
 
 This module touches torch/diffusers and therefore runs only with the GPU stack
 installed; it is import-guarded and unit-tested at the structural level.
@@ -32,8 +33,15 @@ _SD15_CONTROLNET_CONFIG = "lllyasviel/sd-controlnet-canny"
 
 def infer_controlnet_architecture(path: str | Path) -> str:
     """Best-effort ControlNet weight family from filename (sd15 vs sdxl)."""
-    name = Path(path).name.lower()
-    if "sdxl" in name or "controlnet-xl" in name or "xl_control" in name:
+    path = Path(path)
+    name = path.name.lower()
+    parts = " ".join(part.lower() for part in path.parts)
+    if (
+        "sdxl" in parts
+        or "xl_control" in parts
+        or "controlnet-xl" in parts
+        or name.startswith(("diffusers_xl_", "sargezt_xl_", "thibaud_xl_", "sai_xl_"))
+    ):
         return "sdxl"
     if is_control_lora_checkpoint(path) or "sd15" in name or "v11" in name:
         return "sd15"
@@ -63,7 +71,10 @@ def assert_controlnet_checkpoint_compatible(
 
 def is_control_lora_checkpoint(path: str | Path) -> bool:
     """True when the file is a SAI-style SD1.5 Control LoRA (rank128) checkpoint."""
-    name = Path(path).name.lower()
+    path = Path(path)
+    if path.is_dir():
+        return False
+    name = path.name.lower()
     if "control_lora" in name:
         return True
     try:
@@ -83,6 +94,14 @@ def _load_control_lora_checkpoint(path: Path, *, dtype: torch.dtype) -> ControlN
     return model
 
 
+def _load_single_file_controlnet(path: Path, *, dtype: torch.dtype) -> ControlNetModel:
+    kwargs = {"torch_dtype": dtype}
+    original_config = path.with_suffix(".yaml")
+    if original_config.is_file():
+        kwargs["original_config"] = str(original_config)
+    return ControlNetModel.from_single_file(str(path), **kwargs)
+
+
 class ControlNetModelCache:
     """Loads and caches ControlNetModel weights by checkpoint path."""
 
@@ -98,9 +117,12 @@ class ControlNetModelCache:
         if is_control_lora_checkpoint(resolved):
             logger.info("Loading ControlNet LoRA %s", path)
             model = _load_control_lora_checkpoint(resolved, dtype=dtype)
+        elif resolved.is_dir():
+            logger.info("Loading ControlNet Diffusers folder %s", path)
+            model = ControlNetModel.from_pretrained(str(resolved), torch_dtype=dtype)
         else:
             logger.info("Loading ControlNet model %s", path)
-            model = ControlNetModel.from_single_file(str(resolved), torch_dtype=dtype)
+            model = _load_single_file_controlnet(resolved, dtype=dtype)
         self._cache[key] = model
         return model
 

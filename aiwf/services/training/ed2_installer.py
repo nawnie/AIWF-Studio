@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
 
-ED2_REPO_URL = "https://github.com/victorchall/EveryDream2trainer.git"
-ED2_ADDON_RELATIVE = Path("training") / "EveryDream2trainer"
+DEFAULT_ED2_REPO_URL = "https://github.com/victorchall/EveryDream2trainer.git"
+ED2_REPO_URL_ENV = "AIWF_ED2_REPO_URL"
+ED2_ADDON_RELATIVE = Path("engines") / "ed2" / "EveryDream2trainer"
 
 
 class ED2InstallError(RuntimeError):
@@ -22,17 +24,20 @@ def install_ed2_addon(
     repo_root: Path | str | None = None,
     *,
     python_exe: str | Path | None = None,
+    repo_url: str | None = None,
     install_requirements: bool = True,
     run_command: RunCommand = subprocess.run,
 ) -> list[str]:
     """Install EveryDream2 as an optional AIWF training add-on.
 
-    The add-on repo lives under ``training/EveryDream2trainer``. Dependencies
-    are installed from AIWF's overlay requirements, not ED2's legacy upstream
-    requirements file.
+    The add-on repo lives under ``engines/ed2/EveryDream2trainer``. Pass
+    ``repo_url`` or set ``AIWF_ED2_REPO_URL`` to clone Shawn's fork instead of
+    the upstream default. Dependencies are installed from AIWF's overlay
+    requirements, not ED2's legacy upstream requirements file.
     """
     root = Path(repo_root).resolve() if repo_root is not None else _repo_root()
     target = root / ED2_ADDON_RELATIVE
+    source_url = repo_url or os.environ.get(ED2_REPO_URL_ENV) or DEFAULT_ED2_REPO_URL
     logs: list[str] = []
 
     if target.exists():
@@ -42,11 +47,11 @@ def install_ed2_addon(
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
         _run_checked(
-            ["git", "clone", ED2_REPO_URL, str(target)],
+            ["git", "clone", source_url, str(target)],
             cwd=root,
             run_command=run_command,
         )
-        logs.append(f"Cloned ED2 add-on into {target}")
+        logs.append(f"Cloned ED2 add-on from {source_url} into {target}")
 
     if install_requirements:
         requirements = root / "engines" / "ed2" / "requirements.txt"

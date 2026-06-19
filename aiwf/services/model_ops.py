@@ -18,6 +18,7 @@ MODEL_OP_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".bin", ".pth", ".gguf", 
 IMAGE_MODEL_ARCHES = {"sd15", "sdxl", "sdxl_inpaint", "inpaint"}
 JOB_OUTPUT_DIRNAME = "model-ops"
 DTYPE_EXPORT_QUANTS = {"fp16", "bf16"}
+FP8_READY_EXPORT_QUANTS = {"aiwf_fp8_ready"}
 RECEIPT_ONLY_QUANTS = {"fp8", "int8", "nvfp4"}
 
 
@@ -344,22 +345,31 @@ class ModelOpsService:
             warnings.append(
                 "NVFP4 is treated as compression/storage here. RTX 4070 Ti SUPER is Ada, not Blackwell, so do not expect native FP4 speedups."
             )
+        if quant == "fp8":
+            warnings.append(
+                "Plain FP8 export is storage-oriented unless the runtime also keeps scales and executes FP8 matmuls."
+            )
+        if quant == "aiwf_fp8_ready":
+            warnings.append(
+                "AIWF FP8-ready export writes scaled FP8 linear weights plus sidecar scales for AIWF native FP8 runtimes."
+            )
         if target == "vae":
             errors.append("VAE quantization is preflight-only until decode-quality validation is implemented.")
-        if quant in DTYPE_EXPORT_QUANTS and asset.storage != "safetensors":
+        if quant in DTYPE_EXPORT_QUANTS | FP8_READY_EXPORT_QUANTS and asset.storage != "safetensors":
             errors.append(f"{quant.upper()} export currently supports single-file safetensors only.")
         elif quant in RECEIPT_ONLY_QUANTS and asset.storage not in {"safetensors", "diffusers"}:
             errors.append(f"{quant.upper()} receipt jobs expect safetensors or a Diffusers folder.")
         if quant == "gguf":
             warnings.append("GGUF conversion belongs to the future llama.cpp/chat lane and is not executed from image quantization yet.")
             errors.append("GGUF image-model quantization is not enabled in this pass.")
-        elif quant not in DTYPE_EXPORT_QUANTS | RECEIPT_ONLY_QUANTS:
+        elif quant not in DTYPE_EXPORT_QUANTS | FP8_READY_EXPORT_QUANTS | RECEIPT_ONLY_QUANTS:
             errors.append(f"Unknown quantization choice: {quant or 'none'}")
 
         purpose = {
             "fp16": "compatibility and broad runtime support",
             "bf16": "NVIDIA Ada reliability and reduced overflow risk",
-            "fp8": "VRAM/file-size experiment on Ada-capable CUDA",
+            "fp8": "storage-size experiment; runtime speed still depends on FP8 kernels",
+            "aiwf_fp8_ready": "scaled-FP8 runtime package for Wan and other transformer-heavy models",
             "nvfp4": "storage compression only on this machine",
             "int8": "VRAM/file-size experiment through optional torchao",
         }.get(quant, "unknown")
@@ -373,6 +383,18 @@ class ModelOpsService:
         if quant in DTYPE_EXPORT_QUANTS:
             messages.append("Worker will write a converted safetensors copy; non-floating tensors are preserved.")
             title = "Quantization job ready"
+        elif quant in FP8_READY_EXPORT_QUANTS:
+            messages.append(
+                "Worker will write an AIWF FP8-ready safetensors package; 2D linear `.weight` tensors become FP8 "
+                "and matching `.weight_scale` sidecars are written."
+            )
+            messages.append(
+                "Non-linear tensors, biases, embeddings, norms, and integer tensors are preserved to limit quality risk."
+            )
+            messages.append(
+                "Runtime speed still requires the AIWF native FP8 loader and strict no-fallback execution."
+            )
+            title = "AIWF FP8-ready export job ready"
         else:
             messages.append(
                 "Worker will write a receipt only; model export is held until quality and runtime validation land."

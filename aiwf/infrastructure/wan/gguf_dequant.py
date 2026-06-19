@@ -66,7 +66,18 @@ def dequantize_tensor(tensor, dtype=None, dequant_dtype=None):
     import numpy as np
 
     new = gguf.quants.dequantize(np.asarray(tensor.cpu().numpy()), qtype)
-    return torch.from_numpy(new).to(device=tensor.device, dtype=dtype)
+    result = torch.from_numpy(new).to(device=tensor.device, dtype=dtype)
+    # The torch block path above reshapes to `oshape`; this numpy fallback must do the
+    # same or the weight comes back flat/mis-strided and silently corrupts the layer.
+    try:
+        result = result.reshape(oshape)
+    except (RuntimeError, ValueError) as exc:
+        raise RuntimeError(
+            f"numpy dequant for qtype {getattr(qtype, 'name', qtype)} produced shape "
+            f"{tuple(result.shape)} (numel={result.numel()}) and cannot reshape to "
+            f"{tuple(oshape)}; this qtype is unsupported by the fast path."
+        ) from exc
+    return result
 
 
 def dequantize(data, qtype, oshape, dtype=None):

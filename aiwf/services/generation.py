@@ -170,7 +170,7 @@ class GenerationService:
     def _pipeline_kind_for_request(request: GenerationRequest) -> PipelineKind:
         if request.mode == GenerationMode.INPAINT:
             return PipelineKind.INPAINT
-        if request.controlnet_units:
+        if any(unit.enabled for unit in request.controlnet_units):
             return PipelineKind.CONTROLNET
         if request.enable_hr:
             return PipelineKind.HIRES
@@ -217,7 +217,7 @@ class GenerationService:
                 height=int(request.height),
                 batch_size=int(request.batch_size),
                 lora_count=len(parsed.loras),
-                controlnet_count=len(request.controlnet_units),
+                controlnet_count=sum(1 for unit in request.controlnet_units if unit.enabled),
             )
             plan = self.optimization_planner.resolve(opt_request)
             trace_safe(
@@ -332,6 +332,11 @@ class GenerationService:
 
     def resolve_checkpoint(self, checkpoint_id: str | None = None):
         return self.backend.resolve_checkpoint(checkpoint_id)
+
+    def remember_checkpoint_selection(self, checkpoint_id: str | None = None):
+        checkpoint = self.backend.resolve_checkpoint(checkpoint_id)
+        self._persist_last_checkpoint(checkpoint.id)
+        return checkpoint
 
     def load_checkpoint(self, checkpoint_id: str | None = None):
         tenant_job_id = f"image_load_{threading.get_ident()}"

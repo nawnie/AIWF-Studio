@@ -47,9 +47,9 @@ class AudioGenerationService:
 
     def folder_help(self) -> str:
         return (
-            "Audio generation is optional. Install AudioCraft for best duration control: "
-            "`.\\venv\\Scripts\\python.exe -m pip install audiocraft torchaudio`. "
-            "MusicGen can fall back to installed Transformers when available."
+            "Audio generation is optional. This build uses Transformers MusicGen. "
+            "`torchaudio` is installed by `launch.py` with the CUDA torch stack. "
+            "AudioCraft is kept out of the shared venv because current releases pin older torch packages."
         )
 
     def music_model_choices(self) -> list[tuple[str, str]]:
@@ -202,8 +202,8 @@ class AudioGenerationService:
             from audiocraft.models import AudioGen, MusicGen
         except Exception as exc:
             raise AudioUnavailable(
-                "AudioCraft is not installed. Install it with "
-                "`.\\venv\\Scripts\\python.exe -m pip install audiocraft torchaudio`."
+                "AudioCraft is not installed in the shared Studio venv because current releases pin "
+                "older torch packages. Use music generation, which falls back to Transformers MusicGen."
             ) from exc
 
         kind = "sfx" if options.kind == "sfx" else "music"

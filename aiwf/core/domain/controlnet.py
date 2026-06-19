@@ -29,4 +29,5 @@ class ControlNetModelInfo(BaseModel):
 
     @classmethod
     def from_path(cls, path: Path) -> ControlNetModelInfo:
-        return cls(id=path.stem, title=path.stem, path=str(path))
+        name = path.name if path.is_dir() else path.stem
+        return cls(id=name, title=name, path=str(path))

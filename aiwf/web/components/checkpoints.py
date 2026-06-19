@@ -23,13 +23,20 @@ def resolve_default_checkpoint(
     checkpoints: list[Checkpoint],
     last_checkpoint_id: str | None = None,
 ) -> Checkpoint | None:
-    """Pick startup checkpoint: last user selection, else first in catalog."""
+    """Pick startup checkpoint: last user selection, else first non-inpaint in catalog.
+
+    Inpaint checkpoints (9-channel UNet) can't run txt2img/img2img, so defaulting to one
+    would hand the user a checkpoint that errors on the first generation. Prefer a standard
+    checkpoint for the default; the user can still pick an inpaint model explicitly."""
     if not checkpoints:
         return None
     if last_checkpoint_id:
         for checkpoint in checkpoints:
             if checkpoint.id == last_checkpoint_id:
                 return checkpoint
+    for checkpoint in checkpoints:
+        if checkpoint.kind != "inpaint":
+            return checkpoint
     return checkpoints[0]
 
 

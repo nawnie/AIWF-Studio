@@ -3,7 +3,6 @@ from __future__ import annotations
 import gc
 import logging
 import os
-import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -21,153 +20,18 @@ from aiwf.core.domain.wan import WAN_TI2V_5B, WanI2VRequest, WanI2VResult, SAMPL
 from aiwf.dev.diagnostics import trace_model_throughput
 from aiwf.infrastructure.video import write_frames
 from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
+from aiwf.services.wan_models import (
+    WanModelPairCheck,
+    wan_model_pair_compatibility,
+    wan_model_pair_family_key,
+    wan_model_quant_family,
+    wan_model_stage_role,
+    wan_model_storage_family,
+)
 
 logger = logging.getLogger(__name__)
 
 _MAX_DEFAULT_FP8_DEQUANT_GB = 12.0
-
-
-@dataclass(frozen=True)
-class WanModelPairCheck:
-    ok: bool
-    errors: tuple[str, ...] = ()
-    warnings: tuple[str, ...] = ()
-    high_family: str = ""
-    low_family: str = ""
-    high_storage: str = ""
-    low_storage: str = ""
-
-
-def wan_model_stage_role(model_id: str | None) -> str:
-    """Classify a Wan transformer filename as high/low/unknown.
-
-    This is intentionally filename based because the UI needs a cheap filter
-    before expensive safetensors/GGUF header reads. Backend preflight still
-    validates that the file exists and has a legal transformer format.
-    """
-    name = Path(str(model_id or "")).name.lower()
-    stem = Path(name).stem
-    has_high = "high" in stem
-    has_low = "low" in stem
-    if has_high and not has_low:
-        return "high"
-    if has_low and not has_high:
-        return "low"
-    return "unknown"
-
-
-def wan_model_storage_family(model_id: str | None) -> str:
-    suffix = Path(str(model_id or "")).suffix.lower()
-    if suffix == ".gguf":
-        return "gguf"
-    if suffix == ".safetensors":
-        return "safetensors"
-    if not suffix and model_id:
-        return "diffusers_or_folder"
-    return "unknown"
-
-
-def wan_model_quant_family(model_id: str | None) -> str:
-    name = Path(str(model_id or "")).name.lower()
-    if "fp8" in name or "f8" in name:
-        return "fp8"
-    for pattern in (
-        r"q(\d+)(?=high|low)",
-        r"(?:^|[_\-.])q(\d+)(?:[_\-.]|$)",
-        r"(?:^|[_\-.])q(\d+)_k(?:[_\-.]|$)",
-        r"(?:^|[_\-.])q(\d+)_\d(?:[_\-.]|$)",
-    ):
-        match = re.search(pattern, name)
-        if match:
-            return f"q{match.group(1)}"
-    if "bf16" in name:
-        return "bf16"
-    if "fp16" in name:
-        return "fp16"
-    return "unknown"
-
-
-def wan_model_pair_family_key(model_id: str | None) -> str:
-    name = Path(str(model_id or "")).name.lower()
-    stem = Path(name).stem
-    stem = re.sub(r"(high|low)[_\-. ]*noise", "", stem)
-    stem = stem.replace("high", "").replace("low", "")
-    stem = re.sub(r"[_\-. ]+", "_", stem)
-    return stem.strip("_")
-
-
-def wan_model_pair_compatibility(high_model_id: str | None, low_model_id: str | None) -> WanModelPairCheck:
-    high_id = str(high_model_id or "").strip()
-    low_id = str(low_model_id or "").strip()
-    if not high_id or not low_id:
-        return WanModelPairCheck(ok=True)
-
-    high_role = wan_model_stage_role(high_id)
-    low_role = wan_model_stage_role(low_id)
-    high_storage = wan_model_storage_family(high_id)
-    low_storage = wan_model_storage_family(low_id)
-    high_quant = wan_model_quant_family(high_id)
-    low_quant = wan_model_quant_family(low_id)
-    high_family = wan_model_pair_family_key(high_id)
-    low_family = wan_model_pair_family_key(low_id)
-
-    errors: list[str] = []
-    warnings: list[str] = []
-    if high_role == "low":
-        errors.append(f"High noise selection looks like a low-noise model: {Path(high_id).name}")
-    elif high_role == "unknown":
-        warnings.append(f"High noise filename does not clearly say high: {Path(high_id).name}")
-    if low_role == "high":
-        errors.append(f"Low noise selection looks like a high-noise model: {Path(low_id).name}")
-    elif low_role == "unknown":
-        warnings.append(f"Low noise filename does not clearly say low: {Path(low_id).name}")
-
-    if high_storage != "unknown" and low_storage != "unknown" and high_storage != low_storage:
-        errors.append(
-            "High and Low noise transformers use different storage formats "
-            f"({high_storage} vs {low_storage}). Select a matched pair."
-        )
-
-    if high_quant != "unknown" and low_quant != "unknown" and high_quant != low_quant:
-        errors.append(
-            "High and Low noise transformers use different quantization tiers "
-            f"({high_quant} vs {low_quant}). Select matching Q/FP precision files."
-        )
-
-    high_size = low_size = 0
-    try:
-        high_size = Path(high_id).stat().st_size
-        low_size = Path(low_id).stat().st_size
-    except OSError:
-        pass
-    if high_size > 0 and low_size > 0:
-        smaller = min(high_size, low_size)
-        larger = max(high_size, low_size)
-        ratio = larger / max(1, smaller)
-        if ratio >= 1.35:
-            errors.append(
-                "High and Low noise transformer file sizes differ too much for a normal matched pair "
-                f"({high_size / 1024**3:.2f} GiB vs {low_size / 1024**3:.2f} GiB)."
-            )
-        elif ratio >= 1.15:
-            warnings.append(
-                "High and Low noise transformer file sizes differ noticeably "
-                f"({high_size / 1024**3:.2f} GiB vs {low_size / 1024**3:.2f} GiB)."
-            )
-
-    if errors and os.environ.get("AIWF_WAN_ALLOW_MISMATCHED_PAIR", "").strip().lower() in {"1", "true", "yes", "on"}:
-        warnings.extend(f"Ignored by AIWF_WAN_ALLOW_MISMATCHED_PAIR=1: {error}" for error in errors)
-        errors = []
-
-    return WanModelPairCheck(
-        ok=not errors,
-        errors=tuple(errors),
-        warnings=tuple(warnings),
-        high_family=high_family,
-        low_family=low_family,
-        high_storage=high_storage,
-        low_storage=low_storage,
-    )
 
 
 def _native_fp8_unavailable_reason() -> str | None:
@@ -212,6 +76,18 @@ def _video_status(message: str) -> None:
         trace_safe("wan.status", message, component="wan.service")
     except Exception:
         logger.debug("Wan status trace failed.", exc_info=True)
+
+
+def _emit_progress(on_progress, step: int, total: int, steps_per_second=None, message: str | None = None) -> None:
+    if on_progress is None:
+        return
+    try:
+        on_progress(step, total, steps_per_second, message)
+    except TypeError:
+        try:
+            on_progress(step, total, steps_per_second)
+        except TypeError:
+            on_progress(step, total)
 
 
 def _float_metric(value) -> float | None:
@@ -399,6 +275,49 @@ class WanService:
             and (scheduler / "scheduler_config.json").is_file()
         )
 
+    def _is_full_fast_5b_diffusers_model(self, path: Path) -> bool:
+        """Return whether a Diffusers folder contains the actual 5B transformer."""
+        if not (path.is_dir() and (path / "model_index.json").is_file()):
+            return False
+        transformer_dir = path / "transformer"
+        return (transformer_dir / "config.json").is_file() and (
+            (transformer_dir / "diffusion_pytorch_model.safetensors").is_file()
+            or any(transformer_dir.glob("diffusion_pytorch_model-*.safetensors"))
+        )
+
+    def _looks_like_fast_5b_transformer(self, path: Path) -> bool:
+        if not path.is_file() or path.suffix.lower() not in {".safetensors", ".gguf"}:
+            return False
+        name = path.name.lower()
+        return "wan" in name and "5b" in name and "ti2v" in name
+
+    def _find_default_fast_5b_transformer(self) -> str | None:
+        """Find a local standalone Wan 5B TI2V transformer when no full folder exists."""
+        candidates: list[Path] = []
+        for root in self._wan_weight_roots() + self._wan_file_candidates():
+            if not root.exists():
+                continue
+            for name in ("wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_ti2v_5b_fp16.safetensors"):
+                direct = root / name
+                if self._looks_like_fast_5b_transformer(direct):
+                    return str(direct.resolve())
+            candidates.extend(
+                child
+                for child in root.rglob("*")
+                if child.is_file() and self._looks_like_fast_5b_transformer(child)
+            )
+        if not candidates:
+            return None
+        preferred = sorted(
+            candidates,
+            key=lambda p: (
+                0 if "fp16" in p.name.lower() else 1,
+                0 if p.suffix.lower() == ".safetensors" else 1,
+                p.name.lower(),
+            ),
+        )[0]
+        return str(preferred.resolve())
+
     def _component_base_missing(self, path: Path) -> list[str]:
         required = [
             path / "model_index.json",
@@ -451,8 +370,9 @@ class WanService:
             errors.append(f"{label} transformer must be a `.safetensors` or `.gguf` file: {path.name}")
             return errors, warnings
 
-        expected_token = "high" if label.lower().startswith("high") else "low"
-        if expected_token not in path.name.lower():
+        label_lower = label.lower()
+        expected_token = "high" if label_lower.startswith("high") else "low" if label_lower.startswith("low") else ""
+        if expected_token and expected_token not in path.name.lower():
             warnings.append(f"{label} transformer filename does not contain `{expected_token}`: {path.name}")
 
         if suffix == ".gguf":
@@ -582,15 +502,23 @@ class WanService:
         else:
             model_res = self.resolve_model(request.model_id)
             model_path = Path(model_res)
-            if model_path.exists():
-                if not (model_path.is_dir() and (model_path / "model_index.json").exists()):
+            if model_path.is_file():
+                e, w = self._validate_transformer_file(model_path, "Fast 5B")
+                errors.extend(e)
+                warnings.extend(w)
+                if not self._looks_like_fast_5b_transformer(model_path):
+                    warnings.append(
+                        f"Fast 5B transformer filename does not clearly look like Wan TI2V 5B: {model_path.name}"
+                    )
+            elif model_path.exists():
+                if not self._is_full_fast_5b_diffusers_model(model_path):
                     errors.append(
-                        "Fast 5B mode needs a local Diffusers model folder with model_index.json, "
-                        f"not a standalone transformer file: {model_res}"
+                        "Fast 5B mode found only a shared component base. Select or install a standalone "
+                        "Wan TI2V 5B transformer file, or a full Diffusers folder with transformer/config.json."
                     )
             else:
                 errors.append(
-                    "Fast 5B mode needs a local Wan Diffusers folder. "
+                    "Fast 5B mode needs a local Wan TI2V 5B transformer file or full Diffusers folder. "
                     f"Could not resolve locally: {model_res}"
                 )
 
@@ -606,14 +534,33 @@ class WanService:
                 "AIWF will not download them during generation."
             )
 
-        vae_id = request.vae_id or self.preferred_vae()
+        vae_id = request.vae_id or self.preferred_vae(request.runtime_mode)
         vae_res = self.resolve_vae(vae_id) if vae_id else None
         if not vae_res:
-            errors.append("Missing Wan VAE. Place `wan_2.1_vae.safetensors` in `models/VAE` or select a Wan VAE.")
+            errors.append("Missing Wan VAE. Place `wan2.1_vae.safetensors` in `models/VAE` or select a Wan VAE.")
         elif not Path(vae_res).exists():
             errors.append(f"Selected VAE is not local: {vae_res}")
         elif "wan" not in Path(vae_res).name.lower():
             warnings.append(f"Selected VAE does not look Wan-specific: {Path(vae_res).name}")
+        else:
+            # VAE generation must match the runtime: the A14B high/low pair uses the
+            # Wan 2.1 16-channel VAE; the 5B TI2V path uses the Wan 2.2 48-channel VAE.
+            # A wrong pick passes name validation but fails late in latent decode, so
+            # warn here from the filename (cheap, no tensor read).
+            _vae_name = Path(vae_res).name.lower()
+            _looks_22 = "2.2" in _vae_name or "wan22" in _vae_name or "_22" in _vae_name
+            _looks_21 = "2.1" in _vae_name or "wan21" in _vae_name or "_21" in _vae_name
+            if request.requires_dual_transformers() and _looks_22 and not _looks_21:
+                warnings.append(
+                    f"VAE '{Path(vae_res).name}' looks like a Wan 2.2 (48-channel) VAE, but the "
+                    "high/low A14B runtime expects the Wan 2.1 (16-channel) VAE "
+                    "(`wan2.1_vae.safetensors`). A channel mismatch fails late in latent decode."
+                )
+            elif not request.requires_dual_transformers() and _looks_21 and not _looks_22:
+                warnings.append(
+                    f"VAE '{Path(vae_res).name}' looks like a Wan 2.1 (16-channel) VAE, but the "
+                    "5B TI2V runtime expects the Wan 2.2 (48-channel) VAE (`wan2.2_vae.safetensors`)."
+                )
 
         text_encoder_id = request.text_encoder_path or self.default_text_encoder()
         text_encoder_res = self.resolve_text_encoder(text_encoder_id) if text_encoder_id else None
@@ -641,16 +588,14 @@ class WanService:
         )
 
     def _wan_file_candidates(self) -> list[Path]:
-        """Extra locations to scan for standalone .safetensors / .gguf Wan diffusion weights (e.g. your ComfyUI diffusion_models)."""
+        """Configured extra roots for standalone .safetensors / .gguf Wan weights."""
         cands: list[Path] = []
-        # Explicit path you provided for testing your models
-        comfy_dm = Path(r"F:\ComfyUI\models\diffusion_models")
-        if comfy_dm.exists():
-            cands.append(comfy_dm)
-        # Also any extra_model_dir at top level (in case user points extra to Comfy models root)
         for extra in self.flags.resolved_extra_model_dirs():
             if extra.exists():
                 cands.append(extra)
+            diffusion_models = extra / "diffusion_models"
+            if diffusion_models.exists():
+                cands.append(diffusion_models)
         return cands
 
     def _lora_roots(self) -> list[Path]:
@@ -660,9 +605,6 @@ class WanService:
             self.flags.resolved_models_dir() / "Loras",
             self.flags.resolved_models_dir() / "loras",
         ]
-        comfy_models = Path(r"F:\ComfyUI\models")
-        if comfy_models.exists():
-            roots.extend(child for child in comfy_models.iterdir() if child.is_dir() and "lora" in child.name.lower())
         for extra in self.flags.resolved_extra_model_dirs():
             roots.extend([
                 extra / "wan" / "lora",
@@ -670,6 +612,8 @@ class WanService:
                 extra / "Loras",
                 extra / "loras",
             ])
+            if (extra / "loras").exists() or (extra / "Loras").exists():
+                roots.extend(child for child in extra.iterdir() if child.is_dir() and "lora" in child.name.lower())
             if extra.exists():
                 roots.append(extra)
         deduped: list[Path] = []
@@ -722,15 +666,15 @@ class WanService:
     def folder_help(self) -> str:
         return (
             f"**Wan models** -> `{self.models_dir()}`.  \n"
-            f"Default model: `{WAN_TI2V_5B}` (5B, the most VRAM-friendly). "
-            "8 GB cards: use Sequential offload + small size/frames (slow). "
+            "Stable video runtime: matched 14B GGUF High Noise + Low Noise transformers. "
+            "Use Sequential offload + small size/frames on lower-VRAM cards. "
             "Needs a recent `diffusers` + `ftfy`. "
             "Put Wan high/low transformer weights in `models/wan/Safetensor/` or `models/wan/GGUF/`, "
             "broken-out Diffusers folders in `models/wan/Diffusers/`, "
             "and Wan LoRAs in `models/wan/lora/`. "
-            "ComfyUI `diffusion_models/` is still scanned as a fallback if the filename contains 'wan'/'i2v'/'t2v'. "
+            "Add ComfyUI model folders in Settings -> Launch profile -> extra model dirs if you want them scanned. "
             "GGUF files require the optional `gguf` package. "
-            "**VAE**: Wan 2.2 I2V (esp. 14B high/low) typically requires the **Wan 2.1 VAE**. Use the VAE selector in the UI or place `wan*vae*.safetensors` in `models/VAE` or your Comfy `models/vae/`."
+            "**VAE**: Wan 2.2 I2V (esp. 14B high/low) typically requires the **Wan 2.1 VAE**. Use the VAE selector in the UI or place `wan*vae*.safetensors` in `models/VAE` or a configured extra VAE folder."
         )
 
     def list_local_models(self) -> list[str]:
@@ -896,10 +840,6 @@ class WanService:
             self.flags.resolved_models_dir() / "VAE",
             self.flags.resolved_models_dir() / "vae",
         ]
-        # User's Comfy location for vae (common for Wan 2.1 VAE)
-        comfy_vae = Path(r"F:\ComfyUI\models\vae")
-        if comfy_vae.exists():
-            roots.append(comfy_vae)
         for extra in self.flags.resolved_extra_model_dirs():
             roots.extend([
                 extra / "VAE",
@@ -1029,7 +969,7 @@ class WanService:
             out,
             key=lambda name: (
                 0
-                if any(token in name.lower() for token in ("wan_2.1_vae", "wan2.1_vae", "wan21_vae"))
+                if any(token in name.lower() for token in ("wan2.1_vae", "wan_2.1_vae", "wan21_vae"))
                 else 1
                 if ("wan" in name.lower() and "vae" in name.lower())
                 else 2,
@@ -1037,8 +977,19 @@ class WanService:
             ),
         )
 
-    def preferred_vae(self) -> str | None:
-        for name in self.list_local_vaes():
+    def preferred_vae(self, runtime_mode: str | None = None) -> str | None:
+        vaes = self.list_local_vaes()
+        if runtime_mode == "fast_5b":
+            for name in vaes:
+                lowered = name.lower()
+                if "wan2.2" in lowered and "vae" in lowered:
+                    return name
+        else:
+            for name in vaes:
+                lowered = name.lower()
+                if any(token in lowered for token in ("wan2.1_vae", "wan_2.1_vae", "wan21_vae")):
+                    return name
+        for name in vaes:
             lowered = name.lower()
             if "wan" in lowered and "vae" in lowered:
                 return name
@@ -1104,6 +1055,7 @@ class WanService:
         """Local diffusers dir, local .safetensors/.gguf weight file, or fall back to HF repo id."""
         candidate = (model_id or WAN_TI2V_5B).strip() or WAN_TI2V_5B
         as_path = Path(candidate)
+        is_default_fast_5b = candidate == WAN_TI2V_5B or candidate.endswith(WAN_TI2V_5B.split("/")[-1])
 
         # Direct file (absolute or relative that resolves)
         if as_path.is_file() and self._is_valid_wan_weight_path(as_path):
@@ -1113,14 +1065,29 @@ class WanService:
         if as_path.is_dir() and (as_path / "model_index.json").exists():
             return str(as_path)
 
-        # Search roots for exact dir match or file match (by relative path or name)
+        # Search roots for exact dir match or file match (by relative path or name).
+        # For the default fast-5B id, prefer a complete pipeline folder; if the
+        # local match is only the shared component base, fall through and look
+        # for a standalone 5B transformer file.
+        component_base_match: str | None = None
         for root in self._wan_diffusers_roots():
             local_dir = root / candidate
             if local_dir.is_dir() and (local_dir / "model_index.json").exists():
-                return str(local_dir)
+                if self._is_full_fast_5b_diffusers_model(local_dir) or not is_default_fast_5b:
+                    return str(local_dir)
+                component_base_match = str(local_dir.resolve())
             for child in root.rglob(Path(candidate).name):
                 if child.is_dir() and (child / "model_index.json").exists():
-                    return str(child.resolve())
+                    if self._is_full_fast_5b_diffusers_model(child) or not is_default_fast_5b:
+                        return str(child.resolve())
+                    component_base_match = str(child.resolve())
+
+        if is_default_fast_5b:
+            default_transformer = self._find_default_fast_5b_transformer()
+            if default_transformer:
+                return default_transformer
+            if component_base_match:
+                return component_base_match
 
         for root in self._wan_weight_roots():
             local_file = root / candidate
@@ -1223,6 +1190,14 @@ class WanService:
                 os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
 
             started = time.perf_counter()
+            requested_steps = max(1, int(request.effective_steps() or 1))
+            _emit_progress(
+                on_progress,
+                0,
+                requested_steps,
+                None,
+                "Loading models and encoding inputs",
+            )
 
             try:
                 backend_result = self._backend.generate(
@@ -1324,10 +1299,24 @@ class WanService:
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             write_started = time.perf_counter()
+            _emit_progress(
+                on_progress,
+                step_count,
+                max(1, step_count),
+                steps_per_second,
+                "Writing video file",
+            )
             frame_count = write_frames(
                 frames,
                 output_path,
                 fps=float(getattr(request, "fps", 16) or 16),
+            )
+            _emit_progress(
+                on_progress,
+                step_count,
+                max(1, step_count),
+                steps_per_second,
+                "Video file saved",
             )
             video_write_seconds = max(0.0, time.perf_counter() - write_started)
             elapsed = time.perf_counter() - started

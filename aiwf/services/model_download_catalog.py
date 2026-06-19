@@ -3,7 +3,10 @@ from __future__ import annotations
 from aiwf.core.domain.model_download import CatalogEntry
 
 _CN15 = "https://huggingface.co/comfyanonymous/ControlNet-v1-1_fp16_safetensors/resolve/main"
-_CNXL = "https://huggingface.co/xinsir"
+_CN15_FULL_REPO = "lllyasviel/ControlNet-v1-1"
+_CN_ANNOTATORS_REPO = "lllyasviel/Annotators"
+_CN_SDXL_COLLECTION_REPO = "lllyasviel/sd_control_collection"
+_CNXL_UNION_REPO = "xinsir/controlnet-union-sdxl-1.0"
 _SAM = "https://dl.fbaipublicfiles.com/segment_anything"
 _GDINO = "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha"
 _OPENAI = "https://openaipublic.azureedge.net/clip/models"
@@ -303,6 +306,19 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
 
     # ── ControlNet — SD1.5 (v1.1 fp16 safetensors) ──────────────────────────
     CatalogEntry(
+        key="cn15-v11-full-suite",
+        title="ControlNet v1.1 full suite (SD1.5, .pth + .yaml)",
+        category="controlnet",
+        source="huggingface",
+        repo_id=_CN15_FULL_REPO,
+        size_mb=20200,
+        notes=(
+            "Full original SD1.5 ControlNet-v1.1 folder with paired YAML configs. "
+            "Large download; use individual fp16 safetensors below for smaller installs."
+        ),
+        snapshot=True,
+    ),
+    CatalogEntry(
         key="cn15-canny",
         title="ControlNet v1.1 Canny (SD1.5)",
         category="controlnet",
@@ -346,6 +362,15 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         url=f"{_CN15}/control_v11p_sd15_lineart_fp16.safetensors",
         size_mb=689,
         notes="Anime/realistic line art control. Preprocessors: LineArt, LineArtAnime.",
+    ),
+    CatalogEntry(
+        key="cn15-lineart-anime",
+        title="ControlNet v1.1 LineArt Anime (SD1.5)",
+        category="controlnet",
+        source="direct",
+        url=f"{_CN15}/control_v11p_sd15s2_lineart_anime_fp16.safetensors",
+        size_mb=689,
+        notes="Anime line-art control. Preprocessor: LineArt Anime.",
     ),
     CatalogEntry(
         key="cn15-softedge",
@@ -422,6 +447,29 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
 
     # ── ControlNet — SDXL ────────────────────────────────────────────────────
     CatalogEntry(
+        key="cnxl-union-full",
+        title="ControlNet Union SDXL 1.0 (xinsir, diffusers folder)",
+        category="controlnet",
+        source="huggingface",
+        repo_id=_CNXL_UNION_REPO,
+        size_mb=5070,
+        notes="Multi-control SDXL diffusers folder. Supports the default union model and ships the ProMax weights.",
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="cnxl-collection-full",
+        title="SDXL ControlNet collection (lllyasviel)",
+        category="controlnet",
+        source="huggingface",
+        repo_id=_CN_SDXL_COLLECTION_REPO,
+        size_mb=28100,
+        notes=(
+            "Large SDXL collection with full, mid, and small canny/depth models plus openpose/softedge variants. "
+            "AIWF lists supported ControlNetModel files and ignores IP-Adapter/T2I-adapter files in this folder."
+        ),
+        snapshot=True,
+    ),
+    CatalogEntry(
         key="cnxl-canny",
         title="ControlNet Canny SDXL (xinsir)",
         category="controlnet",
@@ -464,6 +512,16 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
 
     # ── ControlNet Preprocessors ─────────────────────────────────────────────
     CatalogEntry(
+        key="pre-annotators-full-suite",
+        title="ControlNet Annotators full suite",
+        category="preprocessor",
+        source="huggingface",
+        repo_id=_CN_ANNOTATORS_REPO,
+        size_mb=10600,
+        notes="Full lllyasviel Annotators folder: depth, pose, HED/PIDI, MLSD, normal, lineart, segmentation, and related weights.",
+        snapshot=True,
+    ),
+    CatalogEntry(
         key="pre-dwpose",
         title="DWPose body+hand+face estimator",
         category="preprocessor",
@@ -486,14 +544,76 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         notes="Classic depth estimator. Faster than ZoeDepth, lower accuracy.",
     ),
     CatalogEntry(
+        key="pre-dpt-hybrid",
+        title="DPT Hybrid MiDaS depth",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/dpt_hybrid-midas-501f0c75.pt",
+        size_mb=493,
+        notes="MiDaS/DPT hybrid depth estimator used by common ControlNet depth preprocessors.",
+    ),
+    CatalogEntry(
         key="pre-zoe-depth",
         title="ZoeDepth (metric depth estimator)",
         category="preprocessor",
-        source="huggingface",
-        repo_id="isl-org/ZoeDepth",
-        filename="ZoeD_M12_N.pt",
-        size_mb=400,
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/ZoeD_M12_N.pt",
+        size_mb=1440,
         notes="Metric depth estimator — best accuracy for indoor scenes.",
+    ),
+    CatalogEntry(
+        key="pre-openpose-body",
+        title="OpenPose body model",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/body_pose_model.pth",
+        size_mb=209,
+        notes="Body pose estimator for OpenPose ControlNet preprocessing.",
+    ),
+    CatalogEntry(
+        key="pre-openpose-hand",
+        title="OpenPose hand model",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/hand_pose_model.pth",
+        size_mb=147,
+        notes="Hand pose estimator for OpenPose ControlNet preprocessing.",
+    ),
+    CatalogEntry(
+        key="pre-openpose-face",
+        title="OpenPose face model",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/facenet.pth",
+        size_mb=154,
+        notes="Face landmark estimator for OpenPose ControlNet preprocessing.",
+    ),
+    CatalogEntry(
+        key="pre-hed",
+        title="HED softedge model",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/ControlNetHED.pth",
+        size_mb=29,
+        notes="HED edge detector for softedge and scribble-style preprocessors.",
+    ),
+    CatalogEntry(
+        key="pre-pidinet",
+        title="PidiNet edge model",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/table5_pidinet.pth",
+        size_mb=3,
+        notes="PidiNet edge detector for softedge/scribble preprocessing.",
+    ),
+    CatalogEntry(
+        key="pre-mlsd",
+        title="MLSD line detector",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/mlsd_large_512_fp32.pth",
+        size_mb=6,
+        notes="Straight-line detector for architecture and perspective ControlNet maps.",
     ),
     CatalogEntry(
         key="pre-normalbae",
@@ -503,6 +623,24 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         url="https://huggingface.co/lllyasviel/Annotators/resolve/main/scannet.pt",
         size_mb=272,
         notes="Surface normal estimator for ControlNet NormalBae.",
+    ),
+    CatalogEntry(
+        key="pre-oneformer-ade20k",
+        title="OneFormer ADE20K segmentation",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/250_16_swin_l_oneformer_ade20k_160k.pth",
+        size_mb=950,
+        notes="Semantic segmentation preprocessor model for ControlNet segmentation.",
+    ),
+    CatalogEntry(
+        key="pre-oneformer-coco",
+        title="OneFormer COCO segmentation",
+        category="preprocessor",
+        source="direct",
+        url="https://huggingface.co/lllyasviel/Annotators/resolve/main/150_16_swin_l_oneformer_coco_100ep.pth",
+        size_mb=950,
+        notes="COCO semantic segmentation preprocessor model.",
     ),
     CatalogEntry(
         key="pre-lineart-realistic",

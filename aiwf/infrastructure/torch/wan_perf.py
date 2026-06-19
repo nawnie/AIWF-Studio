@@ -13,6 +13,9 @@ from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
+_ORIGINAL_SDPA = None
+_SAGE_SDPA_INSTALLED = False
+
 
 @dataclass(frozen=True)
 class WanAccelerationCapability:
@@ -64,6 +67,7 @@ def bootstrap_wan_cuda_settings() -> list[str]:
 
 def _try_sage_attention() -> str | None:
     """ComfyUI parity: --use-sage-attention patches SDPA with sageattention when installed."""
+    global _ORIGINAL_SDPA, _SAGE_SDPA_INSTALLED
     if not _env_flag("AIWF_WAN_SAGE_ATTENTION") and not _env_flag("AIWF_USE_SAGE_ATTENTION"):
         # Auto-enable when the package is present (user already installed it for Comfy).
         try:
@@ -84,7 +88,11 @@ def _try_sage_attention() -> str | None:
 
         import torch
 
+        if _SAGE_SDPA_INSTALLED:
+            return "sageattention"
         _orig = torch.nn.functional.scaled_dot_product_attention
+        if _ORIGINAL_SDPA is None:
+            _ORIGINAL_SDPA = _orig
 
         def _sage_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
             # Wan 3D tensors are (B, seq, heads, dim); sageattn expects (B, heads, seq, dim).
@@ -105,10 +113,31 @@ def _try_sage_attention() -> str | None:
             )
 
         torch.nn.functional.scaled_dot_product_attention = _sage_sdpa
+        _SAGE_SDPA_INSTALLED = True
         return "sageattention"
     except Exception as exc:
         logger.warning("sageattention hook failed (%s); using torch SDPA", exc)
         return None
+
+
+def restore_wan_attention_patch() -> bool:
+    """Undo the fallback SageAttention SDPA monkeypatch after Wan work.
+
+    The fallback hook is useful for Wan, but it is process-global. Leaving it
+    installed can break unrelated models with different attention layouts.
+    """
+    global _SAGE_SDPA_INSTALLED
+    if not _SAGE_SDPA_INSTALLED or _ORIGINAL_SDPA is None:
+        return False
+    try:
+        import torch
+
+        torch.nn.functional.scaled_dot_product_attention = _ORIGINAL_SDPA
+        _SAGE_SDPA_INSTALLED = False
+        return True
+    except Exception:
+        logger.debug("Failed to restore torch SDPA after Wan SageAttention patch.", exc_info=True)
+        return False
 
 
 def _flash_attn_dispatch_available() -> bool:

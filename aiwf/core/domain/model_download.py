@@ -8,6 +8,7 @@ ModelCategory = Literal[
     "lora",
     "vae",
     "controlnet",
+    "preprocessor",
     "upscaler",
     "esrgan",
     "gfpgan",
