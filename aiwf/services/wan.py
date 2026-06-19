@@ -22,11 +22,13 @@ from aiwf.infrastructure.video import write_frames
 from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
 from aiwf.services.wan_models import (
     WanModelPairCheck,
+    wan_lora_matches,
     wan_model_pair_compatibility,
     wan_model_pair_family_key,
     wan_model_quant_family,
     wan_model_stage_role,
     wan_model_storage_family,
+    wan_runtime_size_class,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,15 @@ def _wan_experimental_formats_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+def _looks_like_incompatible_t5xxl(text_encoder_id: str | None) -> bool:
+    text = str(text_encoder_id or "").strip().lower()
+    if not text:
+        return False
+    if any(token in text for token in ("flux", "sd3", "stable-diffusion-3")):
+        return True
+    return "t5xxl" in text and not any(token in text for token in ("umt5", "nsfw_wan"))
 
 
 def _video_status(message: str) -> None:
@@ -551,13 +562,13 @@ class WanService:
             _looks_22 = "2.2" in _vae_name or "wan22" in _vae_name or "_22" in _vae_name
             _looks_21 = "2.1" in _vae_name or "wan21" in _vae_name or "_21" in _vae_name
             if request.requires_dual_transformers() and _looks_22 and not _looks_21:
-                warnings.append(
+                errors.append(
                     f"VAE '{Path(vae_res).name}' looks like a Wan 2.2 (48-channel) VAE, but the "
                     "high/low A14B runtime expects the Wan 2.1 (16-channel) VAE "
                     "(`wan2.1_vae.safetensors`). A channel mismatch fails late in latent decode."
                 )
             elif not request.requires_dual_transformers() and _looks_21 and not _looks_22:
-                warnings.append(
+                errors.append(
                     f"VAE '{Path(vae_res).name}' looks like a Wan 2.1 (16-channel) VAE, but the "
                     "5B TI2V runtime expects the Wan 2.2 (48-channel) VAE (`wan2.2_vae.safetensors`)."
                 )
@@ -566,12 +577,21 @@ class WanService:
         text_encoder_res = self.resolve_text_encoder(text_encoder_id) if text_encoder_id else None
         if text_encoder_id and not text_encoder_res:
             errors.append(f"Selected Wan text encoder is not local: {text_encoder_id}")
+        if _looks_like_incompatible_t5xxl(text_encoder_id) or _looks_like_incompatible_t5xxl(text_encoder_res):
+            errors.append(
+                "Selected text encoder looks like a Flux/SD3 T5-XXL file. Wan requires UMT5-XXL "
+                "(`umt5-xxl`, `umt5`, or `nsfw_wan` naming)."
+            )
 
         high_lora_res = self.resolve_lora(request.high_noise_lora_id)
         low_lora_res = self.resolve_lora(request.low_noise_lora_id)
+        runtime_size = wan_runtime_size_class(request.runtime_mode)
         for label, lora in (("High noise LoRA", high_lora_res), ("Low noise LoRA", low_lora_res)):
             if lora and not Path(lora).exists():
                 errors.append(f"{label} is not local: {lora}")
+            if lora and not wan_lora_matches(lora, size_class=runtime_size):
+                expected = "14B high/low" if runtime_size == "14b" else "5B TI2V"
+                errors.append(f"{label} does not match the {expected} runtime: {Path(lora).name}")
 
         return WanPreflightResult(
             ok=not errors,

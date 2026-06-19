@@ -74,7 +74,7 @@ def test_pass5_fast_5b_preflight_is_local_only_and_does_not_need_high_low(tmp_pa
     assert any("Fast 5B mode needs a local Wan TI2V 5B transformer file" in error for error in missing.errors)
 
     base = _write_component_base(service)
-    vae = service.flags.resolved_models_dir() / "VAE" / "wan2.1_vae.safetensors"
+    vae = service.flags.resolved_models_dir() / "VAE" / "wan2.2_vae.safetensors"
     _write_fake_safetensors(vae)
     base_only = service.preflight(WanI2VRequest(runtime_mode=WAN_RUNTIME_FAST_5B))
 
@@ -90,6 +90,40 @@ def test_pass5_fast_5b_preflight_is_local_only_and_does_not_need_high_low(tmp_pa
     assert ready.high_noise_model is None
     assert ready.low_noise_model is None
     assert ready.components_base == str(base.resolve())
+
+
+def test_pass5_fast_5b_preflight_rejects_wan21_vae(tmp_path: Path, monkeypatch):
+    service = _svc(tmp_path)
+    monkeypatch.setattr(service, "_wan_file_candidates", lambda: [])
+    _write_component_base(service)
+    transformer = service.models_dir() / "Safetensor" / "wan2.2_ti2v_5B_fp16.safetensors"
+    vae = service.flags.resolved_models_dir() / "VAE" / "wan2.1_vae.safetensors"
+    _write_fake_safetensors(transformer)
+    _write_fake_safetensors(vae)
+
+    result = service.preflight(WanI2VRequest(runtime_mode=WAN_RUNTIME_FAST_5B))
+
+    assert result.ok is False
+    assert any("5B TI2V runtime expects the Wan 2.2" in error for error in result.errors)
+
+
+def test_pass5_preflight_rejects_flux_t5xxl_text_encoder(tmp_path: Path, monkeypatch):
+    service = _svc(tmp_path)
+    monkeypatch.setattr(service, "_wan_file_candidates", lambda: [])
+    _write_component_base(service)
+    transformer = service.models_dir() / "Safetensor" / "wan2.2_ti2v_5B_fp16.safetensors"
+    vae = service.flags.resolved_models_dir() / "VAE" / "wan2.2_vae.safetensors"
+    text_encoder = service.flags.resolved_models_dir() / "Textencoder" / "flux_t5xxl_fp16.safetensors"
+    _write_fake_safetensors(transformer)
+    _write_fake_safetensors(vae)
+    _write_fake_safetensors(text_encoder)
+
+    result = service.preflight(
+        WanI2VRequest(runtime_mode=WAN_RUNTIME_FAST_5B, text_encoder_path=text_encoder.name)
+    )
+
+    assert result.ok is False
+    assert any("Flux/SD3 T5-XXL" in error for error in result.errors)
 
 
 def test_pass5_high_low_modes_still_require_both_transformers(tmp_path: Path):

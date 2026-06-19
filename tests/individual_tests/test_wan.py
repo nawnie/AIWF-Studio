@@ -811,7 +811,7 @@ def test_wan_generation_fast_5b_uses_local_model_without_high_low(tmp_path: Path
     monkeypatch.setattr(s, "_wan_file_candidates", lambda: [])
     base = _write_component_base(s)
     transformer = s.models_dir() / "Safetensor" / "wan2.2_ti2v_5B_fp16.safetensors"
-    vae = s.flags.resolved_models_dir() / "VAE" / "wan2.1_vae.safetensors"
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan2.2_vae.safetensors"
     _write_fake_safetensors(transformer)
     _write_fake_safetensors(vae)
     captured: dict[str, object] = {}
@@ -872,6 +872,32 @@ def test_wan_generation_passes_resolved_paths_to_backend(tmp_path: Path, monkeyp
     assert captured["vae"] == str(vae.resolve())
     assert captured["text_encoder"] == str(text_encoder.resolve())
     assert captured["components_base"] == str(base.resolve())
+
+
+def test_preflight_rejects_lora_from_wrong_runtime_size(tmp_path: Path):
+    s = _svc(tmp_path)
+    _force_wan_available(s)
+    _write_component_base(s)
+    high = s.models_dir() / "GGUF" / "wan-a14b-high-q4.gguf"
+    low = s.models_dir() / "GGUF" / "wan-a14b-low-q4.gguf"
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan2.1_vae.safetensors"
+    lora = s.flags.resolved_models_dir() / "Loras" / "Wan" / "motion_5b_ti2v_rank16.safetensors"
+    _write_fake_gguf(high)
+    _write_fake_gguf(low)
+    _write_fake_safetensors(vae)
+    _write_fake_safetensors(lora)
+
+    result = s.preflight(
+        WanI2VRequest(
+            runtime_mode=WAN_RUNTIME_HIGH_LOW,
+            high_noise_model_id=high.name,
+            low_noise_model_id=low.name,
+            high_noise_lora_id=lora.name,
+        )
+    )
+
+    assert result.ok is False
+    assert any("does not match the 14B high/low runtime" in error for error in result.errors)
 
 
 def test_ensure_components_base_is_local_only(tmp_path: Path, monkeypatch):

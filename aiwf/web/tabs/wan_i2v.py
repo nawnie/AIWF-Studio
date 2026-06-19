@@ -33,6 +33,7 @@ from aiwf.services.wan import (
     WanService,
 )
 from aiwf.services.wan_models import (
+    wan_model_pair_compatibility,
     wan_model_quant_family,
     wan_model_stage_role,
     wan_model_storage_family,
@@ -217,7 +218,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     peer_id=peer_value,
                 )
             )
-            return [(label, value) for label, value in labeled if value in allowed] or labeled
+            return [(label, value) for label, value in labeled if value in allowed]
 
         def _filter_lora_choices(runtime_value: str) -> list[str]:
             return wan_selectable_loras(
@@ -242,12 +243,79 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             low_quant = wan_model_quant_family(low_text)
             if not _experimental_wan_formats_enabled() and (high_storage != "gguf" or low_storage != "gguf"):
                 return "**Model pair blocked:** stable Video currently accepts GGUF high/low pairs only."
+            pair_check = wan_model_pair_compatibility(high_text, low_text)
+            if pair_check.errors:
+                return "**Model pair blocked:** " + " ".join(pair_check.errors)
             if high_storage != "unknown" and low_storage != "unknown" and high_storage != low_storage:
                 return f"**Model pair blocked:** {high_storage} high + {low_storage} low."
             if high_quant != "unknown" and low_quant != "unknown" and high_quant != low_quant:
                 return f"**Model pair blocked:** {high_quant.upper()} high + {low_quant.upper()} low."
             parts = [p for p in (high_storage, high_quant) if p != "unknown"]
-            return "**Model pair:** " + (" / ".join(parts) if parts else "stage roles only")
+            status = "**Model pair:** " + (" / ".join(parts) if parts else "stage roles only")
+            if pair_check.warnings:
+                status += "\n\n" + "\n\n".join(f"**Pair warning:** {warning}" for warning in pair_check.warnings)
+            return status
+
+        def _vae_looks_21(value: str | None) -> bool:
+            text = str(value or "").lower()
+            return "2.1" in text or "wan21" in text or "_21" in text
+
+        def _vae_looks_22(value: str | None) -> bool:
+            text = str(value or "").lower()
+            return "2.2" in text or "wan22" in text or "_22" in text
+
+        def _runtime_trace_status(
+            runtime_value: str | None,
+            high_value: str | None,
+            low_value: str | None,
+            vae_value: str | None,
+            text_encoder_value: str | None,
+            offload_value: str | None,
+            width_value: int | float | str | None = None,
+            height_value: int | float | str | None = None,
+            frames_value: int | float | str | None = None,
+        ) -> str:
+            selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
+            selected_vae = str(vae_value or "").strip()
+            selected_te = str(text_encoder_value or "").strip() or "Default/local component"
+            selected_offload = str(offload_value or "").strip() or "balanced"
+            try:
+                selected_width = int(width_value or 0)
+                selected_height = int(height_value or 0)
+                selected_frames = int(frames_value or 0)
+            except (TypeError, ValueError):
+                selected_width = selected_height = selected_frames = 0
+            lines: list[str] = []
+            warnings: list[str] = []
+            if selected_runtime == WAN_RUNTIME_FAST_5B:
+                lines.append("**Route:** Fast 5B TI2V - single transformer")
+                lines.append("**Model:** local Wan 2.2 TI2V 5B transformer or full Diffusers folder")
+                lines.append("**High/Low controls:** ignored and locked for this route")
+                lines.append("**Expected VAE:** Wan 2.2 / 48-channel")
+                if selected_vae and _vae_looks_21(selected_vae) and not _vae_looks_22(selected_vae):
+                    warnings.append("Selected VAE looks Wan 2.1; 5B needs Wan 2.2.")
+            else:
+                lines.append("**Route:** 14B high/low GGUF - dual transformer")
+                lines.append(f"**High:** `{high_value or 'not selected'}`")
+                lines.append(f"**Low:** `{low_value or 'not selected'}`")
+                lines.append("**Expected VAE:** Wan 2.1 / 16-channel")
+                if selected_vae and _vae_looks_22(selected_vae) and not _vae_looks_21(selected_vae):
+                    warnings.append("Selected VAE looks Wan 2.2; 14B high/low needs Wan 2.1.")
+                pair_text = _pair_status(high_value, low_value)
+                if pair_text:
+                    lines.append(pair_text)
+                if (
+                    selected_offload == "balanced"
+                    and selected_width >= 768
+                    and selected_height >= 768
+                    and selected_frames >= 81
+                ):
+                    warnings.append("14B 768x768 / 81 frames OOM'd on balanced; use Low VRAM/model offload.")
+            lines.append(f"**Text encoder:** `{selected_te}`")
+            lines.append(f"**Offload:** `{selected_offload}`")
+            if warnings:
+                lines.extend(f"**Blocked:** {warning}" for warning in warnings)
+            return "\n\n".join(lines)
 
         # Load persisted defaults
         _s = ctx.settings
@@ -297,22 +365,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         default_te_labeled = [("Default (full precision bundled encoder)", "")] + te_labeled
         default_te = _last_te if _last_te else (service.default_text_encoder() if hasattr(service, "default_text_encoder") else "")
 
-        initial_high = _best_default(high_labeled, _last_high)
         initial_lora_choices = _filter_lora_choices(WAN_RUNTIME_FAST_5B)
-        initial_low_choices = _filter_stage_choices(
-            low_labeled,
-            runtime_value=WAN_RUNTIME_FAST_5B,
-            stage="low",
-            peer_value=initial_high,
-        )
-        initial_low = _valid_or_first(_best_default(low_labeled, _last_low), initial_low_choices)
-        initial_high_choices = _filter_stage_choices(
-            high_labeled,
-            runtime_value=WAN_RUNTIME_FAST_5B,
-            stage="high",
-            peer_value=initial_low,
-        )
-        initial_high = _valid_or_first(initial_high, initial_high_choices)
+        initial_high_choices: list[tuple[str, str]] = []
+        initial_low_choices: list[tuple[str, str]] = []
+        initial_high = None
+        initial_low = None
 
         default_video_size = 480
         default_video_ratio = "1:1"
@@ -354,7 +411,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         label="High noise transformer",
                         choices=initial_high_choices,
                         value=initial_high,
-                        allow_custom_value=True,
+                        allow_custom_value=False,
                         interactive=False,
                         info="Early denoising stage for the 14B GGUF runtime.",
                     )
@@ -362,7 +419,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         label="Low noise transformer",
                         choices=initial_low_choices,
                         value=initial_low,
-                        allow_custom_value=True,
+                        allow_custom_value=False,
                         interactive=False,
                         info="Late denoising stage. Must match the selected 14B high GGUF.",
                     )
@@ -374,15 +431,26 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         label="Text encoder (UMT5-XXL)",
                         choices=default_te_labeled,
                         value=default_te if default_te else "",
-                        allow_custom_value=True,
+                        allow_custom_value=False,
                         info="UMT5-XXL only. Use GGUF/FP8 text encoders only if already tested locally.",
                     )
                     vae_id = gr.Dropdown(
                         label="VAE",
                         choices=vae_labeled,
                         value=preferred_vae_id,
-                        allow_custom_value=True,
+                        allow_custom_value=False,
                         info="5B TI2V uses Wan 2.2 VAE. 14B high/low usually uses Wan 2.1 VAE.",
+                    )
+                    route_status = gr.Markdown(
+                        _runtime_trace_status(
+                            WAN_RUNTIME_FAST_5B,
+                            None,
+                            None,
+                            preferred_vae_id,
+                            default_te,
+                            _offload_default,
+                        ),
+                        elem_classes=["aiwf-settings-paths"],
                     )
 
                     gr.Markdown("Stage LoRAs", elem_classes=["aiwf-section-label"])
@@ -390,17 +458,33 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         label="High noise LoRA",
                         choices=initial_lora_choices,
                         value=None,
-                        allow_custom_value=True,
+                        allow_custom_value=False,
+                        interactive=False,
                         info="Optional high-stage LoRA.",
                     )
                     with gr.Row():
-                        high_lora_scale = gr.Slider(0.0, 2.0, value=1.0, step=0.05, label="High LoRA strength")
-                        low_lora_scale = gr.Slider(0.0, 2.0, value=1.0, step=0.05, label="Low LoRA strength")
+                        high_lora_scale = gr.Slider(
+                            0.0,
+                            2.0,
+                            value=1.0,
+                            step=0.05,
+                            label="High LoRA strength",
+                            interactive=False,
+                        )
+                        low_lora_scale = gr.Slider(
+                            0.0,
+                            2.0,
+                            value=1.0,
+                            step=0.05,
+                            label="Low LoRA strength",
+                            interactive=False,
+                        )
                     low_lora = gr.Dropdown(
                         label="Low noise LoRA",
                         choices=initial_lora_choices,
                         value=None,
-                        allow_custom_value=True,
+                        allow_custom_value=False,
+                        interactive=False,
                         info="Optional low-stage LoRA.",
                     )
 
@@ -910,12 +994,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             lora_choices = _filter_lora_choices(selected_runtime)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
                 return (
-                    gr.update(interactive=False),
-                    gr.update(interactive=False),
+                    gr.update(choices=[], value=None, interactive=False),
+                    gr.update(choices=[], value=None, interactive=False),
                     "",
                     gr.update(value=_preferred_vae_for_runtime(selected_runtime, vae_value)),
-                    gr.update(choices=lora_choices, value=None),
-                    gr.update(choices=lora_choices, value=None),
+                    gr.update(choices=[], value=None, interactive=False),
+                    gr.update(choices=[], value=None, interactive=False),
+                    gr.update(value=1.0, interactive=False),
+                    gr.update(value=1.0, interactive=False),
                 )
             high_choices = _filter_stage_choices(
                 high_labeled,
@@ -936,14 +1022,16 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 gr.update(choices=low_choices, value=next_low, interactive=True),
                 _pair_status(next_high, next_low),
                 gr.update(value=_preferred_vae_for_runtime(selected_runtime, vae_value)),
-                gr.update(choices=lora_choices),
-                gr.update(choices=lora_choices),
+                gr.update(choices=lora_choices, interactive=True),
+                gr.update(choices=lora_choices, interactive=True),
+                gr.update(interactive=True),
+                gr.update(interactive=True),
             )
 
         def _sync_low_choices(high_value, low_value, runtime_value):
             selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
-                return gr.update(interactive=False), ""
+                return gr.update(choices=[], value=None, interactive=False), ""
             choices = _filter_stage_choices(
                 low_labeled,
                 runtime_value=selected_runtime,
@@ -956,7 +1044,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         def _sync_high_choices(low_value, high_value, runtime_value):
             selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
-                return gr.update(interactive=False), ""
+                return gr.update(choices=[], value=None, interactive=False), ""
             choices = _filter_stage_choices(
                 high_labeled,
                 runtime_value=selected_runtime,
@@ -969,7 +1057,16 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         runtime_mode.change(
             _sync_runtime_choices,
             inputs=[runtime_mode, high_noise, low_noise, vae_id],
-            outputs=[high_noise, low_noise, model_pair_status, vae_id, high_lora, low_lora],
+            outputs=[
+                high_noise,
+                low_noise,
+                model_pair_status,
+                vae_id,
+                high_lora,
+                low_lora,
+                high_lora_scale,
+                low_lora_scale,
+            ],
             show_progress=False,
         )
         high_noise.change(
@@ -984,6 +1081,37 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             outputs=[high_noise, model_pair_status],
             show_progress=False,
         )
+
+        def _sync_route_status(
+            runtime_value,
+            high_value,
+            low_value,
+            vae_value,
+            text_encoder_value,
+            offload_value,
+            width_value,
+            height_value,
+            frames_value,
+        ):
+            return _runtime_trace_status(
+                runtime_value,
+                high_value,
+                low_value,
+                vae_value,
+                text_encoder_value,
+                offload_value,
+                width_value,
+                height_value,
+                frames_value,
+            )
+
+        for route_input in (runtime_mode, high_noise, low_noise, vae_id, text_encoder, offload, width, height, num_frames):
+            route_input.change(
+                _sync_route_status,
+                inputs=[runtime_mode, high_noise, low_noise, vae_id, text_encoder, offload, width, height, num_frames],
+                outputs=[route_status],
+                show_progress=False,
+            )
 
         def _sync_reactor_source_mode(mode_value):
             mode = str(mode_value or "first_frame")
@@ -1155,6 +1283,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     "Wan video is unavailable — update diffusers (>=0.35) and install ftfy, then restart."
                 )
             selected_runtime = str(runtime_mode_v or WAN_RUNTIME_FAST_5B)
+            requires_dual_runtime = selected_runtime != WAN_RUNTIME_FAST_5B
             if selected_runtime != WAN_RUNTIME_FAST_5B and not (high_v and low_v):
                 raise gr.Error(
                     "Select BOTH a High noise model and a Low noise model. Wan 2.2 image-to-video "
@@ -1166,7 +1295,22 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         "Stable Video currently supports GGUF high/low transformer pairs only. "
                         "FP8/safetensors video experiments are kept on the dev branch."
                     )
-            # Warn if user somehow selected a t5xxl file (shouldn't happen via dropdown but allow_custom_value=True)
+            if selected_runtime == WAN_RUNTIME_FAST_5B and _vae_looks_21(vae_v) and not _vae_looks_22(vae_v):
+                raise gr.Error("Fast 5B uses the Wan 2.2 VAE. Select `wan2.2_vae.safetensors`.")
+            if selected_runtime != WAN_RUNTIME_FAST_5B and _vae_looks_22(vae_v) and not _vae_looks_21(vae_v):
+                raise gr.Error("14B high/low uses the Wan 2.1 VAE. Select `wan2.1_vae.safetensors`.")
+            if (
+                selected_runtime != WAN_RUNTIME_FAST_5B
+                and str(offload_v or "").strip() == "balanced"
+                and int(width_v) >= 768
+                and int(height_v) >= 768
+                and int(frames_v) >= 81
+            ):
+                raise gr.Error(
+                    "14B 768x768 / 81 frames OOM'd on Balanced in local testing. "
+                    "Use Low VRAM/model offload, or reduce size/frames."
+                )
+            # Guard stale settings or non-UI values; service preflight repeats this check.
             _te_path = str(text_encoder_v or "").strip()
             if _te_path and ("t5xxl" in _te_path.lower()) and not any(k in _te_path.lower() for k in ("umt5", "nsfw_wan")):
                 raise gr.Error(
@@ -1194,11 +1338,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 offload=offload_v,
                 vram_reserve_enabled=bool(vram_reserve_enabled_v),
                 vram_reserve_mb=int(vram_reserve_mb_v or 0),
-                high_noise_model_id=high_v or None,
-                low_noise_model_id=low_v or None,
-                high_noise_lora_id=high_lora_v or None,
+                high_noise_model_id=high_v if requires_dual_runtime else None,
+                low_noise_model_id=low_v if requires_dual_runtime else None,
+                high_noise_lora_id=high_lora_v if requires_dual_runtime else None,
                 high_noise_lora_scale=float(high_lora_scale_v),
-                low_noise_lora_id=low_lora_v or None,
+                low_noise_lora_id=low_lora_v if requires_dual_runtime else None,
                 low_noise_lora_scale=float(low_lora_scale_v),
                 boundary_ratio=0.5,
                 vae_id=vae_v or None,

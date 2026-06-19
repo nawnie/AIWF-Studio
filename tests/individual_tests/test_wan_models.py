@@ -29,6 +29,17 @@ def test_wan_model_pair_compatibility_blocks_mismatched_format():
     assert any("different storage formats" in error for error in check.errors)
 
 
+def test_wan_model_pair_compatibility_blocks_swapped_roles():
+    check = wan_model_pair_compatibility(
+        "wan2.2_i2v_low_noise_q4.gguf",
+        "wan2.2_i2v_high_noise_q4.gguf",
+    )
+
+    assert not check.ok
+    assert any("High noise selection looks like a low-noise model" in error for error in check.errors)
+    assert any("Low noise selection looks like a high-noise model" in error for error in check.errors)
+
+
 def test_wan_selectable_transformers_enforces_peer_storage_quant_and_role():
     candidates = [
         "wan_a14b_high_q4.gguf",
