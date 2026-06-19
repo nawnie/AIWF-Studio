@@ -4,6 +4,7 @@ import gc
 import logging
 import math
 import os
+from pathlib import Path
 
 import gradio as gr
 
@@ -18,6 +19,8 @@ from aiwf.core.domain.wan import (
     SAMPLER_TYPES,
     WAN_RUNTIME_FAST_5B,
     WAN_RUNTIME_HIGH_LOW,
+    WAN_RUNTIME_HIGH_LOW_FP8,
+    WAN_TI2V_5B,
     WanI2VRequest,
     duration_seconds_for_frames,
     frames_for_duration_seconds,
@@ -35,6 +38,7 @@ from aiwf.services.wan import (
 from aiwf.services.wan_models import (
     wan_model_pair_compatibility,
     wan_model_quant_family,
+    wan_model_header_info,
     wan_model_stage_role,
     wan_model_storage_family,
     wan_selectable_loras,
@@ -51,7 +55,20 @@ _SERVICES: dict[int, WanService] = {}
 _RIFE_SERVICES: dict[int, RifeService] = {}
 _VSR_SERVICES: dict[int, VsrService] = {}
 _AUDIO_SERVICES: dict[int, AudioGenerationService] = {}
-VIDEO_SIZE_PRESETS: tuple[int, ...] = (480, 568, 640, 768, 896, 1024)
+VIDEO_SIZE_PRESETS: tuple[int, ...] = (480, 512, 568, 640, 768, 896, 1024)
+_WAN_FAST_OFFLOAD_CHOICES = [
+    ("Balanced: model offload", "balanced"),
+    ("Low VRAM: model offload", "model"),
+    ("Sequential: slow fallback", "sequential"),
+]
+_WAN_GGUF_OFFLOAD_CHOICES = [
+    ("Low VRAM GGUF: active stage swaps", "model"),
+    ("Balanced GGUF: active stage swaps, VAE resident", "balanced"),
+    ("Sequential GGUF: slow fallback", "sequential"),
+]
+_WAN_FP8_OFFLOAD_CHOICES = [
+    ("Tested 14B FP8: streamed group offload", "streamed"),
+]
 VSR_UPSCALE_MODE_CHOICES = [
     ("Low", 1),
     ("Medium", 2),
@@ -152,6 +169,54 @@ def _experimental_wan_formats_enabled() -> bool:
     }
 
 
+def _offload_choices_for_runtime(runtime_value: str | None) -> list[tuple[str, str]]:
+    selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
+    if selected_runtime == WAN_RUNTIME_HIGH_LOW_FP8:
+        return list(_WAN_FP8_OFFLOAD_CHOICES)
+    if selected_runtime == WAN_RUNTIME_HIGH_LOW:
+        return list(_WAN_GGUF_OFFLOAD_CHOICES)
+    return list(_WAN_FAST_OFFLOAD_CHOICES)
+
+
+def _default_offload_for_runtime(runtime_value: str | None, current_value: str | None = None) -> str:
+    choices = _offload_choices_for_runtime(runtime_value)
+    values = [value for _label, value in choices]
+    if current_value and current_value in values:
+        return current_value
+    return values[0] if values else "balanced"
+
+
+def _model_allowed_for_runtime(model_id: str | None, runtime_value: str | None) -> bool:
+    selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
+    storage = wan_model_storage_family(model_id)
+    size_class = _model_size_class_for_filter(model_id)
+    if selected_runtime == WAN_RUNTIME_FAST_5B:
+        return storage == "safetensors" and size_class in {"", "5b"}
+    if selected_runtime == WAN_RUNTIME_HIGH_LOW_FP8:
+        return storage == "safetensors" and size_class in {"", "14b"}
+    if selected_runtime == WAN_RUNTIME_HIGH_LOW:
+        return storage == "gguf"
+    return True
+
+
+def _model_size_class_for_filter(model_id: str | None) -> str:
+    text = str(model_id or "").strip()
+    if not text:
+        return ""
+    try:
+        info = wan_model_header_info(text)
+        if info.ok and info.size_class:
+            return info.size_class
+    except Exception:
+        pass
+    name = Path(text).name.lower()
+    if "5b" in name or "ti2v" in name:
+        return "5b"
+    if "14b" in name or "a14b" in name:
+        return "14b"
+    return ""
+
+
 def _rife_multiplier_for_target(input_fps: int | float, target_fps: int | float) -> int:
     safe_input = max(1.0, float(input_fps or 1))
     safe_target = max(1.0, float(target_fps or safe_input))
@@ -198,27 +263,29 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         other_labeled = [c for c in all_labeled if c not in high_labeled and c not in low_labeled]
         high_labeled = list(dict.fromkeys(high_labeled + other_labeled + all_labeled))
         low_labeled  = list(dict.fromkeys(low_labeled  + other_labeled + all_labeled))
-        if not _experimental_wan_formats_enabled():
-            high_labeled = [c for c in high_labeled if wan_model_storage_family(c[1]) == "gguf"]
-            low_labeled = [c for c in low_labeled if wan_model_storage_family(c[1]) == "gguf"]
 
         def _filter_stage_choices(
             labeled: list[tuple[str, str]],
             *,
             runtime_value: str,
-            stage: str,
+            stage: str | None,
             peer_value: str | None,
         ) -> list[tuple[str, str]]:
             ids = [value for _label, value in labeled]
+            selectable_runtime = "" if str(runtime_value or "") == WAN_RUNTIME_HIGH_LOW else runtime_value
             allowed = set(
                 wan_selectable_transformers(
                     ids,
-                    runtime_mode=str(runtime_value or WAN_RUNTIME_HIGH_LOW),
+                    runtime_mode=str(selectable_runtime or ""),
                     want_role=stage,
                     peer_id=peer_value,
                 )
             )
-            return [(label, value) for label, value in labeled if value in allowed]
+            return [
+                (label, value)
+                for label, value in labeled
+                if value in allowed and _model_allowed_for_runtime(value, runtime_value)
+            ]
 
         def _filter_lora_choices(runtime_value: str) -> list[str]:
             return wan_selectable_loras(
@@ -241,8 +308,6 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             low_storage = wan_model_storage_family(low_text)
             high_quant = wan_model_quant_family(high_text)
             low_quant = wan_model_quant_family(low_text)
-            if not _experimental_wan_formats_enabled() and (high_storage != "gguf" or low_storage != "gguf"):
-                return "**Model pair blocked:** stable Video currently accepts GGUF high/low pairs only."
             pair_check = wan_model_pair_compatibility(high_text, low_text)
             if pair_check.errors:
                 return "**Model pair blocked:** " + " ".join(pair_check.errors)
@@ -289,13 +354,18 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             warnings: list[str] = []
             if selected_runtime == WAN_RUNTIME_FAST_5B:
                 lines.append("**Route:** Fast 5B TI2V - single transformer")
-                lines.append("**Model:** local Wan 2.2 TI2V 5B transformer or full Diffusers folder")
-                lines.append("**High/Low controls:** ignored and locked for this route")
+                lines.append(f"**Model:** `{high_value or 'not selected'}`")
+                lines.append("**Low-noise control:** ignored and locked for this route")
                 lines.append("**Expected VAE:** Wan 2.2 / 48-channel")
                 if selected_vae and _vae_looks_21(selected_vae) and not _vae_looks_22(selected_vae):
                     warnings.append("Selected VAE looks Wan 2.1; 5B needs Wan 2.2.")
             else:
-                lines.append("**Route:** 14B high/low GGUF - dual transformer")
+                if selected_runtime == WAN_RUNTIME_HIGH_LOW_FP8:
+                    lines.append("**Route:** Full 14B FP8 safetensors - dual transformer")
+                    if selected_offload != "streamed":
+                        warnings.append("Full 14B FP8 is locked to streamed group offload in the UI.")
+                else:
+                    lines.append("**Route:** GGUF high/low pair - dual transformer")
                 lines.append(f"**High:** `{high_value or 'not selected'}`")
                 lines.append(f"**Low:** `{low_value or 'not selected'}`")
                 lines.append("**Expected VAE:** Wan 2.1 / 16-channel")
@@ -324,8 +394,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         _last_vae  = getattr(_s, "last_wan_vae", "")
         _last_te   = getattr(_s, "last_wan_text_encoder", "")
         _last_offload = getattr(_s, "last_wan_offload", "balanced")
-        _working_offload_defaults = {"balanced", "model", "sequential"}
-        _offload_default = _last_offload if _last_offload in _working_offload_defaults else "balanced"
+        _offload_default = _default_offload_for_runtime(WAN_RUNTIME_FAST_5B, _last_offload)
 
         def _best_default(labeled: list[tuple[str, str]], persisted: str) -> str | None:
             ids = [v for _, v in labeled]
@@ -366,12 +435,17 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         default_te = _last_te if _last_te else (service.default_text_encoder() if hasattr(service, "default_text_encoder") else "")
 
         initial_lora_choices = _filter_lora_choices(WAN_RUNTIME_FAST_5B)
-        initial_high_choices: list[tuple[str, str]] = []
+        initial_high_choices = _filter_stage_choices(
+            all_labeled,
+            runtime_value=WAN_RUNTIME_FAST_5B,
+            stage=None,
+            peer_value=None,
+        )
         initial_low_choices: list[tuple[str, str]] = []
-        initial_high = None
+        initial_high = _valid_or_first(_last_high, initial_high_choices)
         initial_low = None
 
-        default_video_size = 480
+        default_video_size = 512
         default_video_ratio = "1:1"
 
         with gr.Column(elem_classes=["aiwf-wan", "aiwf-video", "aiwf-mode-video"]):
@@ -385,7 +459,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     elem_classes=["aiwf-mode-toggle"],
                 )
                 gr.Markdown(
-                    "Wan image-to-video. Fast 5B TI2V or matched GGUF High Noise + Low Noise pairs.",
+                    "Wan image-to-video. Fast 5B, full 14B FP8, or matched GGUF high/low pairs.",
                     elem_classes=["aiwf-page-intro"],
                 )
                 gr.Markdown(service.folder_help(), elem_classes=["aiwf-page-path"])
@@ -400,20 +474,21 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         label="Runtime",
                         choices=[
                             ("Fast: 5B TI2V", WAN_RUNTIME_FAST_5B),
-                            ("Stable: 14B high/low GGUF", WAN_RUNTIME_HIGH_LOW),
+                            ("Full: 14B FP8 high/low", WAN_RUNTIME_HIGH_LOW_FP8),
+                            ("GGUF: high/low pair", WAN_RUNTIME_HIGH_LOW),
                         ],
                         value=WAN_RUNTIME_FAST_5B,
-                        info="5B uses Wan 2.2 VAE and a single TI2V transformer. 14B requires matched GGUF high/low.",
+                        info="Routes are separated so FP8 safetensors and GGUF pairs cannot be mixed.",
                     )
 
                     gr.Markdown("Models", elem_classes=["aiwf-section-label"])
                     high_noise = gr.Dropdown(
-                        label="High noise transformer",
+                        label="5B transformer",
                         choices=initial_high_choices,
                         value=initial_high,
                         allow_custom_value=False,
-                        interactive=False,
-                        info="Early denoising stage for the 14B GGUF runtime.",
+                        interactive=True,
+                        info="Selected route controls which files appear here.",
                     )
                     low_noise = gr.Dropdown(
                         label="Low noise transformer",
@@ -421,7 +496,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         value=initial_low,
                         allow_custom_value=False,
                         interactive=False,
-                        info="Late denoising stage. Must match the selected 14B high GGUF.",
+                        info="Late denoising stage. Must match the selected high-noise file.",
                     )
                     model_pair_status = gr.Markdown(
                         "",
@@ -444,7 +519,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     route_status = gr.Markdown(
                         _runtime_trace_status(
                             WAN_RUNTIME_FAST_5B,
-                            None,
+                            initial_high,
                             None,
                             preferred_vae_id,
                             default_te,
@@ -491,13 +566,9 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     gr.Markdown("Runtime", elem_classes=["aiwf-section-label"])
                     offload = gr.Dropdown(
                         label="VRAM / offload",
-                        choices=[
-                            ("Balanced 16 GB: active GGUF stage swaps, VAE stays hot", "balanced"),
-                            ("Low VRAM: active GGUF stage swaps, VAE/text offload", "model"),
-                            ("Sequential: slow fallback", "sequential"),
-                        ],
+                        choices=_offload_choices_for_runtime(WAN_RUNTIME_FAST_5B),
                         value=_offload_default,
-                        info="Use Balanced first. Use Low VRAM if it OOMs.",
+                        info="Choices are route-specific; full 14B FP8 uses the tested streamed path.",
                     )
                     vram_reserve_enabled = gr.Checkbox(
                         value=False,
@@ -547,8 +618,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                                     ],
                                 )
                     with gr.Row():
-                        width = gr.Slider(128, 1280, value=480, step=8, label="Width")
-                        height = gr.Slider(128, 1280, value=480, step=8, label="Height")
+                        width = gr.Slider(128, 1280, value=512, step=8, label="Width")
+                        height = gr.Slider(128, 1280, value=512, step=8, label="Height")
 
                     gr.Markdown("Motion", elem_classes=["aiwf-section-label"])
                     with gr.Row():
@@ -989,19 +1060,29 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             show_progress=False,
         )
 
-        def _sync_runtime_choices(runtime_value, high_value, low_value, vae_value):
+        def _sync_runtime_choices(runtime_value, high_value, low_value, vae_value, offload_value):
             selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
             lora_choices = _filter_lora_choices(selected_runtime)
+            offload_choices = _offload_choices_for_runtime(selected_runtime)
+            next_offload = _default_offload_for_runtime(selected_runtime, offload_value)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
+                model_choices = _filter_stage_choices(
+                    all_labeled,
+                    runtime_value=selected_runtime,
+                    stage=None,
+                    peer_value=None,
+                )
+                next_model = _valid_or_first(high_value, model_choices)
                 return (
-                    gr.update(choices=[], value=None, interactive=False),
-                    gr.update(choices=[], value=None, interactive=False),
+                    gr.update(label="5B transformer", choices=model_choices, value=next_model, interactive=True),
+                    gr.update(label="Low noise transformer", choices=[], value=None, interactive=False),
                     "",
                     gr.update(value=_preferred_vae_for_runtime(selected_runtime, vae_value)),
                     gr.update(choices=[], value=None, interactive=False),
                     gr.update(choices=[], value=None, interactive=False),
                     gr.update(value=1.0, interactive=False),
                     gr.update(value=1.0, interactive=False),
+                    gr.update(choices=offload_choices, value=next_offload),
                 )
             high_choices = _filter_stage_choices(
                 high_labeled,
@@ -1018,14 +1099,15 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             next_high = _valid_or_first(high_value, high_choices)
             next_low = _valid_or_first(low_value, low_choices)
             return (
-                gr.update(choices=high_choices, value=next_high, interactive=True),
-                gr.update(choices=low_choices, value=next_low, interactive=True),
+                gr.update(label="High noise transformer", choices=high_choices, value=next_high, interactive=True),
+                gr.update(label="Low noise transformer", choices=low_choices, value=next_low, interactive=True),
                 _pair_status(next_high, next_low),
                 gr.update(value=_preferred_vae_for_runtime(selected_runtime, vae_value)),
                 gr.update(choices=lora_choices, interactive=True),
                 gr.update(choices=lora_choices, interactive=True),
                 gr.update(interactive=True),
                 gr.update(interactive=True),
+                gr.update(choices=offload_choices, value=next_offload),
             )
 
         def _sync_low_choices(high_value, low_value, runtime_value):
@@ -1056,7 +1138,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
         runtime_mode.change(
             _sync_runtime_choices,
-            inputs=[runtime_mode, high_noise, low_noise, vae_id],
+            inputs=[runtime_mode, high_noise, low_noise, vae_id, offload],
             outputs=[
                 high_noise,
                 low_noise,
@@ -1066,6 +1148,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 low_lora,
                 high_lora_scale,
                 low_lora_scale,
+                offload,
             ],
             show_progress=False,
         )
@@ -1284,21 +1367,27 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 )
             selected_runtime = str(runtime_mode_v or WAN_RUNTIME_FAST_5B)
             requires_dual_runtime = selected_runtime != WAN_RUNTIME_FAST_5B
+            if selected_runtime == WAN_RUNTIME_FAST_5B and not high_v:
+                raise gr.Error("Select a 5B safetensors transformer.")
             if selected_runtime != WAN_RUNTIME_FAST_5B and not (high_v and low_v):
                 raise gr.Error(
                     "Select BOTH a High noise model and a Low noise model. Wan 2.2 image-to-video "
                     "high/low modes run a two-stage transformer pair."
                 )
-            if selected_runtime != WAN_RUNTIME_FAST_5B and not _experimental_wan_formats_enabled():
+            if selected_runtime == WAN_RUNTIME_FAST_5B and wan_model_storage_family(high_v) != "safetensors":
+                raise gr.Error("The 5B route only accepts a `.safetensors` transformer file.")
+            if selected_runtime == WAN_RUNTIME_HIGH_LOW:
                 if wan_model_storage_family(high_v) != "gguf" or wan_model_storage_family(low_v) != "gguf":
-                    raise gr.Error(
-                        "Stable Video currently supports GGUF high/low transformer pairs only. "
-                        "FP8/safetensors video experiments are kept on the dev branch."
-                    )
+                    raise gr.Error("The GGUF route only accepts matched `.gguf` high/low files.")
+            if selected_runtime == WAN_RUNTIME_HIGH_LOW_FP8:
+                if wan_model_storage_family(high_v) != "safetensors" or wan_model_storage_family(low_v) != "safetensors":
+                    raise gr.Error("The full 14B FP8 route only accepts matched `.safetensors` high/low files.")
+                if str(offload_v or "").strip() != "streamed":
+                    raise gr.Error("The full 14B FP8 route is locked to streamed group offload.")
             if selected_runtime == WAN_RUNTIME_FAST_5B and _vae_looks_21(vae_v) and not _vae_looks_22(vae_v):
                 raise gr.Error("Fast 5B uses the Wan 2.2 VAE. Select `wan2.2_vae.safetensors`.")
             if selected_runtime != WAN_RUNTIME_FAST_5B and _vae_looks_22(vae_v) and not _vae_looks_21(vae_v):
-                raise gr.Error("14B high/low uses the Wan 2.1 VAE. Select `wan2.1_vae.safetensors`.")
+                raise gr.Error("High/low Wan routes use the Wan 2.1 VAE. Select `wan2.1_vae.safetensors`.")
             if (
                 selected_runtime != WAN_RUNTIME_FAST_5B
                 and str(offload_v or "").strip() == "balanced"
@@ -1307,7 +1396,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 and int(frames_v) >= 81
             ):
                 raise gr.Error(
-                    "14B 768x768 / 81 frames OOM'd on Balanced in local testing. "
+                    "High/low 768x768 / 81 frames OOM'd on Balanced in local testing. "
                     "Use Low VRAM/model offload, or reduce size/frames."
                 )
             # Guard stale settings or non-UI values; service preflight repeats this check.
@@ -1335,6 +1424,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 flow_shift=float(flow_v),
                 seed=int(seed_v),
                 runtime_mode=selected_runtime,
+                model_id=high_v if selected_runtime == WAN_RUNTIME_FAST_5B else WAN_TI2V_5B,
                 offload=offload_v,
                 vram_reserve_enabled=bool(vram_reserve_enabled_v),
                 vram_reserve_mb=int(vram_reserve_mb_v or 0),
@@ -1378,7 +1468,12 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     desc = f"{desc} - {rate_text}"
                 progress(min(0.90, step / max(1, tot)), desc=desc)
 
-            runtime_label = "Wan 5B demo" if selected_runtime == WAN_RUNTIME_FAST_5B else "Wan 14B dual-stage I2V"
+            if selected_runtime == WAN_RUNTIME_FAST_5B:
+                runtime_label = "Wan 5B safetensors"
+            elif selected_runtime == WAN_RUNTIME_HIGH_LOW_FP8:
+                runtime_label = "Wan 14B FP8 safetensors"
+            else:
+                runtime_label = "Wan GGUF high/low"
             progress(0.02, desc=f"Preparing {runtime_label}: loading models and encoding inputs")
             try:
                 result = service.generate(request, image, on_progress=on_progress)

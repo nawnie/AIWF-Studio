@@ -573,7 +573,7 @@ def _wan_group_offload_record_stream() -> bool:
 
 
 def _wan_group_offload_low_cpu_mem_usage() -> bool:
-    return _env_flag("AIWF_WAN_GROUP_OFFLOAD_LOW_CPU_MEM", default=False)
+    return _env_flag("AIWF_WAN_GROUP_OFFLOAD_LOW_CPU_MEM", default=True)
 
 
 def _install_group_offload_for_stage(

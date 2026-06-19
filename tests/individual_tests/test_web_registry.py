@@ -68,3 +68,27 @@ def test_settings_visibility_choices_include_secondary_shipped_tabs():
         assert hidden_by_default not in TAB_VISIBILITY_CHOICES
 
     assert TAB_VISIBILITY_CHOICES[:3] == ["Video", "Models", "Enhance"]
+
+
+def test_wan_video_route_filters_keep_runtime_families_separate():
+    from aiwf.core.domain.wan import WAN_RUNTIME_FAST_5B, WAN_RUNTIME_HIGH_LOW, WAN_RUNTIME_HIGH_LOW_FP8
+    from aiwf.web.tabs.wan_i2v import (
+        _default_offload_for_runtime,
+        _model_allowed_for_runtime,
+        _offload_choices_for_runtime,
+    )
+
+    assert _model_allowed_for_runtime("wan2.2_ti2v_5B_fp16.safetensors", WAN_RUNTIME_FAST_5B)
+    assert not _model_allowed_for_runtime("Wan2.2-I2V-A14B-HighNoise-Q3_K_S.gguf", WAN_RUNTIME_FAST_5B)
+    assert not _model_allowed_for_runtime("DasiwaWAN22I2V14BLightspeed_boundbiteHighV10.safetensors", WAN_RUNTIME_FAST_5B)
+
+    assert _model_allowed_for_runtime("DasiwaWAN22I2V14BLightspeed_boundbiteHighV10.safetensors", WAN_RUNTIME_HIGH_LOW_FP8)
+    assert not _model_allowed_for_runtime("Wan2.2-I2V-A14B-HighNoise-Q3_K_S.gguf", WAN_RUNTIME_HIGH_LOW_FP8)
+
+    assert _model_allowed_for_runtime("Wan2.2-I2V-A14B-HighNoise-Q3_K_S.gguf", WAN_RUNTIME_HIGH_LOW)
+    assert not _model_allowed_for_runtime("DasiwaWAN22I2V14BLightspeed_boundbiteHighV10.safetensors", WAN_RUNTIME_HIGH_LOW)
+
+    assert _offload_choices_for_runtime(WAN_RUNTIME_HIGH_LOW_FP8) == [
+        ("Tested 14B FP8: streamed group offload", "streamed")
+    ]
+    assert _default_offload_for_runtime(WAN_RUNTIME_HIGH_LOW_FP8, "balanced") == "streamed"

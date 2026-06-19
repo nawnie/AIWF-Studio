@@ -16,7 +16,14 @@ from PIL import Image
 from aiwf import __version__
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.engine import EngineSwitchRequest, EngineTenant
-from aiwf.core.domain.wan import WAN_TI2V_5B, WanI2VRequest, WanI2VResult, SAMPLER_TYPES
+from aiwf.core.domain.wan import (
+    WAN_RUNTIME_HIGH_LOW,
+    WAN_RUNTIME_HIGH_LOW_FP8,
+    WAN_TI2V_5B,
+    WanI2VRequest,
+    WanI2VResult,
+    SAMPLER_TYPES,
+)
 from aiwf.dev.diagnostics import trace_model_throughput
 from aiwf.infrastructure.video import write_frames
 from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
@@ -499,14 +506,36 @@ class WanService:
             if high_res and low_res and Path(high_res) == Path(low_res):
                 errors.append("High noise and Low noise transformers must be different files.")
             if high_res and low_res:
-                if not _wan_experimental_formats_enabled():
-                    high_storage = wan_model_storage_family(high_res)
-                    low_storage = wan_model_storage_family(low_res)
+                high_storage = wan_model_storage_family(high_res)
+                low_storage = wan_model_storage_family(low_res)
+                if request.runtime_mode == WAN_RUNTIME_HIGH_LOW:
                     if high_storage != "gguf" or low_storage != "gguf":
+                        errors.append("The GGUF Wan route only accepts matched `.gguf` high/low transformer files.")
+                elif request.runtime_mode == WAN_RUNTIME_HIGH_LOW_FP8:
+                    if high_storage != "safetensors" or low_storage != "safetensors":
                         errors.append(
-                            "Stable Wan Video supports GGUF high/low transformer pairs only. "
-                            "FP8/safetensors and resident experiments are kept on the dev branch."
+                            "The full 14B FP8 Wan route only accepts matched `.safetensors` high/low transformer files."
                         )
+                    if request.offload != "streamed":
+                        errors.append("The full 14B FP8 Wan route is locked to streamed group offload.")
+                    if not _native_fp8_runtime_available():
+                        errors.append(
+                            "The full 14B FP8 Wan route needs native FP8 tensor cores: "
+                            f"{_native_fp8_unavailable_reason() or 'native FP8 is unavailable.'}"
+                        )
+                    if high_storage == "safetensors" and low_storage == "safetensors":
+                        try:
+                            from aiwf.infrastructure.wan.comfy_quant_format import inspect_wan_quant_file
+
+                            for label, resolved in (("High noise", high_res), ("Low noise", low_res)):
+                                report = inspect_wan_quant_file(Path(resolved))
+                                if not report.is_comfy_fp8:
+                                    errors.append(
+                                        f"{label} transformer is not a Comfy scaled-FP8 safetensors file: "
+                                        f"{Path(resolved).name}"
+                                    )
+                        except Exception as exc:
+                            errors.append(f"Could not validate FP8 safetensors headers: {exc}")
                 pair_check = wan_model_pair_compatibility(high_res, low_res)
                 errors.extend(pair_check.errors)
                 warnings.extend(pair_check.warnings)
@@ -514,6 +543,8 @@ class WanService:
             model_res = self.resolve_model(request.model_id)
             model_path = Path(model_res)
             if model_path.is_file():
+                if model_path.suffix.lower() != ".safetensors":
+                    errors.append("The 5B Wan route only accepts a `.safetensors` transformer file.")
                 e, w = self._validate_transformer_file(model_path, "Fast 5B")
                 errors.extend(e)
                 warnings.extend(w)
@@ -686,8 +717,8 @@ class WanService:
     def folder_help(self) -> str:
         return (
             f"**Wan models** -> `{self.models_dir()}`.  \n"
-            "Stable video runtime: matched 14B GGUF High Noise + Low Noise transformers. "
-            "Use Sequential offload + small size/frames on lower-VRAM cards. "
+            "Video runtimes: 5B safetensors, full 14B FP8 safetensors, or matched GGUF High Noise + Low Noise transformers. "
+            "Use smaller size/frames on lower-VRAM cards. "
             "Needs a recent `diffusers` + `ftfy`. "
             "Put Wan high/low transformer weights in `models/wan/Safetensor/` or `models/wan/GGUF/`, "
             "broken-out Diffusers folders in `models/wan/Diffusers/`, "
