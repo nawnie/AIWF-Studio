@@ -350,6 +350,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             width_value: int | float | str | None = None,
             height_value: int | float | str | None = None,
             frames_value: int | float | str | None = None,
+            high_steps_value: int | float | str | None = None,
+            low_steps_value: int | float | str | None = None,
             temporal_chunks_value: bool | None = None,
             chunk_size_value: int | float | str | None = None,
             chunk_overlap_value: int | float | str | None = None,
@@ -376,6 +378,9 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             except (TypeError, ValueError):
                 selected_low_guidance = 1.0
             selected_temporal_chunks = bool(temporal_chunks_value)
+            step_high = high_steps_value if high_steps_value is not None else (8 if selected_runtime == WAN_RUNTIME_FAST_5B else 4)
+            step_low = low_steps_value if low_steps_value is not None else 4
+            selected_total_steps, selected_step_ratio = _step_summary_for_runtime(selected_runtime, step_high, step_low)
             lines: list[str] = []
             warnings: list[str] = []
             if selected_runtime == WAN_RUNTIME_FAST_5B:
@@ -409,6 +414,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     warnings.append("14B 768x768 / 81 frames OOM'd on balanced; use Low VRAM/model offload.")
             lines.append(f"**Text encoder:** `{selected_te}`")
             lines.append(f"**Offload:** `{selected_offload}`")
+            if selected_runtime == WAN_RUNTIME_FAST_5B:
+                lines.append(f"**Steps:** `{selected_total_steps}`")
+            else:
+                lines.append(
+                    f"**Steps:** `{selected_total_steps}` "
+                    f"(high {max(1, int(step_high or 0))} / low {max(1, int(step_low or 0))}, "
+                    f"split {selected_step_ratio:g})"
+                )
             lines.append(
                 f"**Temporal chunks:** `{'on' if selected_temporal_chunks else 'off'}` "
                 f"(latent chunk {selected_chunk_size}, overlap {selected_chunk_overlap})"
@@ -1092,15 +1105,58 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             show_progress=False,
         )
 
+        def _route_status_from_values(
+            runtime_value,
+            high_value,
+            low_value,
+            vae_value,
+            text_encoder_value,
+            offload_value,
+            width_value,
+            height_value,
+            frames_value,
+            high_steps_value,
+            low_steps_value,
+            temporal_chunks_value,
+            chunk_size_value,
+            chunk_overlap_value,
+            low_guidance_value,
+        ):
+            return _runtime_trace_status(
+                runtime_value,
+                high_value,
+                low_value,
+                vae_value,
+                text_encoder_value,
+                offload_value,
+                width_value,
+                height_value,
+                frames_value,
+                high_steps_value,
+                low_steps_value,
+                temporal_chunks_value,
+                chunk_size_value,
+                chunk_overlap_value,
+                low_guidance_value,
+            )
+
         def _sync_runtime_choices(
             runtime_value,
             previous_runtime_value,
             high_value,
             low_value,
             vae_value,
+            text_encoder_value,
             offload_value,
             high_steps_value,
             low_steps_value,
+            width_value,
+            height_value,
+            frames_value,
+            temporal_chunks_value,
+            chunk_size_value,
+            chunk_overlap_value,
+            low_guidance_value,
         ):
             selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
             previous_runtime = str(previous_runtime_value or WAN_RUNTIME_FAST_5B)
@@ -1120,11 +1176,29 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     peer_value=None,
                 )
                 next_model = _valid_or_first(high_value, model_choices)
+                next_vae = _preferred_vae_for_runtime(selected_runtime, vae_value)
+                trace_status = _route_status_from_values(
+                    selected_runtime,
+                    next_model,
+                    None,
+                    next_vae,
+                    text_encoder_value,
+                    next_offload,
+                    width_value,
+                    height_value,
+                    frames_value,
+                    single_steps,
+                    low_steps_value,
+                    temporal_chunks_value,
+                    chunk_size_value,
+                    chunk_overlap_value,
+                    1.0,
+                )
                 return (
                     gr.update(label="5B transformer", choices=model_choices, value=next_model, interactive=True),
                     gr.update(label="Low noise transformer", choices=[], value=None, interactive=False),
                     "",
-                    gr.update(value=_preferred_vae_for_runtime(selected_runtime, vae_value)),
+                    gr.update(value=next_vae),
                     gr.update(choices=[], value=None, interactive=False),
                     gr.update(choices=[], value=None, interactive=False),
                     gr.update(value=1.0, interactive=False),
@@ -1135,6 +1209,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     gr.update(value=total),
                     gr.update(value=ratio),
                     gr.update(value=1.0, interactive=False),
+                    trace_status,
                     selected_runtime,
                 )
             if previous_runtime == WAN_RUNTIME_FAST_5B:
@@ -1156,12 +1231,30 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             )
             next_high = _valid_or_first(high_value, high_choices)
             next_low = _valid_or_first(low_value, low_choices)
+            next_vae = _preferred_vae_for_runtime(selected_runtime, vae_value)
             total, ratio = _step_summary_for_runtime(selected_runtime, next_high_steps, next_low_steps)
+            trace_status = _route_status_from_values(
+                selected_runtime,
+                next_high,
+                next_low,
+                next_vae,
+                text_encoder_value,
+                next_offload,
+                width_value,
+                height_value,
+                frames_value,
+                next_high_steps,
+                next_low_steps,
+                temporal_chunks_value,
+                chunk_size_value,
+                chunk_overlap_value,
+                low_guidance_value,
+            )
             return (
                 gr.update(label="High noise transformer", choices=high_choices, value=next_high, interactive=True),
                 gr.update(label="Low noise transformer", choices=low_choices, value=next_low, interactive=True),
                 _pair_status(next_high, next_low),
-                gr.update(value=_preferred_vae_for_runtime(selected_runtime, vae_value)),
+                gr.update(value=next_vae),
                 gr.update(choices=lora_choices, interactive=True),
                 gr.update(choices=lora_choices, interactive=True),
                 gr.update(interactive=True),
@@ -1172,13 +1265,47 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 gr.update(value=total),
                 gr.update(value=ratio),
                 gr.update(interactive=True),
+                trace_status,
                 selected_runtime,
             )
 
-        def _sync_low_choices(high_value, low_value, runtime_value):
+        def _sync_low_choices(
+            high_value,
+            low_value,
+            runtime_value,
+            vae_value,
+            text_encoder_value,
+            offload_value,
+            width_value,
+            height_value,
+            frames_value,
+            high_steps_value,
+            low_steps_value,
+            temporal_chunks_value,
+            chunk_size_value,
+            chunk_overlap_value,
+            low_guidance_value,
+        ):
             selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
-                return gr.update(choices=[], value=None, interactive=False), ""
+                status_text = _route_status_from_values(
+                    selected_runtime,
+                    high_value,
+                    None,
+                    vae_value,
+                    text_encoder_value,
+                    offload_value,
+                    width_value,
+                    height_value,
+                    frames_value,
+                    high_steps_value,
+                    low_steps_value,
+                    temporal_chunks_value,
+                    chunk_size_value,
+                    chunk_overlap_value,
+                    low_guidance_value,
+                )
+                return gr.update(choices=[], value=None, interactive=False), "", status_text
             choices = _filter_stage_choices(
                 low_labeled,
                 runtime_value=selected_runtime,
@@ -1186,12 +1313,62 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 peer_value=high_value,
             )
             next_low = _valid_or_first(low_value, choices)
-            return gr.update(choices=choices, value=next_low, interactive=True), _pair_status(high_value, next_low)
+            status_text = _route_status_from_values(
+                selected_runtime,
+                high_value,
+                next_low,
+                vae_value,
+                text_encoder_value,
+                offload_value,
+                width_value,
+                height_value,
+                frames_value,
+                high_steps_value,
+                low_steps_value,
+                temporal_chunks_value,
+                chunk_size_value,
+                chunk_overlap_value,
+                low_guidance_value,
+            )
+            return gr.update(choices=choices, value=next_low, interactive=True), _pair_status(high_value, next_low), status_text
 
-        def _sync_high_choices(low_value, high_value, runtime_value):
+        def _sync_high_choices(
+            low_value,
+            high_value,
+            runtime_value,
+            vae_value,
+            text_encoder_value,
+            offload_value,
+            width_value,
+            height_value,
+            frames_value,
+            high_steps_value,
+            low_steps_value,
+            temporal_chunks_value,
+            chunk_size_value,
+            chunk_overlap_value,
+            low_guidance_value,
+        ):
             selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
-                return gr.update(choices=[], value=None, interactive=False), ""
+                status_text = _route_status_from_values(
+                    selected_runtime,
+                    high_value,
+                    None,
+                    vae_value,
+                    text_encoder_value,
+                    offload_value,
+                    width_value,
+                    height_value,
+                    frames_value,
+                    high_steps_value,
+                    low_steps_value,
+                    temporal_chunks_value,
+                    chunk_size_value,
+                    chunk_overlap_value,
+                    low_guidance_value,
+                )
+                return gr.update(choices=[], value=None, interactive=False), "", status_text
             choices = _filter_stage_choices(
                 high_labeled,
                 runtime_value=selected_runtime,
@@ -1199,11 +1376,45 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 peer_value=low_value,
             )
             next_high = _valid_or_first(high_value, choices)
-            return gr.update(choices=choices, value=next_high, interactive=True), _pair_status(next_high, low_value)
+            status_text = _route_status_from_values(
+                selected_runtime,
+                next_high,
+                low_value,
+                vae_value,
+                text_encoder_value,
+                offload_value,
+                width_value,
+                height_value,
+                frames_value,
+                high_steps_value,
+                low_steps_value,
+                temporal_chunks_value,
+                chunk_size_value,
+                chunk_overlap_value,
+                low_guidance_value,
+            )
+            return gr.update(choices=choices, value=next_high, interactive=True), _pair_status(next_high, low_value), status_text
 
         runtime_mode.change(
             _sync_runtime_choices,
-            inputs=[runtime_mode, runtime_previous, high_noise, low_noise, vae_id, offload, high_steps, low_steps],
+            inputs=[
+                runtime_mode,
+                runtime_previous,
+                high_noise,
+                low_noise,
+                vae_id,
+                text_encoder,
+                offload,
+                high_steps,
+                low_steps,
+                width,
+                height,
+                num_frames,
+                temporal_chunks,
+                chunk_size,
+                chunk_overlap,
+                image_guidance_scale,
+            ],
             outputs=[
                 high_noise,
                 low_noise,
@@ -1219,20 +1430,53 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 total_steps,
                 boundary_ratio,
                 image_guidance_scale,
+                route_status,
                 runtime_previous,
             ],
             show_progress=False,
         )
         high_noise.change(
             _sync_low_choices,
-            inputs=[high_noise, low_noise, runtime_mode],
-            outputs=[low_noise, model_pair_status],
+            inputs=[
+                high_noise,
+                low_noise,
+                runtime_mode,
+                vae_id,
+                text_encoder,
+                offload,
+                width,
+                height,
+                num_frames,
+                high_steps,
+                low_steps,
+                temporal_chunks,
+                chunk_size,
+                chunk_overlap,
+                image_guidance_scale,
+            ],
+            outputs=[low_noise, model_pair_status, route_status],
             show_progress=False,
         )
         low_noise.change(
             _sync_high_choices,
-            inputs=[low_noise, high_noise, runtime_mode],
-            outputs=[high_noise, model_pair_status],
+            inputs=[
+                low_noise,
+                high_noise,
+                runtime_mode,
+                vae_id,
+                text_encoder,
+                offload,
+                width,
+                height,
+                num_frames,
+                high_steps,
+                low_steps,
+                temporal_chunks,
+                chunk_size,
+                chunk_overlap,
+                image_guidance_scale,
+            ],
+            outputs=[high_noise, model_pair_status, route_status],
             show_progress=False,
         )
 
@@ -1246,12 +1490,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             width_value,
             height_value,
             frames_value,
+            high_steps_value,
+            low_steps_value,
             temporal_chunks_value,
             chunk_size_value,
             chunk_overlap_value,
             low_guidance_value,
         ):
-            return _runtime_trace_status(
+            return _route_status_from_values(
                 runtime_value,
                 high_value,
                 low_value,
@@ -1261,6 +1507,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 width_value,
                 height_value,
                 frames_value,
+                high_steps_value,
+                low_steps_value,
                 temporal_chunks_value,
                 chunk_size_value,
                 chunk_overlap_value,
@@ -1277,12 +1525,27 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             width,
             height,
             num_frames,
+            high_steps,
+            low_steps,
             temporal_chunks,
             chunk_size,
             chunk_overlap,
             image_guidance_scale,
         ]
-        for route_input in route_trace_inputs:
+        for route_input in [
+            vae_id,
+            text_encoder,
+            offload,
+            width,
+            height,
+            num_frames,
+            high_steps,
+            low_steps,
+            temporal_chunks,
+            chunk_size,
+            chunk_overlap,
+            image_guidance_scale,
+        ]:
             route_input.change(
                 _sync_route_status,
                 inputs=route_trace_inputs,
