@@ -17,6 +17,7 @@ from aiwf.core.events.bus import EventBus
 from aiwf.services.engine_supervisor import EngineSupervisor
 from aiwf.services.queue import JobQueue
 from aiwf.services.failure_archive import FailureArchiveService
+from aiwf.services.genlog import GenerationLogService
 from aiwf.services.generation import GenerationService
 from aiwf.services.gpu_tenant_lock import GpuTenantLock
 from aiwf.services.metadata import MetadataService
@@ -303,3 +304,77 @@ def test_generation_service_records_model_throughput(monkeypatch):
     assert captured["units_label"] == "steps"
     assert captured["units"] == 4
     assert captured["app_version"] == __version__
+
+
+def test_generation_log_service_scrubs_prompts(tmp_path: Path):
+    log = GenerationLogService(tmp_path / "outputs", enabled=True)
+
+    path = log.append(
+        {
+            "kind": "image",
+            "prompt": "do not store this",
+            "settings": {
+                "negative_prompt": "also do not store this",
+                "steps": 20,
+            },
+            "loras": [{"name": "detail", "weight": 0.7}],
+        }
+    )
+
+    assert path is not None
+    data = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    encoded = json.dumps(data)
+    assert "do not store this" not in encoded
+    assert "also do not store this" not in encoded
+    assert data["settings"]["steps"] == 20
+    assert data["loras"] == [{"name": "detail", "weight": 0.7}]
+
+
+def test_image_generation_writes_genlog_without_prompt_text(tmp_path: Path):
+    checkpoint = Checkpoint(
+        id="tiny-xl",
+        title="Tiny XL",
+        filename="tiny-xl.safetensors",
+        path="/models/tiny-xl.safetensors",
+        hash="abc123",
+        architecture="sdxl",
+    )
+
+    backend = MagicMock()
+    backend.resolve_checkpoint.return_value = checkpoint
+    backend.flags = RuntimeFlags(data_dir=tmp_path, genlog=True)
+
+    def generate(request, *, on_progress=None, **_kwargs):
+        if on_progress:
+            on_progress(1, request.steps, "Step 1/1", None)
+        return GenerationResult(
+            job_id=uuid4(),
+            images=[Image.new("RGB", (8, 8))],
+            seeds=[1],
+            infotexts=[""],
+            mode=request.mode,
+        )
+
+    backend.generate.side_effect = generate
+    events = EventBus()
+    genlog = GenerationLogService(tmp_path / "outputs", enabled=True)
+    service = GenerationService(
+        backend=backend,
+        store=MagicMock(),
+        metadata=MagicMock(),
+        queue=JobQueue(events),
+        events=events,
+        settings=UserSettings(save_images=False),
+        genlog=genlog,
+    )
+
+    list(service.submit_streaming(GenerationRequest(prompt="<lora:detail:0.7> private subject", steps=4)))
+
+    data = json.loads(genlog.path.read_text(encoding="utf-8").splitlines()[0])
+    encoded = json.dumps(data)
+    assert data["kind"] == "image"
+    assert data["generate_type"] == "sdxl"
+    assert data["pipeline"] == "diffusers.sdxl.txt2img"
+    assert data["settings"]["steps"] == 4
+    assert data["loras"] == [{"name": "detail", "weight": 0.7}]
+    assert "private subject" not in encoded

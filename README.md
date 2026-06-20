@@ -23,7 +23,7 @@ Current focus: make image generation, inpainting, video generation, and video-au
 ### Image Generation
 
 - txt2img, img2img, and inpaint
-- Stable Diffusion 1.5, SDXL, and SD3.5 checkpoint loading through Diffusers
+- Stable Diffusion 1.5, SDXL, SD3.5, and Flux txt2img checkpoint loading through Diffusers
 - sampler, scheduler, steps, CFG, seed, size, VAE, clip skip, and hires fix controls
 - live preview, interrupt, continuous generation, and job history
 - prompt styles, wildcards, prompt files, dynamic prompt syntax, and Compel support
@@ -47,6 +47,7 @@ Current focus: make image generation, inpainting, video generation, and video-au
 
 - local checkpoint, LoRA, VAE, ControlNet, SAM, and enhancement model scanning
 - SD3.5 Diffusers-folder checkpoints are supported in `models/Stable-diffusion/`
+- Flux split-model txt2img is supported from `models/flux/GGUF/` or `models/flux/UNet/` with local CLIP-L, T5-XXL, and `ae.safetensors`
 - model aliases and trigger-word helpers
 - curated download entries for common local model folders
 - import helpers for model folders from another local install
@@ -105,6 +106,16 @@ Or:
 python launch.py
 ```
 
+Optional local speed/settings logging:
+
+```powershell
+python launch.py --genlog
+```
+
+`--genlog` writes JSONL entries to `outputs/genlog/generation-log.jsonl` for
+SD, SDXL, and Wan runs. It records timings, runtime route/pipeline, settings,
+models, and LoRAs, but not prompt text. The flag is off by default.
+
 AIWF Studio creates and uses local runtime folders:
 
 ```text
@@ -125,6 +136,10 @@ models/ControlNet/         ControlNet models
 models/sam/                SAM weights
 models/wan/GGUF/           Wan high/low GGUF transformers
 models/wan/Diffusers/      Wan shared components
+models/flux/GGUF/          Flux GGUF transformers
+models/flux/UNet/          Flux safetensors transformers
+models/flux/Textencoder/   Flux CLIP-L and T5-XXL encoders
+models/flux/VAE/           Flux ae.safetensors VAE
 models/insightface/        ReActor inswapper ONNX models
 models/reactor/faces/      saved ReActor face models
 ```
@@ -151,6 +166,19 @@ models/wan/Diffusers/Wan2.2-TI2V-5B-Diffusers/
 ```
 
 The Video tab keeps 5B safetensors, 14B FP8/safetensors, and GGUF high/low pairs as separate runtime routes. The UI should filter settings based on that route so a user cannot accidentally send GGUF options into a safetensors backend or vice versa.
+
+## Flux Image Setup
+
+The current Flux route is text-to-image only. It supports Flux transformer files in `.gguf` or `.safetensors` form, plus local split text/VAE assets:
+
+```text
+models/flux/GGUF/          flux transformer .gguf files
+models/flux/UNet/          flux transformer .safetensors files
+models/flux/Textencoder/   clip_l.safetensors and t5xxl_fp16.safetensors
+models/flux/VAE/           ae.safetensors
+```
+
+Distilled/4-step Flux models without a guidance block run with CFG forced to `0.0`. Full Flux-dev style models with guidance tensors can use the CFG control. Flux LoRA, ControlNet, img2img, and inpaint are intentionally blocked until those paths are wired and tested.
 
 ## Video Audio Setup
 

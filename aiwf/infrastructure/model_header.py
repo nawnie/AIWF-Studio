@@ -36,7 +36,11 @@ ARCH_WAN_TRANSFORMER_FP8 = "wan-transformer-fp8"
 ARCH_WAN_LORA            = "wan-lora"
 ARCH_WAN_VAE             = "wan-vae"
 ARCH_UMT5_ENCODER        = "umt5-encoder"
+ARCH_T5XXL_ENCODER       = "t5xxl-encoder"
 ARCH_CLIP                = "clip"
+ARCH_FLUX_TRANSFORMER    = "flux-transformer"
+ARCH_FLUX_LORA           = "flux-lora"
+ARCH_FLUX_VAE            = "flux-vae"
 ARCH_SDXL_CHECKPOINT     = "sdxl-checkpoint"
 ARCH_SD35_CHECKPOINT     = "sd3.5-checkpoint"
 ARCH_SD_CHECKPOINT       = "sd-checkpoint"
@@ -68,6 +72,13 @@ _ST_PATTERNS: list[tuple[str, str, str]] = [
     ("encoder.block.0.layer.0.SelfAttention",                    ARCH_UMT5_ENCODER,        ROLE_TEXT_ENCODER),
     ("text_model.encoder.layers.0",                              ARCH_CLIP,                ROLE_TEXT_ENCODER),
     ("cond_stage_model.transformer.resblocks.0",                 ARCH_CLIP,                ROLE_TEXT_ENCODER),
+    ("double_blocks.0",                                          ARCH_FLUX_TRANSFORMER,    ""),
+    ("single_blocks.0",                                          ARCH_FLUX_TRANSFORMER,    ""),
+    ("transformer.double_blocks.0",                              ARCH_FLUX_TRANSFORMER,    ""),
+    ("transformer.single_blocks.0",                              ARCH_FLUX_TRANSFORMER,    ""),
+    ("model.diffusion_model.double_blocks.0",                    ARCH_FLUX_TRANSFORMER,    ""),
+    ("model.diffusion_model.single_blocks.0",                    ARCH_FLUX_TRANSFORMER,    ""),
+    ("lora_transformer_",                                        ARCH_FLUX_LORA,           ROLE_LORA),
     ("conditioner.embedders.0.transformer",                      ARCH_SDXL_CHECKPOINT,     ROLE_CHECKPOINT),
     ("model.diffusion_model.joint_blocks.0",                     ARCH_SD35_CHECKPOINT,     ROLE_CHECKPOINT),
     ("model.diffusion_model.input_blocks.0.0.weight",            ARCH_SD_CHECKPOINT,       ROLE_CHECKPOINT),
@@ -77,8 +88,9 @@ _ST_PATTERNS: list[tuple[str, str, str]] = [
 
 _GGUF_ARCH_MAP: dict[str, str] = {
     "wan":       ARCH_WAN_TRANSFORMER,
-    "t5encoder": ARCH_UMT5_ENCODER,
+    "t5encoder": ARCH_T5XXL_ENCODER,
     "clip":      ARCH_CLIP,
+    "flux":      ARCH_FLUX_TRANSFORMER,
 }
 
 _ST_DTYPE_DISPLAY: dict[str, str] = {
@@ -88,6 +100,14 @@ _ST_DTYPE_DISPLAY: dict[str, str] = {
 }
 
 _FOLDER_CLUES: list[tuple[str, str, str]] = [
+    ("flux/GGUF",       ARCH_FLUX_TRANSFORMER, ""),
+    ("flux/UNet",       ARCH_FLUX_TRANSFORMER, ""),
+    ("flux/Textencoder", ARCH_T5XXL_ENCODER,   ROLE_TEXT_ENCODER),
+    ("flux/textencoder", ARCH_T5XXL_ENCODER,   ROLE_TEXT_ENCODER),
+    ("flux/VAE",        ARCH_FLUX_VAE,         ROLE_VAE),
+    ("flux/vae",        ARCH_FLUX_VAE,         ROLE_VAE),
+    ("Loras/Flux",      ARCH_FLUX_LORA,        ROLE_LORA),
+    ("Lora/Flux",       ARCH_FLUX_LORA,        ROLE_LORA),
     ("wan/GGUF",       ARCH_WAN_TRANSFORMER,     ""),
     ("wan/Safetensor", ARCH_WAN_TRANSFORMER_FP8, ""),
     ("wan/lora",       ARCH_WAN_LORA,            ROLE_LORA),
@@ -129,7 +149,11 @@ _ARCH_PREFIX: dict[str, str] = {
     ARCH_WAN_LORA:            "Wan LoRA",
     ARCH_WAN_VAE:             "Wan VAE",
     ARCH_UMT5_ENCODER:        "UMT5-XXL",
+    ARCH_T5XXL_ENCODER:       "T5-XXL",
     ARCH_CLIP:                "CLIP",
+    ARCH_FLUX_TRANSFORMER:    "Flux",
+    ARCH_FLUX_LORA:           "Flux LoRA",
+    ARCH_FLUX_VAE:            "Flux VAE",
     ARCH_SDXL_CHECKPOINT:     "SDXL",
     ARCH_SD35_CHECKPOINT:     "SD3.5",
     ARCH_SD_CHECKPOINT:       "SD",
@@ -179,10 +203,12 @@ class ModelInfo:
         return self.role == ROLE_LOW_NOISE
 
     def is_text_encoder(self) -> bool:
-        return self.arch in (ARCH_UMT5_ENCODER, ARCH_CLIP) or self.role == ROLE_TEXT_ENCODER
+        return self.arch in (ARCH_UMT5_ENCODER, ARCH_T5XXL_ENCODER, ARCH_CLIP) or self.role == ROLE_TEXT_ENCODER
 
     def is_t5xxl(self) -> bool:
         """True if this looks like a T5-XXL (Flux/SD3) file — NOT for Wan."""
+        if self.arch == ARCH_T5XXL_ENCODER:
+            return True
         stem = Path(self.filename).stem.lower()
         return (stem.startswith("t5xxl") or stem in ("t5xxl_fp16", "t5xxl_fp8_e4m3fn")) \
             and "umt5" not in self.filename.lower()
@@ -250,9 +276,13 @@ def _read_gguf(p: Path, size_mb: float) -> ModelInfo:
         quant = _gguf_dominant_quant(reader, filename=p.name)
 
         # Refine arch / role
-        if arch == ARCH_UMT5_ENCODER or "umt5" in title.lower() or "umt5" in p.name.lower():
+        if "umt5" in title.lower() or "umt5" in p.name.lower():
             arch = ARCH_UMT5_ENCODER
             role = ROLE_TEXT_ENCODER
+        elif arch == ARCH_T5XXL_ENCODER:
+            role = ROLE_TEXT_ENCODER
+        elif arch == ARCH_FLUX_TRANSFORMER:
+            role = _role_from_filename(p.name)
         elif arch == ARCH_WAN_TRANSFORMER:
             role = _role_from_filename(p.name)
         else:
@@ -413,14 +443,60 @@ def _st_dominant_precision(hdr: dict, tensor_keys: list) -> str:
     return ""
 
 
+def _looks_like_lora_keys(keys: Iterable[str]) -> bool:
+    return any("lora_down" in key or "lora_up" in key or ".lora_A." in key or ".lora_B." in key for key in keys)
+
+
+def _looks_like_flux_lora_keys(keys: Iterable[str]) -> bool:
+    for key in keys:
+        lowered = key.lower()
+        if not ("lora_down" in lowered or "lora_up" in lowered or ".lora_a." in lowered or ".lora_b." in lowered):
+            continue
+        if (
+            "lora_transformer" in lowered
+            or "double_blocks" in lowered
+            or "single_blocks" in lowered
+            or "transformer_blocks" in lowered and "flux" in lowered
+        ):
+            return True
+    return False
+
+
+def _looks_like_t5xxl_file(p: Path, text: str) -> bool:
+    combined = f"{p.name} {text}".lower().replace("-", "_")
+    if "umt5" in combined:
+        return False
+    return any(token in combined for token in ("t5xxl", "t5_xxl", "t5_v1_1_xxl", "t5-v1_1-xxl"))
+
+
+def _looks_like_vae_file(p: Path, tensor_keys: Iterable[str], text: str) -> bool:
+    combined = f"{p.name} {p.as_posix()} {text}".lower()
+    if "/vae/" in combined.replace("\\", "/") or " ae.safetensors" in f" {p.name.lower()}":
+        return True
+    return any(key.startswith(("encoder.", "decoder.", "quant_conv.", "post_quant_conv.")) for key in tensor_keys)
+
+
 def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple:
     # 1. modelspec.architecture
     spec_arch = meta.get("modelspec.architecture", "").lower()
+    combined_meta = " ".join(str(v) for v in meta.values()).lower()
     if "wan" in spec_arch:
         return ARCH_WAN_TRANSFORMER_FP8, _role_from_meta_and_filename(meta, p.name)
+    if "flux" in spec_arch or "flux" in combined_meta:
+        if _looks_like_lora_keys(tensor_keys):
+            return ARCH_FLUX_LORA, ROLE_LORA
+        if _looks_like_vae_file(p, tensor_keys, combined_meta):
+            return ARCH_FLUX_VAE, ROLE_VAE
+        return ARCH_FLUX_TRANSFORMER, _role_from_meta_and_filename(meta, p.name)
+    if _looks_like_t5xxl_file(p, combined_meta):
+        return ARCH_T5XXL_ENCODER, ROLE_TEXT_ENCODER
+    if p.name.lower() == "ae.safetensors":
+        return ARCH_FLUX_VAE, ROLE_VAE
 
     # 2. Tensor key patterns (sample first 40)
     sample = set(tensor_keys[:40])
+    if _looks_like_flux_lora_keys(sample):
+        return ARCH_FLUX_LORA, ROLE_LORA
     for pattern, arch, role_hint in _ST_PATTERNS:
         for key in sample:
             if key.startswith(pattern) or key == pattern:
@@ -438,11 +514,20 @@ def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple
 
 def _arch_from_folder_and_filename(p: Path) -> tuple:
     path_str = p.as_posix()
+    if p.name.lower() == "ae.safetensors":
+        return ARCH_FLUX_VAE, ROLE_VAE
+    if _looks_like_t5xxl_file(p, ""):
+        return ARCH_T5XXL_ENCODER, ROLE_TEXT_ENCODER
+    if "umt5" in p.name.lower():
+        return ARCH_UMT5_ENCODER, ROLE_TEXT_ENCODER
+    if "flux" in p.name.lower():
+        if p.suffix.lower() == ".gguf":
+            return ARCH_FLUX_TRANSFORMER, _role_from_filename(p.name)
+        if "lora" in p.name.lower():
+            return ARCH_FLUX_LORA, ROLE_LORA
     for fragment, arch, role in _FOLDER_CLUES:
         if f"/{fragment}/" in path_str or path_str.endswith(f"/{fragment}"):
             return arch, role or _role_from_filename(p.name)
-    if "umt5" in p.name.lower():
-        return ARCH_UMT5_ENCODER, ROLE_TEXT_ENCODER
     return ARCH_UNKNOWN, _role_from_filename(p.name)
 
 

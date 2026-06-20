@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+import aiwf.services.model_download as model_download_module
 from aiwf.core.config.settings import RuntimeFlags
+from aiwf.core.domain.model_download import CatalogEntry
 from aiwf.services.model_download import (
     ModelDownloadService,
     ParsedRemote,
@@ -14,6 +16,7 @@ from aiwf.services.model_download import (
     inspect_custom_input,
     split_hf_url,
 )
+from aiwf.services.model_download_catalog import QUICK_START_BUNDLES
 
 
 def test_detect_source():
@@ -33,7 +36,18 @@ def test_parse_hf_resolve_url():
     url = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/resolve/main/diffusion_pytorch_model.safetensors"
     remote = _parse_hf_reference(url)
     assert remote.filename == "diffusion_pytorch_model.safetensors"
+    assert remote.repo_filename == "diffusion_pytorch_model.safetensors"
     assert remote.repo_id == "stabilityai/sd-vae-ft-mse-original"
+
+
+def test_parse_hf_subpath_preserves_remote_repo_filename():
+    remote = _parse_hf_reference(
+        "Comfy-Org/Lumina_Image_2.0_Repackaged",
+        "split_files/vae/ae.safetensors",
+    )
+    assert remote.filename == "ae.safetensors"
+    assert remote.repo_filename == "split_files/vae/ae.safetensors"
+    assert remote.url.endswith("/resolve/main/split_files/vae/ae.safetensors")
 
 
 def test_parse_hf_repo_requires_filename():
@@ -46,6 +60,13 @@ def test_split_hf_tree_url():
     repo, filename = split_hf_url(url)
     assert repo == "runwayml/stable-diffusion-v1-5"
     assert filename == "v1-5-pruned-emaonly.safetensors"
+
+
+def test_split_hf_url_keeps_nested_file_path():
+    url = "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/blob/main/split_files/vae/ae.safetensors"
+    repo, filename = split_hf_url(url)
+    assert repo == "Comfy-Org/Lumina_Image_2.0_Repackaged"
+    assert filename == "split_files/vae/ae.safetensors"
 
 
 def test_split_hf_browse_page_rejected():
@@ -79,6 +100,23 @@ def test_destination_dirs(tmp_path: Path):
     assert service.destination_dir("wan_gguf") == tmp_path / "models" / "wan" / "GGUF"
     assert service.destination_dir("wan_diffusers") == tmp_path / "models" / "wan" / "Diffusers"
     assert service.destination_dir("wan_lora") == tmp_path / "models" / "wan" / "lora"
+    assert service.destination_dir("flux_unet_safetensor") == tmp_path / "models" / "flux" / "UNet"
+    assert service.destination_dir("flux_unet_gguf") == tmp_path / "models" / "flux" / "GGUF"
+    assert service.destination_dir("flux_text_encoder") == tmp_path / "models" / "flux" / "Textencoder"
+    assert service.destination_dir("flux_vae") == tmp_path / "models" / "flux" / "VAE"
+
+
+def test_ensure_dirs_creates_nested_category_folders(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+
+    service.ensure_dirs()
+
+    assert (tmp_path / "models" / "wan" / "GGUF").is_dir()
+    assert (tmp_path / "models" / "wan" / "Diffusers").is_dir()
+    assert (tmp_path / "models" / "flux" / "UNet").is_dir()
+    assert (tmp_path / "models" / "flux" / "GGUF").is_dir()
+    assert (tmp_path / "models" / "flux" / "Textencoder").is_dir()
+    assert (tmp_path / "models" / "flux" / "VAE").is_dir()
 
 
 def test_wan_download_categories_validate_file_type(tmp_path: Path):
@@ -96,6 +134,35 @@ def test_wan_download_categories_validate_file_type(tmp_path: Path):
         service.download_parsed(gguf, category="wan_safetensor")
     with pytest.raises(ValueError, match="Wan transformer"):
         service.download_parsed(safe, category="wan_gguf")
+
+
+def test_flux_download_categories_validate_file_type(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    gguf = ParsedRemote(source="direct", url="https://example.com/flux.gguf", filename="flux.gguf")
+    safetensors = ParsedRemote(
+        source="direct",
+        url="https://example.com/clip_l.safetensors",
+        filename="clip_l.safetensors",
+    )
+
+    assert service.destination_for("flux_unet_gguf", gguf.filename) == (
+        tmp_path / "models" / "flux" / "GGUF" / "flux.gguf"
+    )
+    assert service.destination_for("flux_unet_safetensor", safetensors.filename) == (
+        tmp_path / "models" / "flux" / "UNet" / "clip_l.safetensors"
+    )
+    assert service.destination_for("flux_text_encoder", safetensors.filename) == (
+        tmp_path / "models" / "flux" / "Textencoder" / "clip_l.safetensors"
+    )
+    assert service.destination_for("flux_vae", safetensors.filename) == (
+        tmp_path / "models" / "flux" / "VAE" / "clip_l.safetensors"
+    )
+    with pytest.raises(ValueError, match="Flux UNet"):
+        service.download_parsed(safetensors, category="flux_unet_gguf")
+    with pytest.raises(ValueError, match="Flux UNet"):
+        service.download_parsed(gguf, category="flux_unet_safetensor")
+    with pytest.raises(ValueError, match="Flux VAE"):
+        service.download_parsed(gguf, category="flux_vae")
 
 
 def test_wan_diffusers_rejects_single_file_downloads(tmp_path: Path):
@@ -222,8 +289,9 @@ def test_sdxl_controlnet_catalog_entries_install_as_diffusers_folders(tmp_path: 
     assert service.is_catalog_installed(entry) is True
 
 
-def test_duplicate_catalog_filenames_use_distinct_local_names(tmp_path: Path):
+def test_duplicate_catalog_filenames_use_distinct_local_names(tmp_path: Path, monkeypatch):
     service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    monkeypatch.setattr(service, "_catalog_min_bytes", lambda entry: 1)
     sdxl = service.find_catalog("hf-lora-lcm-sdxl")
     sd15 = service.find_catalog("hf-lora-lcm-sd15")
     assert sdxl is not None
@@ -251,6 +319,12 @@ def test_catalog_lists_entries(tmp_path: Path):
     assert "hf-sd15-pruned" in keys
     assert "hf-sd35-medium" in keys
     assert "hf-sd35-large-turbo" in keys
+    assert "flux-dev-q4km" in keys
+    assert "flux-dev-q5km" in keys
+    assert "flux-t5-q4km" in keys
+    assert "flux-t5-fp16" in keys
+    assert "flux-clip-l" in keys
+    assert "flux-ae-vae" in keys
     assert "cn15-v11-full-suite" in keys
     assert "cn15-canny" in keys          # renamed from cn-canny-light
     assert "civit-dreamshaper-8" in keys
@@ -262,6 +336,93 @@ def test_catalog_lists_entries(tmp_path: Path):
     assert "gdino-swinb" in keys         # GroundingDINO
 
 
+def test_flux_quick_start_uses_supported_runtime_assets(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+
+    assert QUICK_START_BUNDLES["flux"] == ["flux-fusion-v2-q4km", "flux-t5-fp16", "flux-clip-l", "flux-ae-vae"]
+    entries = [service.find_catalog(key) for key in QUICK_START_BUNDLES["flux"]]
+    assert all(entry is not None for entry in entries)
+    assert [entry.source for entry in entries if entry is not None] == [
+        "civitai",
+        "huggingface",
+        "huggingface",
+        "huggingface",
+    ]
+    assert [entry.category for entry in entries if entry is not None] == [
+        "flux_unet_gguf",
+        "flux_text_encoder",
+        "flux_text_encoder",
+        "flux_vae",
+    ]
+
+    vae = service.find_catalog("flux-ae-vae")
+    assert vae is not None
+    remote = service._catalog_to_remote(vae)
+    assert remote.filename == "ae.safetensors"
+    assert remote.repo_filename == "split_files/vae/ae.safetensors"
+
+
+def test_fluxtrait_civitai_variants_stay_in_flux_categories(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+
+    fp8 = service.find_catalog("fluxtrait-v10-fp8")
+    q4 = service.find_catalog("fluxtrait-v20-q4km")
+    q5 = service.find_catalog("fluxtrait-v20-q5km")
+    fusion_q4 = service.find_catalog("flux-fusion-v2-q4km")
+
+    assert fp8 is not None
+    assert q4 is not None
+    assert q5 is not None
+    assert fusion_q4 is not None
+    assert fp8.category == "flux_unet_safetensor"
+    assert q4.category == "flux_unet_gguf"
+    assert q5.category == "flux_unet_gguf"
+    assert fusion_q4.category == "flux_unet_gguf"
+    assert service.destination_for(fp8.category, fp8.filename) == (
+        tmp_path / "models" / "flux" / "UNet" / "fluxtraitFLUX2KleinFLUXZ_v10FP8.safetensors"
+    )
+    assert service.destination_for(q4.category, q4.filename) == (
+        tmp_path / "models" / "flux" / "GGUF" / "fluxtraitFLUX2KleinFLUXZ_v20Q4KM.gguf"
+    )
+    assert service.destination_for(fusion_q4.category, fusion_q4.filename) == (
+        tmp_path / "models" / "flux" / "GGUF" / "fluxFusionV24StepsGGUFNF4_V2GGUFQ4KM.gguf"
+    )
+
+
+def test_incomplete_catalog_file_is_replaced_before_retry(tmp_path: Path, monkeypatch):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    entry = CatalogEntry(
+        key="flux-test-q4",
+        title="Flux test",
+        category="flux_unet_gguf",
+        source="direct",
+        url="https://example.com/flux-test.gguf",
+        size_mb=2,
+    )
+    monkeypatch.setattr(model_download_module, "MODEL_DOWNLOAD_CATALOG", [entry])
+
+    stale = service.destination_for("flux_unet_gguf", "flux-test.gguf")
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"not a model")
+
+    def fake_stream_download(url, dest, *, on_progress=None, headers=None, chunk_size=1024 * 256):
+        assert url == "https://example.com/flux-test.gguf"
+        assert not dest.exists()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x" * (2 * 1024 * 1024))
+        if on_progress:
+            on_progress(dest.stat().st_size, dest.stat().st_size)
+        return dest
+
+    monkeypatch.setattr(model_download_module, "stream_download", fake_stream_download)
+
+    path = service.download_catalog("flux-test-q4")
+
+    assert path == stale
+    assert path.stat().st_size == 2 * 1024 * 1024
+    assert list(stale.parent.glob("flux-test.gguf.incomplete-*.bad"))
+
+
 def test_direct_private_download_url_blocked(tmp_path: Path):
     service = ModelDownloadService(
         RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", block_private_download_urls=True)
@@ -270,6 +431,29 @@ def test_direct_private_download_url_blocked(tmp_path: Path):
 
     with pytest.raises(ValueError, match="Private"):
         service.download_parsed(remote, category="checkpoint")
+
+
+def test_civitai_download_sets_user_agent(tmp_path: Path, monkeypatch):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    remote = ParsedRemote(
+        source="civitai",
+        url="https://civitai.com/api/download/models/123",
+        filename="flux.gguf",
+    )
+
+    def fake_stream_download(url, dest, *, on_progress=None, headers=None, chunk_size=1024 * 256):
+        assert url == remote.url
+        assert headers is not None
+        assert headers["User-Agent"] == "AIWF-Studio/1.0"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        return dest
+
+    monkeypatch.setattr(model_download_module, "stream_download", fake_stream_download)
+
+    path = service.download_parsed(remote, category="flux_unet_gguf")
+
+    assert path.name == "flux.gguf"
 
 
 def test_parse_civitai_model_url(monkeypatch):

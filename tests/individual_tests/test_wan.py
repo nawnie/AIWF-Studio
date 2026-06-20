@@ -43,6 +43,7 @@ from aiwf.infrastructure.wan.pipeline import (
 )
 from aiwf.infrastructure.video import VideoError
 from aiwf.services.failure_archive import FailureArchiveService
+from aiwf.services.genlog import GenerationLogService
 from aiwf.services.wan import WanService, wan_model_pair_compatibility
 
 
@@ -861,6 +862,52 @@ def test_wan_generation_fast_5b_uses_local_model_without_high_low(tmp_path: Path
     assert captured["model_id"] == str(transformer.resolve())
     assert captured["high"] is None
     assert captured["low"] is None
+
+
+def test_wan_generation_writes_genlog_without_prompt_text(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    s = _svc(tmp_path)
+    s.genlog = GenerationLogService(tmp_path / "out", enabled=True)
+    _force_wan_available(s)
+    monkeypatch.setattr(s, "_wan_file_candidates", lambda: [])
+    _write_component_base(s)
+    transformer = s.models_dir() / "Safetensor" / "wan2.2_ti2v_5B_fp16.safetensors"
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan2.2_vae.safetensors"
+    lora = s.flags.resolved_models_dir() / "Loras" / "Wan" / "motion_5b_ti2v_rank16.safetensors"
+    _write_fake_safetensors(transformer)
+    _write_fake_safetensors(vae)
+    _write_fake_safetensors(lora)
+
+    def fake_generate(request, *_args, **_kwargs):
+        return [Image.new("RGB", (8, 8), "black")] * 5, 8, 8, {
+            "step_count": 6,
+            "denoise_seconds": 3.0,
+            "steps_per_second": 2.0,
+        }
+
+    s._backend.generate = fake_generate
+    monkeypatch.setattr("aiwf.services.wan.write_frames", _write_fake_video_frames)
+
+    s.generate(
+        WanI2VRequest(
+            prompt="private dance prompt",
+            steps=6,
+            high_noise_lora_id=lora.name,
+            high_noise_lora_scale=0.75,
+        ),
+        Image.new("RGB", (8, 8)),
+    )
+
+    data = json.loads(s.genlog.path.read_text(encoding="utf-8").splitlines()[0])
+    encoded = json.dumps(data)
+    assert data["kind"] == "video"
+    assert data["generate_type"] == "wan"
+    assert data["pipeline"] == "wan.fast_5b"
+    assert data["settings"]["effective_steps"] == 6
+    assert data["timing"]["steps_per_second"] == 2.0
+    assert data["loras"] == [{"id": str(lora.resolve()), "scale": 0.75, "stage": "high"}]
+    assert "private dance prompt" not in encoded
 
 
 def test_wan_generation_rejects_missing_encoded_video(tmp_path: Path, monkeypatch):

@@ -5,7 +5,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from PIL import Image
 
@@ -33,6 +33,7 @@ from aiwf.core.interfaces.storage import ImageStore
 from aiwf.core.config.settings import UserSettings
 from aiwf.services.metadata import MetadataService
 from aiwf.services.failure_archive import FailureArchiveService
+from aiwf.services.genlog import GenerationLogService
 from aiwf.dev.diagnostics import trace_exception_safe, trace_model_throughput, trace_safe
 from aiwf.core.model_profile import detect_model_profile
 from aiwf.services.queue import JobQueue
@@ -70,6 +71,7 @@ class GenerationService:
         supervisor: EngineSupervisor | None = None,
         optimization_planner: OptimizationPlanner | None = None,
         failure_archive: FailureArchiveService | None = None,
+        genlog: GenerationLogService | None = None,
     ) -> None:
         self.backend = backend
         self.store = store
@@ -82,6 +84,7 @@ class GenerationService:
         self.supervisor = supervisor
         self.optimization_planner = optimization_planner
         self.failure_archive = failure_archive
+        self.genlog = genlog
 
     def _apply_default_negative(self, request):
         """When the user leaves the negative prompt blank, fall back to a generic
@@ -215,6 +218,152 @@ class GenerationService:
         if "sd1.5" in blob or "sd15" in blob or "stable-diffusion-v1" in blob:
             return ModelFamily.SD15
         return ModelFamily.UNKNOWN
+
+    @staticmethod
+    def _genlog_generate_type(checkpoint) -> str:
+        architecture = str(getattr(checkpoint, "architecture", "") or "").lower()
+        if architecture.startswith("sdxl"):
+            return "sdxl"
+        if architecture in {"sd15", "sd1", "sd1.5", "inpaint"} or architecture.startswith("sd1"):
+            return "sd"
+        if architecture.startswith("sd3"):
+            return "sd3"
+        return architecture or "unknown"
+
+    def _genlog_step_count(self, request: GenerationRequest) -> int:
+        per_batch = max(1, int(request.steps))
+        controlnet_active = any(unit.enabled for unit in request.controlnet_units)
+        if request.enable_hr and request.mode == GenerationMode.TXT2IMG and not controlnet_active:
+            per_batch += max(1, int(request.hr_steps))
+        if request.sdxl_refiner_enabled and request.mode in (GenerationMode.TXT2IMG, GenerationMode.IMG2IMG):
+            per_batch += max(1, int(request.sdxl_refiner_steps))
+        return max(1, per_batch * max(1, int(request.batch_count)))
+
+    def _write_generation_log(
+        self,
+        *,
+        job: JobRecord,
+        result: GenerationResult,
+        checkpoint,
+        optimization_plan: OptimizationPlan | None,
+    ) -> None:
+        if self.genlog is None or not self.genlog.enabled:
+            return
+        try:
+            request = job.request
+            parsed = parse_extra_networks(request.prompt)
+            generate_type = self._genlog_generate_type(checkpoint)
+            pipeline_kind = self._pipeline_kind_for_request(request).value
+            flags = getattr(self.backend, "flags", None)
+            backend_name = getattr(flags, "inference_backend", None) or self.backend.__class__.__name__.replace(
+                "Backend",
+                "",
+            ).lower()
+            step_count = self._genlog_step_count(request)
+            elapsed = float(result.elapsed_seconds or 0.0)
+            controlnet_units = [
+                {
+                    "model_id": unit.model_id,
+                    "module": unit.module,
+                    "weight": unit.weight,
+                    "guidance_start": unit.guidance_start,
+                    "guidance_end": unit.guidance_end,
+                }
+                for unit in request.controlnet_units
+                if unit.enabled
+            ]
+            settings: dict[str, Any] = {
+                "mode": request.mode.value,
+                "width": int(request.width),
+                "height": int(request.height),
+                "steps": int(request.steps),
+                "cfg_scale": float(request.cfg_scale),
+                "sampler": request.sampler,
+                "scheduler": request.scheduler,
+                "batch_size": int(request.batch_size),
+                "batch_count": int(request.batch_count),
+                "seed": int(request.seed),
+                "clip_skip": int(request.clip_skip),
+                "vae_id": request.vae_id,
+                "enable_hr": bool(request.enable_hr),
+                "sdxl_refiner_enabled": bool(request.sdxl_refiner_enabled),
+                "controlnet_units": controlnet_units,
+            }
+            if request.mode in (GenerationMode.IMG2IMG, GenerationMode.INPAINT):
+                settings["denoising_strength"] = float(request.denoising_strength)
+            if request.mode == GenerationMode.INPAINT:
+                settings.update(
+                    {
+                        "mask_blur": int(request.mask_blur),
+                        "inpaint_only_masked": bool(request.inpaint_only_masked),
+                        "inpaint_masked_padding": int(request.inpaint_masked_padding),
+                        "inpaint_mask_content": request.inpaint_mask_content,
+                    }
+                )
+            if request.enable_hr:
+                settings.update(
+                    {
+                        "hr_scale": float(request.hr_scale),
+                        "hr_steps": int(request.hr_steps),
+                        "hr_denoising_strength": float(request.hr_denoising_strength),
+                        "hr_upscaler": request.hr_upscaler,
+                    }
+                )
+            if request.sdxl_refiner_enabled:
+                settings.update(
+                    {
+                        "sdxl_refiner_checkpoint_id": request.sdxl_refiner_checkpoint_id,
+                        "sdxl_refiner_steps": int(request.sdxl_refiner_steps),
+                        "sdxl_refiner_strength": float(request.sdxl_refiner_strength),
+                    }
+                )
+            runtime_flags = {}
+            if flags is not None:
+                runtime_flags = {
+                    "attention_backend": getattr(flags, "attention_backend", ""),
+                    "fp8": bool(getattr(flags, "fp8", False)),
+                    "medvram": bool(getattr(flags, "medvram", False)),
+                    "lowvram": bool(getattr(flags, "lowvram", False)),
+                    "no_half": bool(getattr(flags, "no_half", False)),
+                    "torch_compile": bool(getattr(flags, "torch_compile", False)),
+                    "channels_last": bool(getattr(flags, "channels_last", False)),
+                }
+            self.genlog.append(
+                {
+                    "event": "generation_completed",
+                    "kind": "image",
+                    "generate_type": generate_type,
+                    "backend": backend_name,
+                    "pipeline": f"{backend_name}.{generate_type}.{pipeline_kind}",
+                    "pipeline_kind": pipeline_kind,
+                    "job_id": str(job.id),
+                    "model": {
+                        "id": getattr(checkpoint, "id", None),
+                        "title": getattr(checkpoint, "title", None),
+                        "filename": getattr(checkpoint, "filename", None),
+                        "architecture": getattr(checkpoint, "architecture", None),
+                    },
+                    "loras": [{"name": ref.name, "weight": ref.weight} for ref in parsed.loras],
+                    "settings": settings,
+                    "runtime_flags": runtime_flags,
+                    "optimization_profile_id": (
+                        optimization_plan.profile_id if optimization_plan is not None else None
+                    ),
+                    "timing": {
+                        "elapsed_seconds": round(elapsed, 6),
+                        "step_count": step_count,
+                        "steps_per_second": round(step_count / elapsed, 6) if elapsed > 0 else None,
+                        "image_count": len(result.images),
+                        "images_per_second": round(len(result.images) / elapsed, 6) if elapsed > 0 else None,
+                    },
+                    "outputs": {
+                        "paths": [artifact.path for artifact in result.artifacts],
+                        "image_count": len(result.images),
+                    },
+                }
+            )
+        except Exception as exc:
+            trace_exception_safe("generation.genlog", exc, job_id=str(job.id))
 
     def _resolve_optimization_plan(self, request: GenerationRequest, checkpoint) -> OptimizationPlan | None:
         """Resolve optional tuning flags without making them boot-critical."""
@@ -614,6 +763,12 @@ class GenerationService:
                     self._save_generation_result(result, job.request, active, optimization_plan)
 
                 self.events.publish(AfterGenerate(job.id, result))
+                self._write_generation_log(
+                    job=job,
+                    result=result,
+                    checkpoint=active,
+                    optimization_plan=optimization_plan,
+                )
                 return result
             except GenerationCancelledError as exc:
                 self._archive_failed_generation(
@@ -755,6 +910,12 @@ class GenerationService:
                     self._save_generation_result(result, job.request, active, optimization_plan)
 
                 self.events.publish(AfterGenerate(job.id, result))
+                self._write_generation_log(
+                    job=job,
+                    result=result,
+                    checkpoint=active,
+                    optimization_plan=optimization_plan,
+                )
                 return result
             except GenerationCancelledError as exc:
                 self._archive_failed_generation(

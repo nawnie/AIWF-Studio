@@ -28,6 +28,7 @@ class RuntimeFlags(BaseSettings):
     api_cors_origins: str = ""
     api_rate_limit_per_minute: int = 0
     block_private_download_urls: bool = True
+    genlog: bool = False
     no_half: bool = False
     fp8: bool = False
     directml: bool = False

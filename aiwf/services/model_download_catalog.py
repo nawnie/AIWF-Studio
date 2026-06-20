@@ -26,6 +26,7 @@ QUICK_START_BUNDLES: dict[str, list[str]] = {
     "sd": ["hf-sd15-pruned", "hf-vae-mse"],
     "sdxl": ["hf-sdxl-base", "hf-vae-sdxl", "hf-sdxl-refiner"],
     "sd35": ["hf-sd35-medium"],
+    "flux": ["flux-fusion-v2-q4km", "flux-t5-fp16", "flux-clip-l", "flux-ae-vae"],
     "controlnet-sd15": [
         "cn15-canny", "cn15-depth", "cn15-openpose",
         "cn15-tile", "cn15-lineart", "cn15-softedge",
@@ -143,7 +144,154 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         snapshot=True,
     ),
 
-    # ── Checkpoints — CivitAI ───────────────────────────────────────────────
+    # Flux runtime assets - Hugging Face
+    CatalogEntry(
+        key="flux-dev-q4km",
+        title="Flux.1 dev UNet GGUF Q4_K_M",
+        category="flux_unet_gguf",
+        source="huggingface",
+        repo_id="unsloth/FLUX.1-dev-GGUF",
+        filename="flux1-dev-Q4_K_M.gguf",
+        size_mb=6930,
+        notes=(
+            "Safe fallback Flux dev quant. Lower VRAM than Q5_K_M, but visibly more compressed. "
+            "Use with Flux CLIP-L, a T5 encoder, and ae.safetensors."
+        ),
+    ),
+    CatalogEntry(
+        key="flux-dev-q5km",
+        title="Flux.1 dev UNet GGUF Q5_K_M",
+        category="flux_unet_gguf",
+        source="huggingface",
+        repo_id="unsloth/FLUX.1-dev-GGUF",
+        filename="flux1-dev-Q5_K_M.gguf",
+        size_mb=8420,
+        notes=(
+            "Recommended first target for 16 GB cards when 12 GB inference is the goal and "
+            "14 GB is acceptable. Keep Q4_K_M installed as fallback."
+        ),
+    ),
+    CatalogEntry(
+        key="flux-dev-q6k",
+        title="Flux.1 dev UNet GGUF Q6_K",
+        category="flux_unet_gguf",
+        source="huggingface",
+        repo_id="unsloth/FLUX.1-dev-GGUF",
+        filename="flux1-dev-Q6_K.gguf",
+        size_mb=9850,
+        notes=(
+            "Quality experiment for 16 GB cards after Q5_K_M benchmarks cleanly. "
+            "Likely needs careful text-encoder quant/offload choices."
+        ),
+    ),
+    CatalogEntry(
+        key="flux-t5-q4km",
+        title="Flux T5-XXL text encoder GGUF Q4_K_M",
+        category="flux_text_encoder",
+        source="huggingface",
+        repo_id="city96/t5-v1_1-xxl-encoder-gguf",
+        filename="t5-v1_1-xxl-encoder-Q4_K_M.gguf",
+        size_mb=4760,
+        notes=(
+            "Quantized T5 route for Flux. This matters as much as the UNet quant for "
+            "staying near a 12-14 GB inference budget."
+        ),
+    ),
+    CatalogEntry(
+        key="flux-t5-fp16",
+        title="Flux T5-XXL text encoder safetensors fp16",
+        category="flux_text_encoder",
+        source="huggingface",
+        repo_id="comfyanonymous/flux_text_encoders",
+        filename="t5xxl_fp16.safetensors",
+        size_mb=9334,
+        notes=(
+            "Backend-supported T5-XXL encoder for the current Diffusers Flux route. "
+            "Use this with CLIP-L, ae.safetensors, and a Flux transformer."
+        ),
+    ),
+    CatalogEntry(
+        key="flux-clip-l",
+        title="Flux CLIP-L text encoder",
+        category="flux_text_encoder",
+        source="huggingface",
+        repo_id="comfyanonymous/flux_text_encoders",
+        filename="clip_l.safetensors",
+        size_mb=246,
+        notes="Required CLIP-L encoder for Flux split-model workflows.",
+    ),
+    CatalogEntry(
+        key="flux-ae-vae",
+        title="Flux ae.safetensors VAE",
+        category="flux_vae",
+        source="huggingface",
+        repo_id="Comfy-Org/Lumina_Image_2.0_Repackaged",
+        filename="split_files/vae/ae.safetensors",
+        size_mb=320,
+        notes="Flux autoencoder/VAE used by split Flux workflows.",
+    ),
+    CatalogEntry(
+        key="fluxtrait-v10-fp8",
+        title="Fluxtrait Flux.1 dev FP8 transformer",
+        category="flux_unet_safetensor",
+        source="civitai",
+        civitai_model_id=2086049,
+        civitai_version_id=2360245,
+        filename="fluxtraitFLUX2KleinFLUXZ_v10FP8.safetensors",
+        size_mb=11346,
+        notes=(
+            "CivitAI Fluxtrait Flux.1 dev FP8 variant. Use with Flux CLIP-L, T5-XXL, "
+            "and ae.safetensors. This is a Flux transformer, not an SD checkpoint."
+        ),
+    ),
+    CatalogEntry(
+        key="fluxtrait-v20-q4km",
+        title="Fluxtrait Flux.1 dev GGUF Q4_K_M",
+        category="flux_unet_gguf",
+        source="civitai",
+        civitai_model_id=2086049,
+        civitai_version_id=2496020,
+        filename="fluxtraitFLUX2KleinFLUXZ_v20Q4KM.gguf",
+        size_mb=6615,
+        notes="CivitAI Fluxtrait Flux.1 dev Q4_K_M GGUF. Lower VRAM fallback for 16 GB cards.",
+    ),
+    CatalogEntry(
+        key="fluxtrait-v20-q5km",
+        title="Fluxtrait Flux.1 dev GGUF Q5_K_M",
+        category="flux_unet_gguf",
+        source="civitai",
+        civitai_model_id=2086049,
+        civitai_version_id=2496097,
+        filename="fluxtraitFLUX2KleinFLUXZ_v20Q5KM.gguf",
+        size_mb=8028,
+        notes="CivitAI Fluxtrait Flux.1 dev Q5_K_M GGUF. Quality target after Q4_K_M is verified.",
+    ),
+    CatalogEntry(
+        key="flux-fusion-v2-q4km",
+        title="Flux Fusion V2 4-step GGUF Q4_K_M",
+        category="flux_unet_gguf",
+        source="civitai",
+        civitai_model_id=630820,
+        civitai_version_id=944898,
+        filename="fluxFusionV24StepsGGUFNF4_V2GGUFQ4KM.gguf",
+        size_mb=6595,
+        notes=(
+            "CivitAI Flux.1 dev derivative with a working public download. "
+            "Fast 4-step Q4_K_M route for first Flux tests on 16 GB cards."
+        ),
+    ),
+    CatalogEntry(
+        key="flux-fusion-v2-q5km",
+        title="Flux Fusion V2 4-step GGUF Q5_K_M",
+        category="flux_unet_gguf",
+        source="civitai",
+        civitai_model_id=630820,
+        civitai_version_id=944753,
+        filename="fluxFusionV24StepsGGUFNF4_V2GGUFQ5KM.gguf",
+        size_mb=8020,
+        notes="CivitAI Flux.1 dev derivative. Q5_K_M quality target after Q4_K_M benchmarks cleanly.",
+    ),
+    # Checkpoints - CivitAI
     CatalogEntry(
         key="civit-dreamshaper-8",
         title="DreamShaper 8 (SD1.5)",

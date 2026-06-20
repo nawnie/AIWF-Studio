@@ -45,6 +45,10 @@ CATEGORY_LABELS: dict[ModelCategory, str] = {
     "wan_lora": "Wan LoRA",
     "wan_vae": "Wan VAE",
     "wan_text_encoder": "Wan text encoder (UMT5-XXL)",
+    "flux_unet_safetensor": "Flux UNet / transformer (.safetensors)",
+    "flux_unet_gguf": "Flux UNet / transformer (.gguf)",
+    "flux_text_encoder": "Flux text encoder",
+    "flux_vae": "Flux VAE",
     "rife": "RIFE (frame interpolation)",
     "sam": "SAM (segmentation)",
     "other": "Other (models root)",
@@ -69,6 +73,10 @@ CATEGORY_FOLDERS: dict[ModelCategory, tuple[str, ...]] = {
     "wan_lora": ("wan", "lora"),
     "wan_vae": ("VAE",),
     "wan_text_encoder": ("Textencoder",),
+    "flux_unet_safetensor": ("flux", "UNet"),
+    "flux_unet_gguf": ("flux", "GGUF"),
+    "flux_text_encoder": ("flux", "Textencoder"),
+    "flux_vae": ("flux", "VAE"),
     "rife": ("rife",),
     "sam": ("sam",),
     "other": (),
@@ -92,6 +100,10 @@ CATEGORY_EXTENSION_RULES: dict[ModelCategory, tuple[str, ...]] = {
     "wan_lora": (".safetensors", ".pt", ".pth"),
     "wan_vae": (".safetensors",),
     "wan_text_encoder": (".safetensors", ".gguf"),
+    "flux_unet_safetensor": (".safetensors",),
+    "flux_unet_gguf": (".gguf",),
+    "flux_text_encoder": (".safetensors", ".gguf"),
+    "flux_vae": (".safetensors",),
     "rife": (".pth",),
     "sam": (".pth",),
 }
@@ -102,6 +114,7 @@ class ParsedRemote:
     source: ModelSource
     url: str
     filename: str
+    repo_filename: str = ""
     local_filename: str = ""
     repo_id: str = ""
     civitai_model_id: int | None = None
@@ -114,7 +127,7 @@ def _civitai_token() -> str | None:
 
 
 def split_hf_url(text: str) -> tuple[str, str]:
-    """Parse a Hugging Face URL into ``(repo_id, inferred_filename)``."""
+    """Parse a Hugging Face URL into ``(repo_id, inferred_file_path)``."""
     parsed = urllib.parse.urlparse(text.strip())
     if parsed.netloc.removeprefix("www.") not in HF_HOSTS:
         raise ValueError("Not a Hugging Face URL.")
@@ -137,7 +150,7 @@ def split_hf_url(text: str) -> tuple[str, str]:
             if file_parts:
                 inferred = "/".join(file_parts)
             break
-    return repo_id, Path(inferred).name if inferred else ""
+    return repo_id, inferred.lstrip("/") if inferred else ""
 
 
 def _parse_hf_reference(url_or_repo: str, filename: str = "", *, allow_snapshot: bool = False) -> ParsedRemote:
@@ -151,13 +164,14 @@ def _parse_hf_reference(url_or_repo: str, filename: str = "", *, allow_snapshot:
             raise ValueError("Not a Hugging Face URL.")
         if "resolve" in text:
             repo_id, inferred = split_hf_url(text)
-            resolved_name = inferred or filename.strip()
-            if not resolved_name:
+            resolved_path = (filename or inferred).strip().lstrip("/")
+            if not resolved_path:
                 raise ValueError("Hugging Face file URL must include a filename after /resolve/<revision>/.")
             return ParsedRemote(
                 source="huggingface",
                 url=text,
-                filename=Path(resolved_name).name,
+                filename=Path(resolved_path).name,
+                repo_filename=resolved_path,
                 repo_id=repo_id,
             )
         repo_id, inferred = split_hf_url(text)
@@ -168,6 +182,7 @@ def _parse_hf_reference(url_or_repo: str, filename: str = "", *, allow_snapshot:
                     source="huggingface",
                     url=f"https://huggingface.co/{repo_id}",
                     filename="",
+                    repo_filename="",
                     repo_id=repo_id,
                     snapshot=True,
                 )
@@ -180,6 +195,7 @@ def _parse_hf_reference(url_or_repo: str, filename: str = "", *, allow_snapshot:
             source="huggingface",
             url=url,
             filename=Path(file_path).name,
+            repo_filename=file_path,
             repo_id=repo_id,
         )
 
@@ -193,12 +209,19 @@ def _parse_hf_reference(url_or_repo: str, filename: str = "", *, allow_snapshot:
                 source="huggingface",
                 url=f"https://huggingface.co/{repo_id}",
                 filename="",
+                repo_filename="",
                 repo_id=repo_id,
                 snapshot=True,
             )
         raise ValueError("Enter a filename or subpath for the Hugging Face repo.")
     url = f"https://huggingface.co/{repo_id}/resolve/main/{file_path}"
-    return ParsedRemote(source="huggingface", url=url, filename=Path(file_path).name, repo_id=repo_id)
+    return ParsedRemote(
+        source="huggingface",
+        url=url,
+        filename=Path(file_path).name,
+        repo_filename=file_path,
+        repo_id=repo_id,
+    )
 
 
 _RE_CIVITAI_MODEL = re.compile(r"/models/(\d+)", re.I)
@@ -455,11 +478,12 @@ class ModelDownloadService:
         self.flags.resolved_ckpt_dir().mkdir(parents=True, exist_ok=True)
         seen: set[Path] = set()
         for folders in CATEGORY_FOLDERS.values():
-            for name in folders:
-                path = (root / name).resolve()
-                if path not in seen:
-                    path.mkdir(parents=True, exist_ok=True)
-                    seen.add(path)
+            if not folders:
+                continue
+            path = root.joinpath(*folders).resolve()
+            if path not in seen:
+                path.mkdir(parents=True, exist_ok=True)
+                seen.add(path)
 
     def destination_dir(self, category: ModelCategory) -> Path:
         root = self.models_root()
@@ -515,7 +539,32 @@ class ModelDownloadService:
         filename = self._catalog_local_filename_hint(entry)
         if not filename:
             return False
-        return self.destination_for(entry.category, filename).is_file()
+        return self._catalog_file_ready(entry, self.destination_for(entry.category, filename))
+
+    def _catalog_min_bytes(self, entry: CatalogEntry) -> int:
+        if not entry.size_mb:
+            return 0
+        # Catalog sizes are rounded and upstream repos can repack files. This
+        # threshold only rejects obvious failed downloads like 0-byte files,
+        # HTML/XML error bodies, and tiny pointer stubs.
+        return max(1024 * 1024, int(entry.size_mb * 1024 * 1024 * 0.35))
+
+    def _catalog_file_ready(self, entry: CatalogEntry, path: Path) -> bool:
+        if not path.is_file():
+            return False
+        min_bytes = self._catalog_min_bytes(entry)
+        if not min_bytes:
+            return True
+        try:
+            return path.stat().st_size >= min_bytes
+        except OSError:
+            return False
+
+    def _quarantine_incomplete_catalog_file(self, entry: CatalogEntry, path: Path) -> None:
+        if not path.is_file() or self._catalog_file_ready(entry, path):
+            return
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        path.replace(path.with_name(f"{path.name}.incomplete-{stamp}.bad"))
 
     def _catalog_filename_hint(self, entry: CatalogEntry) -> str:
         if entry.filename:
@@ -635,6 +684,7 @@ class ModelDownloadService:
 
         headers: dict[str, str] = {}
         if remote.source == "civitai":
+            headers["User-Agent"] = "AIWF-Studio/1.0"
             token = _civitai_token()
             if token:
                 headers["Authorization"] = f"Bearer {token}"
@@ -662,7 +712,7 @@ class ModelDownloadService:
         token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
         cached = hf_hub_download(
             repo_id=remote.repo_id,
-            filename=remote.filename,
+            filename=remote.repo_filename or remote.filename,
             token=token,
         )
         cached_path = Path(cached)
@@ -716,7 +766,17 @@ class ModelDownloadService:
         if entry is None:
             raise ValueError(f"Unknown catalog entry '{key}'")
         remote = self._catalog_to_remote(entry)
-        return self.download_parsed(remote, category=entry.category, on_progress=on_progress)
+        if not remote.snapshot:
+            target = self.destination_for(entry.category, remote.local_filename or remote.filename)
+            self._quarantine_incomplete_catalog_file(entry, target)
+        path = self.download_parsed(remote, category=entry.category, on_progress=on_progress)
+        if not remote.snapshot and not self._catalog_file_ready(entry, path):
+            self._quarantine_incomplete_catalog_file(entry, path)
+            raise ValueError(
+                f"Downloaded file for `{entry.key}` is smaller than expected. "
+                "The upstream response may have been an error page or incomplete transfer."
+            )
+        return path
 
     def folder_paths_help(self) -> str:
         lines = ["**Category folders** — files are saved here based on the selected category."]

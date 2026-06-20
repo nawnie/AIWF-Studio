@@ -110,6 +110,11 @@ def _parse_cli() -> RuntimeFlags:
     parser.add_argument("--api-cors-origins", type=str, default="")
     parser.add_argument("--api-rate-limit-per-minute", type=int, default=0)
     parser.add_argument("--allow-private-download-urls", action="store_true")
+    parser.add_argument(
+        "--genlog",
+        action="store_true",
+        help="Append local generation speed/settings entries to outputs/genlog/generation-log.jsonl",
+    )
     parser.add_argument("--no-half", action="store_true")
     parser.add_argument(
         "--directml",
@@ -209,6 +214,7 @@ def _parse_cli() -> RuntimeFlags:
         api_cors_origins=args.api_cors_origins,
         api_rate_limit_per_minute=args.api_rate_limit_per_minute,
         block_private_download_urls=not args.allow_private_download_urls,
+        genlog=args.genlog,
         no_half=args.no_half,
         fp8=args.fp8,
         directml=args.directml,
@@ -335,6 +341,8 @@ def run() -> None:
     _startup_message("Checking your hardware and loading tools...")
     if flags.cuda_malloc:
         _startup_message("CUDA allocator: cudaMallocAsync (Comfy --cuda-malloc parity).")
+    if flags.genlog:
+        _startup_message(f"Generation log enabled: {flags.resolved_output_dir() / 'genlog' / 'generation-log.jsonl'}")
     wan_perf = []
     if flags.async_offload:
         wan_perf.append("async-offload")

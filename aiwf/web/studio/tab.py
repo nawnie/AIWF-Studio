@@ -280,7 +280,8 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                             "words and default strengths come from the **Models** tab.",
                             elem_classes=["aiwf-settings-paths"],
                         )
-                        lora_choices = ctx.models.lora_choices()
+                        initial_checkpoint_id = checkpoint_map.get(checkpoint.value) if checkpoint.value else None
+                        lora_choices = ctx.models.lora_choices(initial_checkpoint_id)
                         with gr.Column(elem_classes=["aiwf-lora-stack"]):
                             lora_stack_components = []
                             for index in range(4):
@@ -1021,25 +1022,30 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         show_progress=False,
     )
 
+    def _lora_picker_updates_for_checkpoint(ckpt_id):
+        choices = ctx.models.lora_choices(ckpt_id)
+        return [gr.update(choices=choices, value=None) for _ in range(1 + len(lora_stack_components[0::2]))]
+
     def _on_checkpoint_change(ckpt_title, ckpt_map):
         """Remember the selected checkpoint without loading model weights."""
         help_md = _model_help_md(ckpt_title)
+        ckpt_id = ckpt_map.get(ckpt_title) if ckpt_title and ckpt_map else None
+        lora_updates = _lora_picker_updates_for_checkpoint(ckpt_id)
         if not ckpt_title or not ckpt_map:
-            return gr.update(), help_md
-        ckpt_id = ckpt_map.get(ckpt_title)
+            return (gr.update(), help_md, *lora_updates)
         if ckpt_id is None:
-            return gr.update(value=f"**Error:** unknown checkpoint {ckpt_title}"), help_md
+            return (gr.update(value=f"**Error:** unknown checkpoint {ckpt_title}"), help_md, *lora_updates)
         try:
             ctx.generation.remember_checkpoint_selection(ckpt_id)
             base_status = format_model_status(ctx)
-            return gr.update(value=f"**Selected:** {ckpt_title}\n\n{base_status}"), help_md
+            return (gr.update(value=f"**Selected:** {ckpt_title}\n\n{base_status}"), help_md, *lora_updates)
         except Exception as exc:
-            return gr.update(value=f"**Selection failed:** {ckpt_title}: {exc}"), help_md
+            return (gr.update(value=f"**Selection failed:** {ckpt_title}: {exc}"), help_md, *lora_updates)
 
     checkpoint.change(
         _on_checkpoint_change,
         inputs=[checkpoint, state],
-        outputs=[model_status, model_help],
+        outputs=[model_status, model_help, lora_pick, *lora_stack_components[0::2]],
         show_progress=False,
     )
 
@@ -1175,9 +1181,10 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
     for stack_pick, stack_strength in zip(lora_stack_components[0::2], lora_stack_components[1::2]):
         stack_pick.change(_on_lora_pick, inputs=[stack_pick], outputs=[stack_strength], show_progress=False)
 
-    def _refresh_lora_picker(current, *stack_current):
+    def _refresh_lora_picker(ckpt_title, ckpt_map, current, *stack_current):
         ctx.models.refresh_loras()
-        choices = ctx.models.lora_choices()
+        ckpt_id = ckpt_map.get(ckpt_title) if ckpt_title and ckpt_map else None
+        choices = ctx.models.lora_choices(ckpt_id)
         ids = {value for _, value in choices}
         updates = [gr.update(choices=choices, value=current if current in ids else None)]
         for value in stack_current:
@@ -1186,7 +1193,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
 
     lora_pick_refresh.click(
         _refresh_lora_picker,
-        inputs=[lora_pick, *lora_stack_components[0::2]],
+        inputs=[checkpoint, state, lora_pick, *lora_stack_components[0::2]],
         outputs=[lora_pick, *lora_stack_components[0::2]],
         show_progress=False,
     )

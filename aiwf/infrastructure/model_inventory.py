@@ -20,6 +20,22 @@ from aiwf.infrastructure.diffusers.model_arch import (
     looks_like_lora_weights,
     _safetensors_tensor_shapes,
 )
+from aiwf.infrastructure.model_header import (
+    ARCH_CLIP,
+    ARCH_FLUX_LORA,
+    ARCH_FLUX_TRANSFORMER,
+    ARCH_FLUX_VAE,
+    ARCH_T5XXL_ENCODER,
+    ARCH_UMT5_ENCODER,
+    ARCH_WAN_LORA,
+    ARCH_WAN_TRANSFORMER,
+    ARCH_WAN_TRANSFORMER_FP8,
+    ARCH_WAN_VAE,
+    ROLE_LORA,
+    ROLE_TEXT_ENCODER,
+    ROLE_VAE,
+    read_model_info,
+)
 from aiwf.infrastructure.safetensors_metadata import read_safetensors_metadata
 
 logger = logging.getLogger(__name__)
@@ -126,7 +142,7 @@ def _metadata_architecture(metadata: dict[str, str], path: Path) -> str:
     return _architecture_from_text(text)
 
 
-def _recommended_subdir(family: str, architecture: str) -> str:
+def _recommended_subdir(family: str, architecture: str, filename: str = "") -> str:
     if family == "lora":
         if architecture == ARCH_SD35:
             return "Loras/SD3.5"
@@ -139,9 +155,16 @@ def _recommended_subdir(family: str, architecture: str) -> str:
         if architecture in {ARCH_SD15, ARCH_INPAINT}:
             return "Loras/SD15"
         return "Loras"
+    if family == "runtime_asset":
+        if architecture == "flux":
+            suffix = Path(filename).suffix.lower()
+            return "flux/GGUF" if suffix == ".gguf" else "flux/UNet"
+        return "misc"
     if family == "checkpoint":
         return "Stable-diffusion"
     if family == "vae":
+        if architecture == "flux":
+            return "flux/VAE"
         return "VAE"
     if family == "embedding":
         return "embeddings"
@@ -150,12 +173,63 @@ def _recommended_subdir(family: str, architecture: str) -> str:
     if family == "controlnet":
         return "controlnet"
     if family == "text_encoder":
+        if architecture == "flux":
+            return "flux/Textencoder"
         return "Textencoder"
     if family == "face_embedding":
         return "reactor/faces"
     if family == "wan":
         return "wan/Safetensor"
     return "misc"
+
+
+CHECKPOINT_ARCHITECTURES = {ARCH_SD15, ARCH_INPAINT, ARCH_SDXL, ARCH_SDXL_INPAINT, ARCH_SD35}
+
+
+def _header_family_architecture(path: Path) -> tuple[str, str, dict[str, str]] | None:
+    try:
+        info = read_model_info(path)
+    except Exception:
+        logger.debug("Could not inspect model header for %s", path, exc_info=True)
+        return None
+
+    identifiers: dict[str, str] = {
+        "header_arch": info.arch,
+        "header_role": info.role,
+    }
+    if info.precision:
+        identifiers["header_precision"] = info.precision
+
+    if info.arch in {ARCH_FLUX_TRANSFORMER}:
+        return "runtime_asset", "flux", identifiers
+    if info.arch in {ARCH_FLUX_LORA}:
+        return "lora", "flux", identifiers
+    if info.arch in {ARCH_FLUX_VAE}:
+        return "vae", "flux", identifiers
+    if info.arch == ARCH_T5XXL_ENCODER:
+        return "text_encoder", "flux", identifiers
+    if info.arch == ARCH_CLIP and _architecture_from_text(path.as_posix()) == "flux":
+        return "text_encoder", "flux", identifiers
+
+    if info.arch in {ARCH_WAN_TRANSFORMER, ARCH_WAN_TRANSFORMER_FP8}:
+        return "wan", "wan", identifiers
+    if info.arch == ARCH_WAN_LORA:
+        return "lora", "wan", identifiers
+    if info.arch == ARCH_WAN_VAE:
+        return "vae", "wan", identifiers
+    if info.arch == ARCH_UMT5_ENCODER:
+        return "text_encoder", "wan", identifiers
+
+    if info.role == ROLE_LORA:
+        architecture = _architecture_from_text(f"{path.as_posix()} {info.display_name} {' '.join(info.raw_meta.values())}")
+        return "lora", architecture, identifiers
+    if info.role == ROLE_TEXT_ENCODER:
+        architecture = _architecture_from_text(f"{path.as_posix()} {info.display_name} {' '.join(info.raw_meta.values())}")
+        return "text_encoder", architecture, identifiers
+    if info.role == ROLE_VAE:
+        architecture = _architecture_from_text(f"{path.as_posix()} {info.display_name} {' '.join(info.raw_meta.values())}")
+        return "vae", architecture, identifiers
+    return None
 
 
 def _matching_path_family(path: Path) -> str | None:
@@ -229,7 +303,7 @@ def classify_model_dir(path: Path, roots: list[Path]) -> ModelInventoryRecord | 
         family = "runtime_asset"
 
     current_subdir = _relative_subdir(path, roots)
-    recommended = _recommended_subdir(family, architecture)
+    recommended = _recommended_subdir(family, architecture, path.name)
     return ModelInventoryRecord(
         path=str(path.resolve()),
         filename=path.name,
@@ -252,6 +326,7 @@ def classify_model_file(path: Path, roots: list[Path]) -> ModelInventoryRecord |
     path_family = _matching_path_family(path)
     family = path_family or "unknown"
     architecture = _metadata_architecture(metadata, path)
+    header_match = _header_family_architecture(path)
     identifiers: dict[str, str] = {}
     shapes: dict[str, list[int]] = {}
 
@@ -277,6 +352,29 @@ def classify_model_file(path: Path, roots: list[Path]) -> ModelInventoryRecord |
             architecture = infer_architecture_from_shapes(shapes, filename=path.name)
             identifiers["tensor_marker"] = "diffusion checkpoint"
 
+    if header_match and family not in {"controlnet", "face_embedding"}:
+        header_family, header_architecture, header_identifiers = header_match
+        if header_family in {"runtime_asset", "text_encoder", "vae", "wan"} or family in {
+            "unknown",
+            "lora",
+            "vae",
+            "text_encoder",
+            "runtime_asset",
+            "wan",
+        }:
+            family = header_family
+            if header_architecture and header_architecture != "unknown":
+                architecture = header_architecture
+            identifiers.update(header_identifiers)
+
+    if family == "unknown" and architecture in CHECKPOINT_ARCHITECTURES and path.suffix.lower() in {
+        ".ckpt",
+        ".pt",
+        ".safetensors",
+    }:
+        family = "checkpoint"
+        identifiers["metadata_marker"] = "checkpoint architecture"
+
     if family == "unknown":
         if metadata.get("ss_network_module") or "lora" in metadata_text:
             family = "lora"
@@ -291,6 +389,9 @@ def classify_model_file(path: Path, roots: list[Path]) -> ModelInventoryRecord |
             family = "wan"
             architecture = "wan"
             identifiers["filename_marker"] = "wan gguf"
+        elif path.suffix.lower() == ".gguf" and architecture == "flux":
+            family = "runtime_asset"
+            identifiers["filename_marker"] = "flux gguf"
 
     if family == "unknown" and path.suffix.lower() in {".ckpt", ".pt", ".safetensors"}:
         family = "checkpoint"
@@ -303,7 +404,7 @@ def classify_model_file(path: Path, roots: list[Path]) -> ModelInventoryRecord |
         architecture = _architecture_from_text(f"{path.name} {metadata_text}")
 
     current_subdir = _relative_subdir(path, roots)
-    recommended = _recommended_subdir(family, architecture)
+    recommended = _recommended_subdir(family, architecture, path.name)
     important_metadata = {
         key: value
         for key, value in metadata.items()

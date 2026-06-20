@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from PIL import Image
 
@@ -23,10 +23,11 @@ from aiwf.core.domain.wan import (
     WanI2VRequest,
     WanI2VResult,
 )
-from aiwf.dev.diagnostics import trace_model_throughput
+from aiwf.dev.diagnostics import trace_exception_safe, trace_model_throughput
 from aiwf.infrastructure.video import VideoError, write_frames
 from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
 from aiwf.services.failure_archive import FailureArchiveService
+from aiwf.services.genlog import GenerationLogService
 from aiwf.services.wan_models import (
     WanModelPairCheck,
     wan_lora_matches,
@@ -211,6 +212,7 @@ class WanService:
         unload_image_models: Callable[[], None] | None = None,
         supervisor=None,
         failure_archive: FailureArchiveService | None = None,
+        genlog: GenerationLogService | None = None,
     ) -> None:
         self.flags = flags
         self.settings = settings
@@ -221,6 +223,7 @@ class WanService:
         self._unload_image_models = unload_image_models
         self.supervisor = supervisor
         self.failure_archive = failure_archive
+        self.genlog = genlog
 
     def available(self) -> bool:
         return self._backend.available()
@@ -264,6 +267,134 @@ class WanService:
             )
         except Exception:
             logger.debug("Wan failure archive failed.", exc_info=True)
+
+    def _write_generation_log(self, request: WanI2VRequest, result: WanI2VResult) -> None:
+        if self.genlog is None or not self.genlog.enabled:
+            return
+        try:
+            loras: list[dict[str, Any]] = []
+            if request.high_noise_lora_id:
+                loras.append(
+                    {
+                        "stage": "high",
+                        "id": request.high_noise_lora_id,
+                        "scale": float(request.high_noise_lora_scale),
+                    }
+                )
+            if request.low_noise_lora_id:
+                loras.append(
+                    {
+                        "stage": "low",
+                        "id": request.low_noise_lora_id,
+                        "scale": float(request.low_noise_lora_scale),
+                    }
+                )
+            self.genlog.append(
+                {
+                    "event": "generation_completed",
+                    "kind": "video",
+                    "generate_type": "wan",
+                    "backend": "wan",
+                    "pipeline": f"wan.{request.runtime_mode}",
+                    "pipeline_kind": "i2v",
+                    "model": {
+                        "runtime_mode": request.runtime_mode,
+                        "model_id": request.model_id,
+                        "high_noise_model_id": request.high_noise_model_id,
+                        "low_noise_model_id": request.low_noise_model_id,
+                        "vae_id": request.vae_id,
+                        "text_encoder_path": request.text_encoder_path,
+                        "components_base": request.components_base,
+                    },
+                    "loras": loras,
+                    "settings": {
+                        "width": int(request.width),
+                        "height": int(request.height),
+                        "num_frames": int(request.normalized_frames()),
+                        "fps": int(request.fps),
+                        "steps": int(request.steps),
+                        "high_noise_steps": int(request.high_noise_steps),
+                        "low_noise_steps": int(request.low_noise_steps),
+                        "effective_steps": int(request.effective_steps()),
+                        "boundary_ratio": request.boundary_ratio,
+                        "effective_boundary_ratio": request.effective_boundary_ratio(),
+                        "guidance_scale": float(request.guidance_scale),
+                        "image_guidance_scale": float(request.image_guidance_scale),
+                        "flow_shift": float(request.flow_shift),
+                        "sigma_type": request.sigma_type,
+                        "sampler": request.sampler,
+                        "seed": int(request.seed),
+                        "offload": request.offload,
+                        "temporal_chunks": bool(request.temporal_chunks),
+                        "chunk_size": int(request.chunk_size),
+                        "chunk_overlap": int(request.chunk_overlap),
+                        "vram_reserve_enabled": bool(request.vram_reserve_enabled),
+                        "vram_reserve_mb": int(request.vram_reserve_mb),
+                    },
+                    "runtime_flags": {
+                        "async_offload": bool(getattr(self.flags, "async_offload", False)),
+                        "pinned_memory": bool(getattr(self.flags, "pinned_memory", False)),
+                        "cuda_malloc": bool(getattr(self.flags, "cuda_malloc", False)),
+                    },
+                    "timing": {
+                        "elapsed_seconds": float(result.elapsed_seconds),
+                        "step_count": int(result.step_count),
+                        "steps_per_second": result.steps_per_second,
+                        "iterations_per_second": result.iterations_per_second,
+                        "frame_count": int(result.frame_count),
+                        "frames_per_second": (
+                            round(float(result.frame_count) / float(result.elapsed_seconds), 6)
+                            if result.elapsed_seconds > 0
+                            else None
+                        ),
+                        "load_seconds": result.load_seconds,
+                        "preprocess_seconds": result.preprocess_seconds,
+                        "prompt_encode_seconds": result.prompt_encode_seconds,
+                        "image_encode_seconds": result.image_encode_seconds,
+                        "latent_prepare_seconds": result.latent_prepare_seconds,
+                        "denoise_seconds": result.denoise_seconds,
+                        "high_denoise_seconds": result.high_denoise_seconds,
+                        "low_denoise_seconds": result.low_denoise_seconds,
+                        "pipeline_seconds": result.pipeline_seconds,
+                        "pipeline_overhead_seconds": result.pipeline_overhead_seconds,
+                        "vae_decode_seconds": result.vae_decode_seconds,
+                        "video_write_seconds": result.video_write_seconds,
+                    },
+                    "wan_metrics": {
+                        "manual_vae_decode": result.manual_vae_decode,
+                        "vae_decode_chunk_frames": result.vae_decode_chunk_frames,
+                        "latent_frame_count": result.latent_frame_count,
+                        "temporal_chunks": result.temporal_chunks,
+                        "temporal_chunk_size": result.temporal_chunk_size,
+                        "temporal_chunk_overlap": result.temporal_chunk_overlap,
+                        "transformer_chunks_per_forward": result.transformer_chunks_per_forward,
+                        "transformer_forwards_per_step": result.transformer_forwards_per_step,
+                        "fp8_linear_layers": result.fp8_linear_layers,
+                        "fp8_fast_mm_calls": result.fp8_fast_mm_calls,
+                        "fp8_fallback_calls": result.fp8_fallback_calls,
+                        "fp8_fallback_layers": result.fp8_fallback_layers,
+                        "fp8_strict_mode": result.fp8_strict_mode,
+                        "fp8_native_available": result.fp8_native_available,
+                        "fp8_backend": result.fp8_backend,
+                        "attention_backends": result.attention_backends,
+                        "attention_optimizations": result.attention_optimizations,
+                        "stage_transition_count": result.stage_transition_count,
+                        "stage_transition_total_ms": result.stage_transition_total_ms,
+                        "cache_mode": result.cache_mode,
+                        "performance_benchmark_valid": result.performance_benchmark_valid,
+                        "performance_benchmark_notes": result.performance_benchmark_notes,
+                        "vram_limit_mb": result.vram_limit_mb,
+                        "vram_total_mb": result.vram_total_mb,
+                        "vram_limit_fraction": result.vram_limit_fraction,
+                    },
+                    "outputs": {
+                        "path": result.output_path,
+                        "frame_count": int(result.frame_count),
+                    },
+                }
+            )
+        except Exception as exc:
+            trace_exception_safe("wan.genlog", exc, runtime_mode=request.runtime_mode)
 
     def unload_models(self) -> None:
         """Release cached Wan models before another GPU video stage starts."""
@@ -1586,7 +1717,7 @@ class WanService:
                     f"(keep_free={vram_reserve_mb} MB)"
                 )
 
-            return WanI2VResult(
+            result = WanI2VResult(
                 output_path=str(output_path),
                 frame_count=frame_count,
                 fps=int(getattr(request, "fps", 16) or 16),
@@ -1657,6 +1788,8 @@ class WanService:
                 vram_limit_fraction=round(vram_limit_fraction, 6),
                 message=message,
             )
+            self._write_generation_log(request, result)
+            return result
         except WanUnavailable as exc:
             self._archive_failed_generation(
                 request,

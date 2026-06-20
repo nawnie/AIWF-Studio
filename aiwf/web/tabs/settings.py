@@ -290,6 +290,7 @@ def _launch_component_values(settings: LaunchSettings) -> list:
         settings.directml,
         settings.api,
         settings.nowebui,
+        settings.genlog,
         settings.models_dir,
         settings.ckpt_dir,
         settings.output_dir,
@@ -789,6 +790,11 @@ def register_settings(registry: WebRegistry) -> None:
                                 value=launch.nowebui,
                                 info="Starts FastAPI without the Gradio UI.",
                             )
+                            launch_genlog = gr.Checkbox(
+                                label="Generation speed log (--genlog)",
+                                value=launch.genlog,
+                                info="Writes local speed/settings JSONL without prompt text.",
+                            )
 
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
                             gr.Markdown("Network & access", elem_classes=["aiwf-section-label"])
@@ -1185,6 +1191,7 @@ def register_settings(registry: WebRegistry) -> None:
             launch_directml,
             launch_api,
             launch_nowebui,
+            launch_genlog,
             launch_models_dir,
             launch_ckpt_dir,
             launch_output_dir,
@@ -1478,6 +1485,7 @@ def register_settings(registry: WebRegistry) -> None:
                 directml,
                 api,
                 nowebui,
+                genlog,
                 models_dir,
                 ckpt_dir,
                 output_dir,
@@ -1526,6 +1534,7 @@ def register_settings(registry: WebRegistry) -> None:
                 vsr_model_dir=engine_profile.vsr_model_dir,
                 api=bool(api),
                 nowebui=bool(nowebui),
+                genlog=bool(genlog),
                 models_dir=(models_dir or "").strip(),
                 ckpt_dir=(ckpt_dir or "").strip(),
                 output_dir=(output_dir or "").strip(),

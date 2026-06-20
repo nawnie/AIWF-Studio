@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import random
+import tempfile
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +20,10 @@ from diffusers import (
     DPMSolverSDEScheduler,
     EulerAncestralDiscreteScheduler,
     EulerDiscreteScheduler,
+    FlowMatchEulerDiscreteScheduler,
+    FluxPipeline,
+    FluxTransformer2DModel,
+    GGUFQuantizationConfig,
     HeunDiscreteScheduler,
     KDPM2AncestralDiscreteScheduler,
     KDPM2DiscreteScheduler,
@@ -38,6 +44,7 @@ from diffusers import (
 )
 from diffusers.utils import logging as diffusers_logging
 from PIL import Image
+from safetensors.torch import load_file
 
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.errors import GenerationCancelledError, ModelNotFoundError
@@ -68,9 +75,11 @@ from aiwf.infrastructure.controlnet.catalog import iter_controlnet_model_paths, 
 from aiwf.infrastructure.controlnet.images import decode_control_image
 from aiwf.infrastructure.controlnet.preprocess import PreprocessParams, preprocess_control_image
 from aiwf.infrastructure.diffusers.model_arch import (
+    ARCH_FLUX,
     ARCH_SDXL,
     ARCH_SDXL_INPAINT,
     is_inpaint_architecture,
+    is_flux_architecture,
     is_sd3_architecture,
     is_sdxl_architecture,
 )
@@ -153,6 +162,42 @@ _SINGLE_FILE_CONFIG_REPOS = {
     StableDiffusion3InpaintPipeline: "stabilityai/stable-diffusion-3.5-medium",
 }
 
+_FLUX_TRANSFORMER_CONFIG_BASE = {
+    "_class_name": "FluxTransformer2DModel",
+    "_diffusers_version": "0.38.0",
+    "patch_size": 1,
+    "in_channels": 64,
+    "out_channels": None,
+    "num_layers": 19,
+    "num_single_layers": 38,
+    "attention_head_dim": 128,
+    "num_attention_heads": 24,
+    "joint_attention_dim": 4096,
+    "pooled_projection_dim": 768,
+    "axes_dims_rope": [16, 56, 56],
+}
+
+_FLUX_VAE_CONFIG = {
+    "_class_name": "AutoencoderKL",
+    "_diffusers_version": "0.38.0",
+    "act_fn": "silu",
+    "block_out_channels": [128, 256, 512, 512],
+    "down_block_types": ["DownEncoderBlock2D"] * 4,
+    "up_block_types": ["UpDecoderBlock2D"] * 4,
+    "force_upcast": True,
+    "in_channels": 3,
+    "out_channels": 3,
+    "latent_channels": 16,
+    "layers_per_block": 2,
+    "mid_block_add_attention": True,
+    "norm_num_groups": 32,
+    "sample_size": 1024,
+    "scaling_factor": 0.3611,
+    "shift_factor": 0.1159,
+    "use_quant_conv": False,
+    "use_post_quant_conv": False,
+}
+
 
 def _cached_single_file_config_dir(pipeline_cls) -> str | None:
     """Return a locally cached Diffusers config directory for single-file loads.
@@ -210,6 +255,11 @@ class DiffusersBackend:
         self._embedding_catalog: list | None = None
         self._controlnet_cache = ControlNetModelCache()
         self._offload_active = False
+        self._flux_text_encoder = None
+        self._flux_text_encoder_2 = None
+        self._flux_tokenizer = None
+        self._flux_tokenizer_2 = None
+        self._flux_component_paths: dict[str, str] = {}
 
     @staticmethod
     def _snapshot_scheduler_config(scheduler) -> dict:
@@ -380,7 +430,7 @@ class DiffusersBackend:
     def _dtype_for_architecture(self, architecture: str) -> torch.dtype:
         if self.flags.no_half:
             return torch.float32
-        if is_sd3_architecture(architecture) and self.devices.device().type == "cuda":
+        if (is_sd3_architecture(architecture) or is_flux_architecture(architecture)) and self.devices.device().type == "cuda":
             try:
                 if torch.cuda.is_bf16_supported():
                     return torch.bfloat16
@@ -389,7 +439,185 @@ class DiffusersBackend:
         return self.devices.dtype(self.flags.no_half)
 
     @staticmethod
+    def _flux_transformer_has_guidance(path: Path) -> bool:
+        suffix = path.suffix.lower()
+        try:
+            if suffix == ".gguf":
+                import gguf
+
+                reader = gguf.GGUFReader(str(path))
+                return any("guidance_in" in tensor.name for tensor in reader.tensors)
+            if suffix == ".safetensors":
+                from safetensors import safe_open
+
+                with safe_open(path, framework="pt", device="cpu") as handle:
+                    return any("guidance_in" in key for key in handle.keys())
+        except Exception:
+            logger.debug("Could not inspect Flux guidance tensors for %s", path, exc_info=True)
+        name = path.name.lower()
+        return not any(token in name for token in ("schnell", "fusion", "turbo", "lightning", "4step", "4-step"))
+
+    def _flux_search_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for root in [self.flags.resolved_models_dir(), *self.flags.resolved_extra_model_dirs()]:
+            try:
+                resolved = root.resolve()
+            except Exception:
+                continue
+            key = str(resolved).lower()
+            if resolved.exists() and key not in seen:
+                seen.add(key)
+                roots.append(resolved)
+        return roots
+
+    def _find_flux_component(self, filenames: tuple[str, ...], subdirs: tuple[str, ...]) -> Path | None:
+        for root in self._flux_search_roots():
+            for subdir in subdirs:
+                base = root / subdir if subdir else root
+                for filename in filenames:
+                    candidate = base / filename
+                    if candidate.is_file():
+                        return candidate.resolve()
+        return None
+
+    def _resolve_flux_component_paths(self) -> dict[str, Path]:
+        clip = self._find_flux_component(
+            ("clip_l.safetensors",),
+            ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders", "Clip", "clip"),
+        )
+        t5 = self._find_flux_component(
+            ("t5xxl_fp16.safetensors", "t5xxl_fp8_e4m3fn.safetensors"),
+            ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders"),
+        )
+        vae = self._find_flux_component(
+            ("ae.safetensors",),
+            ("flux/VAE", "VAE", "vae"),
+        )
+        missing = [
+            name
+            for name, value in (("CLIP-L", clip), ("T5-XXL", t5), ("Flux VAE", vae))
+            if value is None
+        ]
+        if missing:
+            roots = ", ".join(str(root) for root in self._flux_search_roots())
+            raise ModelNotFoundError(
+                "Flux generation needs local CLIP-L, T5-XXL, and ae.safetensors assets. "
+                f"Missing: {', '.join(missing)}. Put them under models/flux/Textencoder and "
+                f"models/flux/VAE, or add a shared model root in Settings. Searched: {roots}"
+            )
+        return {"clip_l": clip, "t5xxl": t5, "vae": vae}  # type: ignore[dict-item]
+
+    @staticmethod
+    def _write_temp_config(root: Path, name: str, config: dict) -> str:
+        target = root / name
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        return str(target)
+
+    def _load_flux_prompt_models(self, component_paths: dict[str, Path]) -> None:
+        if (
+            self._flux_text_encoder is not None
+            and self._flux_text_encoder_2 is not None
+            and self._flux_tokenizer is not None
+            and self._flux_tokenizer_2 is not None
+            and self._flux_component_paths == {key: str(value) for key, value in component_paths.items()}
+        ):
+            return
+
+        from transformers import CLIPTextConfig, CLIPTextModel, CLIPTokenizer, T5Config, T5EncoderModel, T5TokenizerFast
+
+        clip_config = CLIPTextConfig(
+            vocab_size=49408,
+            hidden_size=768,
+            intermediate_size=3072,
+            num_hidden_layers=12,
+            num_attention_heads=12,
+            max_position_embeddings=77,
+            hidden_act="quick_gelu",
+            layer_norm_eps=1e-5,
+            bos_token_id=49406,
+            eos_token_id=49407,
+            pad_token_id=1,
+            projection_dim=768,
+        )
+        clip = CLIPTextModel(clip_config).to(dtype=torch.float16)
+        clip.load_state_dict(load_file(str(component_paths["clip_l"]), device="cpu"), strict=True)
+        clip.eval()
+
+        t5_config = T5Config(
+            vocab_size=32128,
+            d_model=4096,
+            d_ff=10240,
+            d_kv=64,
+            num_layers=24,
+            num_decoder_layers=24,
+            num_heads=64,
+            relative_attention_num_buckets=32,
+            relative_attention_max_distance=128,
+            dropout_rate=0.0,
+            layer_norm_epsilon=1e-6,
+            feed_forward_proj="gated-gelu",
+            is_encoder_decoder=False,
+            use_cache=False,
+            pad_token_id=0,
+            eos_token_id=1,
+        )
+        t5 = T5EncoderModel(t5_config).to(dtype=torch.float16)
+        state = load_file(str(component_paths["t5xxl"]), device="cpu")
+        t5.load_state_dict(state, strict=True)
+        del state
+        t5.eval()
+
+        self._flux_text_encoder = clip
+        self._flux_text_encoder_2 = t5
+        self._flux_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+        self._flux_tokenizer_2 = T5TokenizerFast.from_pretrained("google/t5-v1_1-xxl", legacy=True)
+        self._flux_component_paths = {key: str(value) for key, value in component_paths.items()}
+
+    def _encode_flux_prompt(
+        self,
+        prompt: str,
+        *,
+        device: torch.device,
+        batch_size: int,
+        max_sequence_length: int = 256,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self._flux_text_encoder is not None
+        assert self._flux_text_encoder_2 is not None
+        assert self._flux_tokenizer is not None
+        assert self._flux_tokenizer_2 is not None
+        clip_inputs = self._flux_tokenizer(
+            [prompt],
+            padding="max_length",
+            max_length=77,
+            truncation=True,
+            return_tensors="pt",
+        )
+        t5_inputs = self._flux_tokenizer_2(
+            [prompt],
+            padding="max_length",
+            max_length=max_sequence_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        with torch.no_grad():
+            pooled = self._flux_text_encoder(clip_inputs.input_ids, output_hidden_states=False).pooler_output
+            prompt_embeds = self._flux_text_encoder_2(
+                t5_inputs.input_ids,
+                output_hidden_states=False,
+            )[0]
+        prompt_embeds = prompt_embeds.to(dtype=torch.bfloat16, device=device)
+        pooled = pooled.to(dtype=torch.bfloat16, device=device)
+        if batch_size > 1:
+            prompt_embeds = prompt_embeds.repeat(batch_size, 1, 1)
+            pooled = pooled.repeat(batch_size, 1)
+        return prompt_embeds, pooled
+
+    @staticmethod
     def _txt2img_pipeline_cls_for_architecture(architecture: str):
+        if is_flux_architecture(architecture):
+            return FluxPipeline
         if is_sd3_architecture(architecture):
             return StableDiffusion3Pipeline
         if is_sdxl_architecture(architecture):
@@ -399,6 +627,10 @@ class DiffusersBackend:
     @staticmethod
     def _is_sd3_pipe(pipe) -> bool:
         return hasattr(pipe, "transformer") and hasattr(pipe, "text_encoder_3")
+
+    @staticmethod
+    def _is_flux_pipe(pipe) -> bool:
+        return isinstance(pipe, FluxPipeline)
 
     def _apply_fp8_storage(self, pipe) -> None:
         """Store denoiser weights in FP8, compute in fp16 (diffusers layerwise casting)."""
@@ -435,6 +667,8 @@ class DiffusersBackend:
         return dev
 
     def _wants_offload(self, architecture: str) -> bool:
+        if is_flux_architecture(architecture):
+            return False
         vram = self.devices.total_vram_gb()
         if is_sd3_architecture(architecture):
             return 0.0 < vram < 24.0
@@ -446,11 +680,13 @@ class DiffusersBackend:
         return vram < threshold
 
     def _compile_allowed_for_architecture(self, architecture: str) -> bool:
+        if is_flux_architecture(architecture):
+            return False
         return not (self.flags.lowvram or self.flags.medvram or self._wants_offload(architecture))
 
     def _tune_vae_memory(self, pipe, architecture: str) -> None:
         """SDXL's 1024px VAE decode is the peak-VRAM step — slice and tile it."""
-        if not (is_sdxl_architecture(architecture) or is_sd3_architecture(architecture)):
+        if not (is_sdxl_architecture(architecture) or is_sd3_architecture(architecture) or is_flux_architecture(architecture)):
             return
         vae = getattr(pipe, "vae", None)
         if vae is None:
@@ -540,13 +776,82 @@ class DiffusersBackend:
 
     def can_preload_checkpoint_locally(self, checkpoint_id: str | None = None) -> bool:
         checkpoint = self._resolve_checkpoint(checkpoint_id)
+        if is_flux_architecture(checkpoint.architecture):
+            try:
+                self._resolve_flux_component_paths()
+            except ModelNotFoundError:
+                return False
+            return Path(checkpoint.path).is_file()
         pipeline_cls = self._txt2img_pipeline_cls_for_architecture(checkpoint.architecture)
         if Path(checkpoint.path).is_dir():
             return (Path(checkpoint.path) / "model_index.json").is_file()
         return _cached_single_file_config_dir(pipeline_cls) is not None
 
+    def _load_flux_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            return checkpoint
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        path = Path(checkpoint.path)
+        if path.suffix.lower() not in {".gguf", ".safetensors"}:
+            raise ModelNotFoundError("Flux generation currently expects a .gguf or .safetensors transformer file.")
+        component_paths = self._resolve_flux_component_paths()
+        guidance_embeds = self._flux_transformer_has_guidance(path)
+        dtype = self._dtype_for_architecture(ARCH_FLUX)
+
+        transformer_config = dict(_FLUX_TRANSFORMER_CONFIG_BASE)
+        transformer_config["guidance_embeds"] = guidance_embeds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            transformer_config_dir = self._write_temp_config(tmp_root, "transformer", transformer_config)
+            vae_config_dir = self._write_temp_config(tmp_root, "vae", _FLUX_VAE_CONFIG)
+            load_kwargs = {
+                "config": transformer_config_dir,
+                "torch_dtype": dtype,
+                "local_files_only": True,
+            }
+            if path.suffix.lower() == ".gguf":
+                load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
+            transformer = FluxTransformer2DModel.from_single_file(str(path), **load_kwargs)
+            vae = AutoencoderKL.from_single_file(
+                str(component_paths["vae"]),
+                config=vae_config_dir,
+                torch_dtype=dtype,
+                local_files_only=True,
+            )
+
+        pipe = FluxPipeline(
+            scheduler=FlowMatchEulerDiscreteScheduler(shift=3.0),
+            vae=vae,
+            text_encoder=None,
+            tokenizer=None,
+            text_encoder_2=None,
+            tokenizer_2=None,
+            transformer=transformer,
+        )
+        pipe._aiwf_flux_guidance_embeds = guidance_embeds
+        pipe._aiwf_flux_components = {key: str(value) for key, value in component_paths.items()}
+        pipe = pipe.to(self.devices.device())
+        pipe.set_progress_bar_config(disable=True)
+        self._remember_base_scheduler_config(pipe)
+        self._tune_vae_memory(pipe, ARCH_FLUX)
+
+        self._active = checkpoint
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
     def load_checkpoint(self, checkpoint_id: str | None = None) -> Checkpoint:
         checkpoint = self._resolve_checkpoint(checkpoint_id)
+        if is_flux_architecture(checkpoint.architecture):
+            return self._load_flux_checkpoint(checkpoint)
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
             return checkpoint
 
@@ -734,6 +1039,11 @@ class DiffusersBackend:
         self._refiner_active = None
         self._active_vae_id = None
         self._controlnet_cache.clear()
+        self._flux_text_encoder = None
+        self._flux_text_encoder_2 = None
+        self._flux_tokenizer = None
+        self._flux_tokenizer_2 = None
+        self._flux_component_paths = {}
         self.devices.empty_cache()
 
     _SAMPLER_EXTRA_KWARGS = {
@@ -743,6 +1053,9 @@ class DiffusersBackend:
     }
 
     def _apply_sampler(self, pipe, sampler_id: str, schedule_type: str = "automatic") -> None:
+        if self._is_flux_pipe(pipe):
+            logger.info("Flux uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            return
         if self._is_sd3_pipe(pipe):
             logger.info("SD3.5 uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
             return
@@ -872,6 +1185,46 @@ class DiffusersBackend:
             callback_on_step_end_tensor_inputs=["latents"],
             width=width,
             height=height,
+        )
+
+    def _run_flux_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+    ):
+        component_paths = getattr(pipe, "_aiwf_flux_components", None) or self._resolve_flux_component_paths()
+        self._load_flux_prompt_models({key: Path(value) for key, value in component_paths.items()})
+        device = self._execution_device(pipe)
+        prompt_embeds, pooled_prompt_embeds = self._encode_flux_prompt(
+            parsed_prompt,
+            device=device,
+            batch_size=request.batch_size,
+        )
+        guidance_embeds = bool(getattr(pipe, "_aiwf_flux_guidance_embeds", False))
+        guidance_scale = float(request.cfg_scale) if guidance_embeds else 0.0
+        if not guidance_embeds and request.cfg_scale != 0:
+            logger.info("Flux distilled transformer has no guidance block; CFG/guidance is forced to 0.0.")
+        return self._call_pipe(
+            pipe,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            num_images_per_prompt=1,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
+            max_sequence_length=256,
+            output_type="pil",
         )
 
     def _run_img2img_pass(
@@ -1128,6 +1481,7 @@ class DiffusersBackend:
         before_hires_images: list[Image.Image] = []
 
         parsed = parse_extra_networks(request.prompt)
+        is_flux_checkpoint = is_flux_architecture(checkpoint.architecture)
         if is_sd3_architecture(checkpoint.architecture):
             if request.vae_id:
                 raise ValueError("External SD1.5/SDXL VAE selection is not supported with SD3.5 checkpoints.")
@@ -1137,6 +1491,19 @@ class DiffusersBackend:
                 raise ValueError(
                     "The current ControlNet stack is for SD1.5/SDXL. Disable ControlNet for SD3.5."
                 )
+        if is_flux_checkpoint:
+            if request.mode != GenerationMode.TXT2IMG:
+                raise ValueError("Flux is currently wired for txt2img only. Use SD/SDXL/SD3.5 for img2img or inpaint.")
+            if request.vae_id:
+                raise ValueError("External SD VAE selection is not supported with Flux.")
+            if request.enable_hr:
+                raise ValueError("Hires fix is not wired for Flux yet. Generate Flux at the target resolution directly.")
+            if request.sdxl_refiner_enabled:
+                raise ValueError("SDXL refiner only works with SDXL checkpoints, not Flux.")
+            if any(unit.enabled for unit in (request.controlnet_units or [])):
+                raise ValueError("ControlNet is not wired for Flux yet. Disable ControlNet or use an SD/SDXL model.")
+            if parsed.loras:
+                raise ValueError("Flux LoRA application is not wired yet. Remove Flux LoRAs for this pass.")
 
         if request.mode == GenerationMode.INPAINT:
             if not init_images:
@@ -1161,27 +1528,30 @@ class DiffusersBackend:
             pipe = self._txt2img
             assert pipe is not None
 
-        self._apply_vae(pipe, request.vae_id)
-        if request.mode != GenerationMode.INPAINT and self._img2img is not None:
-            self._apply_vae(self._img2img, request.vae_id)
+        if not is_flux_checkpoint:
+            self._apply_vae(pipe, request.vae_id)
+            if request.mode != GenerationMode.INPAINT and self._img2img is not None:
+                self._apply_vae(self._img2img, request.vae_id)
 
         self._apply_sampler(pipe, request.sampler, request.scheduler)
         if self._img2img is not None and request.mode == GenerationMode.TXT2IMG and request.enable_hr:
             self._apply_sampler(self._img2img, request.sampler, request.scheduler)
 
-        adapter_names = apply_loras(
-            pipe,
-            parsed.loras,
-            self.list_loras(),
-            base_architecture=checkpoint.architecture,
-        )
-        if self._img2img is not None and adapter_names:
-            apply_loras(
-                self._img2img,
+        adapter_names = []
+        if not is_flux_checkpoint:
+            adapter_names = apply_loras(
+                pipe,
                 parsed.loras,
                 self.list_loras(),
                 base_architecture=checkpoint.architecture,
             )
+            if self._img2img is not None and adapter_names:
+                apply_loras(
+                    self._img2img,
+                    parsed.loras,
+                    self.list_loras(),
+                    base_architecture=checkpoint.architecture,
+                )
 
         controlnets = self._prepare_controlnets(request, control_images)
         if any(unit.enabled for unit in (request.controlnet_units or [])) and not controlnets:
@@ -1215,17 +1585,18 @@ class DiffusersBackend:
         # Load textual inversions referenced by the (processed) prompt/negative.
         # Only embeddings the user actually uses in the prompt text are loaded here;
         # the rest stay on disk and are never injected into the text encoders.
-        self._ensure_embeddings_for_prompt(
-            pipe, request.prompt, request.negative_prompt, checkpoint.architecture
-        )
-        if self._img2img is not None:
+        if not is_flux_checkpoint:
             self._ensure_embeddings_for_prompt(
-                self._img2img, request.prompt, request.negative_prompt, checkpoint.architecture
+                pipe, request.prompt, request.negative_prompt, checkpoint.architecture
             )
-        if cn_pipe is not None:
-            self._ensure_embeddings_for_prompt(
-                cn_pipe, request.prompt, request.negative_prompt, checkpoint.architecture
-            )
+            if self._img2img is not None:
+                self._ensure_embeddings_for_prompt(
+                    self._img2img, request.prompt, request.negative_prompt, checkpoint.architecture
+                )
+            if cn_pipe is not None:
+                self._ensure_embeddings_for_prompt(
+                    cn_pipe, request.prompt, request.negative_prompt, checkpoint.architecture
+                )
 
         try:
             run_pipe = cn_pipe if cn_pipe is not None else pipe
@@ -1244,7 +1615,28 @@ class DiffusersBackend:
                 generator.manual_seed(seed)
                 width, height = request.width, request.height
 
-                if cn_pipe is not None:
+                if is_flux_checkpoint:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_flux_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=request.width,
+                        height=request.height,
+                        steps=request.steps,
+                    )
+                    batch_images = output.images
+
+                elif cn_pipe is not None:
                     callback = self._make_callback(
                         run_pipe,
                         request,

@@ -19,6 +19,7 @@ ARCH_INPAINT = "inpaint"
 ARCH_SDXL = "sdxl"
 ARCH_SDXL_INPAINT = "sdxl_inpaint"
 ARCH_SD35 = "sd35"
+ARCH_FLUX = "flux"
 
 
 def _safetensors_tensor_shapes(path: Path) -> dict[str, list[int]]:
@@ -80,6 +81,8 @@ def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: st
 
     if has_sd3 or "sd3.5" in lower or "sd35" in lower or "stable-diffusion-3.5" in lower:
         return ARCH_SD35
+    if "flux" in lower:
+        return ARCH_FLUX
 
     if unet_in and len(unet_in) >= 2 and unet_in[1] == 9:
         if has_sdxl:
@@ -118,6 +121,8 @@ def detect_checkpoint_architecture(path: Path | str) -> str:
         return ARCH_SD35
     if normalized.startswith("sd3-") or normalized.startswith("sd3.") or normalized.startswith("sd3_"):
         return ARCH_SD35
+    if "flux" in normalized:
+        return ARCH_FLUX
     if "inpaint" in lower and "xl" in lower.replace("_", " "):
         return ARCH_SDXL_INPAINT
     if "inpaint" in lower:
@@ -132,6 +137,7 @@ def architecture_label(architecture: str) -> str:
         ARCH_SDXL: "SDXL",
         ARCH_SDXL_INPAINT: "SDXL inpaint",
         ARCH_SD35: "SD3.5",
+        ARCH_FLUX: "Flux",
         ARCH_INPAINT: "inpaint",
         ARCH_SD15: "SD1.5",
     }.get(architecture, architecture)
@@ -147,3 +153,7 @@ def is_sdxl_architecture(architecture: str) -> bool:
 
 def is_sd3_architecture(architecture: str) -> bool:
     return (architecture or "").lower() in {ARCH_SD35, "sd3", "stable-diffusion-3", "stable-diffusion-3.5"}
+
+
+def is_flux_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() == ARCH_FLUX

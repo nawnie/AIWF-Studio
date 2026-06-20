@@ -40,3 +40,14 @@ pythonpath = ["."]
 markers = [
     "dev: development-only diagnostics and client logging tests",
 ]
+filterwarnings = [
+    'ignore:Using `httpx` with `starlette\.testclient` is deprecated.*:starlette.exceptions.StarletteDeprecationWarning',
+    'ignore:builtin type .* has no __module__ attribute:DeprecationWarning',
+    "ignore:The module 'mediapipe' is not installed.*:UserWarning",
+    'ignore:Please import `gaussian_filter` from the `scipy\.ndimage` namespace.*:DeprecationWarning',
+    'ignore:Importing from timm\.models\..* is deprecated.*:FutureWarning',
+    'ignore:Overwriting tiny_vit_.* in registry with controlnet_aux.*:UserWarning',
+    'ignore:Mapping deprecated model name vit_base_resnet50_384.*:UserWarning',
+    'ignore:hand_and_face is deprecated.*:DeprecationWarning',
+    "ignore:__array__ implementation doesn't accept a copy keyword.*:DeprecationWarning",
+]

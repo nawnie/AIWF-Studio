@@ -18,7 +18,7 @@ from aiwf.infrastructure.diffusers.loras import resolve_lora
 logger = logging.getLogger(__name__)
 
 
-def _lora_compatible(base_architecture: str | None, lora_architecture: str | None) -> bool:
+def lora_compatible_with_base(base_architecture: str | None, lora_architecture: str | None) -> bool:
     lora_arch = (lora_architecture or "unknown").lower()
     if lora_arch in {"", "unknown"}:
         return True
@@ -50,7 +50,7 @@ def apply_loras(
         if match is None:
             logger.warning("LoRA not found: %s", ref.name)
             continue
-        if not _lora_compatible(base_architecture, match.architecture):
+        if not lora_compatible_with_base(base_architecture, match.architecture):
             raise ValueError(
                 f"LoRA '{match.title}' targets {match.architecture}, "
                 f"but the selected checkpoint is {base_architecture or 'unknown'}."

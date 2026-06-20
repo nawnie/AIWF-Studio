@@ -34,6 +34,7 @@ def test_launch_settings_argv_includes_api_security_flags():
         api_cors_origins="http://127.0.0.1:3000, https://studio.example",
         api_rate_limit_per_minute=120,
         block_private_download_urls=False,
+        genlog=True,
     )
     argv = settings.argv()
 
@@ -42,6 +43,7 @@ def test_launch_settings_argv_includes_api_security_flags():
     assert "--api-rate-limit-per-minute" in argv
     assert "120" in argv
     assert "--allow-private-download-urls" in argv
+    assert "--genlog" in argv
 
 
 def test_launch_settings_argv_includes_extra_model_search_dirs():
@@ -142,6 +144,7 @@ def test_merge_launch_settings_applies_api_security(tmp_path: Path):
         api_cors_origins="https://studio.example",
         api_rate_limit_per_minute=60,
         block_private_download_urls=False,
+        genlog=True,
     )
 
     merged = merge_launch_settings(cli, saved, explicit=set())
@@ -149,6 +152,16 @@ def test_merge_launch_settings_applies_api_security(tmp_path: Path):
     assert merged.api_cors_origins == "https://studio.example"
     assert merged.api_rate_limit_per_minute == 60
     assert merged.block_private_download_urls is False
+    assert merged.genlog is True
+
+
+def test_merge_launch_settings_respects_explicit_genlog_cli(tmp_path: Path):
+    cli = RuntimeFlags(data_dir=tmp_path, genlog=False)
+    saved = LaunchSettings(genlog=True)
+
+    merged = merge_launch_settings(cli, saved, explicit={"--genlog"})
+
+    assert merged.genlog is False
 
 
 def test_merge_launch_settings_applies_extra_model_dirs(tmp_path: Path):

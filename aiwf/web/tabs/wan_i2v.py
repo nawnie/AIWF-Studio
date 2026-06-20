@@ -114,6 +114,7 @@ def _service(ctx: AppContext) -> WanService:
             unload_image_models=ctx.generation.backend.unload,
             supervisor=ctx.supervisor,
             failure_archive=ctx.failure_archive,
+            genlog=ctx.genlog,
         )
         _SERVICES[id(ctx)] = svc
     return svc

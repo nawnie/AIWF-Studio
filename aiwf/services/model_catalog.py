@@ -5,6 +5,7 @@ from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.models import Checkpoint, LoraInfo
+from aiwf.infrastructure.diffusers.extra_networks import lora_compatible_with_base
 from aiwf.infrastructure.diffusers.model_arch import architecture_label
 from aiwf.infrastructure.diffusers.loras import resolve_lora
 from aiwf.infrastructure.safetensors_metadata import (
@@ -41,6 +42,16 @@ class ModelCatalogService:
 
     def list_loras(self) -> list[LoraInfo]:
         return self._generation.list_loras()
+
+    def list_loras_for_checkpoint(self, checkpoint_id: str | None) -> list[LoraInfo]:
+        checkpoint = self.find_checkpoint(checkpoint_id)
+        if checkpoint is None:
+            return self.list_loras()
+        return [
+            lora
+            for lora in self.list_loras()
+            if lora_compatible_with_base(checkpoint.architecture, lora.architecture)
+        ]
 
     def refresh_loras(self) -> list[LoraInfo]:
         invalidate = getattr(self._generation.backend, "invalidate_loras", None)
@@ -212,9 +223,9 @@ class ModelCatalogService:
         expanded = RE_LORA_KEYWORD.sub(replace, prompt)
         return re.sub(r"\s{2,}", " ", expanded).strip()
 
-    def lora_choices(self) -> list[tuple[str, str]]:
+    def lora_choices(self, checkpoint_id: str | None = None) -> list[tuple[str, str]]:
         choices: list[tuple[str, str]] = []
-        for lora in self.list_loras():
+        for lora in self.list_loras_for_checkpoint(checkpoint_id):
             alias = self.alias_for_lora(lora.id)
             label = f"{lora.title}"
             if alias:

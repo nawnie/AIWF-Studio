@@ -24,6 +24,7 @@ from aiwf.services.faceswap import FaceSwapService
 from aiwf.services.controlnet import ControlNetService
 from aiwf.services.failure_archive import FailureArchiveService
 from aiwf.services.generation import GenerationService
+from aiwf.services.genlog import GenerationLogService
 from aiwf.services.metadata import MetadataService
 from aiwf.services.model_catalog import ModelCatalogService
 from aiwf.services.model_download import ModelDownloadService
@@ -47,6 +48,7 @@ class AppContext:
     plugins: PluginRegistry
     supervisor: EngineSupervisor
     generation: GenerationService
+    genlog: GenerationLogService
     failure_archive: FailureArchiveService
     enhance: EnhanceService
     controlnet: ControlNetService
@@ -190,6 +192,7 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     queue = JobQueue(events)
     store = FilesystemImageStore(flags.resolved_output_dir(), settings=settings)
     failure_archive = FailureArchiveService(flags.resolved_output_dir())
+    genlog = GenerationLogService(flags.resolved_output_dir(), enabled=flags.genlog)
 
     capabilities = CapabilityDetector()
     optimization_planner = OptimizationPlanner()
@@ -213,6 +216,7 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
         supervisor=supervisor,
         optimization_planner=optimization_planner,
         failure_archive=failure_archive,
+        genlog=genlog,
     )
     enhance = EnhanceService(flags, settings, devices, store, supervisor=supervisor)
     controlnet = ControlNetService(flags)
@@ -236,6 +240,7 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
         plugins=PluginRegistry(),
         supervisor=supervisor,
         generation=generation,
+        genlog=genlog,
         failure_archive=failure_archive,
         enhance=enhance,
         controlnet=controlnet,

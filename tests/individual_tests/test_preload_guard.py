@@ -59,10 +59,12 @@ def _inject_stubs():
         "StableDiffusionImg2ImgPipeline", "StableDiffusionXLImg2ImgPipeline",
         "StableDiffusion3Pipeline", "StableDiffusion3Img2ImgPipeline",
         "StableDiffusion3InpaintPipeline",
-        "AutoencoderKL",
+        "AutoencoderKL", "FluxPipeline", "FluxTransformer2DModel",
+        "GGUFQuantizationConfig",
         "DDIMScheduler", "DEISMultistepScheduler",
         "DPMSolverMultistepScheduler", "DPMSolverSDEScheduler",
         "EulerAncestralDiscreteScheduler", "EulerDiscreteScheduler",
+        "FlowMatchEulerDiscreteScheduler",
         "HeunDiscreteScheduler", "KDPM2AncestralDiscreteScheduler",
         "KDPM2DiscreteScheduler", "LCMScheduler", "LMSDiscreteScheduler",
         "SASolverScheduler", "TCDScheduler", "UniPCMultistepScheduler",
@@ -81,6 +83,8 @@ def _inject_stubs():
 
     _set_stub("PIL", _make_mod("PIL"))
     _set_stub("PIL.Image", _make_mod("PIL.Image", Image=object))
+    _set_stub("safetensors", _make_mod("safetensors"))
+    _set_stub("safetensors.torch", _make_mod("safetensors.torch", load_file=lambda *a, **k: {}))
 
     # aiwf leaf modules -- only the ones backend.py imports from.
     # Parent packages (aiwf, aiwf.infrastructure, aiwf.infrastructure.diffusers)
@@ -140,8 +144,10 @@ def _inject_stubs():
             preprocess_control_image=lambda *a, **k: None,
         ),
         "aiwf.infrastructure.diffusers.model_arch": dict(
+            ARCH_FLUX="flux",
             ARCH_SDXL="sdxl", ARCH_SDXL_INPAINT="sdxl_inpaint",
             ARCH_SD35="sd35",
+            is_flux_architecture=lambda *a: False,
             is_sdxl_architecture=lambda *a: False,
             is_sd3_architecture=lambda *a: False,
             is_inpaint_architecture=lambda *a: False,

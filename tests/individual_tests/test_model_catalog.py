@@ -35,6 +35,22 @@ def catalog(tmp_path):
             filename="DetailTweaker.safetensors",
             path=str(tmp_path / "DetailTweaker.safetensors"),
         ),
+        LoraInfo(
+            id="SD15Style",
+            title="SD15Style",
+            filename="SD15Style.safetensors",
+            path=str(tmp_path / "SD15Style.safetensors"),
+            architecture="sd15",
+            recommended_subdir="Loras/SD15",
+        ),
+        LoraInfo(
+            id="FluxMotion",
+            title="FluxMotion",
+            filename="FluxMotion.safetensors",
+            path=str(tmp_path / "FluxMotion.safetensors"),
+            architecture="flux",
+            recommended_subdir="Loras/Flux",
+        ),
     ]
     generation.list_checkpoints.return_value = [
         Checkpoint(
@@ -43,7 +59,21 @@ def catalog(tmp_path):
             filename="test_model.safetensors",
             path=str(tmp_path / "test_model.safetensors"),
             hash="abc123",
-        )
+        ),
+        Checkpoint(
+            id="sdxl_model",
+            title="sdxl_model",
+            filename="sdxl_model.safetensors",
+            path=str(tmp_path / "sdxl_model.safetensors"),
+            architecture="sdxl",
+        ),
+        Checkpoint(
+            id="flux_model",
+            title="flux_model",
+            filename="flux_model.safetensors",
+            path=str(tmp_path / "flux_model.safetensors"),
+            architecture="flux",
+        ),
     ]
     return ModelCatalogService(generation, flags, settings)
 
@@ -96,3 +126,13 @@ def test_lora_details_include_compatibility_metadata(catalog):
     text = catalog.lora_details(lora)
     assert "**Architecture:** SDXL" in text
     assert "**Recommended folder:** `Loras/SDXL`" in text
+
+
+def test_lora_choices_filter_by_checkpoint_architecture(catalog):
+    sd15_values = {value for _, value in catalog.lora_choices("test_model")}
+    sdxl_values = {value for _, value in catalog.lora_choices("sdxl_model")}
+    flux_values = {value for _, value in catalog.lora_choices("flux_model")}
+
+    assert sd15_values == {"DetailTweaker", "SD15Style"}
+    assert sdxl_values == {"ClearSkin_v2", "DetailTweaker"}
+    assert flux_values == {"DetailTweaker", "FluxMotion"}

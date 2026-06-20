@@ -33,6 +33,7 @@ class LaunchSettings(BaseSettings):
     # Security default for model downloads: block loopback/LAN/private targets
     # unless the user intentionally enables local private URL fetching.
     block_private_download_urls: bool = True
+    genlog: bool = False
     share: bool = False
     medvram: bool = False
     lowvram: bool = False
@@ -128,6 +129,7 @@ class LaunchSettings(BaseSettings):
             api_cors_origins=flags.api_cors_origins,
             api_rate_limit_per_minute=flags.api_rate_limit_per_minute,
             block_private_download_urls=flags.block_private_download_urls,
+            genlog=flags.genlog,
             share=flags.share,
             medvram=flags.medvram,
             lowvram=flags.lowvram,
@@ -179,6 +181,7 @@ class LaunchSettings(BaseSettings):
                 "api_cors_origins": self.api_cors_origins,
                 "api_rate_limit_per_minute": self.api_rate_limit_per_minute,
                 "block_private_download_urls": self.block_private_download_urls,
+                "genlog": self.genlog,
                 "share": self.share,
                 "medvram": self.medvram,
                 "lowvram": self.lowvram,
@@ -246,6 +249,8 @@ class LaunchSettings(BaseSettings):
             args.extend(["--api-rate-limit-per-minute", str(self.api_rate_limit_per_minute)])
         if not self.block_private_download_urls:
             args.append("--allow-private-download-urls")
+        if self.genlog:
+            args.append("--genlog")
         if self.share:
             args.append("--share")
         if self.medvram:
@@ -383,6 +388,7 @@ def merge_launch_settings(
         "api_cors_origins": "--api-cors-origins",
         "api_rate_limit_per_minute": "--api-rate-limit-per-minute",
         "block_private_download_urls": "--allow-private-download-urls",
+        "genlog": "--genlog",
         "share": "--share",
         "medvram": "--medvram",
         "lowvram": "--lowvram",
