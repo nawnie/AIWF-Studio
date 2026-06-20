@@ -401,7 +401,7 @@ class DiffusersBackend:
         return hasattr(pipe, "transformer") and hasattr(pipe, "text_encoder_3")
 
     def _apply_fp8_storage(self, pipe) -> None:
-        """Store UNet weights in FP8, compute in fp16 (diffusers layerwise casting)."""
+        """Store denoiser weights in FP8, compute in fp16 (diffusers layerwise casting)."""
         if not self.flags.fp8:
             return
         if self.flags.lowvram:
@@ -416,7 +416,7 @@ class DiffusersBackend:
                 storage_dtype=torch.float8_e4m3fn,
                 compute_dtype=getattr(denoiser, "dtype", None) or self.devices.dtype(self.flags.no_half),
             )
-            logger.info("UNet weights stored in FP8 (compute fp16) — roughly half the UNet VRAM.")
+            logger.info("Denoiser weights stored in FP8 (compute fp16); roughly half the denoiser VRAM.")
         except Exception:
             logger.exception("Could not enable FP8 weight storage; continuing at fp16.")
 
@@ -440,7 +440,7 @@ class DiffusersBackend:
             return 0.0 < vram < 24.0
         if not is_sdxl_architecture(architecture) or vram <= 0.0:
             return False
-        # FP8 storage halves the UNet, so ~8GB cards can keep the whole
+        # FP8 storage halves the active denoiser, so ~8GB cards can keep the whole
         # pipeline resident — much faster than offloading.
         threshold = 7.0 if self.flags.fp8 else self._AUTO_OFFLOAD_VRAM_GB
         return vram < threshold
