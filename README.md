@@ -1,5 +1,8 @@
 # AIWF Studio
 
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![NVIDIA RTX / VFX SDK](https://img.shields.io/badge/NVIDIA%20RTX-VFX%20SDK-76B900?logo=nvidia&logoColor=white)](https://docs.nvidia.com/maxine/vfx/index.html)
+
 **Local-first AI image generation for Windows, NVIDIA GPUs, Stable Diffusion, ControlNet, inpainting, enhancement, and Wan GGUF image-to-video.**
 
 AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. It is designed as a serious local creative workspace: explicit wiring, typed requests, predictable model folders, and no legacy global `shared` state.
