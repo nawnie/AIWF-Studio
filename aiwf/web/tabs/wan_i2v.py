@@ -516,7 +516,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     negative = gr.Textbox(label="Negative prompt", lines=2, value="")
 
                     runtime_mode = gr.Radio(
-                        label="Runtime",
+                        label="Wan route",
                         choices=[
                             ("Fast: 5B TI2V", WAN_RUNTIME_FAST_5B),
                             ("Full: 14B FP8 high/low", WAN_RUNTIME_HIGH_LOW_FP8),
