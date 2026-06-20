@@ -35,6 +35,25 @@ Current local source mapping:
 
 The future "Install base components for video" button should install or verify exactly this base set. Transformer high/low files and LoRAs remain user-selectable model files, not part of the shared base.
 
+## Maintainer Notes
+
+Keep user-facing Wan routes separate in UI, validation, and docs:
+
+- 5B safetensors, 14B safetensors, and GGUF are separate video routes with
+  different memory, speed, and compatibility expectations.
+- FP8 safetensors and GGUF should not be mixed in one high/low transformer
+  pair. Treat them as different loader/runtime paths, not interchangeable file
+  formats.
+- Some current paths work because the compatibility layer accepts them, but
+  that does not mean they are optimized. Avoid claiming speed wins without
+  measured step time, VRAM/RAM, fallback count, and attention backend evidence.
+- If temporal jumps, odd reference drift, or unexpected frame-to-frame behavior
+  appear, investigate conditioning, latent handoff, and reference-image handling
+  first before assuming the selected checkpoint is corrupt.
+- Wan S2V is not the same plan as post-Wan audio. The MVP audio route is
+  MMAudio after visual generation; S2V should stay framed as a separate future
+  generation route.
+
 ## Engineering Priorities
 
 Current priority is compatibility and validation, not native FP8 execution.

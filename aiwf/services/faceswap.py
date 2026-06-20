@@ -62,6 +62,8 @@ class FaceSwapService:
     Workflow inspired by https://github.com/Gourieff/sd-webui-reactor
     (see docs/ATTRIBUTION.md). Heavy onnxruntime/insightface work is isolated in
     the infrastructure layer and loaded lazily.
+    Direct swap failures stay explicit; video pipelines can catch
+    FaceSwapUnavailable and keep the input/previous output as a soft-fail stage.
     """
 
     def __init__(self, flags: RuntimeFlags, supervisor=None) -> None:
@@ -73,6 +75,7 @@ class FaceSwapService:
 
     @contextmanager
     def _gpu_tenant(self, reason: str):
+        """Borrow the enhance tenant while insightface/onnxruntime owns VRAM."""
         supervisor = getattr(self, "supervisor", None)
         if supervisor is None:
             yield

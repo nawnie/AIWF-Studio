@@ -31,7 +31,7 @@ class EngineSpec:
     """Declares a backend engine's Python environment and entry point.
 
     Each engine that needs dependency isolation (Kohya, ED2) gets its own
-    venv. The generation engine shares the main venv for now — the architecture
+    venv. The generation engine shares the main venv for now â€” the architecture
     doc recommends splitting only if an incompatible dependency stack appears.
 
     Fields
@@ -44,7 +44,7 @@ class EngineSpec:
         Where the engine's venv lives (or will be created).  ``None`` means
         "use the main AIWF venv" (generation engine case).
     worker_script:
-        The subprocess entry point — written by AIWF, not the upstream tool.
+        The subprocess entry point â€” written by AIWF, not the upstream tool.
     repo_dir:
         If the engine is a git-cloned tool (kohya_ss, EveryDream2trainer),
         this is where it lives.  Setup steps install its requirements after
@@ -66,7 +66,7 @@ class EngineSpec:
     name: str
     label: str
     worker_script: Path
-    venv_dir: Path | None = None          # None → use main venv
+    venv_dir: Path | None = None          # None â†’ use main venv
     repo_dir: Path | None = None
     repo_requirements: str = "requirements.txt"
     extra_requirements: Path | None = None
@@ -77,7 +77,7 @@ class EngineSpec:
 
     @property
     def effective_venv(self) -> Path:
-        """Return the venv to use — falls back to main AIWF venv."""
+        """Return the venv to use â€” falls back to main AIWF venv."""
         return self.venv_dir if self.venv_dir is not None else VENV
 
     def python_exe(self) -> str:
@@ -154,7 +154,7 @@ def _build_engine_registry() -> list[EngineSpec]:
         name="generation",
         label="Generation (stable image reference)",
         worker_script=ROOT / "engines" / "generation" / "worker.py",
-        # venv_dir=None → uses main venv (ROOT/venv)
+        # venv_dir=None â†’ uses main venv (ROOT/venv)
         venv_dir=gen_venv_raw if str(gen_venv_raw) != str(ROOT) else None,
         enabled_by_default=True,
         cuda_torch=True,
@@ -322,11 +322,9 @@ def install_xformers(py: str) -> None:
 def sageattention_ready(py: str) -> bool:
     """Return True when sageattention >=1.0.0 is importable.
 
-    SageAttention 2.x (Triton-based, fastest) has not been published to PyPI —
-    it requires a manual build from https://github.com/thu-ml/SageAttention.
-    We accept 1.x (numba kernels, still helpful on long Wan sequences) as the
-    auto-install target so startup stays clean.  Users who want 2.x can build
-    it from source and it will be detected here automatically once installed.
+    SageAttention is an optional accelerator, not a correctness dependency.
+    Newer 2.x builds are benchmark-gated on this Windows/CUDA setup before
+    being promoted.
     """
     script = (
         "from importlib.metadata import version, PackageNotFoundError\n"
@@ -343,13 +341,12 @@ def sageattention_ready(py: str) -> bool:
 def install_sageattention(py: str) -> None:
     """Install SageAttention for faster Wan attention.
 
-    SageAttention 2.x (Triton, ~2-4x faster per step) is NOT on PyPI.
-    We install the latest available PyPI release (1.x) which still improves
-    throughput on long Wan sequences vs plain torch SDPA.
+    We install the latest available package only as a best-effort optimization.
+    Wan must still run correctly when this install fails or the package is not
+    compatible with the local CUDA/Triton stack.
 
-    For 2.x speed: build from source —
-      git clone https://github.com/thu-ml/SageAttention && cd SageAttention
-      pip install -e .   (requires CUDA toolkit + triton)
+    For a current upstream 2.x test lane, use a copied venv and install:
+      pip install sageattention==2.2.0 --no-build-isolation
     """
     pkgs = ["sageattention"]
     if os.name == "nt":
@@ -368,7 +365,7 @@ def install_sageattention(py: str) -> None:
                 *pkgs,
             ]
         )
-        print("SageAttention installed — Wan attention will use optimised kernels.")
+        print("SageAttention installed â€” Wan attention will use optimised kernels.")
     except subprocess.CalledProcessError:
         print(
             "NOTE: SageAttention auto-install skipped (optional). "
@@ -474,7 +471,7 @@ def prepare(skip_prepare: bool, skip_install: bool, argv: list[str]) -> None:
     if not torch_cuda_ready(py):
         print("WARNING: CUDA is still not available after install. Generation will use CPU.")
 
-    # SageAttention — Comfy --use-sage-attention parity; 2-4x faster Wan steps on RTX 40-series.
+    # Optional accelerator. Keep startup graceful and benchmark speed claims locally.
     if "--skip-sageattention" not in argv and not sageattention_ready(py):
         install_sageattention(py)
 
@@ -482,7 +479,7 @@ def prepare(skip_prepare: bool, skip_install: bool, argv: list[str]) -> None:
         install_xformers(py)
 
     # ------------------------------------------------------------------
-    # Training engine venvs (Kohya, ED2) — opt-in via engines.json
+    # Training engine venvs (Kohya, ED2) â€” opt-in via engines.json
     # ------------------------------------------------------------------
     engines_cfg = _load_engines_config()
     for spec in _build_engine_registry():

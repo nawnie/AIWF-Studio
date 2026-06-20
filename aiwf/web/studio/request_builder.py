@@ -84,6 +84,8 @@ def build_generation_request(
     controlnet: ControlNetService | None = None,
     checkpoint_architecture: str | None = None,
 ):
+    # Raise gr.Error for user-correctable validation so Gradio renders the
+    # message in the UI instead of exposing a traceback.
     if not ckpt_map or not ckpt_title:
         raise gr.Error("No checkpoint available. Refresh models.")
 
@@ -206,6 +208,8 @@ def build_generation_request(
         )
 
     control_images = None
+    # ControlNet validation is centralized here because route compatibility
+    # depends on both the active mode and the selected checkpoint architecture.
     try:
         units, control_images_list = build_controlnet_stack(
             slots=[

@@ -29,6 +29,7 @@ def register_audio(registry: WebRegistry) -> None:
         service = _service(ctx)
         music_models = service.music_model_choices()
         sfx_models = service.sfx_model_choices()
+        video_audio_models = service.video_audio_model_choices()
 
         with gr.Column(elem_classes=["aiwf-audio", "aiwf-video"]):
             with gr.Column(elem_classes=["aiwf-page-header"]):
@@ -51,13 +52,17 @@ def register_audio(registry: WebRegistry) -> None:
                     with gr.Row():
                         kind = gr.Radio(
                             label="Type",
-                            choices=[("Music", "music"), ("Sound effects", "sfx")],
-                            value="music",
+                            choices=[
+                                ("Video-conditioned audio", "video_audio"),
+                                ("Music", "music"),
+                                ("Sound effects", "sfx"),
+                            ],
+                            value="video_audio",
                         )
                         model = gr.Dropdown(
                             label="Model",
-                            choices=music_models,
-                            value=music_models[0][1] if music_models else "facebook/musicgen-small",
+                            choices=video_audio_models,
+                            value=video_audio_models[0][1] if video_audio_models else "mmaudio:large_44k_v2",
                             allow_custom_value=True,
                         )
                     with gr.Row():
@@ -75,8 +80,16 @@ def register_audio(registry: WebRegistry) -> None:
                     details = gr.Textbox(label="Details", lines=4, interactive=False, elem_classes=["aiwf-gen-info"])
 
         def _sync_kind(kind_value):
-            choices = sfx_models if kind_value == "sfx" else music_models
-            fallback = "facebook/audiogen-medium" if kind_value == "sfx" else "facebook/musicgen-small"
+            selected = str(kind_value or "video_audio")
+            if selected == "sfx":
+                choices = sfx_models
+                fallback = "facebook/audiogen-medium"
+            elif selected == "music":
+                choices = music_models
+                fallback = "facebook/musicgen-small"
+            else:
+                choices = video_audio_models
+                fallback = "mmaudio:large_44k_v2"
             return gr.update(choices=choices, value=choices[0][1] if choices else fallback)
 
         kind.change(_sync_kind, inputs=[kind], outputs=[model], show_progress=False)
@@ -88,7 +101,16 @@ def register_audio(registry: WebRegistry) -> None:
             options = AudioGenerationOptions(
                 prompt=prompt_v or "",
                 kind=str(kind_v or "music"),
-                model_id=str(model_v or ("facebook/audiogen-medium" if kind_v == "sfx" else "facebook/musicgen-small")),
+                model_id=str(
+                    model_v
+                    or (
+                        "facebook/audiogen-medium"
+                        if kind_v == "sfx"
+                        else "facebook/musicgen-small"
+                        if kind_v == "music"
+                        else "mmaudio:large_44k_v2"
+                    )
+                ),
                 duration_seconds=float(duration_v or 8),
                 temperature=float(temperature_v or 1.0),
                 cfg_coef=float(cfg_v or 3.0),

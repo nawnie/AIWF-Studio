@@ -28,9 +28,12 @@ SIGMA_TYPES = ("simple", "beta", "exponential", "karras")
 #   heun  -- FlowMatchHeunDiscreteScheduler (2nd-order, higher quality, ~2x NFE per step)
 SAMPLER_TYPES = ("euler", "heun")
 
-# Runtime modes. The default is the standalone 5B Diffusers path so the Video
-# tab has a reliable proof-of-life mode before the experimental 14B high/low
-# native FP8 runtime is selected.
+# Wan video routes:
+# - fast_5b: single 5B safetensors route for the default fast path.
+# - native_high_low_fp8_experimental: dual 14B high/low route for FP8
+#   safetensors weights.
+# - native_high_low: dual GGUF high/low route. Keep UI filtering strict so users
+#   do not mix incompatible 5B, FP8 safetensors, and GGUF assets in one request.
 WAN_RUNTIME_FAST_5B = "fast_5b"
 WAN_RUNTIME_HIGH_LOW = "native_high_low"
 WAN_RUNTIME_HIGH_LOW_FP8 = "native_high_low_fp8_experimental"
@@ -81,6 +84,10 @@ class WanI2VRequest(BaseModel):
     temporal_chunks: bool = False
     chunk_size: int = Field(default=24, ge=4, le=64)
     chunk_overlap: int = Field(default=0, ge=0, le=32)
+    # Route settings semantics: `steps` belongs to the single 5B fast route;
+    # `high_noise_steps`, `low_noise_steps`, `boundary_ratio`, and low-stage CFG
+    # only describe dual high/low routes. Filtering keeps those knobs paired with
+    # compatible model families instead of silently crossing full/FP8/GGUF routes.
     # Low-noise stage CFG for Wan 2.2 dual high/low pairs (maps to diffusers'
     # `guidance_scale_2`). 1.0 = reuse `guidance_scale` for both stages. Only applied on
     # the dual transformer path; ignored by the single 5B path. (Despite the legacy field
@@ -142,10 +149,10 @@ class WanI2VRequest(BaseModel):
             raise ValueError(f"runtime_mode must be one of {WAN_RUNTIME_MODES}, got {v!r}")
         return v
 
-    # Wan 2.2 I2V 14B+ (and some variants) use a two-stage (high-noise / low-noise) transformer pair.
-    # Provide both for dual-stage denoising. `boundary_ratio` controls the switch point
-    # (e.g. 0.875 is a common value: high-noise transformer for early / high-noise timesteps,
-    # low-noise for the rest).
+    # Wan 2.2 dual routes use a two-stage (high-noise / low-noise) transformer
+    # pair. Provide both files from the same route family: FP8 safetensors or GGUF.
+    # `boundary_ratio` controls the switch point (e.g. 0.875 is a common value:
+    # high-noise transformer for early / high-noise timesteps, low-noise for the rest).
     high_noise_model_id: str | None = None
     low_noise_model_id: str | None = None
     boundary_ratio: float | None = Field(default=0.875, ge=0.0, le=1.0)

@@ -52,7 +52,12 @@ def assert_controlnet_checkpoint_compatible(
     controlnet_path: str | Path,
     checkpoint_architecture: str,
 ) -> None:
-    """Raise ValueError when a ControlNet weight cannot pair with the base checkpoint."""
+    """Raise ValueError when a ControlNet weight cannot pair with the base checkpoint.
+
+    This is a runtime safety check, not just a UX guard: SD1.5 and SDXL
+    ControlNet tensors can both be valid files while still being incompatible
+    with the loaded base UNet.
+    """
     from aiwf.infrastructure.diffusers.model_arch import is_sdxl_architecture
 
     cn_arch = infer_controlnet_architecture(controlnet_path)
@@ -103,7 +108,12 @@ def _load_single_file_controlnet(path: Path, *, dtype: torch.dtype) -> ControlNe
 
 
 class ControlNetModelCache:
-    """Loads and caches ControlNetModel weights by checkpoint path."""
+    """Loads and caches ControlNetModel weights by checkpoint path.
+
+    The cache owns only ControlNet branches. Base SD/SDXL checkpoint lifetime
+    stays in DiffusersBackend so toggling control images does not reload the
+    main pipeline.
+    """
 
     def __init__(self) -> None:
         self._cache: dict[str, ControlNetModel] = {}

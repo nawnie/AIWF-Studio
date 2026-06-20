@@ -954,6 +954,8 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                     elem_classes=["aiwf-client-error-wrap"],
                 )
 
+    # Gradio state mirrors backend choices that can change while the tab stays
+    # mounted, so callbacks do not rely on stale dropdown labels.
     state = gr.State(checkpoint_map)
     last_seed = gr.State(-1)
     gallery_seeds = gr.State([])
@@ -2783,6 +2785,8 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
 
     def _on_studio_tab_select(mode_label, cn_current, cn2_current, cn3_current, current_ckpt):
         mode = mode_from_label(mode_label)
+        # Tab activation is the cheap sync point for disk-visible model changes;
+        # avoid rescanning on every control edit.
         ckpt_update, new_map = refresh_checkpoints(
             ctx, rescan=True, current_value=current_ckpt
         )

@@ -122,7 +122,7 @@ Copied-venv accelerator probe results:
 
 | Experiment | Result |
 | --- | --- |
-| `sageattention==2.2.0` | Blocked: this Windows/PyPI environment only offers SageAttention up to `1.0.6`. |
+| `sageattention==2.2.0` | Deferred: current upstream documents this install path, but it still needs a copied-venv Windows/CUDA retest before promotion. The previous local probe only reached the older `1.0.6` fallback. |
 | `kernels==0.15.2` | Installed in copied venv, but it requires `huggingface-hub>=1.10.0`, which conflicts with `transformers 4.57.6`; after restoring HF Hub `0.36.2`, `kernels` is present but not importable. |
 | `torchao` latest | Blocked: `torchao 0.17.0` reports incompatible Torch expectations and fails importing with current Torch/Triton. |
 | `torchao==0.10.0` | Still not importable with current Torch/Triton. |

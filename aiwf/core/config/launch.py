@@ -14,7 +14,12 @@ LAUNCH_FILENAME = "launch.json"
 
 
 class LaunchSettings(BaseSettings):
-    """User-editable options applied on the next app start."""
+    """User-editable options applied on the next app start.
+
+    This is the persisted launch profile, not live process state. Explicit CLI
+    flags win during merge so a one-off safe/local override is not overwritten
+    by an older launch.json.
+    """
 
     model_config = SettingsConfigDict(extra="ignore")
 
@@ -25,6 +30,8 @@ class LaunchSettings(BaseSettings):
     gradio_auth: str = ""
     api_cors_origins: str = ""
     api_rate_limit_per_minute: int = Field(default=0, ge=0, le=6000)
+    # Security default for model downloads: block loopback/LAN/private targets
+    # unless the user intentionally enables local private URL fetching.
     block_private_download_urls: bool = True
     share: bool = False
     medvram: bool = False
@@ -53,6 +60,8 @@ class LaunchSettings(BaseSettings):
     models_dir: str = ""
     ckpt_dir: str = ""
     output_dir: str = ""
+    # Newline-delimited text mirrors the Settings UI text boxes; conversion to
+    # Path lists happens only when the profile becomes RuntimeFlags.
     extra_model_dirs: str = ""
     extra_ckpt_dirs: str = ""
 
@@ -302,6 +311,13 @@ def merge_launch_settings(
     *,
     explicit: set[str] | None = None,
 ) -> RuntimeFlags:
+    """Merge saved launch.json with current CLI/env flags.
+
+    Saved values provide the normal app-start defaults. Any explicitly supplied
+    CLI flag takes precedence so maintainers can force a temporary runtime
+    boundary without editing the user's persisted launch profile.
+    """
+
     if saved is None:
         return cli_flags
 

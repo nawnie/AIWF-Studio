@@ -19,6 +19,12 @@ class WorkflowStepType(str, Enum):
 
 
 class WorkflowStep(BaseModel):
+    """Serializable workflow node.
+
+    `params` intentionally stays generic because each step type owns its own
+    request schema at execution time.
+    """
+
     id: str = ""
     type: WorkflowStepType
     label: str = ""
@@ -26,6 +32,8 @@ class WorkflowStep(BaseModel):
 
 
 class WorkflowDefinition(BaseModel):
+    """User-authored workflow saved to disk and replayed by services."""
+
     name: str
     description: str = ""
     version: int = 1
@@ -34,6 +42,8 @@ class WorkflowDefinition(BaseModel):
 
     @model_validator(mode="after")
     def assign_step_ids(self) -> WorkflowDefinition:
+        """Backfill stable IDs for older/simple workflow files."""
+
         for index, step in enumerate(self.steps):
             if not step.id:
                 step.id = f"step_{index + 1}"

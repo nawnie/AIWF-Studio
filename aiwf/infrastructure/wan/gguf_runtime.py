@@ -199,6 +199,9 @@ def load_gguf_transformer_weights(
             try:
                 module = _replace_linear_with_gguf(transformer, module_path)
             except WanUnavailable:
+                # Some upstream key layouts do not map to nn.Linear modules in
+                # the active diffusers class. Preserve compatibility by loading
+                # those tensors dense, while mapped layers keep mmap/dequant.
                 deferred_dense.append((key, dequantize_tensor(tensor, dtype=torch_dtype)))
                 continue
             module.weight = tensor

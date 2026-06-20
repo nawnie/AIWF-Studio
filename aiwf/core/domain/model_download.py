@@ -32,6 +32,12 @@ ModelSource = Literal["huggingface", "civitai", "direct"]
 
 @dataclass(frozen=True)
 class CatalogEntry:
+    """Trusted model-manager entry, not arbitrary user download input.
+
+    Download services use category/source to choose the destination and fetcher.
+    Keep enough provenance here to write receipts and re-check upstream sources.
+    """
+
     key: str
     title: str
     category: ModelCategory
@@ -43,6 +49,8 @@ class CatalogEntry:
     civitai_version_id: int | None = None
     url: str = ""
     notes: str = ""
+    # Hugging Face snapshot downloads are directory-shaped assets; ordinary
+    # entries resolve to a single file under the category destination.
     snapshot: bool = False
 
     def choice_label(self, *, installed: bool = False) -> str:

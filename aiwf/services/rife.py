@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 
 
 class RifeService:
+    """Frame interpolation wrapper for optional RIFE postprocessing.
+
+    Direct calls raise RifeUnavailable on setup/runtime failure. Wan and other
+    orchestration callers may catch that and keep the last good video, so this
+    service should report precise failures without deleting inputs or outputs.
+    """
+
     def __init__(self, flags: RuntimeFlags, settings: UserSettings, devices: DeviceManager, supervisor=None) -> None:
         self.flags = flags
         self.settings = settings

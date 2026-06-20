@@ -18,19 +18,20 @@ spandrel>=0.4.0
 spandrel-extra-arches>=0.1.0
 opencv-python-headless>=4.8.0
 # Bundles a static ffmpeg binary used to transcode generated videos to browser-playable
-# H.264 (accessed via imageio_ffmpeg.get_ffmpeg_exe()). A real dependency — not a scavenged path.
+# H.264 (accessed via imageio_ffmpeg.get_ffmpeg_exe()). A real dependency - not a scavenged path.
 imageio-ffmpeg>=0.5.1
 facexlib>=0.3.0
 compel>=2.0.0
 ftfy>=6.1.0
 gguf>=0.19.0
-# SageAttention — auto-installed by launch.py on first run (RTX 30/40-series, 2-4x Wan step speed).
-# Comfy --use-sage-attention parity. Not listed as a bare pip dep because it needs a
-# matching CUDA/Triton build; launch.py installs it with graceful failure.
-# Manual install: pip install "sageattention>=2.1.1" triton-windows
+# SageAttention is optional Wan/video acceleration. It is not listed as a hard
+# dependency because Windows CUDA/Triton compatibility changes quickly.
+# launch.py may attempt a best-effort install and must fall back cleanly.
+# Treat any speed claim as benchmark-gated on the local machine.
+# Manual current-upstream test: pip install sageattention==2.2.0 --no-build-isolation
 # Skip auto-install: pass --skip-sageattention to launch.py
 #
-# Optional — faster Wan attention when buildable on your CUDA toolchain:
+# Optional - faster Wan attention when buildable on your CUDA toolchain:
 # pip install flash-attn
 torchsde>=0.2.6
 segment-anything>=1.0
@@ -43,11 +44,11 @@ sentencepiece>=0.2.0
 # AIWF imports this lazily; missing annotators degrade to pass-through maps.
 controlnet-aux>=0.0.10
 
-# Optional — AMD/Intel GPU on Windows: pip install torch-directml, then
+# Optional - AMD/Intel GPU on Windows: pip install torch-directml, then
 # enable DirectML in Settings -> Launch profile. (Linux AMD: install the
 # ROCm torch build instead; it shows up as CUDA automatically.)
 
-# Optional — Face Swap (ReActor). Install to enable the Face Swap tab.
+# Optional - Face Swap (ReActor). Install to enable the Face Swap tab.
 # onnxruntime-gpu for NVIDIA; onnxruntime for CPU-only.
 insightface>=0.7.3
 onnxruntime>=1.17.0

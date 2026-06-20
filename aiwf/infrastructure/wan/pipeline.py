@@ -2211,9 +2211,11 @@ class WanI2VBackend:
 
         pp = Path(weight_path)
         if pp.suffix.lower() == ".gguf":
+            # GGUF is a separate quantized runtime path, not the safetensors FP8 route.
             _video_status(f"Loading GGUF {label} (mmap + on-the-fly dequant): {pp.name}")
             miss, unex = _load_gguf_transformer_weights(target, pp, torch_dtype=torch.bfloat16)
         elif pp.suffix.lower() == ".safetensors" and _safetensors_uses_comfy_fp8_quant(pp):
+            # Comfy scaled-FP8 safetensors keep high/low stages on the native FP8 path.
             _video_status(f"Loading native Comfy FP8 {label}: {pp.name}")
             miss, unex = _load_comfy_fp8_transformer_weights(target, pp, torch_dtype=torch.bfloat16)
         else:
@@ -2925,6 +2927,11 @@ class WanI2VBackend:
         use_cache = _stage_cache_uses_cpu_standby(cache_mode)
         dual_gpu_resident = _stage_cache_is_dual_gpu_resident(cache_mode)
         pin_tensors = _stage_cache_pins_tensors(cache_mode) and self._pinned_memory
+        # Stage/cache modes below are explicit runtime placement choices. Some
+        # paths are supported fallbacks for consumer GPUs, but are not optimized.
+        # Next improvement target: keep the working 16 GB path stable while adding
+        # timing around each swap/load boundary, then promote only the measured
+        # fastest profile to a default.
         _video_status("Building local Wan A14B I2V pipeline components.")
         _video_status("Preparing empty high-noise transformer stage.")
         high_trans = _empty_wan_transformer(WAN_I2V_A14B_TRANSFORMER_CONFIG)
@@ -2942,11 +2949,13 @@ class WanI2VBackend:
         # Inject high into the primary transformer (overwrites the base one in-place)
         high_pp = Path(high_path)
         if high_pp.suffix.lower() == ".gguf":
+            # GGUF transformer weights stay on the GGUF loader/runtime boundary.
             _video_status(f"Loading GGUF high-noise transformer (mmap + on-the-fly dequant): {high_pp.name}")
             miss_h, unex_h = _load_gguf_transformer_weights(
                 pipe.transformer, high_pp, torch_dtype=torch.bfloat16
             )
         elif high_pp.suffix.lower() == ".safetensors" and _safetensors_uses_comfy_fp8_quant(high_pp):
+            # FP8 high/low safetensors should use the native scaled-FP8 loader.
             _video_status(f"Loading native Comfy FP8 high-noise transformer: {high_pp.name}")
             miss_h, unex_h = _load_comfy_fp8_transformer_weights(
                 pipe.transformer, high_pp, torch_dtype=torch.bfloat16
@@ -3508,6 +3517,12 @@ class WanI2VBackend:
                 output_type=output_type,
                 callback_on_step_end=_step_callback,
             )
+            # If reference/temporal behavior looks wrong, investigate conditioning,
+            # image encoding, and latent initialization before assuming model files
+            # are bad. The same weights can behave differently across these paths.
+            # Follow-up: add a tiny conditioning/latent debug dump for bad first-frame
+            # or stale-reference cases so this can be checked without re-running a full
+            # benchmark grid.
             # Wan 2.2's dual high/low pair supports a SEPARATE low-noise CFG via
             # `guidance_scale_2` (honored by both diffusers 0.38's WanImageToVideoPipeline
             # and AIWF's native denoise loop). The UI's low-noise guidance slider maps

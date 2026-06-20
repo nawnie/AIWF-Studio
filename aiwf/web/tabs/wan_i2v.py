@@ -158,6 +158,9 @@ def _format_it_s(steps_per_second) -> str:
 
 
 def _offload_choices_for_runtime(runtime_value: str | None) -> list[tuple[str, str]]:
+    # Team note: route-specific UI choices are intentional guardrails. Keep 5B,
+    # 14B FP8 safetensors, and GGUF high/low families filtered apart so users
+    # do not accidentally mix incompatible runtime/model/settings paths.
     selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
     if selected_runtime == WAN_RUNTIME_HIGH_LOW_FP8:
         return list(_WAN_FP8_OFFLOAD_CHOICES)
@@ -247,6 +250,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         relight_hdr_choices = vsr_service.relighting_hdr_choices()
         audio_music_models = audio_service.music_model_choices()
         audio_sfx_models = audio_service.sfx_model_choices()
+        audio_video_models = audio_service.video_audio_model_choices()
 
         def _faceswap_model_choices() -> list[tuple[str, str]]:
             return [(m.title, m.id) for m in ctx.faceswap.list_models()]
@@ -990,26 +994,33 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                                 )
 
                         with gr.Accordion("Audio", open=False, elem_classes=["aiwf-prompt-tools"]):
+                            # Team note: this is audio post-processing after all visual effects
+                            # have finished. It is not Wan S2V or part of Wan video generation.
                             audio_enabled = gr.Checkbox(
                                 value=False,
-                                label="Generate audio and mux into video",
-                                info="Runs after all visual post-processing.",
+                                label="Add audio after video",
+                                info="Runs after all visual post-processing and writes a muxed MP4.",
                             )
+                            gr.Markdown(audio_service.video_audio_status(), elem_classes=["aiwf-settings-paths"])
                             audio_prompt = gr.Textbox(
                                 label="Audio prompt",
                                 lines=3,
-                                placeholder="Blank uses the video prompt.",
+                                placeholder="footsteps, cloth movement, room tone, light cinematic ambience",
                             )
                             with gr.Row():
                                 audio_kind = gr.Radio(
                                     label="Type",
-                                    choices=[("Music", "music"), ("Sound effects", "sfx")],
-                                    value="music",
+                                    choices=[
+                                        ("Video-conditioned audio", "video_audio"),
+                                        ("Music", "music"),
+                                        ("Sound effects", "sfx"),
+                                    ],
+                                    value="video_audio",
                                 )
                                 audio_model = gr.Dropdown(
                                     label="Audio model",
-                                    choices=audio_music_models,
-                                    value=audio_music_models[0][1] if audio_music_models else "facebook/musicgen-small",
+                                    choices=audio_video_models,
+                                    value=audio_video_models[0][1] if audio_video_models else "mmaudio:large_44k_v2",
                                     allow_custom_value=True,
                                 )
                             with gr.Row():
@@ -1024,7 +1035,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                                 audio_seed = gr.Number(value=-1, precision=0, label="Audio seed")
                             with gr.Row():
                                 audio_temperature = gr.Slider(0.1, 2.0, value=1.0, step=0.05, label="Temperature")
-                                audio_cfg = gr.Slider(0.1, 10.0, value=3.0, step=0.1, label="Guidance")
+                                audio_cfg = gr.Slider(0.1, 10.0, value=4.5, step=0.1, label="Guidance")
 
                     run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
                     video_out = gr.Video(label="Result", interactive=False)
@@ -1569,14 +1580,28 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         )
 
         def _sync_audio_kind(kind_value):
-            choices = audio_sfx_models if kind_value == "sfx" else audio_music_models
-            fallback = "facebook/audiogen-medium" if kind_value == "sfx" else "facebook/musicgen-small"
-            return gr.update(choices=choices, value=choices[0][1] if choices else fallback)
+            selected = str(kind_value or "video_audio")
+            if selected == "sfx":
+                choices = audio_sfx_models
+                fallback = "facebook/audiogen-medium"
+                cfg_value = 3.0
+            elif selected == "music":
+                choices = audio_music_models
+                fallback = "facebook/musicgen-small"
+                cfg_value = 3.0
+            else:
+                choices = audio_video_models
+                fallback = "mmaudio:large_44k_v2"
+                cfg_value = 4.5
+            return (
+                gr.update(choices=choices, value=choices[0][1] if choices else fallback),
+                gr.update(value=cfg_value),
+            )
 
         audio_kind.change(
             _sync_audio_kind,
             inputs=[audio_kind],
-            outputs=[audio_model],
+            outputs=[audio_model, audio_cfg],
             show_progress=False,
         )
 
@@ -2078,11 +2103,20 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     duration_value = float(audio_duration_v or 0)
                     audio_options = AudioGenerationOptions(
                         prompt=audio_text,
-                        kind=str(audio_kind_v or "music"),
-                        model_id=str(audio_model_v or ("facebook/audiogen-medium" if audio_kind_v == "sfx" else "facebook/musicgen-small")),
+                        kind=str(audio_kind_v or "video_audio"),
+                        model_id=str(
+                            audio_model_v
+                            or (
+                                "facebook/audiogen-medium"
+                                if audio_kind_v == "sfx"
+                                else "facebook/musicgen-small"
+                                if audio_kind_v == "music"
+                                else "mmaudio:large_44k_v2"
+                            )
+                        ),
                         duration_seconds=max(1.0, duration_value) if duration_value > 0 else 8.0,
                         temperature=float(audio_temperature_v or 1.0),
-                        cfg_coef=float(audio_cfg_v or 3.0),
+                        cfg_coef=float(audio_cfg_v or (4.5 if audio_kind_v == "video_audio" else 3.0)),
                         seed=int(audio_seed_v if audio_seed_v is not None else -1),
                     )
                     progress(0.0, desc="Generating audio")

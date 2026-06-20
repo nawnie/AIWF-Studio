@@ -3,6 +3,8 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import random
+import shutil
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime
@@ -24,7 +26,7 @@ class AudioUnavailable(RuntimeError):
 
 
 class AudioGenerationService:
-    """Optional local text-to-audio generation and video muxing."""
+    """Optional local text-to-audio, video-conditioned audio, and video muxing."""
 
     def __init__(self, flags: RuntimeFlags, settings: UserSettings, devices=None, supervisor=None) -> None:
         self.flags = flags
@@ -47,7 +49,8 @@ class AudioGenerationService:
 
     def folder_help(self) -> str:
         return (
-            "Audio generation is optional. This build uses Transformers MusicGen. "
+            "Audio generation is optional. Video-conditioned audio uses an isolated MMAudio engine when installed. "
+            "Standalone music uses Transformers MusicGen. "
             "`torchaudio` is installed by `launch.py` with the CUDA torch stack. "
             "AudioCraft is kept out of the shared venv because current releases pin older torch packages."
         )
@@ -64,6 +67,29 @@ class AudioGenerationService:
         return [
             ("AudioGen medium", "facebook/audiogen-medium"),
         ]
+
+    def video_audio_model_choices(self) -> list[tuple[str, str]]:
+        return [
+            ("MMAudio large 44k v2", "mmaudio:large_44k_v2"),
+            ("MMAudio large 44k", "mmaudio:large_44k"),
+            ("MMAudio medium 44k", "mmaudio:medium_44k"),
+            ("MMAudio small 44k", "mmaudio:small_44k"),
+            ("MMAudio small 16k", "mmaudio:small_16k"),
+        ]
+
+    def video_audio_status(self) -> str:
+        root = self._mmaudio_root()
+        demo = root / "demo.py"
+        python = self._audio_engine_python()
+        if demo.is_file() and python.is_file():
+            return (
+                f"Video audio ready: MMAudio at {root}. "
+                "MMAudio checkpoints are CC-BY-NC 4.0; use for non-commercial work unless licensed otherwise."
+            )
+        return (
+            f"Video audio needs MMAudio installed at {root} with engine Python at {python}. "
+            "This route is video-conditioned audio for generated Wan clips."
+        )
 
     def output_path(self, *, stem: str = "audio", suffix: str = ".wav") -> Path:
         root = self.flags.resolved_output_dir() / getattr(self.settings, "audio_output_subdir", "audio")
@@ -87,6 +113,8 @@ class AudioGenerationService:
         prompt = (options.prompt or "").strip()
         if not prompt:
             raise AudioUnavailable("Enter an audio prompt first.")
+        if str(options.kind or "").lower() == "video_audio":
+            raise AudioUnavailable("Video-conditioned audio needs a target video.")
         dest = Path(output_path) if output_path else self.output_path(stem=self._safe_stem(prompt))
         dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -125,7 +153,45 @@ class AudioGenerationService:
         if duration_seconds is None or duration_seconds <= 0:
             info = VideoProcessor().probe(video_path)
             duration_seconds = info.duration_seconds or options.duration_seconds
-        return self.generate(options.model_copy(update={"duration_seconds": float(duration_seconds)}))
+        next_options = options.model_copy(update={"duration_seconds": float(duration_seconds)})
+        if str(next_options.kind or "").lower() == "video_audio":
+            return self.generate_video_audio(video_path, next_options)
+        return self.generate(next_options)
+
+    def generate_video_audio(
+        self,
+        video_path: str | Path,
+        options: AudioGenerationOptions,
+        *,
+        output_path: str | Path | None = None,
+    ) -> AudioGenerationResult:
+        prompt = (options.prompt or "").strip()
+        if not prompt:
+            raise AudioUnavailable("Enter an audio prompt first.")
+        src_video = Path(video_path)
+        if not src_video.is_file():
+            raise AudioUnavailable(f"Video not found: {src_video}")
+        stem = f"{src_video.stem}_{self._safe_stem(prompt)}"
+        dest = Path(output_path) if output_path else self.output_path(stem=stem, suffix=".flac")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        with self._gpu_tenant("Video audio generation"):
+            sample_rate = self._generate_mmaudio_video_audio(src_video, options, dest)
+
+        infotext = (
+            f"Video audio {options.model_id}: {options.duration_seconds:.1f}s, "
+            f"steps {int(options.steps)}, CFG {float(options.cfg_coef):.2f}"
+        )
+        return AudioGenerationResult(
+            output_path=str(dest),
+            prompt=prompt,
+            model_id=options.model_id,
+            kind="video_audio",
+            duration_seconds=float(options.duration_seconds),
+            sample_rate=sample_rate,
+            message=f"Saved video-conditioned audio -> {dest}",
+            infotext=infotext,
+        )
 
     def mux_audio(
         self,
@@ -273,6 +339,76 @@ class AudioGenerationService:
         audio = np.asarray(audio, dtype=np.float32)
         scipy.io.wavfile.write(str(dest), sample_rate, audio)
         return sample_rate
+
+    def _generate_mmaudio_video_audio(self, video_path: Path, options: AudioGenerationOptions, dest: Path) -> int:
+        # VAP is internal shorthand for this post-processing route: a finished video
+        # conditions audio generation through the isolated local MMAudio CLI bridge.
+        # Come back here when the MVP is proven: parse MMAudio's real output metadata
+        # instead of inferring sample rate from the variant name, and expose a small
+        # install/status probe so the UI can distinguish "not installed" from "installed
+        # but missing checkpoints".
+        root = self._mmaudio_root()
+        demo = root / "demo.py"
+        python = self._audio_engine_python()
+        if not demo.is_file():
+            raise AudioUnavailable(f"MMAudio demo.py not found. Install MMAudio at {root}.")
+        if not python.is_file():
+            raise AudioUnavailable(f"MMAudio engine Python not found: {python}")
+
+        variant = self._mmaudio_variant(options.model_id)
+        run_dir = dest.parent / f"{dest.stem}_mmaudio"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        seed = int(options.seed) if options.seed is not None and int(options.seed) >= 0 else random.randint(0, 2**31 - 1)
+        command = [
+            str(python),
+            str(demo),
+            "--variant",
+            variant,
+            "--video",
+            str(video_path),
+            "--prompt",
+            options.prompt,
+            "--negative_prompt",
+            options.negative_prompt or "",
+            "--duration",
+            f"{float(options.duration_seconds):.3f}",
+            "--cfg_strength",
+            f"{float(options.cfg_coef):.3f}",
+            "--num_steps",
+            str(int(options.steps)),
+            "--seed",
+            str(seed),
+            "--output",
+            str(run_dir),
+            "--skip_video_composite",
+        ]
+        result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, timeout=3600)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise AudioUnavailable(f"MMAudio video audio failed: {detail}")
+        source = run_dir / f"{video_path.stem}.flac"
+        if not source.is_file() or source.stat().st_size <= 0:
+            raise AudioUnavailable(f"MMAudio did not create expected audio: {source}")
+        if source.resolve() != dest.resolve():
+            if dest.exists():
+                dest.unlink()
+            shutil.move(str(source), str(dest))
+        return 44100 if "44k" in variant else 16000
+
+    def _mmaudio_root(self) -> Path:
+        return self.flags.data_dir.resolve() / "engines" / "audio" / "MMAudio"
+
+    def _audio_engine_python(self) -> Path:
+        if os.name == "nt":
+            return self.flags.data_dir.resolve() / "engines" / "audio" / ".venv" / "Scripts" / "python.exe"
+        return self.flags.data_dir.resolve() / "engines" / "audio" / ".venv" / "bin" / "python"
+
+    @staticmethod
+    def _mmaudio_variant(model_id: str) -> str:
+        text = str(model_id or "").strip()
+        if text.startswith("mmaudio:"):
+            return text.split(":", 1)[1] or "large_44k_v2"
+        return text or "large_44k_v2"
 
     def _device_string(self) -> str:
         if self.devices is not None:

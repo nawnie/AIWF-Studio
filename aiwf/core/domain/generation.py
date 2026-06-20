@@ -25,6 +25,12 @@ class JobState(str, Enum):
 
 
 class GenerationRequest(BaseModel):
+    """Backend-neutral request contract for Studio image generation.
+
+    Keep this free of UI widgets and backend-specific objects. Services may
+    translate these fields into Diffusers, ONNX, or future runners.
+    """
+
     mode: GenerationMode = GenerationMode.TXT2IMG
     prompt: str = ""
     negative_prompt: str = ""
@@ -64,6 +70,8 @@ class GenerationRequest(BaseModel):
     style_name: str | None = None
     style_prompt_template: str | None = None
     style_negative_template: str | None = None
+    # Multiple units are preserved here; each backend decides how to fan them
+    # out or reject unsupported combinations.
     controlnet_units: list[ControlNetUnit] = Field(default_factory=list)
 
     @field_validator("width", "height")
@@ -77,11 +85,19 @@ class GenerationRequest(BaseModel):
 
 
 class SavedArtifact(BaseModel):
+    """A persisted output plus the infotext/metadata written with it."""
+
     path: str
     infotext: str
 
 
 class GenerationResult(BaseModel):
+    """Completed image job result returned by generation services.
+
+    `images` may hold in-memory previews, while `artifacts` records what was
+    actually saved to disk for gallery/history workflows.
+    """
+
     job_id: UUID
     images: list[Image.Image]
     seeds: list[int]
@@ -111,6 +127,8 @@ class JobProgress(BaseModel):
 
 
 class JobRecord(BaseModel):
+    """Queue record shared by UI/status layers and generation runners."""
+
     id: UUID = Field(default_factory=uuid4)
     request: GenerationRequest
     state: JobState = JobState.QUEUED

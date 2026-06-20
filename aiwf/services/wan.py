@@ -164,7 +164,13 @@ class WanPreflightResult:
 
 
 class WanService:
-    """Application layer for Wan 2.2 image-to-video."""
+    """Application boundary for Wan image-to-video.
+
+    This service owns preflight, model-root discovery, GPU tenant handoff, and
+    throughput receipts. The infrastructure backend owns tensor execution; this
+    layer deliberately treats speed features as measured capabilities, not as
+    assumed optimizations.
+    """
 
     def __init__(
         self,
@@ -1207,6 +1213,8 @@ class WanService:
             )
         tenant_job_id = f"wan_{uuid.uuid4().hex[:8]}"
         if self.supervisor is not None:
+            # Wan owns the VIDEO tenant for the whole generation/write path so
+            # image models, VSR, and training cannot claim VRAM mid-run.
             switch = self.supervisor.request_switch(
                 EngineSwitchRequest(
                     target=EngineTenant.VIDEO,
@@ -1322,6 +1330,8 @@ class WanService:
             hardware_fingerprint = _dict_metric(backend_metrics.get("hardware_fingerprint"))
             transfer_probe = _dict_metric(backend_metrics.get("transfer_probe"))
             performance_benchmark_notes: list[str] = []
+            # A completed video is not automatically a valid speed receipt; FP8
+            # fallback and non-strict paths are surfaced as diagnostic runs.
             if fp8_fallback_calls:
                 performance_benchmark_notes.append("FP8 fallback occurred; speed result is diagnostic only.")
             if fp8_linear_layers and not fp8_strict_mode:

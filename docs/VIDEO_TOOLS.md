@@ -68,6 +68,36 @@ optional AudioCraft stack is installed, with a Transformers MusicGen fallback
 for music. `generate_and_mux(...)` generates audio at the target video duration
 and writes a new MP4 with that audio track.
 
+In code and planning notes, `VAP` means video audio post-processing: take an
+already generated video, create or repair the audio layer, and mux the result
+without changing the visual frames.
+
+The first video-audio MVP route is video-conditioned audio through MMAudio. It
+is isolated under `engines/audio/` instead of the shared Studio venv:
+
+```text
+engines/audio/.venv/
+engines/audio/MMAudio/demo.py
+```
+
+When installed, the Wan Video tab can run a generated MP4 through MMAudio with
+the selected prompt, write a `.flac`, then mux it back into the final MP4. If
+MMAudio is not installed, the post-process soft-fails with an explicit setup
+message and preserves the visual video output.
+
+MMAudio code is MIT licensed, while its released checkpoints are CC-BY-NC 4.0.
+Keep that visible in UI/help text before treating generated soundtrack output
+as commercial-safe.
+
+Do not blur this MVP with Wan S2V. MMAudio after Wan is the near-term VAP path
+for completed clips; Wan S2V is a separate future route where sound participates
+in the generation workflow itself.
+
+Follow-up after the first local MMAudio smoke: record actual generated audio
+duration/sample rate, preserve the audio prompt in the final video infotext, and
+add an install probe that tells the user whether MMAudio is missing, importable
+but missing checkpoints, or ready to run.
+
 The tests patch `process_video_file(...)` at the service boundary so they do not
 depend on local OpenCV codec availability.
 

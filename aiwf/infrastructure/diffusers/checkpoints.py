@@ -44,7 +44,12 @@ SKIP_DIR_NAMES = {
 
 
 def resolve_search_roots(flags: RuntimeFlags) -> list[Path]:
-    """All directories scanned for checkpoints, in priority order."""
+    """All directories scanned for checkpoints, in priority order.
+
+    This is the local model discovery boundary for image generation. Keep it
+    rooted in configured AIWF/model directories; broad drive scans belong in a
+    user-triggered import/index task, not in normal app startup.
+    """
     models_dir = flags.resolved_models_dir()
     ckpt_dir = flags.resolved_ckpt_dir()
     roots: list[Path] = []
@@ -116,6 +121,8 @@ def _iter_checkpoint_files(root: Path) -> list[Path]:
                 continue
             if not entry.is_dir():
                 continue
+            # Avoid descending into sibling asset families whose files often
+            # share .safetensors/.pt suffixes but are not selectable checkpoints.
             if entry.name.lower() in SKIP_DIR_NAMES:
                 continue
             walk(entry)

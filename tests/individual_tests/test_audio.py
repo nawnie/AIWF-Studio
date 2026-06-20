@@ -49,3 +49,50 @@ def test_audio_mux_builds_ffmpeg_command(tmp_path: Path):
     assert str(audio) in captured["command"]
     assert "-shortest" in captured["command"]
     assert result.output_path == str(out)
+
+
+def test_video_audio_builds_mmaudio_command(tmp_path: Path):
+    service = AudioGenerationService(RuntimeFlags(data_dir=tmp_path), UserSettings())
+    video = tmp_path / "clip.mp4"
+    out = tmp_path / "sound.flac"
+    video.write_bytes(b"video")
+    engine = tmp_path / "engines" / "audio" / "MMAudio"
+    engine.mkdir(parents=True)
+    (engine / "demo.py").write_text("print('demo')", encoding="utf-8")
+    python = tmp_path / "engines" / "audio" / ".venv" / "Scripts" / "python.exe"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    captured = {}
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output_dir = Path(command[command.index("--output") + 1])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "clip.flac").write_bytes(b"audio")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("aiwf.services.audio.subprocess.run", side_effect=fake_run):
+        result = service.generate_video_audio(
+            video,
+            AudioGenerationOptions(
+                prompt="cloth movement and footsteps",
+                kind="video_audio",
+                model_id="mmaudio:small_16k",
+                duration_seconds=5,
+                cfg_coef=4.5,
+                steps=12,
+                seed=123,
+            ),
+            output_path=out,
+        )
+
+    command = captured["command"]
+    assert command[0] == str(python)
+    assert command[1] == str(engine / "demo.py")
+    assert command[command.index("--variant") + 1] == "small_16k"
+    assert command[command.index("--video") + 1] == str(video)
+    assert command[command.index("--num_steps") + 1] == "12"
+    assert "--skip_video_composite" in command
+    assert result.output_path == str(out)
+    assert result.kind == "video_audio"
+    assert out.read_bytes() == b"audio"

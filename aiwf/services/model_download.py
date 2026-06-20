@@ -418,7 +418,12 @@ def write_download_receipt(dest: Path, *, url: str, source: str) -> None:
 
 
 class ModelDownloadService:
-    """Download checkpoints, LoRAs, and other assets from Hugging Face, CivitAI, or direct URLs."""
+    """User-facing model download boundary.
+
+    The catalog and UI route through this service so every download lands in a
+    category-safe folder, private-network URLs can be blocked, extensions are
+    checked before writing, and receipts preserve provenance for maintainers.
+    """
 
     def __init__(self, flags: RuntimeFlags) -> None:
         self.flags = flags
@@ -535,6 +540,8 @@ class ModelDownloadService:
         on_progress: ProgressCallback | None = None,
     ) -> Path:
         self.ensure_dirs()
+        # Direct URLs are the riskiest source because they can target local
+        # services; keep the SSRF/private-network guard at this boundary.
         if self.flags.block_private_download_urls and remote.source == "direct" and is_private_url(remote.url):
             raise ValueError("Private, loopback, and local-network download URLs are blocked by Settings.")
         if remote.snapshot:

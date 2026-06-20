@@ -6,6 +6,12 @@ from pydantic import BaseModel, Field
 
 
 class ControlNetUnit(BaseModel):
+    """One ControlNet conditioning lane from UI through backend execution.
+
+    Image and mask are paths/identifiers here, not decoded image tensors. That
+    keeps preprocessing/runtime ownership outside the core domain model.
+    """
+
     enabled: bool = True
     model: str | None = None
     module: str = "none"
@@ -22,6 +28,8 @@ class ControlNetUnit(BaseModel):
 
 
 class ControlNetModelInfo(BaseModel):
+    """Discovered local ControlNet asset exposed to selectors and catalogs."""
+
     id: str
     title: str
     path: str

@@ -9,6 +9,12 @@ from aiwf.core.domain.prompt_style import PromptStyle
 
 
 class RuntimeFlags(BaseSettings):
+    """Process/runtime knobs sourced from env, CLI, and saved launch profiles.
+
+    Defaults are intentionally local-first: no listener, no public share, API
+    disabled, and private/LAN download URLs blocked unless the user opts in.
+    """
+
     model_config = SettingsConfigDict(env_prefix="AIWF_", extra="ignore")
 
     port: int = 7860
@@ -47,6 +53,8 @@ class RuntimeFlags(BaseSettings):
     cpu: bool = False
     skip_install: bool = False
     skip_prepare_environment: bool = False
+    # Resolve data roots late so portable checkouts can use repo-local
+    # models/outputs, while launch profiles can point at shared model disks.
     data_dir: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[3])
     models_dir: Path | None = None
     ckpt_dir: Path | None = None
@@ -73,6 +81,12 @@ class RuntimeFlags(BaseSettings):
 
 
 class UserSettings(BaseSettings):
+    """Persisted UI and generation preferences stored in config.json.
+
+    These are user choices, not launch-time environment detection. Keep field
+    names stable so existing local installs can round-trip old config files.
+    """
+
     model_config = SettingsConfigDict(extra="ignore")
 
     save_images: bool = True
@@ -103,6 +117,8 @@ class UserSettings(BaseSettings):
     wildcards_dir: str = "wildcards"
     prompt_styles: list[PromptStyle] = Field(default_factory=list)
     accent_preset: str = "mint"
+    # Hidden tabs keep unfinished/heavy surfaces out of the default local UI
+    # without deleting the underlying feature routes.
     hidden_tabs: list[str] = Field(default_factory=lambda: ["Audio", "Chat", "RIFE", "Training", "Workflows"])
 
     # Generation defaults — applied as the Studio tab's initial values.
@@ -118,6 +134,8 @@ class UserSettings(BaseSettings):
     last_checkpoint_id: str | None = None
 
     # Last Wan video settings — restored when the video tab opens.
+    # Restored as UI hints only; Wan request validation still checks route and
+    # model compatibility before anything is loaded.
     last_wan_high: str = ""
     last_wan_low: str = ""
     last_wan_vae: str = ""
@@ -175,6 +193,8 @@ class UserSettings(BaseSettings):
     write_download_receipts: bool = True
 
     # API keys for model downloads (stored locally in config.json).
+    # Stored locally for download helpers only; do not copy into metadata,
+    # receipts, logs, or UI previews.
     huggingface_token: str = ""
     civitai_token: str = ""
 

@@ -52,8 +52,24 @@ The Face Swap tab is a clean-room reimplementation inspired by
 [Gourieff/ReActor](https://huggingface.co/datasets/Gourieff/ReActor) assets repo and
 stored in `{models_dir}/insightface/`.
 
+InsightFace code is MIT licensed, but InsightFace-trained models and inswapper
+series face-swap models need separate license review for anything beyond local
+personal use. Keep this feature optional and user-installed unless we have
+explicit permission for broader redistribution or commercial use.
+
 Face swapping must only be used with the consent of the people depicted and in
 compliance with applicable law.
+
+## MMAudio video-audio post-processing
+
+AIWF's VAP path can optionally call
+[MMAudio](https://github.com/hkchengrex/MMAudio) after a video has been
+generated. The MMAudio checkout and virtual environment live under
+`engines/audio/` and are not vendored into the AIWF repo.
+
+MMAudio code is MIT licensed. The released checkpoints are hosted on Hugging
+Face under CC-BY-NC 4.0, so AIWF must treat MMAudio-backed output as
+non-commercial unless the user has separate permission.
 
 ## NVIDIA Video Effects / VFX SDK integration
 
@@ -69,3 +85,11 @@ AI green screen, powered by NVIDIA GPUs with Tensor Cores:
 
 AIWF does not vendor or redistribute NVIDIA SDK binaries, models, or samples.
 Users must install and license NVIDIA components separately.
+
+## SageAttention optimization research
+
+AIWF can probe SageAttention-style attention acceleration for Wan/video work.
+[SageAttention](https://github.com/thu-ml/SageAttention) is Apache-2.0, but it
+is an optimization dependency, not a required feature dependency. Keep it in the
+shared SDK cache or a disposable copied venv until local Windows/NVIDIA tests
+prove installability, output quality, and speed for this project.

@@ -359,6 +359,8 @@ def register_settings(registry: WebRegistry) -> None:
                                 label="Visible tabs",
                                 choices=TAB_VISIBILITY_CHOICES,
                                 value=[tab_name for tab_name in TAB_VISIBILITY_CHOICES if tab_name not in ctx.settings.hidden_tabs],
+                                # This writes only the user's navigation filter;
+                                # WIP tabs still require registration in app.py.
                                 info="Hide rarely used tools without disabling them.",
                             )
 
@@ -645,6 +647,8 @@ def register_settings(registry: WebRegistry) -> None:
                             launch_api = gr.Checkbox(
                                 label="Enable REST API (--api)",
                                 value=launch.api,
+                                # The route guardrails below apply only when the
+                                # REST surface is mounted for integrations.
                                 info="Mounts /api/v1 for tools, scripts, and integrations.",
                             )
                             launch_nowebui = gr.Checkbox(
@@ -681,6 +685,8 @@ def register_settings(registry: WebRegistry) -> None:
                                 label="API rate limit / minute",
                                 value=launch.api_rate_limit_per_minute,
                                 precision=0,
+                                # Keep this visible near --api/--listen; it is a
+                                # user-facing throttle, not a model scheduler.
                                 info="0 disables the limiter. Applies per client IP to /api and /sdapi routes.",
                             )
                             launch_block_private_urls = gr.Checkbox(
@@ -1469,6 +1475,8 @@ def register_settings(registry: WebRegistry) -> None:
             ctx.settings.default_height = int(d_height or 512)
             ctx.settings.default_clip_skip = int(d_clip or 1)
             ctx.settings.accent_preset = accent or "mint"
+            # Store hidden names instead of visible names so newly added tabs
+            # appear by default unless the maintainer adds them to this list.
             selected = set(selected_tabs or [])
             ctx.settings.hidden_tabs = [tab_name for tab_name in TAB_VISIBILITY_CHOICES if tab_name not in selected]
             ctx.save_settings()

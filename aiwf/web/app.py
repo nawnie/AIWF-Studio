@@ -75,6 +75,8 @@ def _topbar_runtime_html(ctx: AppContext) -> str:
 
 
 def register_default_tabs(registry: WebRegistry) -> None:
+    # Keep unfinished surfaces opt-in; removing them from registration is what
+    # keeps them out of Gradio entirely, not just hidden in the Settings list.
     enable_wip_tabs = os.environ.get("AIWF_ENABLE_WIP_TABS", "").strip().lower() in {
         "1",
         "true",
@@ -82,6 +84,8 @@ def register_default_tabs(registry: WebRegistry) -> None:
         "on",
     }
 
+    # Registration order defines the primary navigation order after per-tab
+    # order values are sorted by WebRegistry.tab.
     register_studio(registry)
     register_wan_i2v(registry)
     from aiwf.web.tabs.rife import register_rife

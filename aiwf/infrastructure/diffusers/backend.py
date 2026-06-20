@@ -540,6 +540,10 @@ class DiffusersBackend:
         _add_cached_single_file_config(load_kwargs, pipeline_cls)
         if pipeline_cls is StableDiffusionPipeline:
             load_kwargs["requires_safety_checker"] = False
+        # AIWF loads local single-file checkpoints with app-level controls around
+        # requests and file selection. Diffusers' optional safety checker needs
+        # extra model assets and is disabled here so backend selection stays
+        # deterministic/offline.
         pipe = pipeline_cls.from_single_file(checkpoint.path, **load_kwargs)
         self._remember_base_scheduler_config(pipe)
         self._apply_fp8_storage(pipe)
@@ -874,6 +878,8 @@ class DiffusersBackend:
         """Resolve usable ControlNet units into (unit, control_image, path) tuples.
 
         Returns an empty list when ControlNet is not active or cannot be satisfied.
+        Missing optional units are skipped here; generate() turns an explicitly
+        enabled-but-empty ControlNet request into a user-facing error.
         """
         if request.mode not in (GenerationMode.TXT2IMG, GenerationMode.IMG2IMG):
             return []
@@ -971,6 +977,8 @@ class DiffusersBackend:
             cn_units = [unit for unit, _image, _path in controlnets]
             cn_images = [image for _unit, image, _path in controlnets]
             cn_paths = [path for _unit, _image, path in controlnets]
+            # Validate every branch before building the combined pipeline so a
+            # mixed SD1.5/SDXL stack fails cleanly before any heavy reload work.
             for cn_path in cn_paths:
                 assert_controlnet_checkpoint_compatible(cn_path, checkpoint.architecture)
             if request.enable_hr:

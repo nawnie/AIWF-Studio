@@ -262,6 +262,9 @@ class VideoProcessor:
             if tmp_video.exists():
                 tmp_video.unlink()
         else:
+            # Publish only after the writer is closed. If remux/transcode fails,
+            # users still get processed frames instead of losing the whole job
+            # over optional audio/browser-codec polish.
             os.replace(str(tmp_video), str(out))
             # No audio path: cv2 wrote mp4v — transcode so it previews in-browser.
             _transcode_to_h264(out)

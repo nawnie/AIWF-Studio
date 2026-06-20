@@ -48,7 +48,12 @@ DEFAULT_NEGATIVE_PROMPT = (
 
 
 class GenerationService:
-    """Application layer — UI and API talk here, never to torch/diffusers directly."""
+    """Application boundary for image generation orchestration.
+
+    UI/API callers stay here while the backend owns torch, diffusers, ONNX, and
+    sampler details. This layer coordinates prompts, queue state, metadata,
+    tenant ownership, and receipts without making backend-specific assumptions.
+    """
 
     def __init__(
         self,
@@ -205,6 +210,7 @@ class GenerationService:
         return ModelFamily.UNKNOWN
 
     def _resolve_optimization_plan(self, request: GenerationRequest, checkpoint) -> OptimizationPlan | None:
+        """Resolve optional tuning flags without making them boot-critical."""
         if self.optimization_planner is None:
             return None
         try:
@@ -383,6 +389,8 @@ class GenerationService:
         def worker(job: JobRecord) -> GenerationResult:
             tenant_job_id = str(job.id)
             if self.supervisor is not None:
+                # Image jobs are GPU tenants; postprocessors borrow the same
+                # tenant below so they do not race a video/training handoff.
                 switch = self.supervisor.request_switch(
                     EngineSwitchRequest(
                         target=EngineTenant.IMAGE,

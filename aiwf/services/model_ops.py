@@ -161,7 +161,13 @@ def write_model_op_receipt(path: str | Path, payload: dict[str, Any]) -> Path:
 
 
 class ModelOpsService:
-    """Preflight and command builder for model mixing, conversion, and quant jobs."""
+    """Preflight and command builder for model mixing, conversion, and quant jobs.
+
+    This layer is intentionally conservative: unsupported or quality-sensitive
+    paths become receipts/preflight messages instead of silent destructive
+    exports. Several paths work as maintenance workflows but are not optimized
+    runtime accelerators until receipts and benchmark evidence prove that.
+    """
 
     def __init__(self, flags: RuntimeFlags) -> None:
         self.flags = flags

@@ -79,6 +79,8 @@ def select_provider(
 
     "auto" tries CUDA → DirectML → CPU in order.
     """
+    # Explicit GPU preferences still fall back to CPU instead of raising here
+    # so the preflight/reporting layer can explain missing ORT packages cleanly.
     available = set(get_available_providers())
 
     if preference == "auto":

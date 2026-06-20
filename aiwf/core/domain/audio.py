@@ -9,12 +9,14 @@ class AudioGenerationOptions(BaseModel):
     """Options for optional text-to-audio generation."""
 
     prompt: str = ""
-    kind: str = "music"  # music | sfx
+    kind: str = "music"  # music | sfx | video_audio
     model_id: str = "facebook/musicgen-small"
+    negative_prompt: str = ""
     duration_seconds: float = Field(default=8.0, ge=1.0, le=120.0)
     temperature: float = Field(default=1.0, ge=0.1, le=2.0)
     cfg_coef: float = Field(default=3.0, ge=0.1, le=10.0)
     top_k: int = Field(default=250, ge=0, le=1000)
+    steps: int = Field(default=25, ge=1, le=200)
     seed: int = -1
 
 

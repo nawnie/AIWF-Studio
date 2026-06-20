@@ -96,6 +96,14 @@ def load_engines_config(repo_root: Path | str | None = None) -> dict[str, Any]:
 
 
 class WorkerTenantRegistry:
+    """Resolve optional engine workers into launchable subprocess commands.
+
+    Tenants keep heavy engines in their own repos/venvs when configured, while
+    still allowing the Studio venv fallback for lightweight or transitional
+    workers. Status is intentionally descriptive so Settings can explain what
+    is missing without importing those engines.
+    """
+
     def __init__(
         self,
         repo_root: Path | str | None = None,

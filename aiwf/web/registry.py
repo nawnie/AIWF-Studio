@@ -8,6 +8,7 @@ import gradio as gr
 if TYPE_CHECKING:
     from aiwf.bootstrap import AppContext
 
+# Tab builders receive the live Gradio tab so they can refresh state on select.
 TabBuilder = Callable[["AppContext", "gr.Tab | None"], None]
 PINNED_TABS = {"Image", "Settings"}
 
@@ -29,6 +30,8 @@ class WebRegistry:
         return [
             (name, builder, order)
             for name, builder, order in self.tabs
+            # Visibility settings are presentation-only. Pinned tabs must remain
+            # reachable so users can recover navigation and workspace settings.
             if name not in hidden or name in PINNED_TABS
         ]
 

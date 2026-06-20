@@ -619,6 +619,8 @@
     }
 
     function postDevJson(path, payload) {
+        // Diagnostics are best-effort: never let dev telemetry interrupt the
+        // user's active Gradio job or page navigation.
         const body = JSON.stringify(payload);
         try {
             if (navigator.sendBeacon) {
@@ -688,6 +690,8 @@
     }
 
     function initClientErrorHooks() {
+        // Keep browser-side failures user-visible even when the Python callback
+        // never receives the request.
         window.addEventListener(
             "error",
             (event) => {
@@ -762,6 +766,8 @@
         };
 
         const nativeConsoleError = console.error.bind(console);
+        // Gradio sometimes reports callback failures through console.error
+        // after the fetch has already resolved; capture that path too.
         console.error = function patchedConsoleError(...args) {
             const text = args
                 .map((arg) => {

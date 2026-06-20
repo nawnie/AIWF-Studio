@@ -84,6 +84,8 @@ class VsrService:
     The first implementation uses NVIDIA's Video Effects SDK sample binary
     (`VideoEffectsApp.exe`) instead of binding the C API directly. That keeps
     the Python app boot-safe while we validate the SDK install path locally.
+    Failures are raised as VsrUnavailable so higher-level video flows can
+    soft-fail optional cleanup/upscale stages and preserve the prior video.
     """
 
     def __init__(self, flags: RuntimeFlags, settings: UserSettings, supervisor=None) -> None:
@@ -528,6 +530,8 @@ class VsrService:
     def _run_sdk_command(self, command: list[str], info: VsrInstallInfo, *, label: str, dest: Path) -> None:
         tenant_job_id = f"videofx_{uuid.uuid4().hex[:8]}"
         if self.supervisor is not None:
+            # VideoFX sample apps are external processes but still consume the
+            # same GPU tenant as Wan, so gate them through the supervisor.
             switch = self.supervisor.request_switch(
                 EngineSwitchRequest(
                     target=VIDEOFX_TENANT,
