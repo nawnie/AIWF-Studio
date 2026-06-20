@@ -3,7 +3,6 @@ from __future__ import annotations
 import gc
 import logging
 import math
-import os
 from pathlib import Path
 
 import gradio as gr
@@ -15,8 +14,6 @@ from aiwf.core.domain.rife import RifeOptions
 from aiwf.core.domain.vsr import VideoFxAigsOptions, VideoFxDenoiseOptions, VideoFxRelightOptions, VsrOptions
 from aiwf.bootstrap import AppContext
 from aiwf.core.domain.wan import (
-    SIGMA_TYPES,
-    SAMPLER_TYPES,
     WAN_RUNTIME_FAST_5B,
     WAN_RUNTIME_HIGH_LOW,
     WAN_RUNTIME_HIGH_LOW_FP8,
@@ -160,15 +157,6 @@ def _format_it_s(steps_per_second) -> str:
     return f"{rate:.3f} it/s ({1.0 / rate:.2f} s/it)"
 
 
-def _experimental_wan_formats_enabled() -> bool:
-    return os.environ.get("AIWF_WAN_ENABLE_EXPERIMENTAL_FORMATS", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def _offload_choices_for_runtime(runtime_value: str | None) -> list[tuple[str, str]]:
     selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
     if selected_runtime == WAN_RUNTIME_HIGH_LOW_FP8:
@@ -217,6 +205,13 @@ def _model_size_class_for_filter(model_id: str | None) -> str:
     return ""
 
 
+def _existing_video_output_path(output_path: str | Path | None, stage: str) -> str:
+    path = Path(str(output_path or "")).expanduser()
+    if not path.is_file():
+        raise VideoError(f"{stage} did not create a video file: {path}")
+    return str(path.resolve())
+
+
 def _rife_multiplier_for_target(input_fps: int | float, target_fps: int | float) -> int:
     safe_input = max(1.0, float(input_fps or 1))
     safe_target = max(1.0, float(target_fps or safe_input))
@@ -250,7 +245,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         reactor_face_model_choices = _reactor_face_model_choices()
         reactor_restorer_choices = _restorer_choices()
 
-        # Labeled (display_name, identifier) choices — read from model file headers.
+        # Labeled (display_name, identifier) choices - read from model file headers.
         all_labeled = service.list_local_models_labeled() if hasattr(service, "list_local_models_labeled") else []
         if not all_labeled:
             all_labeled = [(m, m) for m in service.list_local_models()]
@@ -339,6 +334,10 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             width_value: int | float | str | None = None,
             height_value: int | float | str | None = None,
             frames_value: int | float | str | None = None,
+            temporal_chunks_value: bool | None = None,
+            chunk_size_value: int | float | str | None = None,
+            chunk_overlap_value: int | float | str | None = None,
+            low_guidance_value: int | float | str | None = None,
         ) -> str:
             selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
             selected_vae = str(vae_value or "").strip()
@@ -350,6 +349,17 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 selected_frames = int(frames_value or 0)
             except (TypeError, ValueError):
                 selected_width = selected_height = selected_frames = 0
+            try:
+                selected_chunk_size = int(chunk_size_value or 24)
+                selected_chunk_overlap = int(chunk_overlap_value or 0)
+            except (TypeError, ValueError):
+                selected_chunk_size = 24
+                selected_chunk_overlap = 0
+            try:
+                selected_low_guidance = float(low_guidance_value or 1.0)
+            except (TypeError, ValueError):
+                selected_low_guidance = 1.0
+            selected_temporal_chunks = bool(temporal_chunks_value)
             lines: list[str] = []
             warnings: list[str] = []
             if selected_runtime == WAN_RUNTIME_FAST_5B:
@@ -383,6 +393,12 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     warnings.append("14B 768x768 / 81 frames OOM'd on balanced; use Low VRAM/model offload.")
             lines.append(f"**Text encoder:** `{selected_te}`")
             lines.append(f"**Offload:** `{selected_offload}`")
+            lines.append(
+                f"**Temporal chunks:** `{'on' if selected_temporal_chunks else 'off'}` "
+                f"(latent chunk {selected_chunk_size}, overlap {selected_chunk_overlap})"
+            )
+            if selected_runtime != WAN_RUNTIME_FAST_5B:
+                lines.append(f"**Low-noise guidance:** `{selected_low_guidance:g}`")
             if warnings:
                 lines.extend(f"**Blocked:** {warning}" for warning in warnings)
             return "\n\n".join(lines)
@@ -629,7 +645,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         num_frames = gr.Number(value=49, precision=0, label="Frames", interactive=False)
                         guidance = gr.Slider(1.0, 12.0, value=1.0, step=0.5, label="Guidance (CFG)")
                     frame_summary = gr.Markdown(
-                        "**Frames:** 49 · **Duration:** 3.0s snapped for Wan",
+                        "**Frames:** 49 - **Duration:** 3.0s snapped for Wan",
                         elem_classes=["aiwf-settings-paths"],
                     )
 
@@ -645,8 +661,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     sampler = gr.Dropdown(
                         label="Sampler",
                         choices=[
-                            ("FlowMatch Euler (recommended — fast, 1 NFE/step)", "euler"),
-                            ("FlowMatch Heun (2nd-order, higher quality, ~2× slower)", "heun"),
+                            ("FlowMatch Euler (recommended - fast, 1 NFE/step)", "euler"),
+                            ("FlowMatch Heun (2nd-order, higher quality, ~2x slower)", "heun"),
                         ],
                         value="euler",
                         info="Heun can improve motion but roughly doubles step time.",
@@ -654,10 +670,10 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     sigma_type = gr.Dropdown(
                         label="Scheduler",
                         choices=[
-                            ("Beta — smooth motion, best quality at low steps (recommended)", "beta"),
-                            ("Simple — linear uniform spacing (fastest)", "simple"),
-                            ("Exponential — more detail at high noise", "exponential"),
-                            ("Karras — SD-style detail preservation", "karras"),
+                            ("Beta - smooth motion, best quality at low steps (recommended)", "beta"),
+                            ("Simple - linear uniform spacing (fastest)", "simple"),
+                            ("Exponential - more detail at high noise", "exponential"),
+                            ("Karras - SD-style detail preservation", "karras"),
                         ],
                         value="beta",
                         info="Simple is fastest; Beta is the quality check.",
@@ -981,7 +997,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
                     run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
                     video_out = gr.Video(label="Result", interactive=False)
-                    status = gr.Markdown("**Ready** — upload an image and generate.", elem_classes=["aiwf-status-bar"])
+                    status = gr.Markdown("**Ready** - upload an image and generate.", elem_classes=["aiwf-status-bar"])
 
         def _active_resolution_ratio(ratio_value, square_ratio_value):
             return square_ratio_value or ratio_value or "1:1"
@@ -1025,7 +1041,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             snapped = duration_seconds_for_frames(frames, int(fps_value or 16))
             return (
                 gr.update(value=frames),
-                gr.update(value=f"**Frames:** {frames} · **Duration:** {snapped:.1f}s snapped for Wan"),
+                gr.update(value=f"**Frames:** {frames} - **Duration:** {snapped:.1f}s snapped for Wan"),
             )
 
         fps.change(
@@ -1175,6 +1191,10 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             width_value,
             height_value,
             frames_value,
+            temporal_chunks_value,
+            chunk_size_value,
+            chunk_overlap_value,
+            low_guidance_value,
         ):
             return _runtime_trace_status(
                 runtime_value,
@@ -1186,12 +1206,31 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 width_value,
                 height_value,
                 frames_value,
+                temporal_chunks_value,
+                chunk_size_value,
+                chunk_overlap_value,
+                low_guidance_value,
             )
 
-        for route_input in (runtime_mode, high_noise, low_noise, vae_id, text_encoder, offload, width, height, num_frames):
+        route_trace_inputs = [
+            runtime_mode,
+            high_noise,
+            low_noise,
+            vae_id,
+            text_encoder,
+            offload,
+            width,
+            height,
+            num_frames,
+            temporal_chunks,
+            chunk_size,
+            chunk_overlap,
+            image_guidance_scale,
+        ]
+        for route_input in route_trace_inputs:
             route_input.change(
                 _sync_route_status,
-                inputs=[runtime_mode, high_noise, low_noise, vae_id, text_encoder, offload, width, height, num_frames],
+                inputs=route_trace_inputs,
                 outputs=[route_status],
                 show_progress=False,
             )
@@ -1363,7 +1402,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 raise gr.Error("Upload a source image first.")
             if not service.available():
                 raise gr.Error(
-                    "Wan video is unavailable — update diffusers (>=0.35) and install ftfy, then restart."
+                    "Wan video is unavailable - update diffusers (>=0.35) and install ftfy, then restart."
                 )
             selected_runtime = str(runtime_mode_v or WAN_RUNTIME_FAST_5B)
             requires_dual_runtime = selected_runtime != WAN_RUNTIME_FAST_5B
@@ -1403,8 +1442,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             _te_path = str(text_encoder_v or "").strip()
             if _te_path and ("t5xxl" in _te_path.lower()) and not any(k in _te_path.lower() for k in ("umt5", "nsfw_wan")):
                 raise gr.Error(
-                    f"⚠ '{_te_path}' looks like a T5-XXL file (Flux/SD3). "
-                    "T5-XXL is NOT compatible with Wan — it will produce garbage output. "
+                    f"Warning: '{_te_path}' looks like a T5-XXL file (Flux/SD3). "
+                    "T5-XXL is NOT compatible with Wan - it will produce garbage output. "
                     "Select 'Default' or a UMT5-XXL file (umt5-xxl-*.gguf or umt5/nsfw_wan_*.safetensors)."
                 )
 
@@ -1502,7 +1541,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 except Exception:
                     pass
 
-            final_video_path = result.output_path
+            final_video_path = _existing_video_output_path(result.output_path, "Wan")
             status_parts = [f"**Done** -- {result.message}"]
             if bool(rife_enabled_v):
                 target_fps = int(rife_target_fps_v or 30)
@@ -1529,11 +1568,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 try:
                     progress(0.0, desc=f"Running RIFE x{multiplier} -> {target_fps} FPS")
                     rife_result = rife_service.interpolate(
-                        result.output_path,
+                        final_video_path,
                         rife_options,
                         on_progress=on_rife_progress,
                     )
-                    final_video_path = rife_result.output_path
+                    final_video_path = _existing_video_output_path(rife_result.output_path, "RIFE")
                     status_parts.append(f"**RIFE** -- {rife_result.message}")
                 except RifeUnavailable as exc:
                     logger.warning("RIFE post-processing unavailable: %s", exc)
@@ -1606,7 +1645,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             restore_fn=restore_fn,
                             on_progress=on_reactor_progress,
                         )
-                    final_video_path = reactor_result.output_path
+                    final_video_path = _existing_video_output_path(reactor_result.output_path, "ReActor")
                     status_parts.append(f"**ReActor** -- {reactor_result.message}")
                 except (FaceSwapUnavailable, VideoError) as exc:
                     logger.warning("ReActor post-processing unavailable: %s", exc)
@@ -1624,7 +1663,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     )
                     progress(0.0, desc="Running NVIDIA VideoFX Denoise")
                     denoise_result = vsr_service.denoise(final_video_path, denoise_options)
-                    final_video_path = denoise_result.output_path
+                    final_video_path = _existing_video_output_path(denoise_result.output_path, "NVIDIA Denoise")
                     status_parts.append(f"**NVIDIA Denoise** -- {denoise_result.message}")
                 except VsrUnavailable as exc:
                     logger.warning("NVIDIA VideoFX Denoise unavailable: %s", exc)
@@ -1649,7 +1688,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     )
                     progress(0.0, desc="Running NVIDIA AI Green Screen")
                     aigs_result = vsr_service.aigs(final_video_path, aigs_options)
-                    final_video_path = aigs_result.output_path
+                    final_video_path = _existing_video_output_path(aigs_result.output_path, "NVIDIA AI Green Screen")
                     status_parts.append(f"**NVIDIA AI Green Screen** -- {aigs_result.message}")
                 except VsrUnavailable as exc:
                     logger.warning("NVIDIA AI Green Screen unavailable: %s", exc)
@@ -1677,7 +1716,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     )
                     progress(0.0, desc="Running NVIDIA Relighting")
                     relight_result = vsr_service.relight(final_video_path, relight_options)
-                    final_video_path = relight_result.output_path
+                    final_video_path = _existing_video_output_path(relight_result.output_path, "NVIDIA Relighting")
                     status_parts.append(f"**NVIDIA Relighting** -- {relight_result.message}")
                 except VsrUnavailable as exc:
                     logger.warning("NVIDIA Relighting unavailable: %s", exc)
@@ -1698,7 +1737,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     )
                     progress(0.0, desc="Running NVIDIA VideoFX upscale/cleanup")
                     vsr_result = vsr_service.upscale(final_video_path, vsr_options)
-                    final_video_path = vsr_result.output_path
+                    final_video_path = _existing_video_output_path(vsr_result.output_path, "NVIDIA VideoFX")
                     status_parts.append(f"**NVIDIA VideoFX** -- {vsr_result.message}")
                 except VsrUnavailable as exc:
                     logger.warning("NVIDIA VideoFX post-processing unavailable: %s", exc)
@@ -1730,7 +1769,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         audio_options,
                         duration_seconds=None if duration_value <= 0 else duration_value,
                     )
-                    final_video_path = mux_result.output_path
+                    final_video_path = _existing_video_output_path(mux_result.output_path, "Audio mux")
                     status_parts.append(f"**Audio** -- {audio_result.message}")
                 except AudioUnavailable as exc:
                     logger.warning("Audio post-processing unavailable: %s", exc)

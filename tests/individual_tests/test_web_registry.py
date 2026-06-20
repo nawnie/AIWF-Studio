@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from aiwf.web.app import register_default_tabs
 from aiwf.web.registry import WebRegistry
 from aiwf.web.tabs.settings import TAB_VISIBILITY_CHOICES
@@ -92,3 +94,15 @@ def test_wan_video_route_filters_keep_runtime_families_separate():
         ("Tested 14B FP8: streamed group offload", "streamed")
     ]
     assert _default_offload_for_runtime(WAN_RUNTIME_HIGH_LOW_FP8, "balanced") == "streamed"
+
+
+def test_wan_video_display_path_must_exist(tmp_path):
+    from aiwf.infrastructure.video import VideoError
+    from aiwf.web.tabs.wan_i2v import _existing_video_output_path
+
+    out = tmp_path / "clip.mp4"
+    out.write_bytes(b"fake mp4")
+
+    assert _existing_video_output_path(out, "Wan") == str(out.resolve())
+    with pytest.raises(VideoError, match="Wan did not create a video file"):
+        _existing_video_output_path(tmp_path / "missing.mp4", "Wan")

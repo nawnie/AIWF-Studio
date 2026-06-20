@@ -41,6 +41,7 @@ from aiwf.infrastructure.wan.pipeline import (
     _wan_cache_mode,
     estimate_gguf_expanded_gb,
 )
+from aiwf.infrastructure.video import VideoError
 from aiwf.services.wan import WanService, wan_model_pair_compatibility
 
 
@@ -76,6 +77,14 @@ def _write_fake_safetensors(path: Path) -> None:
 def _write_fake_gguf(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"fake")
+
+
+def _write_fake_video_frames(frames, output_path, *, fps: float) -> int:
+    usable = [frame for frame in frames if frame is not None]
+    dest = Path(output_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"fake mp4")
+    return len(usable)
 
 
 def test_snap_num_frames():
@@ -695,7 +704,7 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     captured: dict[str, object] = {}
     progress_events: list[tuple[int, int, object, str | None]] = []
     monkeypatch.setattr("aiwf.services.wan.trace_model_throughput", lambda **kwargs: captured.update(kwargs))
-    monkeypatch.setattr("aiwf.services.wan.write_frames", lambda frames, output_path, fps: len(frames))
+    monkeypatch.setattr("aiwf.services.wan.write_frames", _write_fake_video_frames)
 
     result = s.generate(
         WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high.name, low_noise_model_id=low.name),
@@ -809,7 +818,7 @@ def test_wan_generation_fast_5b_uses_local_model_without_high_low(tmp_path: Path
     s = _svc(tmp_path)
     _force_wan_available(s)
     monkeypatch.setattr(s, "_wan_file_candidates", lambda: [])
-    base = _write_component_base(s)
+    _write_component_base(s)
     transformer = s.models_dir() / "Safetensor" / "wan2.2_ti2v_5B_fp16.safetensors"
     vae = s.flags.resolved_models_dir() / "VAE" / "wan2.2_vae.safetensors"
     _write_fake_safetensors(transformer)
@@ -824,15 +833,37 @@ def test_wan_generation_fast_5b_uses_local_model_without_high_low(tmp_path: Path
         return [Image.new("RGB", (8, 8), "black")] * 5, 8, 8, {"step_count": 6, "denoise_seconds": 3.0}
 
     s._backend.generate = fake_generate
-    monkeypatch.setattr("aiwf.services.wan.write_frames", lambda frames, output_path, fps: len(frames))
+    monkeypatch.setattr("aiwf.services.wan.write_frames", _write_fake_video_frames)
 
     result = s.generate(WanI2VRequest(steps=6), Image.new("RGB", (8, 8)))
 
     assert result.frame_count == 5
+    assert Path(result.output_path).is_absolute()
+    assert Path(result.output_path).is_file()
+    assert Path(result.output_path).parent == s.output_dir()
     assert captured["runtime_mode"] == WAN_RUNTIME_FAST_5B
     assert captured["model_id"] == str(transformer.resolve())
     assert captured["high"] is None
     assert captured["low"] is None
+
+
+def test_wan_generation_rejects_missing_encoded_video(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    s = _svc(tmp_path)
+    _force_wan_available(s)
+    monkeypatch.setattr(s, "_wan_file_candidates", lambda: [])
+    _write_component_base(s)
+    transformer = s.models_dir() / "Safetensor" / "wan2.2_ti2v_5B_fp16.safetensors"
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan2.2_vae.safetensors"
+    _write_fake_safetensors(transformer)
+    _write_fake_safetensors(vae)
+
+    s._backend.generate = lambda *args, **kwargs: ([Image.new("RGB", (8, 8), "black")], 8, 8)
+    monkeypatch.setattr("aiwf.services.wan.write_frames", lambda frames, output_path, fps: 1)
+
+    with pytest.raises(VideoError, match="did not create output file"):
+        s.generate(WanI2VRequest(), Image.new("RGB", (8, 8)))
 
 
 def test_wan_generation_passes_resolved_paths_to_backend(tmp_path: Path, monkeypatch):
@@ -860,7 +891,7 @@ def test_wan_generation_passes_resolved_paths_to_backend(tmp_path: Path, monkeyp
         return [Image.new("RGB", (8, 8), "black")], 8, 8
 
     s._backend.generate = fake_generate
-    monkeypatch.setattr("aiwf.services.wan.write_frames", lambda frames, output_path, fps: len(frames))
+    monkeypatch.setattr("aiwf.services.wan.write_frames", _write_fake_video_frames)
 
     s.generate(
         WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high.name, low_noise_model_id=low.name),
@@ -1225,6 +1256,89 @@ def test_wan_pipeline_cache_key_includes_temporal_chunk_settings():
     assert fourth is not third
     assert fifth is not fourth
     assert loads == [(16, 8, False), (16, 8, True), (20, 8, True), (20, 4, True)]
+
+
+def test_wan_single_5b_passes_temporal_chunk_settings_to_transformer():
+    torch = pytest.importorskip("torch")
+
+    class DummyVae:
+        def enable_tiling(self):
+            pass
+
+        def enable_slicing(self):
+            pass
+
+    class DummyPipe:
+        def __init__(self) -> None:
+            self.scheduler = object()
+            self.transformer = torch.nn.Module()
+            self.vae = DummyVae()
+
+        def enable_model_cpu_offload(self):
+            pass
+
+        def to(self, _device):
+            return self
+
+    backend = WanI2VBackend()
+    loaded: list[str] = []
+    seen: list[tuple[int | None, int | None, bool | None]] = []
+
+    def fake_from_pretrained(model_id, **_kwargs):
+        loaded.append(str(model_id))
+        return DummyPipe()
+
+    def capture_optimizations(_target, _label, *, chunk_size=None, chunk_overlap=None, temporal_chunks=None):
+        seen.append((chunk_size, chunk_overlap, temporal_chunks))
+
+    ensure_kwargs = dict(
+        model_id="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        vae_id=None,
+        components_base=None,
+        text_encoder_path="",
+        offload="model",
+        flow_shift=5.0,
+        sigma_type="beta",
+        sampler="euler",
+    )
+
+    with patch("aiwf.infrastructure.wan.pipeline._require_wan"), patch(
+        "diffusers.WanImageToVideoPipeline.from_pretrained",
+        side_effect=fake_from_pretrained,
+    ), patch(
+        "aiwf.infrastructure.wan.pipeline._new_wan_euler_scheduler",
+        side_effect=lambda scheduler, **_kwargs: scheduler,
+    ), patch(
+        "aiwf.infrastructure.wan.pipeline._ensure_wan_attention_processors"
+    ), patch(
+        "aiwf.infrastructure.wan.pipeline._apply_wan_attention_optimizations",
+        side_effect=capture_optimizations,
+    ), patch(
+        "aiwf.infrastructure.wan.pipeline._free_cuda_memory"
+    ):
+        first = backend._ensure_single_5b(
+            **ensure_kwargs,
+            chunk_size=16,
+            chunk_overlap=8,
+            temporal_chunks=True,
+        )
+        second = backend._ensure_single_5b(
+            **ensure_kwargs,
+            chunk_size=16,
+            chunk_overlap=8,
+            temporal_chunks=True,
+        )
+        third = backend._ensure_single_5b(
+            **ensure_kwargs,
+            chunk_size=16,
+            chunk_overlap=4,
+            temporal_chunks=True,
+        )
+
+    assert first is second
+    assert third is not first
+    assert loaded == ["Wan-AI/Wan2.2-TI2V-5B-Diffusers", "Wan-AI/Wan2.2-TI2V-5B-Diffusers"]
+    assert seen == [(16, 8, True), (16, 4, True)]
 
 
 def test_dequantize_comfy_fp8_state_dict_scales_weights():

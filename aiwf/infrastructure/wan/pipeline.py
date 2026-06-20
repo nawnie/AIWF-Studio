@@ -2673,6 +2673,9 @@ class WanI2VBackend:
         flow_shift: float,
         sigma_type: str = "beta",
         sampler: str = "euler",
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
+        temporal_chunks: bool | None = None,
     ):
         import torch
         from diffusers import WanImageToVideoPipeline
@@ -2689,6 +2692,9 @@ class WanI2VBackend:
             sampler,
             sigma_type,
             round(float(flow_shift), 3),
+            int(chunk_size or 24),
+            int(chunk_overlap or 0),
+            bool(temporal_chunks),
         )
         if self._pipe is not None and self._key == key:
             return self._pipe
@@ -2830,7 +2836,13 @@ class WanI2VBackend:
         transformer = getattr(pipe, "transformer", None)
         if transformer is not None:
             _ensure_wan_attention_processors(transformer, "5B transformer")
-            _apply_wan_attention_optimizations(transformer, "5B transformer")
+            _apply_wan_attention_optimizations(
+                transformer,
+                "5B transformer",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                temporal_chunks=temporal_chunks,
+            )
 
         for method in ("enable_tiling", "enable_slicing"):
             try:
@@ -3255,6 +3267,9 @@ class WanI2VBackend:
                 flow_shift=_flow_shift,
                 sigma_type=_sigma_type,
                 sampler=_sampler,
+                chunk_size=_chunk_size,
+                chunk_overlap=_chunk_overlap,
+                temporal_chunks=_temporal_chunks,
             )
         load_seconds = max(0.0, time.perf_counter() - load_started)
 

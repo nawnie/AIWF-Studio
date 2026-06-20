@@ -22,10 +22,9 @@ from aiwf.core.domain.wan import (
     WAN_TI2V_5B,
     WanI2VRequest,
     WanI2VResult,
-    SAMPLER_TYPES,
 )
 from aiwf.dev.diagnostics import trace_model_throughput
-from aiwf.infrastructure.video import write_frames
+from aiwf.infrastructure.video import VideoError, write_frames
 from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
 from aiwf.services.wan_models import (
     WanModelPairCheck,
@@ -66,15 +65,6 @@ def _native_fp8_unavailable_reason() -> str | None:
 
 def _native_fp8_runtime_available() -> bool:
     return _native_fp8_unavailable_reason() is None
-
-
-def _wan_experimental_formats_enabled() -> bool:
-    return os.environ.get("AIWF_WAN_ENABLE_EXPERIMENTAL_FORMATS", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 def _looks_like_incompatible_t5xxl(text_encoder_id: str | None) -> bool:
@@ -1362,6 +1352,8 @@ class WanService:
                 output_path,
                 fps=float(getattr(request, "fps", 16) or 16),
             )
+            if frame_count <= 0 or not output_path.is_file():
+                raise VideoError(f"Wan video writer did not create output file: {output_path}")
             _emit_progress(
                 on_progress,
                 step_count,
