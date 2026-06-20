@@ -110,7 +110,9 @@ def test_wan_video_display_path_must_exist(tmp_path):
 
 def test_wan_video_step_summary_is_route_specific():
     from aiwf.core.domain.wan import WAN_RUNTIME_FAST_5B, WAN_RUNTIME_HIGH_LOW
-    from aiwf.web.tabs.wan_i2v import _step_summary_for_runtime
+    from aiwf.web.tabs.wan_i2v import _dual_step_split_from_total, _step_summary_for_runtime
 
     assert _step_summary_for_runtime(WAN_RUNTIME_FAST_5B, 6, 4) == (6, 1.0)
     assert _step_summary_for_runtime(WAN_RUNTIME_HIGH_LOW, 6, 4) == (10, 0.6)
+    assert _dual_step_split_from_total(8) == (4, 4)
+    assert _dual_step_split_from_total(9) == (5, 4)

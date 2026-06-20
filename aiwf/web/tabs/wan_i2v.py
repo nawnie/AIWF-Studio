@@ -221,6 +221,13 @@ def _step_summary_for_runtime(runtime_value: str | None, high_value, low_value) 
     return total, round(high / total, 3)
 
 
+def _dual_step_split_from_total(total_value) -> tuple[int, int]:
+    total = max(2, int(total_value or 0))
+    high = max(1, (total + 1) // 2)
+    low = max(1, total - high)
+    return high, low
+
+
 def _rife_multiplier_for_target(input_fps: int | float, target_fps: int | float) -> int:
     safe_input = max(1.0, float(input_fps or 1))
     safe_target = max(1.0, float(target_fps or safe_input))
@@ -505,6 +512,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         value=WAN_RUNTIME_FAST_5B,
                         info="Routes are separated so FP8 safetensors and GGUF pairs cannot be mixed.",
                     )
+                    runtime_previous = gr.State(WAN_RUNTIME_FAST_5B)
 
                     gr.Markdown("Models", elem_classes=["aiwf-section-label"])
                     high_noise = gr.Dropdown(
@@ -1086,6 +1094,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
         def _sync_runtime_choices(
             runtime_value,
+            previous_runtime_value,
             high_value,
             low_value,
             vae_value,
@@ -1094,11 +1103,15 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             low_steps_value,
         ):
             selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
+            previous_runtime = str(previous_runtime_value or WAN_RUNTIME_FAST_5B)
             lora_choices = _filter_lora_choices(selected_runtime)
             offload_choices = _offload_choices_for_runtime(selected_runtime)
             next_offload = _default_offload_for_runtime(selected_runtime, offload_value)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
-                single_steps = max(1, int(high_steps_value or 0)) + max(1, int(low_steps_value or 0))
+                if previous_runtime == WAN_RUNTIME_FAST_5B:
+                    single_steps = max(1, int(high_steps_value or 0))
+                else:
+                    single_steps = max(1, int(high_steps_value or 0)) + max(1, int(low_steps_value or 0))
                 total, ratio = single_steps, 1.0
                 model_choices = _filter_stage_choices(
                     all_labeled,
@@ -1122,7 +1135,13 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     gr.update(value=total),
                     gr.update(value=ratio),
                     gr.update(value=1.0, interactive=False),
+                    selected_runtime,
                 )
+            if previous_runtime == WAN_RUNTIME_FAST_5B:
+                next_high_steps, next_low_steps = _dual_step_split_from_total(high_steps_value)
+            else:
+                next_high_steps = max(1, int(high_steps_value or 0))
+                next_low_steps = max(1, int(low_steps_value or 0))
             high_choices = _filter_stage_choices(
                 high_labeled,
                 runtime_value=selected_runtime,
@@ -1137,7 +1156,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             )
             next_high = _valid_or_first(high_value, high_choices)
             next_low = _valid_or_first(low_value, low_choices)
-            total, ratio = _step_summary_for_runtime(selected_runtime, high_steps_value, low_steps_value)
+            total, ratio = _step_summary_for_runtime(selected_runtime, next_high_steps, next_low_steps)
             return (
                 gr.update(label="High noise transformer", choices=high_choices, value=next_high, interactive=True),
                 gr.update(label="Low noise transformer", choices=low_choices, value=next_low, interactive=True),
@@ -1148,11 +1167,12 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 gr.update(interactive=True),
                 gr.update(interactive=True),
                 gr.update(choices=offload_choices, value=next_offload),
-                gr.update(label="High noise steps", interactive=True),
-                gr.update(label="Low noise steps", interactive=True),
+                gr.update(label="High noise steps", value=next_high_steps, interactive=True),
+                gr.update(label="Low noise steps", value=next_low_steps, interactive=True),
                 gr.update(value=total),
                 gr.update(value=ratio),
                 gr.update(interactive=True),
+                selected_runtime,
             )
 
         def _sync_low_choices(high_value, low_value, runtime_value):
@@ -1183,7 +1203,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
         runtime_mode.change(
             _sync_runtime_choices,
-            inputs=[runtime_mode, high_noise, low_noise, vae_id, offload, high_steps, low_steps],
+            inputs=[runtime_mode, runtime_previous, high_noise, low_noise, vae_id, offload, high_steps, low_steps],
             outputs=[
                 high_noise,
                 low_noise,
@@ -1199,6 +1219,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 total_steps,
                 boundary_ratio,
                 image_guidance_scale,
+                runtime_previous,
             ],
             show_progress=False,
         )
