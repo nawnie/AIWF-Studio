@@ -1221,15 +1221,15 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 high_labeled,
                 runtime_value=selected_runtime,
                 stage="high",
-                peer_value=low_value,
+                peer_value=None,
             )
+            next_high = _valid_or_first(high_value, high_choices)
             low_choices = _filter_stage_choices(
                 low_labeled,
                 runtime_value=selected_runtime,
                 stage="low",
-                peer_value=high_value,
+                peer_value=next_high,
             )
-            next_high = _valid_or_first(high_value, high_choices)
             next_low = _valid_or_first(low_value, low_choices)
             next_vae = _preferred_vae_for_runtime(selected_runtime, vae_value)
             total, ratio = _step_summary_for_runtime(selected_runtime, next_high_steps, next_low_steps)

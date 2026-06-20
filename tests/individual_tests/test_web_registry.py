@@ -116,3 +116,119 @@ def test_wan_video_step_summary_is_route_specific():
     assert _step_summary_for_runtime(WAN_RUNTIME_HIGH_LOW, 6, 4) == (10, 0.6)
     assert _dual_step_split_from_total(8) == (4, 4)
     assert _dual_step_split_from_total(9) == (5, 4)
+
+
+def test_wan_route_switch_filters_low_model_from_normalized_high(tmp_path):
+    from aiwf.bootstrap import build_context
+    from aiwf.core.config.settings import RuntimeFlags
+    from aiwf.core.domain.wan import WAN_RUNTIME_FAST_5B, WAN_RUNTIME_HIGH_LOW, WAN_RUNTIME_HIGH_LOW_FP8
+    from aiwf.web.app import create_web_ui
+
+    models = tmp_path / "models"
+    safetensors = models / "wan" / "Safetensor"
+    gguf = models / "wan" / "GGUF"
+    vae = models / "VAE"
+    output = tmp_path / "outputs"
+    for folder in (safetensors, gguf, vae, output):
+        folder.mkdir(parents=True, exist_ok=True)
+
+    for name in (
+        "wan2.2_ti2v_5B_fp16.safetensors",
+        "wan2.2_i2v_14B_high_noise_fp8.safetensors",
+        "wan2.2_i2v_14B_low_noise_fp8.safetensors",
+    ):
+        (safetensors / name).write_bytes(b"")
+    for name in (
+        "Wan2.2-I2V-A14B-HighNoise-Q4_K_M.gguf",
+        "Wan2.2-I2V-A14B-LowNoise-Q4_K_M.gguf",
+    ):
+        (gguf / name).write_bytes(b"")
+    (vae / "wan2.2_vae.safetensors").write_bytes(b"")
+    (vae / "wan2.1_vae.safetensors").write_bytes(b"")
+
+    ctx = build_context(RuntimeFlags(data_dir=tmp_path, models_dir=models, output_dir=output))
+    demo, *_ = create_web_ui(ctx)
+
+    def callback(name):
+        for event in demo.fns.values() if isinstance(demo.fns, dict) else demo.fns:
+            fn = getattr(event, "fn", None)
+            if getattr(fn, "__name__", "") == name:
+                return fn
+        raise AssertionError(f"Missing Gradio callback: {name}")
+
+    def component_value(label):
+        for component in demo.config.get("components", []):
+            props = component.get("props") or {}
+            if props.get("label") == label:
+                return props.get("value")
+        raise AssertionError(f"Missing Gradio component: {label}")
+
+    sync_runtime = callback("_sync_runtime_choices")
+    fast_high = component_value("5B transformer")
+    assert fast_high == "Safetensor/wan2.2_ti2v_5B_fp16.safetensors"
+
+    fp8 = sync_runtime(
+        WAN_RUNTIME_HIGH_LOW_FP8,
+        WAN_RUNTIME_FAST_5B,
+        fast_high,
+        None,
+        None,
+        "",
+        "balanced",
+        8,
+        4,
+        512,
+        512,
+        81,
+        False,
+        24,
+        0,
+        1.0,
+    )
+    assert fp8[0].get("value") == "Safetensor/wan2.2_i2v_14B_high_noise_fp8.safetensors"
+    assert fp8[1].get("value") == "Safetensor/wan2.2_i2v_14B_low_noise_fp8.safetensors"
+    assert fp8[8].get("value") == "streamed"
+
+    gguf_route = sync_runtime(
+        WAN_RUNTIME_HIGH_LOW,
+        WAN_RUNTIME_HIGH_LOW_FP8,
+        fp8[0].get("value"),
+        fp8[1].get("value"),
+        fp8[3].get("value"),
+        "",
+        fp8[8].get("value"),
+        fp8[9].get("value"),
+        fp8[10].get("value"),
+        512,
+        512,
+        81,
+        False,
+        24,
+        0,
+        1.0,
+    )
+    assert gguf_route[0].get("value") == "GGUF/Wan2.2-I2V-A14B-HighNoise-Q4_K_M.gguf"
+    assert gguf_route[1].get("value") == "GGUF/Wan2.2-I2V-A14B-LowNoise-Q4_K_M.gguf"
+    assert gguf_route[8].get("value") == "model"
+
+    fast_route = sync_runtime(
+        WAN_RUNTIME_FAST_5B,
+        WAN_RUNTIME_HIGH_LOW,
+        gguf_route[0].get("value"),
+        gguf_route[1].get("value"),
+        gguf_route[3].get("value"),
+        "",
+        gguf_route[8].get("value"),
+        gguf_route[9].get("value"),
+        gguf_route[10].get("value"),
+        512,
+        512,
+        81,
+        False,
+        24,
+        0,
+        1.0,
+    )
+    assert fast_route[0].get("value") == "Safetensor/wan2.2_ti2v_5B_fp16.safetensors"
+    assert fast_route[1].get("value") is None
+    assert fast_route[1].get("interactive") is False
