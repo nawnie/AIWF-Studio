@@ -5,7 +5,7 @@ from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.models import LoraInfo
-from aiwf.infrastructure.diffusers.checkpoints import resolve_search_roots
+from aiwf.infrastructure.model_inventory import scan_and_write_model_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -39,31 +39,35 @@ def resolve_lora_roots(flags: RuntimeFlags) -> list[Path]:
 def scan_loras(flags: RuntimeFlags) -> list[LoraInfo]:
     seen: set[str] = set()
     results: list[LoraInfo] = []
+    inventory = scan_and_write_model_inventory(flags)
 
-    for root in resolve_lora_roots(flags):
-        try:
-            paths = sorted(root.rglob("*"))
-        except OSError:
+    for record in inventory:
+        if record.family != "lora":
             continue
-        for path in paths:
-            if not path.is_file() or path.suffix.lower() not in LORA_EXTENSIONS:
-                continue
-            import os
+        if record.architecture == "wan":
+            continue
+        path = Path(record.path)
+        if path.suffix.lower() not in LORA_EXTENSIONS:
+            continue
+        import os
 
-            resolved = str(path.resolve())
-            dedup_key = os.path.normcase(resolved)
-            if dedup_key in seen:
-                continue
-            seen.add(dedup_key)
-            lora_id = path.stem
-            results.append(
-                LoraInfo(
-                    id=lora_id,
-                    title=lora_id,
-                    filename=path.name,
-                    path=resolved,
-                )
+        resolved = str(path.resolve())
+        dedup_key = os.path.normcase(resolved)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        lora_id = path.stem
+        results.append(
+            LoraInfo(
+                id=lora_id,
+                title=lora_id,
+                filename=path.name,
+                path=resolved,
+                architecture=record.architecture,
+                recommended_subdir=record.recommended_subdir,
+                metadata=record.metadata,
             )
+        )
 
     results.sort(key=lambda item: item.title.lower())
     logger.info("Found %d LoRA(s)", len(results))

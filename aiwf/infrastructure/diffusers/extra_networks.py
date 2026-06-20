@@ -5,12 +5,31 @@ from pathlib import Path
 
 from aiwf.core.domain.extra_networks import LoraRef
 from aiwf.core.domain.models import LoraInfo
+from aiwf.infrastructure.diffusers.model_arch import ARCH_SD15, ARCH_SDXL, is_sdxl_architecture
 from aiwf.infrastructure.diffusers.loras import resolve_lora
 
 logger = logging.getLogger(__name__)
 
 
-def apply_loras(pipe, loras: list[LoraRef], catalog: list[LoraInfo]) -> list[str]:
+def _lora_compatible(base_architecture: str | None, lora_architecture: str | None) -> bool:
+    lora_arch = (lora_architecture or "unknown").lower()
+    if lora_arch in {"", "unknown"}:
+        return True
+    base_arch = (base_architecture or "unknown").lower()
+    if lora_arch == ARCH_SDXL:
+        return is_sdxl_architecture(base_arch)
+    if lora_arch == ARCH_SD15:
+        return not is_sdxl_architecture(base_arch)
+    return lora_arch == base_arch
+
+
+def apply_loras(
+    pipe,
+    loras: list[LoraRef],
+    catalog: list[LoraInfo],
+    *,
+    base_architecture: str | None = None,
+) -> list[str]:
     """Load LoRA adapters onto an active diffusers pipeline. Returns adapter names."""
     if not loras:
         return []
@@ -27,6 +46,11 @@ def apply_loras(pipe, loras: list[LoraRef], catalog: list[LoraInfo]) -> list[str
         if match is None:
             logger.warning("LoRA not found: %s", ref.name)
             continue
+        if not _lora_compatible(base_architecture, match.architecture):
+            raise ValueError(
+                f"LoRA '{match.title}' targets {match.architecture}, "
+                f"but the selected checkpoint is {base_architecture or 'unknown'}."
+            )
 
         adapter_name = f"aiwf_lora_{index}"
         path = Path(match.path)

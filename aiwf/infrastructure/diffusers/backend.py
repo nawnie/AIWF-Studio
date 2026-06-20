@@ -1104,9 +1104,19 @@ class DiffusersBackend:
         if self._img2img is not None and request.mode == GenerationMode.TXT2IMG and request.enable_hr:
             self._apply_sampler(self._img2img, request.sampler, request.scheduler)
 
-        adapter_names = apply_loras(pipe, parsed.loras, self.list_loras())
+        adapter_names = apply_loras(
+            pipe,
+            parsed.loras,
+            self.list_loras(),
+            base_architecture=checkpoint.architecture,
+        )
         if self._img2img is not None and adapter_names:
-            apply_loras(self._img2img, parsed.loras, self.list_loras())
+            apply_loras(
+                self._img2img,
+                parsed.loras,
+                self.list_loras(),
+                base_architecture=checkpoint.architecture,
+            )
 
         controlnets = self._prepare_controlnets(request, control_images)
         if any(unit.enabled for unit in (request.controlnet_units or [])) and not controlnets:

@@ -1,0 +1,284 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+from aiwf.core.config.settings import RuntimeFlags
+from aiwf.infrastructure.diffusers.model_arch import (
+    ARCH_INPAINT,
+    ARCH_SD15,
+    ARCH_SDXL,
+    ARCH_SDXL_INPAINT,
+    UNET_INPUT_KEY,
+    detect_checkpoint_architecture,
+    infer_architecture_from_shapes,
+    looks_like_lora_weights,
+    _safetensors_tensor_shapes,
+)
+from aiwf.infrastructure.safetensors_metadata import read_safetensors_metadata
+
+logger = logging.getLogger(__name__)
+
+MODEL_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx"}
+MODEL_INVENTORY_VERSION = 1
+
+
+@dataclass(frozen=True)
+class ModelInventoryRecord:
+    path: str
+    filename: str
+    family: str
+    architecture: str
+    current_subdir: str
+    recommended_subdir: str
+    should_move: bool
+    header_identifiers: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, str] = field(default_factory=dict)
+
+
+def inventory_path(flags: RuntimeFlags) -> Path:
+    return flags.resolved_models_dir() / "model_inventory.json"
+
+
+def model_inventory_roots(flags: RuntimeFlags) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+    candidates = [
+        flags.resolved_models_dir(),
+        flags.resolved_ckpt_dir(),
+        *flags.resolved_extra_model_dirs(),
+        *flags.resolved_extra_ckpt_dirs(),
+    ]
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        key = os.path.normcase(str(resolved))
+        if resolved.exists() and key not in seen:
+            seen.add(key)
+            roots.append(resolved)
+    return roots
+
+
+def _relative_subdir(path: Path, roots: list[Path]) -> str:
+    parent = path.parent.resolve()
+    for root in sorted((root.resolve() for root in roots), key=lambda p: len(str(p)), reverse=True):
+        try:
+            rel = parent.relative_to(root)
+        except ValueError:
+            continue
+        return "" if str(rel) == "." else rel.as_posix()
+    return parent.as_posix()
+
+
+def _metadata_text(metadata: dict[str, str]) -> str:
+    return " ".join(f"{key} {value}" for key, value in metadata.items()).lower()
+
+
+def _architecture_from_text(text: str) -> str:
+    normalized = text.lower().replace("_", " ").replace("-", " ")
+    if "sdxl" in normalized or "sd xl" in normalized or "xl base" in normalized:
+        return ARCH_SDXL
+    if "flux" in normalized:
+        return "flux"
+    if "wan" in normalized:
+        return "wan"
+    if "sd 1" in normalized or "sd1" in normalized or "1.5" in normalized or "v1 5" in normalized:
+        return ARCH_SD15
+    return "unknown"
+
+
+def _metadata_architecture(metadata: dict[str, str], path: Path) -> str:
+    text = " ".join(
+        value
+        for value in (
+            metadata.get("modelspec.architecture", ""),
+            metadata.get("modelspec.implementation", ""),
+            metadata.get("ss_base_model_version", ""),
+            metadata.get("ss_sd_model_name", ""),
+            path.name,
+        )
+        if value
+    )
+    return _architecture_from_text(text)
+
+
+def _recommended_subdir(family: str, architecture: str) -> str:
+    if family == "lora":
+        if architecture == ARCH_SDXL:
+            return "Loras/SDXL"
+        if architecture == "flux":
+            return "Loras/Flux"
+        if architecture == "wan":
+            return "Loras/Wan"
+        return "Loras/SD15"
+    if family == "checkpoint":
+        return "Stable-diffusion"
+    if family == "vae":
+        return "VAE"
+    if family == "controlnet":
+        return "controlnet"
+    if family == "text_encoder":
+        return "Textencoder"
+    if family == "face_embedding":
+        return "reactor/faces"
+    if family == "wan":
+        return "wan/Safetensor"
+    return "misc"
+
+
+def _matching_path_family(path: Path) -> str | None:
+    parent_parts = [part.lower() for part in path.parts[:-1]]
+    name = path.name.lower()
+    if "reactor" in parent_parts and "faces" in parent_parts:
+        return "face_embedding"
+    if (
+        any(
+            part in {"controlnet", "controlnets", "control_net", "control-net", "sd_control_collection"}
+            or part.startswith("controlnet-")
+            for part in parent_parts
+        )
+        or name.startswith("control_")
+        or "controlnet" in name
+    ):
+        return "controlnet"
+    if any(part in {"textencoder", "text_encoder", "text-encoder", "clip", "clip_vision"} for part in parent_parts):
+        return "text_encoder"
+    if any(part in {"diffusion_models", "unet"} for part in parent_parts):
+        return "runtime_asset"
+    if any(part in {"vae", "vae-approx"} for part in parent_parts) or name.endswith((".vae.safetensors", ".vae.ckpt", ".vae.pt")):
+        return "vae"
+    if any(part == "wan" or part.startswith("wan_") or part.startswith("wan-") for part in parent_parts) or "wan" in name:
+        return "wan"
+    if any(part in {"lora", "loras"} for part in parent_parts):
+        return "lora"
+    return None
+
+
+def classify_model_file(path: Path, roots: list[Path]) -> ModelInventoryRecord | None:
+    if not path.is_file() or path.suffix.lower() not in MODEL_EXTENSIONS:
+        return None
+
+    metadata = read_safetensors_metadata(path)
+    metadata_text = _metadata_text(metadata)
+    path_family = _matching_path_family(path)
+    family = path_family or "unknown"
+    architecture = _metadata_architecture(metadata, path)
+    identifiers: dict[str, str] = {}
+    shapes: dict[str, list[int]] = {}
+
+    if path.suffix.lower() == ".safetensors":
+        try:
+            shapes = _safetensors_tensor_shapes(path)
+        except Exception:
+            logger.debug("Could not inspect safetensors tensor header for %s", path, exc_info=True)
+
+    if shapes:
+        keys = set(shapes)
+        if {"embedding", "bbox", "kps"} & keys and len(shapes) <= 12:
+            family = "face_embedding"
+            identifiers["tensor_marker"] = "face embedding keys"
+        elif looks_like_lora_weights(path):
+            if family == "controlnet":
+                identifiers["tensor_marker"] = "controlnet lora"
+            else:
+                family = "lora"
+                identifiers["tensor_marker"] = "lora_up/lora_down"
+        elif UNET_INPUT_KEY in shapes or "conditioner.embedders.1.model.ln_final.weight" in keys:
+            family = "checkpoint"
+            architecture = infer_architecture_from_shapes(shapes, filename=path.name)
+            identifiers["tensor_marker"] = "diffusion checkpoint"
+
+    if family == "unknown":
+        if metadata.get("ss_network_module") or "lora" in metadata_text:
+            family = "lora"
+            identifiers["metadata_marker"] = "ss_network_module/lora"
+        elif "controlnet" in metadata_text:
+            family = "controlnet"
+            identifiers["metadata_marker"] = "controlnet"
+        elif "vae" in metadata_text:
+            family = "vae"
+            identifiers["metadata_marker"] = "vae"
+        elif path.suffix.lower() == ".gguf" and "wan" in path.name.lower():
+            family = "wan"
+            architecture = "wan"
+            identifiers["filename_marker"] = "wan gguf"
+
+    if family == "unknown" and path.suffix.lower() in {".ckpt", ".pt", ".safetensors"}:
+        family = "checkpoint"
+        architecture = detect_checkpoint_architecture(path)
+        identifiers["fallback_marker"] = "checkpoint extension"
+
+    if architecture == "unknown" and family == "checkpoint":
+        architecture = detect_checkpoint_architecture(path)
+    if architecture == "unknown" and family == "lora":
+        architecture = _architecture_from_text(f"{path.name} {metadata_text}")
+
+    current_subdir = _relative_subdir(path, roots)
+    recommended = _recommended_subdir(family, architecture)
+    important_metadata = {
+        key: value
+        for key, value in metadata.items()
+        if key.startswith("ss_") or key.startswith("modelspec.")
+    }
+    return ModelInventoryRecord(
+        path=str(path.resolve()),
+        filename=path.name,
+        family=family,
+        architecture=architecture,
+        current_subdir=current_subdir,
+        recommended_subdir=recommended,
+        should_move=current_subdir.replace("\\", "/").lower() != recommended.lower(),
+        header_identifiers=identifiers,
+        metadata=important_metadata,
+    )
+
+
+def scan_model_inventory(flags: RuntimeFlags) -> list[ModelInventoryRecord]:
+    roots = model_inventory_roots(flags)
+    seen: set[str] = set()
+    records: list[ModelInventoryRecord] = []
+    for root in roots:
+        try:
+            paths = sorted(root.rglob("*"), key=lambda p: str(p).lower())
+        except OSError:
+            continue
+        for path in paths:
+            key = os.path.normcase(str(path.resolve()))
+            if key in seen:
+                continue
+            record = classify_model_file(path, roots)
+            if record is None:
+                continue
+            seen.add(key)
+            records.append(record)
+    records.sort(key=lambda item: (item.family, item.architecture, item.filename.lower()))
+    return records
+
+
+def write_model_inventory(flags: RuntimeFlags, records: list[ModelInventoryRecord]) -> Path | None:
+    path = inventory_path(flags)
+    payload = {
+        "schema_version": MODEL_INVENTORY_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "roots": [str(root) for root in model_inventory_roots(flags)],
+        "assets": [asdict(record) for record in records],
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+        return path
+    except OSError:
+        logger.debug("Could not write model inventory to %s", path, exc_info=True)
+        return None
+
+
+def scan_and_write_model_inventory(flags: RuntimeFlags) -> list[ModelInventoryRecord]:
+    records = scan_model_inventory(flags)
+    write_model_inventory(flags, records)
+    logger.info("Indexed %d local model asset(s)", len(records))
+    return records

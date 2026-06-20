@@ -18,6 +18,10 @@ class LoraInfo(BaseModel):
     title: str
     filename: str
     path: str
+    architecture: str = "unknown"
+    family: str = "lora"
+    recommended_subdir: str | None = None
+    metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class VaeInfo(BaseModel):

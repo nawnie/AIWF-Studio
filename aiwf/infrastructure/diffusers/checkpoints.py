@@ -13,6 +13,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
     is_inpaint_architecture,
     looks_like_lora_weights,
 )
+from aiwf.infrastructure.model_inventory import ModelInventoryRecord, scan_and_write_model_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,13 @@ def scan_checkpoints(roots: list[Path]) -> list[Checkpoint]:
 def scan_from_flags(flags: RuntimeFlags) -> list[Checkpoint]:
     roots = resolve_search_roots(flags)
     logger.info("Scanning for checkpoints in: %s", ", ".join(str(r) for r in roots))
-    checkpoints = scan_checkpoints(roots)
+    inventory = scan_and_write_model_inventory(flags)
+    checkpoints = [
+        _checkpoint_from_inventory(record)
+        for record in inventory
+        if record.family == "checkpoint"
+    ]
+    checkpoints.sort(key=lambda item: (1 if item.kind == "inpaint" else 0, item.title.lower()))
 
     logger.info("Found %d checkpoint(s)", len(checkpoints))
     if not checkpoints:
@@ -190,3 +197,22 @@ def scan_from_flags(flags: RuntimeFlags) -> list[Checkpoint]:
             flags.resolved_ckpt_dir(),
         )
     return checkpoints
+
+
+def _checkpoint_from_inventory(record: ModelInventoryRecord) -> Checkpoint:
+    path = Path(record.path)
+    architecture = record.architecture or detect_checkpoint_architecture(path)
+    short_hash = _fast_fingerprint(path)
+    checkpoint_id = path.stem
+    title = f"{checkpoint_id} [{architecture_label(architecture)}]"
+    if short_hash:
+        title = f"{title} [{short_hash}]"
+    return Checkpoint(
+        id=checkpoint_id,
+        title=title,
+        filename=path.name,
+        path=str(path.resolve()),
+        hash=short_hash,
+        kind="inpaint" if is_inpaint_architecture(architecture) else "checkpoint",
+        architecture=architecture,
+    )
