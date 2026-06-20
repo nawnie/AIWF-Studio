@@ -61,6 +61,13 @@ class RuntimeFlags(BaseSettings):
     output_dir: Path | None = None
     extra_model_dirs: list[Path] = Field(default_factory=list)
     extra_ckpt_dirs: list[Path] = Field(default_factory=list)
+    nvidia_vfx_sdk_root: Path | None = None
+    vsr_video_effects_app: Path | None = None
+    vsr_upscale_app: Path | None = None
+    videofx_denoise_app: Path | None = None
+    videofx_aigs_app: Path | None = None
+    videofx_relight_app: Path | None = None
+    vsr_model_dir: Path | None = None
     vae_path: Path | None = None
     default_checkpoint: Path | None = None
 

@@ -64,6 +64,13 @@ class LaunchSettings(BaseSettings):
     # Path lists happens only when the profile becomes RuntimeFlags.
     extra_model_dirs: str = ""
     extra_ckpt_dirs: str = ""
+    nvidia_vfx_sdk_root: str = ""
+    vsr_video_effects_app: str = ""
+    vsr_upscale_app: str = ""
+    videofx_denoise_app: str = ""
+    videofx_aigs_app: str = ""
+    videofx_relight_app: str = ""
+    vsr_model_dir: str = ""
 
     @field_validator("theme")
     @classmethod
@@ -139,6 +146,13 @@ class LaunchSettings(BaseSettings):
             output_dir=str(flags.output_dir) if flags.output_dir else "",
             extra_model_dirs="\n".join(str(path) for path in flags.resolved_extra_model_dirs()),
             extra_ckpt_dirs="\n".join(str(path) for path in flags.resolved_extra_ckpt_dirs()),
+            nvidia_vfx_sdk_root=str(flags.nvidia_vfx_sdk_root) if flags.nvidia_vfx_sdk_root else "",
+            vsr_video_effects_app=str(flags.vsr_video_effects_app) if flags.vsr_video_effects_app else "",
+            vsr_upscale_app=str(flags.vsr_upscale_app) if flags.vsr_upscale_app else "",
+            videofx_denoise_app=str(flags.videofx_denoise_app) if flags.videofx_denoise_app else "",
+            videofx_aigs_app=str(flags.videofx_aigs_app) if flags.videofx_aigs_app else "",
+            videofx_relight_app=str(flags.videofx_relight_app) if flags.videofx_relight_app else "",
+            vsr_model_dir=str(flags.vsr_model_dir) if flags.vsr_model_dir else "",
         )
 
     def to_runtime_flags(self, base: RuntimeFlags) -> RuntimeFlags:
@@ -190,6 +204,13 @@ class LaunchSettings(BaseSettings):
                     for line in self.extra_ckpt_dirs.splitlines()
                     if line.strip()
                 ],
+                "nvidia_vfx_sdk_root": Path(self.nvidia_vfx_sdk_root).resolve() if self.nvidia_vfx_sdk_root.strip() else None,
+                "vsr_video_effects_app": Path(self.vsr_video_effects_app).resolve() if self.vsr_video_effects_app.strip() else None,
+                "vsr_upscale_app": Path(self.vsr_upscale_app).resolve() if self.vsr_upscale_app.strip() else None,
+                "videofx_denoise_app": Path(self.videofx_denoise_app).resolve() if self.videofx_denoise_app.strip() else None,
+                "videofx_aigs_app": Path(self.videofx_aigs_app).resolve() if self.videofx_aigs_app.strip() else None,
+                "videofx_relight_app": Path(self.videofx_relight_app).resolve() if self.videofx_relight_app.strip() else None,
+                "vsr_model_dir": Path(self.vsr_model_dir).resolve() if self.vsr_model_dir.strip() else None,
             }
         )
         return RuntimeFlags.model_validate(payload)
@@ -270,6 +291,20 @@ class LaunchSettings(BaseSettings):
             args.extend(["--extra-model-dir", path])
         for path in [line.strip() for line in self.extra_ckpt_dirs.splitlines() if line.strip()]:
             args.extend(["--extra-ckpt-dir", path])
+        if self.nvidia_vfx_sdk_root.strip():
+            args.extend(["--nvidia-vfx-sdk-root", self.nvidia_vfx_sdk_root.strip()])
+        if self.vsr_video_effects_app.strip():
+            args.extend(["--vsr-video-effects-app", self.vsr_video_effects_app.strip()])
+        if self.vsr_upscale_app.strip():
+            args.extend(["--vsr-upscale-app", self.vsr_upscale_app.strip()])
+        if self.videofx_denoise_app.strip():
+            args.extend(["--videofx-denoise-app", self.videofx_denoise_app.strip()])
+        if self.videofx_aigs_app.strip():
+            args.extend(["--videofx-aigs-app", self.videofx_aigs_app.strip()])
+        if self.videofx_relight_app.strip():
+            args.extend(["--videofx-relight-app", self.videofx_relight_app.strip()])
+        if self.vsr_model_dir.strip():
+            args.extend(["--vsr-model-dir", self.vsr_model_dir.strip()])
         return args
 
     def command_preview(self) -> str:
@@ -362,6 +397,13 @@ def merge_launch_settings(
         "output_dir": "--output-dir",
         "extra_model_dirs": "--extra-model-dir",
         "extra_ckpt_dirs": "--extra-ckpt-dir",
+        "nvidia_vfx_sdk_root": "--nvidia-vfx-sdk-root",
+        "vsr_video_effects_app": "--vsr-video-effects-app",
+        "vsr_upscale_app": "--vsr-upscale-app",
+        "videofx_denoise_app": "--videofx-denoise-app",
+        "videofx_aigs_app": "--videofx-aigs-app",
+        "videofx_relight_app": "--videofx-relight-app",
+        "vsr_model_dir": "--vsr-model-dir",
     }
 
     cli_dump = cli_flags.model_dump()

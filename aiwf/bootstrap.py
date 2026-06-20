@@ -153,9 +153,21 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
         "AIWF_NVENC":          ("1" if flags.nvenc          else "0"),
         "AIWF_HEVC":           ("1" if flags.hevc           else "0"),
     }
+    _path_env = {
+        "AIWF_NVIDIA_VFX_SDK_ROOT": flags.nvidia_vfx_sdk_root,
+        "AIWF_VSR_VIDEO_EFFECTS_APP": flags.vsr_video_effects_app,
+        "AIWF_VSR_UPSCALE_APP": flags.vsr_upscale_app,
+        "AIWF_VIDEOFX_DENOISE_APP": flags.videofx_denoise_app,
+        "AIWF_VIDEOFX_AIGS_APP": flags.videofx_aigs_app,
+        "AIWF_VIDEOFX_RELIGHT_APP": flags.videofx_relight_app,
+        "AIWF_VSR_MODEL_DIR": flags.vsr_model_dir,
+    }
     import os as _os
     for _k, _v in _engine_env.items():
         _os.environ.setdefault(_k, _v)
+    for _k, _v in _path_env.items():
+        if _v is not None:
+            _os.environ.setdefault(_k, str(_v))
 
     if flags.inference_backend == "onnx":
         from pathlib import Path as _Path

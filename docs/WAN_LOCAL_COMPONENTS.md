@@ -26,12 +26,20 @@ models/wan/Diffusers/Wan2.2-TI2V-5B-Diffusers/
     `-- tokenizer_config.json
 ```
 
-Current local source mapping:
+Component source mapping:
 
-- `text_encoder/model.safetensors` is the tuned `models/Clip/nsfw_wan_umt5-xxl_fp8_scaled.safetensors`.
-- `tokenizer/` came from `F:/ComfyUI/custom_nodes/ComfyUI-WanVideoWrapper/configs/T5_tokenizer/`.
-- `scheduler/scheduler_config.json` matches the Wan Diffusers UniPC flow scheduler config.
-- `models/VAE/wan2.1_vae.safetensors` and `models/VAE/wan2.2_vae.safetensors` came from `F:/ComfyUI/models/vae/`.
+- `text_encoder/model.safetensors` can be copied from a compatible local Wan
+  UMT5 text encoder file.
+- `tokenizer/` can be copied from a compatible Wan Diffusers or WanVideoWrapper
+  tokenizer folder.
+- `scheduler/scheduler_config.json` matches the Wan Diffusers UniPC flow
+  scheduler config.
+- `models/VAE/wan2.1_vae.safetensors` and `models/VAE/wan2.2_vae.safetensors`
+  should live in the configured VAE/model folders.
+
+Do not require hard links or junctions for these components. Copy the small
+shared config/tokenizer files into the local component base, and add large model
+libraries through Settings -> Model paths.
 
 The future "Install base components for video" button should install or verify exactly this base set. Transformer high/low files and LoRAs remain user-selectable model files, not part of the shared base.
 

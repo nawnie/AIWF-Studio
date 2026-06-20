@@ -128,6 +128,11 @@ models/insightface/        ReActor inswapper ONNX models
 models/reactor/faces/      saved ReActor face models
 ```
 
+No hard links or junctions are required. To reuse an existing A1111, ComfyUI,
+or shared model library, open **Settings -> Model paths** and add the folders as
+extra scan roots. Optional SDK/app paths, such as NVIDIA VideoFX executables,
+live under **Settings -> Engines & pipelines -> External tool paths**.
+
 ## Wan GGUF Video Setup
 
 For the stable Video tab, use a matched pair:
@@ -185,6 +190,7 @@ Useful project docs:
 - `docs/DEPENDENCY_POLICY.md`
 - `docs/ENGINE_ISOLATION.md`
 - `docs/MAINTAINER_NOTES.md`
+- `docs/PATH_CONFIGURATION.md`
 - `docs/TRAINING_ENGINE_ROADMAP.md`
 
 ## License And Third-party Status
@@ -203,7 +209,7 @@ Before a broader public release, choose a root repo license and keep optional re
 
 ## SageAttention And SDK Cache
 
-SageAttention is a promising Wan/video optimization, and the upstream project is Apache-2.0. It belongs in `F:\sdks` as a future accelerator reference and disposable test lane, not as a required runtime dependency yet.
+SageAttention is a promising Wan/video optimization, and the upstream project is Apache-2.0. It belongs in a shared local SDK/cache folder as a future accelerator reference and disposable test lane, not as a required runtime dependency yet.
 
 Current rule for `main`: do not wire SageAttention as a required path until a copied-venv test proves installability, output quality, and speed on this Windows/NVIDIA setup. Wan should keep working through the existing torch SDPA fallback when SageAttention is missing.
 

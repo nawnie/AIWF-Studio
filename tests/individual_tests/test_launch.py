@@ -78,6 +78,29 @@ def test_launch_settings_argv_includes_pipeline_and_engine_flags():
     assert "--hevc" in argv
 
 
+def test_launch_settings_argv_includes_external_tool_paths():
+    settings = LaunchSettings(
+        nvidia_vfx_sdk_root="D:\\SDKs\\NVIDIA\\VFX",
+        vsr_video_effects_app="D:\\SDKs\\NVIDIA\\VideoEffectsApp.exe",
+        vsr_upscale_app="D:\\SDKs\\NVIDIA\\UpscalePipelineApp.exe",
+        videofx_denoise_app="D:\\SDKs\\NVIDIA\\DenoiseEffectApp.exe",
+        videofx_aigs_app="D:\\SDKs\\NVIDIA\\AigsEffectApp.exe",
+        videofx_relight_app="D:\\SDKs\\NVIDIA\\RelightingEffectApp.exe",
+        vsr_model_dir="D:\\SDKs\\NVIDIA\\models",
+    )
+    argv = settings.argv()
+
+    assert "--nvidia-vfx-sdk-root" in argv
+    assert "D:\\SDKs\\NVIDIA\\VFX" in argv
+    assert "--vsr-video-effects-app" in argv
+    assert "D:\\SDKs\\NVIDIA\\VideoEffectsApp.exe" in argv
+    assert "--vsr-upscale-app" in argv
+    assert "--videofx-denoise-app" in argv
+    assert "--videofx-aigs-app" in argv
+    assert "--videofx-relight-app" in argv
+    assert "--vsr-model-dir" in argv
+
+
 def test_merge_launch_settings_respects_explicit_cli(tmp_path: Path):
     cli = RuntimeFlags(data_dir=tmp_path, listen=False, port=7860, xformers=False)
     saved = LaunchSettings(listen=True, port=9000, xformers=True)
@@ -151,6 +174,23 @@ def test_merge_launch_settings_applies_pipeline_and_engine_flags(tmp_path: Path)
     assert merged.channels_last is True
     assert merged.nvenc is True
     assert merged.hevc is True
+
+
+def test_merge_launch_settings_applies_external_tool_paths(tmp_path: Path):
+    sdk = tmp_path / "sdk"
+    app = tmp_path / "VideoEffectsApp.exe"
+    cli = RuntimeFlags(data_dir=tmp_path)
+    saved = LaunchSettings(
+        nvidia_vfx_sdk_root=str(sdk),
+        vsr_video_effects_app=str(app),
+        vsr_model_dir=str(tmp_path / "models"),
+    )
+
+    merged = merge_launch_settings(cli, saved, explicit=set())
+
+    assert merged.nvidia_vfx_sdk_root == sdk.resolve()
+    assert merged.vsr_video_effects_app == app.resolve()
+    assert merged.vsr_model_dir == (tmp_path / "models").resolve()
 
 
 def test_save_and_load_launch_settings_roundtrip(tmp_path: Path):

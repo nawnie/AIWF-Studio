@@ -109,6 +109,17 @@ def _model_paths_markdown(ctx: AppContext) -> str:
     return "  \n".join(lines)
 
 
+def _path_setup_markdown(ctx: AppContext) -> str:
+    return (
+        "**No hard links required.** Point AIWF at existing folders instead of linking or copying large model trees.  \n"
+        "- Use **Models folder** when AIWF should own one primary model tree.  \n"
+        "- Use **Extra model library folders** for existing A1111, ComfyUI, or shared model libraries.  \n"
+        "- Use **Extra checkpoint folders** only for checkpoint-only directories.  \n"
+        "- Use **Engines & pipelines -> External tool paths** for SDK/app executables such as NVIDIA VideoFX.  \n"
+        f"- Saved profile: `{ctx.launch_settings_path}`"
+    )
+
+
 def _pipeline_registry(ctx: AppContext) -> PipelineRegistry:
     return PipelineRegistry(ctx.flags, ctx.settings)
 
@@ -569,6 +580,10 @@ def register_settings(registry: WebRegistry) -> None:
                                 _model_paths_markdown(ctx),
                                 elem_classes=["aiwf-page-path"],
                             )
+                            gr.Markdown(
+                                _path_setup_markdown(ctx),
+                                elem_classes=["aiwf-settings-hint"],
+                            )
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
                             gr.Markdown("Next-start library folders", elem_classes=["aiwf-section-label"])
                             gr.Markdown(
@@ -871,6 +886,55 @@ def register_settings(registry: WebRegistry) -> None:
                             )
 
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
+                            gr.Markdown("External tool paths", elem_classes=["aiwf-section-label"])
+                            gr.Markdown(
+                                "Set optional SDK and executable paths here instead of hard links, junctions, or machine-local code edits. Blank fields use AIWF's normal auto-detection and environment variables.",
+                                elem_classes=["aiwf-settings-hint"],
+                            )
+                            engine_nvidia_vfx_root = gr.Textbox(
+                                label="NVIDIA VFX SDK root",
+                                value=launch.nvidia_vfx_sdk_root,
+                                placeholder=r"C:\Program Files\NVIDIA Corporation\NVIDIA VFX SDK",
+                                info="Equivalent to AIWF_NVIDIA_VFX_SDK_ROOT.",
+                            )
+                            engine_vsr_video_effects_app = gr.Textbox(
+                                label="VideoEffectsApp.exe",
+                                value=launch.vsr_video_effects_app,
+                                placeholder=r"C:\path\to\VideoEffectsApp.exe",
+                                info="Equivalent to AIWF_VSR_VIDEO_EFFECTS_APP.",
+                            )
+                            engine_vsr_upscale_app = gr.Textbox(
+                                label="UpscalePipelineApp.exe",
+                                value=launch.vsr_upscale_app,
+                                placeholder=r"C:\path\to\UpscalePipelineApp.exe",
+                                info="Equivalent to AIWF_VSR_UPSCALE_APP.",
+                            )
+                            engine_videofx_denoise_app = gr.Textbox(
+                                label="DenoiseEffectApp.exe",
+                                value=launch.videofx_denoise_app,
+                                placeholder=r"C:\path\to\DenoiseEffectApp.exe",
+                                info="Equivalent to AIWF_VIDEOFX_DENOISE_APP.",
+                            )
+                            engine_videofx_aigs_app = gr.Textbox(
+                                label="AigsEffectApp.exe",
+                                value=launch.videofx_aigs_app,
+                                placeholder=r"C:\path\to\AigsEffectApp.exe",
+                                info="Equivalent to AIWF_VIDEOFX_AIGS_APP.",
+                            )
+                            engine_videofx_relight_app = gr.Textbox(
+                                label="RelightingEffectApp.exe",
+                                value=launch.videofx_relight_app,
+                                placeholder=r"C:\path\to\RelightingEffectApp.exe",
+                                info="Equivalent to AIWF_VIDEOFX_RELIGHT_APP.",
+                            )
+                            engine_vsr_model_dir = gr.Textbox(
+                                label="NVIDIA VFX model directory",
+                                value=launch.vsr_model_dir,
+                                placeholder=r"C:\path\to\nvidia\vfx\models",
+                                info="Equivalent to AIWF_VSR_MODEL_DIR.",
+                            )
+
+                        with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
                             gr.Markdown("Engines", elem_classes=["aiwf-section-label"])
                             worker_tenant_status = gr.Markdown(
                                 _worker_tenants_markdown(),
@@ -1070,6 +1134,9 @@ def register_settings(registry: WebRegistry) -> None:
         def save_engine_settings(
             backend, onnx_dir, onnx_provider,
             cuda_graphs, torchao, fp8, torch_compile, channels_last, nvenc, hevc,
+            nvidia_vfx_root, vsr_video_effects_app, vsr_upscale_app,
+            videofx_denoise_app, videofx_aigs_app, videofx_relight_app,
+            vsr_model_dir,
         ):
             import os as _os
             # Persist onnx_model_dir to UserSettings
@@ -1092,6 +1159,13 @@ def register_settings(registry: WebRegistry) -> None:
                     "channels_last": bool(channels_last),
                     "nvenc": bool(nvenc),
                     "hevc": bool(hevc),
+                    "nvidia_vfx_sdk_root": (nvidia_vfx_root or "").strip(),
+                    "vsr_video_effects_app": (vsr_video_effects_app or "").strip(),
+                    "vsr_upscale_app": (vsr_upscale_app or "").strip(),
+                    "videofx_denoise_app": (videofx_denoise_app or "").strip(),
+                    "videofx_aigs_app": (videofx_aigs_app or "").strip(),
+                    "videofx_relight_app": (videofx_relight_app or "").strip(),
+                    "vsr_model_dir": (vsr_model_dir or "").strip(),
                 }
             )
             ctx.save_launch_settings(settings)
@@ -1108,6 +1182,21 @@ def register_settings(registry: WebRegistry) -> None:
             }
             for k, v in flag_map.items():
                 _os.environ[k] = "1" if v else "0"
+            path_map = {
+                "AIWF_NVIDIA_VFX_SDK_ROOT": nvidia_vfx_root,
+                "AIWF_VSR_VIDEO_EFFECTS_APP": vsr_video_effects_app,
+                "AIWF_VSR_UPSCALE_APP": vsr_upscale_app,
+                "AIWF_VIDEOFX_DENOISE_APP": videofx_denoise_app,
+                "AIWF_VIDEOFX_AIGS_APP": videofx_aigs_app,
+                "AIWF_VIDEOFX_RELIGHT_APP": videofx_relight_app,
+                "AIWF_VSR_MODEL_DIR": vsr_model_dir,
+            }
+            for k, v in path_map.items():
+                cleaned = (v or "").strip()
+                if cleaned:
+                    _os.environ[k] = cleaned
+                else:
+                    _os.environ.pop(k, None)
 
             return (
                 "**Engine settings saved.** Restart AIWF Studio to activate the selected pipeline and flags."
@@ -1119,6 +1208,9 @@ def register_settings(registry: WebRegistry) -> None:
                 engine_backend, engine_onnx_dir, engine_onnx_provider,
                 engine_cuda_graphs, engine_torchao, engine_fp8,
                 engine_torch_compile, engine_channels_last, engine_nvenc, engine_hevc,
+                engine_nvidia_vfx_root, engine_vsr_video_effects_app, engine_vsr_upscale_app,
+                engine_videofx_denoise_app, engine_videofx_aigs_app, engine_videofx_relight_app,
+                engine_vsr_model_dir,
             ],
             outputs=[engine_save_status],
             show_progress=False,
@@ -1142,6 +1234,13 @@ def register_settings(registry: WebRegistry) -> None:
                 settings.channels_last,
                 settings.nvenc,
                 settings.hevc,
+                settings.nvidia_vfx_sdk_root,
+                settings.vsr_video_effects_app,
+                settings.vsr_upscale_app,
+                settings.videofx_denoise_app,
+                settings.videofx_aigs_app,
+                settings.videofx_relight_app,
+                settings.vsr_model_dir,
                 "**Engines and pipelines refreshed from disk.**",
             )
 
@@ -1161,6 +1260,13 @@ def register_settings(registry: WebRegistry) -> None:
                 engine_channels_last,
                 engine_nvenc,
                 engine_hevc,
+                engine_nvidia_vfx_root,
+                engine_vsr_video_effects_app,
+                engine_vsr_upscale_app,
+                engine_videofx_denoise_app,
+                engine_videofx_aigs_app,
+                engine_videofx_relight_app,
+                engine_vsr_model_dir,
                 engine_save_status,
             ],
             show_progress=False,
@@ -1292,6 +1398,13 @@ def register_settings(registry: WebRegistry) -> None:
                 channels_last=engine_profile.channels_last,
                 nvenc=engine_profile.nvenc,
                 hevc=engine_profile.hevc,
+                nvidia_vfx_sdk_root=engine_profile.nvidia_vfx_sdk_root,
+                vsr_video_effects_app=engine_profile.vsr_video_effects_app,
+                vsr_upscale_app=engine_profile.vsr_upscale_app,
+                videofx_denoise_app=engine_profile.videofx_denoise_app,
+                videofx_aigs_app=engine_profile.videofx_aigs_app,
+                videofx_relight_app=engine_profile.videofx_relight_app,
+                vsr_model_dir=engine_profile.vsr_model_dir,
                 api=bool(api),
                 nowebui=bool(nowebui),
                 models_dir=(models_dir or "").strip(),
@@ -1559,6 +1672,13 @@ def register_settings(registry: WebRegistry) -> None:
                     engine_channels_last,
                     engine_nvenc,
                     engine_hevc,
+                    engine_nvidia_vfx_root,
+                    engine_vsr_video_effects_app,
+                    engine_vsr_upscale_app,
+                    engine_videofx_denoise_app,
+                    engine_videofx_aigs_app,
+                    engine_videofx_relight_app,
+                    engine_vsr_model_dir,
                     engine_save_status,
                 ],
                 show_progress=False,

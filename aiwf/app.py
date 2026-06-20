@@ -92,6 +92,13 @@ def _parse_cli() -> RuntimeFlags:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--extra-model-dir", type=Path, action="append", default=None)
     parser.add_argument("--extra-ckpt-dir", type=Path, action="append", default=None)
+    parser.add_argument("--nvidia-vfx-sdk-root", type=Path, default=None)
+    parser.add_argument("--vsr-video-effects-app", type=Path, default=None)
+    parser.add_argument("--vsr-upscale-app", type=Path, default=None)
+    parser.add_argument("--videofx-denoise-app", type=Path, default=None)
+    parser.add_argument("--videofx-aigs-app", type=Path, default=None)
+    parser.add_argument("--videofx-relight-app", type=Path, default=None)
+    parser.add_argument("--vsr-model-dir", type=Path, default=None)
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--listen", action="store_true")
     parser.add_argument("--share", action="store_true")
@@ -178,6 +185,13 @@ def _parse_cli() -> RuntimeFlags:
         output_dir=args.output_dir.resolve() if args.output_dir else None,
         extra_model_dirs=[path.resolve() for path in (args.extra_model_dir or [])],
         extra_ckpt_dirs=[path.resolve() for path in (args.extra_ckpt_dir or [])],
+        nvidia_vfx_sdk_root=args.nvidia_vfx_sdk_root.resolve() if args.nvidia_vfx_sdk_root else None,
+        vsr_video_effects_app=args.vsr_video_effects_app.resolve() if args.vsr_video_effects_app else None,
+        vsr_upscale_app=args.vsr_upscale_app.resolve() if args.vsr_upscale_app else None,
+        videofx_denoise_app=args.videofx_denoise_app.resolve() if args.videofx_denoise_app else None,
+        videofx_aigs_app=args.videofx_aigs_app.resolve() if args.videofx_aigs_app else None,
+        videofx_relight_app=args.videofx_relight_app.resolve() if args.videofx_relight_app else None,
+        vsr_model_dir=args.vsr_model_dir.resolve() if args.vsr_model_dir else None,
         port=args.port,
         listen=args.listen,
         share=args.share,

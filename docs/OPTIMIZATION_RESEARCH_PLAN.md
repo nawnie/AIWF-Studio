@@ -112,7 +112,8 @@ Receipt folders:
 - `outputs/benchmarks/wan_fp8_720square_hook_timing_20260617/`
 - `outputs/benchmarks/wan_fp8_720square_manual_vae_decode_20260617/`
 
-Comfy reference settings were read from `F:\ComfyUI\user\default\workflows`,
+Comfy reference settings were read from a local ComfyUI `user/default/workflows`
+folder,
 especially `DRAFTS\wan video gen.json`, `wan loop2.json`, and
 `1_video_wan2_2_14B_i2v.json`. Shawn's recorded go-to settings are 720-side
 Wan 2.2 I2V, CFG 1, Euler/Normal or Euler/simple, 4 steps, flow/sigma shift 5,

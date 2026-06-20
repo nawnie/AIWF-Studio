@@ -7,8 +7,9 @@ what was tested without replaying the whole investigation.
 
 ## Daily Workflow
 
-- Start from the current checkout, not an older Desktop path. This workspace is
-  expected at `F:\AIWF_Studio`.
+- Start from the current checkout, not an older Desktop path. The repo can live
+  anywhere; path resolution should come from `AppContext`, `launch.json`, CLI
+  flags, environment variables, or `engines.json`.
 - Check `git status --short` before editing. Multiple agents often work in this
   tree, so do not revert unrelated dirty files.
 - Keep generated media, local datasets, engine checkouts, venvs, logs, and
@@ -52,6 +53,8 @@ When installing or repairing an engine:
    has a worker contract.
 4. Leave local machine paths in config or ignored files, not in import-time
    defaults.
+5. Do not require hard links, junctions, or symlinks for normal operation. Add a
+   Settings field, CLI flag, env var, or `engines.json` option instead.
 
 ## Tests And Receipts
 
