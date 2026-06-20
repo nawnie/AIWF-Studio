@@ -26,6 +26,9 @@ from diffusers import (
     SASolverScheduler,
     TCDScheduler,
     UniPCMultistepScheduler,
+    StableDiffusion3Img2ImgPipeline,
+    StableDiffusion3InpaintPipeline,
+    StableDiffusion3Pipeline,
     StableDiffusionImg2ImgPipeline,
     StableDiffusionInpaintPipeline,
     StableDiffusionPipeline,
@@ -68,6 +71,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_SDXL,
     ARCH_SDXL_INPAINT,
     is_inpaint_architecture,
+    is_sd3_architecture,
     is_sdxl_architecture,
 )
 from aiwf.infrastructure.diffusers.prompt_encode import build_prompt_kwargs
@@ -143,8 +147,10 @@ SAMPLER_CLASSES = {
 _SINGLE_FILE_CONFIG_REPOS = {
     StableDiffusionPipeline: "stable-diffusion-v1-5/stable-diffusion-v1-5",
     StableDiffusionXLPipeline: "stabilityai/stable-diffusion-xl-base-1.0",
+    StableDiffusion3Pipeline: "stabilityai/stable-diffusion-3.5-medium",
     StableDiffusionInpaintPipeline: "stable-diffusion-v1-5/stable-diffusion-inpainting",
     StableDiffusionXLInpaintPipeline: "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+    StableDiffusion3InpaintPipeline: "stabilityai/stable-diffusion-3.5-medium",
 }
 
 
@@ -321,6 +327,8 @@ class DiffusersBackend:
         This means unused embedding files the user never put in a prompt are never
         "selected" or loaded — fixing the previous eager behavior.
         """
+        if is_sd3_architecture(architecture):
+            return
         items = self.list_embeddings()
         if not items or not hasattr(pipe, "load_textual_inversion"):
             return
@@ -369,6 +377,29 @@ class DiffusersBackend:
             return
         pipe.load_textual_inversion(item.path, token=item.id)
 
+    def _dtype_for_architecture(self, architecture: str) -> torch.dtype:
+        if self.flags.no_half:
+            return torch.float32
+        if is_sd3_architecture(architecture) and self.devices.device().type == "cuda":
+            try:
+                if torch.cuda.is_bf16_supported():
+                    return torch.bfloat16
+            except Exception:
+                pass
+        return self.devices.dtype(self.flags.no_half)
+
+    @staticmethod
+    def _txt2img_pipeline_cls_for_architecture(architecture: str):
+        if is_sd3_architecture(architecture):
+            return StableDiffusion3Pipeline
+        if is_sdxl_architecture(architecture):
+            return StableDiffusionXLPipeline
+        return StableDiffusionPipeline
+
+    @staticmethod
+    def _is_sd3_pipe(pipe) -> bool:
+        return hasattr(pipe, "transformer") and hasattr(pipe, "text_encoder_3")
+
     def _apply_fp8_storage(self, pipe) -> None:
         """Store UNet weights in FP8, compute in fp16 (diffusers layerwise casting)."""
         if not self.flags.fp8:
@@ -376,14 +407,14 @@ class DiffusersBackend:
         if self.flags.lowvram:
             logger.warning("FP8 weight storage is skipped in Low VRAM mode (conflicting offload hooks).")
             return
-        unet = getattr(pipe, "unet", None)
-        if unet is None or not hasattr(unet, "enable_layerwise_casting"):
+        denoiser = getattr(pipe, "unet", None) or getattr(pipe, "transformer", None)
+        if denoiser is None or not hasattr(denoiser, "enable_layerwise_casting"):
             logger.warning("FP8 weight storage not supported by this diffusers version; continuing at fp16.")
             return
         try:
-            unet.enable_layerwise_casting(
+            denoiser.enable_layerwise_casting(
                 storage_dtype=torch.float8_e4m3fn,
-                compute_dtype=self.devices.dtype(self.flags.no_half),
+                compute_dtype=getattr(denoiser, "dtype", None) or self.devices.dtype(self.flags.no_half),
             )
             logger.info("UNet weights stored in FP8 (compute fp16) — roughly half the UNet VRAM.")
         except Exception:
@@ -405,6 +436,8 @@ class DiffusersBackend:
 
     def _wants_offload(self, architecture: str) -> bool:
         vram = self.devices.total_vram_gb()
+        if is_sd3_architecture(architecture):
+            return 0.0 < vram < 24.0
         if not is_sdxl_architecture(architecture) or vram <= 0.0:
             return False
         # FP8 storage halves the UNet, so ~8GB cards can keep the whole
@@ -417,7 +450,7 @@ class DiffusersBackend:
 
     def _tune_vae_memory(self, pipe, architecture: str) -> None:
         """SDXL's 1024px VAE decode is the peak-VRAM step — slice and tile it."""
-        if not is_sdxl_architecture(architecture):
+        if not (is_sdxl_architecture(architecture) or is_sd3_architecture(architecture)):
             return
         vae = getattr(pipe, "vae", None)
         if vae is None:
@@ -426,14 +459,16 @@ class DiffusersBackend:
             vae.enable_slicing()
             vae.enable_tiling()
             pipe._aiwf_sdxl = True
-            logger.info("SDXL VAE slicing + tiling enabled (cuts decode VRAM spike)")
+            logger.info("VAE slicing + tiling enabled (cuts decode VRAM spike)")
         except Exception:
             logger.debug("Could not enable VAE slicing/tiling", exc_info=True)
 
     def _sync_img2img_from_txt2img(self) -> None:
         assert self._txt2img is not None
         pipe = self._txt2img
-        if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
+        if self._active is not None and is_sd3_architecture(self._active.architecture):
+            self._img2img = StableDiffusion3Img2ImgPipeline.from_pipe(pipe)
+        elif hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
             self._img2img = StableDiffusionXLImg2ImgPipeline(
                 vae=pipe.vae,
                 text_encoder=pipe.text_encoder,
@@ -505,11 +540,9 @@ class DiffusersBackend:
 
     def can_preload_checkpoint_locally(self, checkpoint_id: str | None = None) -> bool:
         checkpoint = self._resolve_checkpoint(checkpoint_id)
-        pipeline_cls = (
-            StableDiffusionXLPipeline
-            if is_sdxl_architecture(checkpoint.architecture)
-            else StableDiffusionPipeline
-        )
+        pipeline_cls = self._txt2img_pipeline_cls_for_architecture(checkpoint.architecture)
+        if Path(checkpoint.path).is_dir():
+            return (Path(checkpoint.path) / "model_index.json").is_file()
         return _cached_single_file_config_dir(pipeline_cls) is not None
 
     def load_checkpoint(self, checkpoint_id: str | None = None) -> Checkpoint:
@@ -542,23 +575,25 @@ class DiffusersBackend:
                 f"'{checkpoint.title}' is an inpaint checkpoint (9-channel UNet) and can't be "
                 "loaded for txt2img/img2img. Switch to Inpaint mode, or pick a standard checkpoint."
             )
-        pipeline_cls = (
-            StableDiffusionXLPipeline
-            if is_sdxl_architecture(checkpoint.architecture)
-            else StableDiffusionPipeline
-        )
+        pipeline_cls = self._txt2img_pipeline_cls_for_architecture(checkpoint.architecture)
         load_kwargs = {
             "torch_dtype": dtype,
             "use_safetensors": path.suffix.lower() == ".safetensors",
         }
-        _add_cached_single_file_config(load_kwargs, pipeline_cls)
+        if path.is_dir():
+            load_kwargs.pop("use_safetensors", None)
+        else:
+            _add_cached_single_file_config(load_kwargs, pipeline_cls)
         if pipeline_cls is StableDiffusionPipeline:
             load_kwargs["requires_safety_checker"] = False
         # AIWF loads local single-file checkpoints with app-level controls around
         # requests and file selection. Diffusers' optional safety checker needs
         # extra model assets and is disabled here so backend selection stays
         # deterministic/offline.
-        pipe = pipeline_cls.from_single_file(checkpoint.path, **load_kwargs)
+        if path.is_dir():
+            pipe = pipeline_cls.from_pretrained(checkpoint.path, **load_kwargs)
+        else:
+            pipe = pipeline_cls.from_single_file(checkpoint.path, **load_kwargs)
         self._remember_base_scheduler_config(pipe)
         self._apply_fp8_storage(pipe)
 
@@ -572,14 +607,14 @@ class DiffusersBackend:
         if hasattr(pipe, "safety_checker"):
             pipe.safety_checker = None
 
+        self._active = checkpoint
         self._txt2img = pipe
         self._sync_img2img_from_txt2img()
-        self._active = checkpoint
         return checkpoint
 
     def _load_inpaint_checkpoint(
         self, checkpoint: Checkpoint
-    ) -> StableDiffusionInpaintPipeline | StableDiffusionXLInpaintPipeline:
+    ) -> StableDiffusionInpaintPipeline | StableDiffusionXLInpaintPipeline | StableDiffusion3InpaintPipeline:
         if self._inpaint and self._inpaint_active and self._inpaint_active.path == checkpoint.path:
             return self._inpaint
 
@@ -595,9 +630,11 @@ class DiffusersBackend:
             self.devices.empty_cache()
 
         logger.info("Loading inpaint pipeline for %s (%s)", checkpoint.title, checkpoint.architecture)
-        dtype = self.devices.dtype(self.flags.no_half)
+        dtype = self._dtype_for_architecture(checkpoint.architecture)
         path = Path(checkpoint.path)
-        if checkpoint.architecture == ARCH_SDXL_INPAINT:
+        if is_sd3_architecture(checkpoint.architecture):
+            pipeline_cls = StableDiffusion3InpaintPipeline
+        elif checkpoint.architecture == ARCH_SDXL_INPAINT:
             pipeline_cls = StableDiffusionXLInpaintPipeline
         elif checkpoint.architecture == ARCH_SDXL:
             logger.warning(
@@ -612,10 +649,23 @@ class DiffusersBackend:
             "torch_dtype": dtype,
             "use_safetensors": path.suffix.lower() == ".safetensors",
         }
-        _add_cached_single_file_config(load_kwargs, pipeline_cls)
+        if path.is_dir():
+            load_kwargs.pop("use_safetensors", None)
+        else:
+            _add_cached_single_file_config(load_kwargs, pipeline_cls)
         if pipeline_cls is StableDiffusionInpaintPipeline:
             load_kwargs["requires_safety_checker"] = False
-        pipe = pipeline_cls.from_single_file(checkpoint.path, **load_kwargs)
+        if (
+            pipeline_cls is StableDiffusion3InpaintPipeline
+            and self._txt2img is not None
+            and self._active
+            and self._active.path == checkpoint.path
+        ):
+            pipe = StableDiffusion3InpaintPipeline.from_pipe(self._txt2img)
+        elif path.is_dir():
+            pipe = pipeline_cls.from_pretrained(checkpoint.path, **load_kwargs)
+        else:
+            pipe = pipeline_cls.from_single_file(checkpoint.path, **load_kwargs)
         self._remember_base_scheduler_config(pipe)
         self._apply_fp8_storage(pipe)
 
@@ -643,7 +693,7 @@ class DiffusersBackend:
             return self._refiner
 
         logger.info("Loading SDXL refiner pipeline for %s", checkpoint.title)
-        dtype = self.devices.dtype(self.flags.no_half)
+        dtype = self._dtype_for_architecture(checkpoint.architecture)
         path = Path(checkpoint.path)
         load_kwargs = {
             "torch_dtype": dtype,
@@ -693,6 +743,9 @@ class DiffusersBackend:
     }
 
     def _apply_sampler(self, pipe, sampler_id: str, schedule_type: str = "automatic") -> None:
+        if self._is_sd3_pipe(pipe):
+            logger.info("SD3.5 uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            return
         cls = SAMPLER_CLASSES.get(sampler_id, EulerAncestralDiscreteScheduler)
         base_config = self._base_scheduler_config_for_pipe(pipe)
         kwargs = dict(self._SAMPLER_EXTRA_KWARGS.get(sampler_id, {}))
@@ -1072,13 +1125,22 @@ class DiffusersBackend:
         before_hires_images: list[Image.Image] = []
 
         parsed = parse_extra_networks(request.prompt)
+        if is_sd3_architecture(checkpoint.architecture):
+            if request.vae_id:
+                raise ValueError("External SD1.5/SDXL VAE selection is not supported with SD3.5 checkpoints.")
+            if request.sdxl_refiner_enabled:
+                raise ValueError("SDXL refiner only works with SDXL checkpoints, not SD3.5.")
+            if any(unit.enabled for unit in (request.controlnet_units or [])):
+                raise ValueError(
+                    "The current ControlNet stack is for SD1.5/SDXL. Disable ControlNet for SD3.5."
+                )
 
         if request.mode == GenerationMode.INPAINT:
             if not init_images:
                 raise ValueError("inpaint requires init_images")
             if not mask_images:
                 raise ValueError("inpaint requires mask_images")
-            if not is_inpaint_architecture(checkpoint.architecture):
+            if not is_inpaint_architecture(checkpoint.architecture) and not is_sd3_architecture(checkpoint.architecture):
                 logger.warning(
                     "Checkpoint %s is not an inpaint model (%s); results may be poor or fail.",
                     checkpoint.title,

@@ -142,9 +142,11 @@ def apply_image_pipeline_optimizations(
         logger.debug("cudnn tuning failed", exc_info=True)
 
     unet = getattr(pipe, "unet", None)
+    transformer = getattr(pipe, "transformer", None)
     vae = getattr(pipe, "vae", None)
     if include_unet:
         _maybe_channels_last(unet, label="UNet", flags=flags)
+        _maybe_channels_last(transformer, label="Transformer", flags=flags)
     if include_vae:
         _maybe_channels_last(vae, label="VAE", flags=flags)
 
@@ -157,6 +159,14 @@ def apply_image_pipeline_optimizations(
         )
         if compiled_unet is not unet:
             pipe.unet = compiled_unet
+        compiled_transformer = _maybe_compile_module(
+            transformer,
+            label="Transformer",
+            flags=flags,
+            compile_allowed=compile_allowed,
+        )
+        if compiled_transformer is not transformer:
+            pipe.transformer = compiled_transformer
 
     if include_vae and _flag(flags, "torch_compile") and vae is not None:
         if not compile_allowed:
@@ -200,7 +210,8 @@ def apply_attention_optimizations(pipe, flags, *, compile_allowed: bool = True) 
             from diffusers.models.attention_processor import AttnProcessor2_0
 
             processor = AttnProcessor2_0()
-            pipe.unet.set_attn_processor(processor)
+            denoiser = getattr(pipe, "unet", None) or getattr(pipe, "transformer", None)
+            denoiser.set_attn_processor(processor)
             name = "sage_sdpa (SageAttention call patch + SDPA fallback)" if backend == "sage_sdpa" else "sdp-attention (split-attention equivalent)"
             logger.info("Attention optimization: %s", name)
             return "sage_sdpa" if backend == "sage_sdpa" else "sdp"

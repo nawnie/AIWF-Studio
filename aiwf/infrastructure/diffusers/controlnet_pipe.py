@@ -60,8 +60,13 @@ def assert_controlnet_checkpoint_compatible(
     ControlNet tensors can both be valid files while still being incompatible
     with the loaded base UNet.
     """
-    from aiwf.infrastructure.diffusers.model_arch import is_sdxl_architecture
+    from aiwf.infrastructure.diffusers.model_arch import is_sd3_architecture, is_sdxl_architecture
 
+    if is_sd3_architecture(checkpoint_architecture):
+        raise ValueError(
+            "SD3.5 ControlNet uses a different Diffusers control model path. "
+            "The installed ControlNet catalog is SD1.5/SDXL only."
+        )
     cn_arch = infer_controlnet_architecture(controlnet_path)
     ckpt_sdxl = is_sdxl_architecture(checkpoint_architecture)
     if ckpt_sdxl and cn_arch == "sd15":

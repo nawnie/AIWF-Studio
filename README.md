@@ -23,7 +23,7 @@ Current focus: make image generation, inpainting, video generation, and video-au
 ### Image Generation
 
 - txt2img, img2img, and inpaint
-- Stable Diffusion 1.5 and SDXL checkpoint loading through Diffusers
+- Stable Diffusion 1.5, SDXL, and SD3.5 checkpoint loading through Diffusers
 - sampler, scheduler, steps, CFG, seed, size, VAE, clip skip, and hires fix controls
 - live preview, interrupt, continuous generation, and job history
 - prompt styles, wildcards, prompt files, dynamic prompt syntax, and Compel support
@@ -46,6 +46,7 @@ Current focus: make image generation, inpainting, video generation, and video-au
 ### Models
 
 - local checkpoint, LoRA, VAE, ControlNet, SAM, and enhancement model scanning
+- SD3.5 Diffusers-folder checkpoints are supported in `models/Stable-diffusion/`
 - model aliases and trigger-word helpers
 - curated download entries for common local model folders
 - import helpers for model folders from another local install
@@ -202,6 +203,7 @@ This is a practical release checklist, not legal advice.
 - Commercial use requires separate written permission from the project owner. Contact: https://github.com/nawnie
 - Model weights, generated outputs, NVIDIA SDK binaries, MMAudio checkout files, and large engine repos are local-only and ignored by git.
 - Users are responsible for the licenses of checkpoints, LoRAs, VAEs, ControlNet models, SAM weights, Wan files, and audio models they install.
+- Stable Diffusion 3.5 model weights are released under Stability AI's Community License and may require Hugging Face gate acceptance before download.
 - NVIDIA Video Effects / VFX SDK support is optional. AIWF does not vendor or redistribute NVIDIA SDK binaries or models.
 - MMAudio checkpoints are CC-BY-NC 4.0. Do not present MMAudio-backed audio as commercial-safe without separate permission.
 - InsightFace code is MIT, but InsightFace-trained models and the inswapper face-swap model require separate license care for non-local or commercial use. Face swapping must only be used with consent and applicable-law compliance.

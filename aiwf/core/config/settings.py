@@ -143,7 +143,7 @@ class UserSettings(BaseSettings):
     default_sampler: str = "euler_a"
     default_scheduler: str = "automatic"
     default_steps: int = Field(default=20, ge=1, le=150)
-    default_cfg_scale: float = Field(default=7.0, ge=1.0, le=30.0)
+    default_cfg_scale: float = Field(default=7.0, ge=0.0, le=30.0)
     default_width: int = Field(default=512, ge=64, le=2048)
     default_height: int = Field(default=512, ge=64, le=2048)
     default_clip_skip: int = Field(default=1, ge=1, le=12)

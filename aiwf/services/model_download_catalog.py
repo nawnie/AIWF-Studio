@@ -25,6 +25,7 @@ QUICK_START_BUNDLES: dict[str, list[str]] = {
     "faceswap": ["fs-inswapper-fp16"],
     "sd": ["hf-sd15-pruned", "hf-vae-mse"],
     "sdxl": ["hf-sdxl-base", "hf-vae-sdxl", "hf-sdxl-refiner"],
+    "sd35": ["hf-sd35-medium"],
     "controlnet-sd15": [
         "cn15-canny", "cn15-depth", "cn15-openpose",
         "cn15-tile", "cn15-lineart", "cn15-softedge",
@@ -104,6 +105,42 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         filename="sd_xl_refiner_1.0.safetensors",
         size_mb=6082,
         notes="Run SDXL Base at 0.8 denoise then Refiner for final 0.2 for best detail.",
+    ),
+    CatalogEntry(
+        key="hf-sd35-medium",
+        title="Stable Diffusion 3.5 Medium (Diffusers folder)",
+        category="checkpoint",
+        source="huggingface",
+        repo_id="stabilityai/stable-diffusion-3.5-medium",
+        notes=(
+            "SD3.5 MMDiT-X text-to-image model. Gated Stability Community License; "
+            "accept the Hugging Face gate and set HF_TOKEN/HUGGINGFACE_TOKEN before downloading."
+        ),
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="hf-sd35-large-turbo",
+        title="Stable Diffusion 3.5 Large Turbo (Diffusers folder)",
+        category="checkpoint",
+        source="huggingface",
+        repo_id="stabilityai/stable-diffusion-3.5-large-turbo",
+        notes=(
+            "Fast distilled SD3.5 route. Use about 4-8 steps and CFG 0-1. "
+            "Gated Stability Community License; needs accepted HF access."
+        ),
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="hf-sd35-large",
+        title="Stable Diffusion 3.5 Large (Diffusers folder)",
+        category="checkpoint",
+        source="huggingface",
+        repo_id="stabilityai/stable-diffusion-3.5-large",
+        notes=(
+            "Full 8B SD3.5 model. Quality route for high VRAM/offload; Medium or Large Turbo "
+            "is the practical consumer-GPU starting point. Gated Stability Community License."
+        ),
+        snapshot=True,
     ),
 
     # ── Checkpoints — CivitAI ───────────────────────────────────────────────

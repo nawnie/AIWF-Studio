@@ -11,6 +11,7 @@ from aiwf.core.config.settings import RuntimeFlags
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_INPAINT,
     ARCH_SD15,
+    ARCH_SD35,
     ARCH_SDXL,
     ARCH_SDXL_INPAINT,
     UNET_INPUT_KEY,
@@ -79,6 +80,15 @@ def _metadata_text(metadata: dict[str, str]) -> str:
 
 def _architecture_from_text(text: str) -> str:
     normalized = text.lower().replace("_", " ").replace("-", " ")
+    if (
+        "stable diffusion 3.5" in normalized
+        or "sd3.5" in text.lower()
+        or "sd35" in normalized
+        or "sd 3.5" in normalized
+        or "sd3 large" in normalized
+        or "sd3 medium" in normalized
+    ):
+        return ARCH_SD35
     if "sdxl" in normalized or "sd xl" in normalized or "xl base" in normalized:
         return ARCH_SDXL
     if "flux" in normalized:
@@ -107,6 +117,8 @@ def _metadata_architecture(metadata: dict[str, str], path: Path) -> str:
 
 def _recommended_subdir(family: str, architecture: str) -> str:
     if family == "lora":
+        if architecture == ARCH_SD35:
+            return "Loras/SD3.5"
         if architecture == ARCH_SDXL:
             return "Loras/SDXL"
         if architecture == "flux":
@@ -146,7 +158,9 @@ def _matching_path_family(path: Path) -> str | None:
         return "controlnet"
     if any(part in {"textencoder", "text_encoder", "text-encoder", "clip", "clip_vision"} for part in parent_parts):
         return "text_encoder"
-    if any(part in {"diffusion_models", "unet"} for part in parent_parts):
+    if name.startswith(("clip_g", "clip_l", "t5xxl")):
+        return "text_encoder"
+    if any(part in {"diffusion_models", "unet", "transformer"} for part in parent_parts):
         return "runtime_asset"
     if any(part in {"vae", "vae-approx"} for part in parent_parts) or name.endswith((".vae.safetensors", ".vae.ckpt", ".vae.pt")):
         return "vae"
@@ -155,6 +169,57 @@ def _matching_path_family(path: Path) -> str | None:
     if any(part in {"lora", "loras"} for part in parent_parts):
         return "lora"
     return None
+
+
+def _read_model_index(path: Path) -> dict:
+    try:
+        return json.loads((path / "model_index.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def classify_model_dir(path: Path, roots: list[Path]) -> ModelInventoryRecord | None:
+    if not path.is_dir() or not (path / "model_index.json").is_file():
+        return None
+
+    model_index = _read_model_index(path)
+    class_name = str(model_index.get("_class_name") or "")
+    text = f"{path.name} {' '.join(path.parts)} {class_name}"
+    family = "checkpoint"
+    architecture = _architecture_from_text(text)
+    lowered = text.lower()
+    identifiers = {"model_index": class_name or "model_index.json"}
+
+    if "wan" in lowered:
+        family = "wan"
+        architecture = "wan"
+    elif "flux" in lowered:
+        family = "runtime_asset"
+        architecture = "flux"
+    elif "stablediffusionxl" in class_name.lower() or "stable-diffusion-xl" in lowered:
+        architecture = ARCH_SDXL
+    elif "stablediffusion3" in class_name.lower() or architecture == ARCH_SD35:
+        architecture = ARCH_SD35
+    elif "stablediffusioninpaint" in class_name.lower() or "inpaint" in lowered:
+        architecture = ARCH_INPAINT
+    elif "stablediffusion" in class_name.lower():
+        architecture = ARCH_SD15
+    else:
+        family = "runtime_asset"
+
+    current_subdir = _relative_subdir(path, roots)
+    recommended = _recommended_subdir(family, architecture)
+    return ModelInventoryRecord(
+        path=str(path.resolve()),
+        filename=path.name,
+        family=family,
+        architecture=architecture,
+        current_subdir=current_subdir,
+        recommended_subdir=recommended,
+        should_move=current_subdir.replace("\\", "/").lower() != recommended.lower(),
+        header_identifiers=identifiers,
+        metadata={},
+    )
 
 
 def classify_model_file(path: Path, roots: list[Path]) -> ModelInventoryRecord | None:
@@ -242,14 +307,14 @@ def scan_model_inventory(flags: RuntimeFlags) -> list[ModelInventoryRecord]:
     records: list[ModelInventoryRecord] = []
     for root in roots:
         try:
-            paths = sorted(root.rglob("*"), key=lambda p: str(p).lower())
+            paths = [root, *sorted(root.rglob("*"), key=lambda p: str(p).lower())]
         except OSError:
             continue
         for path in paths:
             key = os.path.normcase(str(path.resolve()))
             if key in seen:
                 continue
-            record = classify_model_file(path, roots)
+            record = classify_model_dir(path, roots) if path.is_dir() else classify_model_file(path, roots)
             if record is None:
                 continue
             seen.add(key)

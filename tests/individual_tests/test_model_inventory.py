@@ -102,3 +102,34 @@ def test_controlnet_and_wan_loras_do_not_enter_image_lora_catalog(tmp_path: Path
     assert by_name["motion_wan_rank16.safetensors"].family == "lora"
     assert by_name["motion_wan_rank16.safetensors"].architecture == "wan"
     assert image_loras == []
+
+
+def test_sd35_diffusers_folder_is_checkpoint(tmp_path: Path):
+    models = tmp_path / "models"
+    sd35 = models / "Stable-diffusion" / "stable-diffusion-3.5-medium"
+    sd35.mkdir(parents=True)
+    (sd35 / "model_index.json").write_text(
+        json.dumps({"_class_name": "StableDiffusion3Pipeline"}),
+        encoding="utf-8",
+    )
+    (sd35 / "transformer").mkdir()
+    _write_safetensors_header(
+        sd35 / "transformer" / "diffusion_pytorch_model.safetensors",
+        {
+            "transformer_blocks.0.attn.add_q_proj.weight": {
+                "dtype": "F16",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+    )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+
+    folder_record = next(item for item in records if item.path == str(sd35.resolve()))
+    assert folder_record.family == "checkpoint"
+    assert folder_record.architecture == "sd35"
+    assert [checkpoint.id for checkpoint in checkpoints] == ["stable-diffusion-3.5-medium"]
+    assert checkpoints[0].architecture == "sd35"

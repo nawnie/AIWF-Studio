@@ -121,6 +121,32 @@ def test_hf_snapshot_allowed_for_wan_diffusers(tmp_path: Path, monkeypatch):
     assert (path / "model_index.json").is_file()
 
 
+def test_hf_snapshot_allowed_for_checkpoint_diffusers_folder(tmp_path: Path, monkeypatch):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    remote = service.parse_reference(
+        source="huggingface",
+        url_or_repo="stabilityai/stable-diffusion-3.5-medium",
+        filename="",
+        category="checkpoint",
+    )
+    assert remote.snapshot is True
+    assert remote.repo_id == "stabilityai/stable-diffusion-3.5-medium"
+
+    def fake_snapshot_download(*, repo_id, local_dir, token=None):
+        target = Path(local_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "model_index.json").write_text(
+            '{"_class_name": "StableDiffusion3Pipeline"}',
+            encoding="utf-8",
+        )
+        return str(target)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    path = service.download_parsed(remote, category="checkpoint")
+    assert path == tmp_path / "models" / "Stable-diffusion" / "stable-diffusion-3.5-medium"
+    assert (path / "model_index.json").is_file()
+
+
 @pytest.mark.parametrize(
     "category,repo_id,expected",
     [
@@ -160,6 +186,8 @@ def test_catalog_lists_entries(tmp_path: Path):
     service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
     keys = {item.key for item in service.list_catalog()}
     assert "hf-sd15-pruned" in keys
+    assert "hf-sd35-medium" in keys
+    assert "hf-sd35-large-turbo" in keys
     assert "cn15-v11-full-suite" in keys
     assert "cn15-canny" in keys          # renamed from cn-canny-light
     assert "civit-dreamshaper-8" in keys

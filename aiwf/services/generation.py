@@ -196,6 +196,9 @@ class GenerationService:
                 return ModelFamily.SDXL_TURBO
         except Exception:
             pass
+        architecture = str(getattr(checkpoint, "architecture", "") or "").lower()
+        if architecture in {"sd35", "sd3", "stable-diffusion-3", "stable-diffusion-3.5"}:
+            return ModelFamily.SD3
         blob = " ".join(
             str(value or "")
             for value in (

@@ -5,7 +5,14 @@ from pathlib import Path
 
 from aiwf.core.domain.extra_networks import LoraRef
 from aiwf.core.domain.models import LoraInfo
-from aiwf.infrastructure.diffusers.model_arch import ARCH_SD15, ARCH_SDXL, is_sdxl_architecture
+from aiwf.infrastructure.diffusers.model_arch import (
+    ARCH_INPAINT,
+    ARCH_SD15,
+    ARCH_SD35,
+    ARCH_SDXL,
+    is_sd3_architecture,
+    is_sdxl_architecture,
+)
 from aiwf.infrastructure.diffusers.loras import resolve_lora
 
 logger = logging.getLogger(__name__)
@@ -19,7 +26,9 @@ def _lora_compatible(base_architecture: str | None, lora_architecture: str | Non
     if lora_arch == ARCH_SDXL:
         return is_sdxl_architecture(base_arch)
     if lora_arch == ARCH_SD15:
-        return not is_sdxl_architecture(base_arch)
+        return base_arch in {ARCH_SD15, ARCH_INPAINT}
+    if lora_arch in {ARCH_SD35, "sd3"}:
+        return is_sd3_architecture(base_arch)
     return lora_arch == base_arch
 
 

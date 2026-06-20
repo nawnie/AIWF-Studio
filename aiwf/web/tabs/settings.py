@@ -635,7 +635,7 @@ def register_settings(registry: WebRegistry) -> None:
                                 )
                             with gr.Row():
                                 default_steps = gr.Slider(1, 150, value=ctx.settings.default_steps, step=1, label="Steps")
-                                default_cfg = gr.Slider(1, 30, value=ctx.settings.default_cfg_scale, step=0.5, label="CFG scale")
+                                default_cfg = gr.Slider(0, 30, value=ctx.settings.default_cfg_scale, step=0.5, label="CFG scale")
                             with gr.Row():
                                 default_width = gr.Slider(64, 2048, value=ctx.settings.default_width, step=8, label="Width")
                                 default_height = gr.Slider(64, 2048, value=ctx.settings.default_height, step=8, label="Height")
@@ -1699,7 +1699,7 @@ def register_settings(registry: WebRegistry) -> None:
             ctx.settings.default_sampler = sampler_label_to_id.get(sampler_label, ctx.settings.default_sampler)
             ctx.settings.default_scheduler = schedule_label_to_id.get(schedule_label, "automatic")
             ctx.settings.default_steps = int(d_steps or 20)
-            ctx.settings.default_cfg_scale = float(d_cfg or 7.0)
+            ctx.settings.default_cfg_scale = 7.0 if d_cfg is None else float(d_cfg)
             ctx.settings.default_width = int(d_width or 512)
             ctx.settings.default_height = int(d_height or 512)
             ctx.settings.default_clip_skip = int(d_clip or 1)

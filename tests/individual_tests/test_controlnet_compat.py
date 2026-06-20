@@ -47,6 +47,14 @@ def test_assert_allows_sd15_pairing():
     )
 
 
+def test_assert_rejects_sd35_controlnet_pairing():
+    with pytest.raises(ValueError, match="SD3.5 ControlNet"):
+        assert_controlnet_checkpoint_compatible(
+            "control_lora_rank128_v11p_sd15_canny_fp16.safetensors",
+            "sd35",
+        )
+
+
 def test_validate_enabled_requires_model_image_and_supported_mode(tmp_path: Path):
     service = ControlNetService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
     service.ensure_dir()

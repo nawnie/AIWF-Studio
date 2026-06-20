@@ -14,6 +14,10 @@ def _is_sdxl_pipe(pipe) -> bool:
     return hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None
 
 
+def _is_sd3_pipe(pipe) -> bool:
+    return hasattr(pipe, "transformer") and hasattr(pipe, "text_encoder_3")
+
+
 def _pipe_accepts_kwarg(pipe, name: str) -> bool:
     try:
         sig = inspect.signature(pipe.__call__)
@@ -28,6 +32,15 @@ def build_prompt_kwargs(pipe, prompt: str, negative_prompt: str | None, clip_ski
     """Return kwargs for diffusers pipe calls — uses Compel when emphasis syntax is present."""
     negative = negative_prompt or ""
     if not prompt_uses_emphasis(prompt) and not prompt_uses_emphasis(negative):
+        kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or None,
+        }
+        if clip_skip and clip_skip > 1 and _pipe_accepts_kwarg(pipe, "clip_skip"):
+            kwargs["clip_skip"] = int(clip_skip)
+        return kwargs
+
+    if _is_sd3_pipe(pipe):
         kwargs = {
             "prompt": prompt,
             "negative_prompt": negative_prompt or None,

@@ -57,6 +57,8 @@ def _inject_stubs():
         "StableDiffusionPipeline", "StableDiffusionXLPipeline",
         "StableDiffusionInpaintPipeline", "StableDiffusionXLInpaintPipeline",
         "StableDiffusionImg2ImgPipeline", "StableDiffusionXLImg2ImgPipeline",
+        "StableDiffusion3Pipeline", "StableDiffusion3Img2ImgPipeline",
+        "StableDiffusion3InpaintPipeline",
         "AutoencoderKL",
         "DDIMScheduler", "DEISMultistepScheduler",
         "DPMSolverMultistepScheduler", "DPMSolverSDEScheduler",
@@ -137,7 +139,9 @@ def _inject_stubs():
         ),
         "aiwf.infrastructure.diffusers.model_arch": dict(
             ARCH_SDXL="sdxl", ARCH_SDXL_INPAINT="sdxl_inpaint",
+            ARCH_SD35="sd35",
             is_sdxl_architecture=lambda *a: False,
+            is_sd3_architecture=lambda *a: False,
             is_inpaint_architecture=lambda *a: False,
         ),
         "aiwf.infrastructure.diffusers.prompt_encode": dict(

@@ -161,6 +161,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                         with gr.Row():
                             qs_sd_btn     = gr.Button("Text-to-image SD1.5",   variant="secondary")
                             qs_sdxl_btn   = gr.Button("Text-to-image SDXL",    variant="secondary")
+                            qs_sd35_btn   = gr.Button("Text-to-image SD3.5",   variant="secondary")
                         qs_status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
 
                     with gr.Column(elem_classes=["aiwf-panel"]):
@@ -211,7 +212,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                         custom_filename = gr.Textbox(
                             label="Hugging Face file path (optional)",
                             placeholder="v1-5-pruned-emaonly.safetensors",
-                            info="Required for HF file downloads. Leave empty only for Wan Diffusers folder repos.",
+                            info="Required for HF file downloads. Leave empty for Diffusers folder checkpoint or Wan repos.",
                         )
                         custom_category = gr.Radio(
                             label="Save as category",
@@ -711,6 +712,7 @@ def register_model_manager(registry: WebRegistry) -> None:
             (qs_fs_btn,     "faceswap"),
             (qs_sd_btn,     "sd"),
             (qs_sdxl_btn,   "sdxl"),
+            (qs_sd35_btn,   "sd35"),
         ]:
             _btn.click(_download_bundle, inputs=gr.State(_key), outputs=[qs_status], show_progress="minimal")
 

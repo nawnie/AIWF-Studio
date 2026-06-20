@@ -84,6 +84,17 @@ def resolve_search_roots(flags: RuntimeFlags) -> list[Path]:
 def _fast_fingerprint(path: Path) -> str | None:
     """Quick id for UI labels — avoids reading multi-GB files on every scan."""
     try:
+        if path.is_dir():
+            marker = path / "model_index.json"
+            if not marker.is_file():
+                return None
+            stat = marker.stat()
+            digest = hashlib.sha256()
+            digest.update(str(path.resolve()).encode())
+            digest.update(str(stat.st_size).encode())
+            digest.update(str(int(stat.st_mtime)).encode())
+            digest.update(marker.read_bytes()[:1024 * 1024])
+            return digest.hexdigest()[:10]
         stat = path.stat()
         digest = hashlib.sha256()
         digest.update(str(stat.st_size).encode())
@@ -203,7 +214,7 @@ def _checkpoint_from_inventory(record: ModelInventoryRecord) -> Checkpoint:
     path = Path(record.path)
     architecture = record.architecture or detect_checkpoint_architecture(path)
     short_hash = _fast_fingerprint(path)
-    checkpoint_id = path.stem
+    checkpoint_id = path.name if path.is_dir() else path.stem
     title = f"{checkpoint_id} [{architecture_label(architecture)}]"
     if short_hash:
         title = f"{title} [{short_hash}]"

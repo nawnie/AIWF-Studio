@@ -30,3 +30,16 @@ def test_apply_loras_rejects_wrong_base_architecture():
 
     with pytest.raises(ValueError, match="targets sdxl"):
         apply_loras(object(), [LoraRef("xl_style", 1.0)], [lora], base_architecture="sd15")
+
+
+def test_apply_loras_rejects_sd15_lora_on_sd35():
+    lora = LoraInfo(
+        id="sd15_style",
+        title="SD15 Style",
+        filename="sd15_style.safetensors",
+        path="sd15_style.safetensors",
+        architecture="sd15",
+    )
+
+    with pytest.raises(ValueError, match="targets sd15"):
+        apply_loras(object(), [LoraRef("sd15_style", 1.0)], [lora], base_architecture="sd35")

@@ -129,6 +129,21 @@ _RECOMMEND_TABLE: dict[tuple[str, str], RecommendedSettings] = {
         sampler="dpmpp_2m", schedule="karras",
         rationale="SDXL quality: landscape 1216×832, DPM++ 2M Karras, 40 steps.",
     ),
+    ("sd35", "speed"): RecommendedSettings(
+        width=1024, height=1024, steps=20, cfg_scale=4.5,
+        sampler="euler", schedule="automatic",
+        rationale="SD3.5 speed: native 1024x1024, FlowMatch scheduler, around 20 steps.",
+    ),
+    ("sd35", "balanced"): RecommendedSettings(
+        width=1024, height=1024, steps=28, cfg_scale=4.5,
+        sampler="euler", schedule="automatic",
+        rationale="SD3.5 balanced: 1024x1024, FlowMatch scheduler, 28 steps.",
+    ),
+    ("sd35", "quality"): RecommendedSettings(
+        width=1216, height=832, steps=40, cfg_scale=4.5,
+        sampler="euler", schedule="automatic",
+        rationale="SD3.5 quality: larger canvas, FlowMatch scheduler, 40 steps.",
+    ),
     ("wan", "speed"): RecommendedSettings(
         width=832, height=480, steps=20, cfg_scale=6.0,
         sampler="euler", schedule="automatic",

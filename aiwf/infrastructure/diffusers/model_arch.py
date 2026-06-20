@@ -11,11 +11,14 @@ logger = logging.getLogger(__name__)
 UNET_INPUT_KEY = "model.diffusion_model.input_blocks.0.0.weight"
 SDXL_OPENCLIP_KEY = "conditioner.embedders.1.model.ln_final.weight"
 SDXL_BASE_KEY = "conditioner.embedders.1.model.transformer.resblocks.9.mlp.c_proj.bias"
+SD3_JOINT_BLOCK_MARKER = "joint_blocks.0"
+SD3_DIFFUSERS_BLOCK_MARKER = "transformer_blocks.0"
 
 ARCH_SD15 = "sd15"
 ARCH_INPAINT = "inpaint"
 ARCH_SDXL = "sdxl"
 ARCH_SDXL_INPAINT = "sdxl_inpaint"
+ARCH_SD35 = "sd35"
 
 
 def _safetensors_tensor_shapes(path: Path) -> dict[str, list[int]]:
@@ -69,6 +72,14 @@ def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: st
     """Classify checkpoint architecture from state-dict key shapes."""
     unet_in = shapes.get(UNET_INPUT_KEY)
     has_sdxl = SDXL_OPENCLIP_KEY in shapes or SDXL_BASE_KEY in shapes
+    lower = filename.lower().replace("_", "-")
+    has_sd3 = any(
+        SD3_JOINT_BLOCK_MARKER in key or key.startswith(SD3_DIFFUSERS_BLOCK_MARKER)
+        for key in shapes
+    )
+
+    if has_sd3 or "sd3.5" in lower or "sd35" in lower or "stable-diffusion-3.5" in lower:
+        return ARCH_SD35
 
     if unet_in and len(unet_in) >= 2 and unet_in[1] == 9:
         if has_sdxl:
@@ -102,6 +113,11 @@ def detect_checkpoint_architecture(path: Path | str) -> str:
         return infer_architecture_from_shapes(shapes, filename=resolved.name)
 
     lower = resolved.name.lower()
+    normalized = lower.replace("_", "-")
+    if "sd3.5" in normalized or "sd35" in normalized or "stable-diffusion-3.5" in normalized:
+        return ARCH_SD35
+    if normalized.startswith("sd3-") or normalized.startswith("sd3.") or normalized.startswith("sd3_"):
+        return ARCH_SD35
     if "inpaint" in lower and "xl" in lower.replace("_", " "):
         return ARCH_SDXL_INPAINT
     if "inpaint" in lower:
@@ -115,6 +131,7 @@ def architecture_label(architecture: str) -> str:
     return {
         ARCH_SDXL: "SDXL",
         ARCH_SDXL_INPAINT: "SDXL inpaint",
+        ARCH_SD35: "SD3.5",
         ARCH_INPAINT: "inpaint",
         ARCH_SD15: "SD1.5",
     }.get(architecture, architecture)
@@ -126,3 +143,7 @@ def is_inpaint_architecture(architecture: str) -> bool:
 
 def is_sdxl_architecture(architecture: str) -> bool:
     return architecture in {ARCH_SDXL, ARCH_SDXL_INPAINT}
+
+
+def is_sd3_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() in {ARCH_SD35, "sd3", "stable-diffusion-3", "stable-diffusion-3.5"}

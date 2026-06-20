@@ -35,7 +35,7 @@ class GenerationRequest(BaseModel):
     prompt: str = ""
     negative_prompt: str = ""
     steps: int = Field(default=20, ge=1, le=150)
-    cfg_scale: float = Field(default=7.0, ge=1.0, le=30.0)
+    cfg_scale: float = Field(default=7.0, ge=0.0, le=30.0)
     width: int = Field(default=512, ge=64, le=2048)
     height: int = Field(default=512, ge=64, le=2048)
     seed: int = Field(default=-1)

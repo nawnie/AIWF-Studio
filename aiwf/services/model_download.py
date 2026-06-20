@@ -354,8 +354,8 @@ def inspect_custom_input(
                     status += f"  \n**File** `{merged_filename}` — ready to download."
                 else:
                     status += (
-                        "  \n_Add a filename from the model's Files tab "
-                        "(e.g. `model.safetensors`)._"
+                        "  \n_Add a filename for a single-file download, or leave it empty "
+                        "for a Diffusers folder checkpoint / Wan Diffusers repo._"
                     )
                 return source, repo_id, merged_filename, status
             remote = _parse_hf_reference(text, filename)
@@ -513,7 +513,7 @@ class ModelDownloadService:
             return _parse_hf_reference(
                 url_or_repo,
                 filename,
-                allow_snapshot=category in {"controlnet", "preprocessor", "wan_diffusers"},
+                allow_snapshot=category in {"checkpoint", "controlnet", "preprocessor", "wan_diffusers"},
             )
         if source == "civitai":
             return _parse_civitai_reference(url_or_repo)
@@ -545,9 +545,10 @@ class ModelDownloadService:
         if self.flags.block_private_download_urls and remote.source == "direct" and is_private_url(remote.url):
             raise ValueError("Private, loopback, and local-network download URLs are blocked by Settings.")
         if remote.snapshot:
-            if category not in {"controlnet", "preprocessor", "wan_diffusers"}:
+            if category not in {"checkpoint", "controlnet", "preprocessor", "wan_diffusers"}:
                 raise ValueError(
-                    "Full repository downloads are only supported for Diffusers folder, ControlNet, and preprocessor categories."
+                    "Full repository downloads are only supported for checkpoint Diffusers folders, "
+                    "Wan Diffusers folders, ControlNet, and preprocessor categories."
                 )
             return self._download_hf_snapshot(remote, category, on_progress=on_progress)
         self._validate_destination_filename(category, remote.filename)
