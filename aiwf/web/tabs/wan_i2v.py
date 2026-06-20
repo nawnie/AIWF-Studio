@@ -113,6 +113,7 @@ def _service(ctx: AppContext) -> WanService:
             ctx.settings,
             unload_image_models=ctx.generation.backend.unload,
             supervisor=ctx.supervisor,
+            failure_archive=ctx.failure_archive,
         )
         _SERVICES[id(ctx)] = svc
     return svc
@@ -1039,6 +1040,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
                     run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
                     video_out = gr.Video(label="Result", interactive=False)
+                    save_bad_video = gr.Button("Save bad result", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
                     status = gr.Markdown("**Ready** - upload an image and generate.", elem_classes=["aiwf-status-bar"])
 
         def _active_resolution_ratio(ratio_value, square_ratio_value):
@@ -2139,6 +2141,18 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         def _clear_previous_video():
             return gr.update(value=None), "**Generating** -- preparing Wan video..."
 
+        def _save_bad_video(video_value):
+            if not video_value:
+                raise gr.Error("Generate a video first.")
+            record = ctx.failure_archive.archive_bad_video(
+                video_value,
+                note="Marked from Video tab",
+                extra={"source": "wan_i2v_tab"},
+            )
+            if not record.ok:
+                return f"**Failure gallery** -- saved with archive warnings: {record.archive_dir}"
+            return f"**Failure gallery** -- saved bad result: {record.archive_dir}"
+
         run_event = run.click(
             _clear_previous_video,
             outputs=[video_out, status],
@@ -2229,6 +2243,12 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             outputs=[video_out, status],
             show_progress="minimal",
             show_progress_on=[status],
+        )
+        save_bad_video.click(
+            _save_bad_video,
+            inputs=[video_out],
+            outputs=[status],
+            show_progress=False,
         )
 
         if tab is not None:

@@ -32,6 +32,7 @@ from aiwf.core.interfaces.backend import InferenceBackend
 from aiwf.core.interfaces.storage import ImageStore
 from aiwf.core.config.settings import UserSettings
 from aiwf.services.metadata import MetadataService
+from aiwf.services.failure_archive import FailureArchiveService
 from aiwf.dev.diagnostics import trace_exception_safe, trace_model_throughput, trace_safe
 from aiwf.core.model_profile import detect_model_profile
 from aiwf.services.queue import JobQueue
@@ -68,6 +69,7 @@ class GenerationService:
         settings_path: Path | None = None,
         supervisor: EngineSupervisor | None = None,
         optimization_planner: OptimizationPlanner | None = None,
+        failure_archive: FailureArchiveService | None = None,
     ) -> None:
         self.backend = backend
         self.store = store
@@ -79,6 +81,7 @@ class GenerationService:
         self._settings_path = settings_path
         self.supervisor = supervisor
         self.optimization_planner = optimization_planner
+        self.failure_archive = failure_archive
 
     def _apply_default_negative(self, request):
         """When the user leaves the negative prompt blank, fall back to a generic
@@ -419,6 +422,34 @@ class GenerationService:
         result.artifacts = [artifact]
         job.result = result
 
+    def _archive_failed_generation(
+        self,
+        job: JobRecord,
+        exc: BaseException,
+        *,
+        preview: Image.Image | None,
+        checkpoint=None,
+        stage: str = "image_generation",
+    ) -> None:
+        if self.failure_archive is None:
+            return
+        try:
+            checkpoint_id = getattr(checkpoint, "id", None) if checkpoint is not None else None
+            self.failure_archive.archive_failure(
+                kind="image",
+                stage=stage,
+                request=job.request,
+                error=exc,
+                preview=preview,
+                extra={
+                    "job_id": str(job.id),
+                    "job_state": job.state.value,
+                    "checkpoint_id": checkpoint_id,
+                },
+            )
+        except Exception:
+            trace_exception_safe("generation.failure_archive", exc, job_id=str(job.id))
+
     def list_checkpoints(self):
         return self.backend.list_checkpoints()
 
@@ -504,19 +535,24 @@ class GenerationService:
 
         def worker(job: JobRecord) -> GenerationResult:
             tenant_job_id = str(job.id)
-            if self.supervisor is not None:
-                # Image jobs are GPU tenants; postprocessors borrow the same
-                # tenant below so they do not race a video/training handoff.
-                switch = self.supervisor.request_switch(
-                    EngineSwitchRequest(
-                        target=EngineTenant.IMAGE,
-                        reason=f"Image generation {job.id}",
-                        job_id=tenant_job_id,
-                    )
-                )
-                if not switch.ok:
-                    raise RuntimeError(f"GPU busy: {switch.message}")
+            tenant_acquired = False
+            active = None
+            optimization_plan: OptimizationPlan | None = None
+            latest_preview: Image.Image | None = None
             try:
+                if self.supervisor is not None:
+                    # Image jobs are GPU tenants; postprocessors borrow the same
+                    # tenant below so they do not race a video/training handoff.
+                    switch = self.supervisor.request_switch(
+                        EngineSwitchRequest(
+                            target=EngineTenant.IMAGE,
+                            reason=f"Image generation {job.id}",
+                            job_id=tenant_job_id,
+                        )
+                    )
+                    if not switch.ok:
+                        raise RuntimeError(f"GPU busy: {switch.message}")
+                    tenant_acquired = True
                 job.request = self._resolve_prompts(job.request)
                 job.request = self._apply_default_negative(job.request)
                 job.request = self._apply_generation_settings(job.request)
@@ -525,8 +561,6 @@ class GenerationService:
                 self._persist_last_checkpoint(active.id)
                 job.request = self._guard_distilled_cfg(job.request, active)
                 optimization_plan = self._resolve_optimization_plan(job.request, active)
-
-                latest_preview: Image.Image | None = None
 
                 def on_progress(
                     step: int,
@@ -581,8 +615,26 @@ class GenerationService:
 
                 self.events.publish(AfterGenerate(job.id, result))
                 return result
+            except GenerationCancelledError as exc:
+                self._archive_failed_generation(
+                    job,
+                    exc,
+                    preview=latest_preview,
+                    checkpoint=active,
+                    stage="image_cancelled",
+                )
+                raise
+            except Exception as exc:
+                self._archive_failed_generation(
+                    job,
+                    exc,
+                    preview=latest_preview,
+                    checkpoint=active,
+                    stage="image_generation",
+                )
+                raise
             finally:
-                if self.supervisor is not None:
+                if self.supervisor is not None and tenant_acquired:
                     self.supervisor.request_switch(
                         EngineSwitchRequest(
                             target=EngineTenant.IDLE,
@@ -621,17 +673,22 @@ class GenerationService:
 
         def worker(job: JobRecord) -> GenerationResult:
             tenant_job_id = str(job.id)
-            if self.supervisor is not None:
-                switch = self.supervisor.request_switch(
-                    EngineSwitchRequest(
-                        target=EngineTenant.IMAGE,
-                        reason=f"Image generation {job.id}",
-                        job_id=tenant_job_id,
-                    )
-                )
-                if not switch.ok:
-                    raise RuntimeError(f"GPU busy: {switch.message}")
+            tenant_acquired = False
+            active = None
+            optimization_plan: OptimizationPlan | None = None
+            latest_preview: Image.Image | None = None
             try:
+                if self.supervisor is not None:
+                    switch = self.supervisor.request_switch(
+                        EngineSwitchRequest(
+                            target=EngineTenant.IMAGE,
+                            reason=f"Image generation {job.id}",
+                            job_id=tenant_job_id,
+                        )
+                    )
+                    if not switch.ok:
+                        raise RuntimeError(f"GPU busy: {switch.message}")
+                    tenant_acquired = True
                 job.request = self._resolve_prompts(job.request)
                 job.request = self._apply_default_negative(job.request)
                 job.request = self._apply_generation_settings(job.request)
@@ -643,7 +700,6 @@ class GenerationService:
                 preview_every = self.settings.live_preview_interval()
                 if job.request.save_interrupted and preview_every == 0:
                     preview_every = 1
-                latest_preview: Image.Image | None = None
 
                 def on_progress(
                     step: int,
@@ -700,8 +756,26 @@ class GenerationService:
 
                 self.events.publish(AfterGenerate(job.id, result))
                 return result
+            except GenerationCancelledError as exc:
+                self._archive_failed_generation(
+                    job,
+                    exc,
+                    preview=latest_preview,
+                    checkpoint=active,
+                    stage="image_cancelled",
+                )
+                raise
+            except Exception as exc:
+                self._archive_failed_generation(
+                    job,
+                    exc,
+                    preview=latest_preview,
+                    checkpoint=active,
+                    stage="image_generation",
+                )
+                raise
             finally:
-                if self.supervisor is not None:
+                if self.supervisor is not None and tenant_acquired:
                     self.supervisor.request_switch(
                         EngineSwitchRequest(
                             target=EngineTenant.IDLE,

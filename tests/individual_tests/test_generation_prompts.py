@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
 from PIL import Image
 
 from aiwf import __version__
@@ -14,6 +16,7 @@ from aiwf.core.domain.models import Checkpoint, LoraInfo, VaeInfo
 from aiwf.core.events.bus import EventBus
 from aiwf.services.engine_supervisor import EngineSupervisor
 from aiwf.services.queue import JobQueue
+from aiwf.services.failure_archive import FailureArchiveService
 from aiwf.services.generation import GenerationService
 from aiwf.services.gpu_tenant_lock import GpuTenantLock
 from aiwf.services.metadata import MetadataService
@@ -208,6 +211,51 @@ def test_image_generation_keeps_backend_loaded_after_success():
 
     assert job.result is not None
     backend.unload.assert_not_called()
+
+
+def test_image_generation_archives_backend_failure(tmp_path: Path):
+    checkpoint = Checkpoint(
+        id="tiny",
+        title="Tiny Model",
+        filename="tiny.safetensors",
+        path="/models/tiny.safetensors",
+        hash="abc123",
+    )
+    preview = Image.new("RGB", (8, 8), "purple")
+
+    backend = MagicMock()
+    backend.resolve_checkpoint.return_value = checkpoint
+
+    def fail_generate(request, *, on_progress=None, **_kwargs):
+        if on_progress:
+            on_progress(1, request.steps, "Step 1/1", preview)
+        raise RuntimeError("bad latent soup")
+
+    backend.generate.side_effect = fail_generate
+    events = EventBus()
+    archive = FailureArchiveService(tmp_path / "outputs")
+    service = GenerationService(
+        backend=backend,
+        store=MagicMock(),
+        metadata=MagicMock(),
+        queue=JobQueue(events),
+        events=events,
+        settings=UserSettings(save_images=False),
+        failure_archive=archive,
+    )
+
+    with pytest.raises(RuntimeError, match="bad latent soup"):
+        service.submit(GenerationRequest(prompt="dance", steps=1))
+
+    index_path = tmp_path / "outputs" / "failures" / "index.jsonl"
+    entries = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "image"
+    assert entries[0]["stage"] == "image-generation"
+    assert entries[0]["request"]["prompt"] == "dance"
+    assert entries[0]["error"]["message"] == "bad latent soup"
+    assert entries[0]["extra"]["checkpoint_id"] == "tiny"
+    assert list((tmp_path / "outputs" / "failures").rglob("preview.png"))
 
 
 def test_generation_service_records_model_throughput(monkeypatch):

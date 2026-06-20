@@ -42,6 +42,7 @@ from aiwf.infrastructure.wan.pipeline import (
     estimate_gguf_expanded_gb,
 )
 from aiwf.infrastructure.video import VideoError
+from aiwf.services.failure_archive import FailureArchiveService
 from aiwf.services.wan import WanService, wan_model_pair_compatibility
 
 
@@ -621,6 +622,7 @@ def test_wan_generation_unloads_video_backend_after_failure(tmp_path: Path):
 
     calls: list[str] = []
     s = _svc(tmp_path)
+    s.failure_archive = FailureArchiveService(s.flags.resolved_output_dir())
     _force_wan_available(s)
     _write_component_base(s)
     high = s.models_dir() / "GGUF" / "wan-high-q4.gguf"
@@ -644,6 +646,18 @@ def test_wan_generation_unloads_video_backend_after_failure(tmp_path: Path):
         )
 
     assert calls == ["generate", "unload"]
+    entries = [
+        json.loads(line)
+        for line in (s.flags.resolved_output_dir() / "failures" / "index.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "video"
+    assert entries[0]["stage"] == "wan-video"
+    assert "Allocation on device" in entries[0]["error"]["message"]
+    assert entries[0]["extra"]["runtime_mode"] == WAN_RUNTIME_HIGH_LOW
+    assert list((s.flags.resolved_output_dir() / "failures").rglob("preview.png"))
 
 
 def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):

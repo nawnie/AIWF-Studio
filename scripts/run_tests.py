@@ -99,6 +99,7 @@ SUITES: dict[str, tuple[str, ...]] = {
         "test_client_log.py",
         "test_dev_diagnostics.py",
         "test_enhance.py",
+        "test_failure_archive.py",
         "test_faceswap.py",
         "test_gallery_select.py",
         "test_photo_restore.py",

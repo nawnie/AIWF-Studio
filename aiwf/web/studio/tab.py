@@ -738,6 +738,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                         buttons=["copy"],
                         elem_classes=["aiwf-gen-info"],
                     )
+                    save_bad_image = gr.Button("Save bad result", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
                 with gr.Accordion("Segment", open=False, elem_classes=["aiwf-prompt-tools", "aiwf-segment-panel"]):
                     build_segment_panel(ctx)
                 with gr.Accordion("ControlNet", open=False, elem_classes=["aiwf-prompt-tools", "aiwf-controlnet-panel"]):
@@ -2649,6 +2650,25 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         toggle_compare,
         inputs=[show_compare, last_before, last_result],
         outputs=[show_compare, workspace_image, compare_slider, compare_btn],
+    )
+
+    def _save_bad_image(image, infotext):
+        if image is None:
+            raise gr.Error("Generate or select an image first.")
+        record = ctx.failure_archive.archive_bad_image(
+            image,
+            infotext=infotext or "",
+            note="Marked from Image tab",
+        )
+        if not record.ok:
+            return f"**Failure gallery** -- saved with archive warnings: {record.archive_dir}"
+        return f"**Failure gallery** -- saved bad result: {record.archive_dir}"
+
+    save_bad_image.click(
+        _save_bad_image,
+        inputs=[last_result, info],
+        outputs=[status],
+        show_progress=False,
     )
 
     def _on_gallery_select(evt: gr.SelectData, seeds: list, img_w: int, img_h: int):

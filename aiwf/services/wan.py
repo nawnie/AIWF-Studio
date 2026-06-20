@@ -26,6 +26,7 @@ from aiwf.core.domain.wan import (
 from aiwf.dev.diagnostics import trace_model_throughput
 from aiwf.infrastructure.video import VideoError, write_frames
 from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
+from aiwf.services.failure_archive import FailureArchiveService
 from aiwf.services.wan_models import (
     WanModelPairCheck,
     wan_lora_matches,
@@ -209,6 +210,7 @@ class WanService:
         *,
         unload_image_models: Callable[[], None] | None = None,
         supervisor=None,
+        failure_archive: FailureArchiveService | None = None,
     ) -> None:
         self.flags = flags
         self.settings = settings
@@ -218,6 +220,7 @@ class WanService:
         )
         self._unload_image_models = unload_image_models
         self.supervisor = supervisor
+        self.failure_archive = failure_archive
 
     def available(self) -> bool:
         return self._backend.available()
@@ -228,6 +231,39 @@ class WanService:
             self._backend.unload()
         except Exception:
             logger.debug("Wan backend cleanup after failed generation failed.", exc_info=True)
+
+    def _archive_failed_generation(
+        self,
+        request: WanI2VRequest,
+        exc: BaseException,
+        *,
+        image: Image.Image | None = None,
+        output_path: Path | None = None,
+        stage: str = "wan_video",
+    ) -> None:
+        if self.failure_archive is None:
+            return
+        try:
+            self.failure_archive.archive_failure(
+                kind="video",
+                stage=stage,
+                request=request,
+                error=exc,
+                preview=image,
+                source_path=output_path,
+                extra={
+                    "runtime_mode": request.runtime_mode,
+                    "model_id": request.model_id,
+                    "high_noise_model_id": request.high_noise_model_id,
+                    "low_noise_model_id": request.low_noise_model_id,
+                    "offload": request.offload,
+                    "num_frames": request.num_frames,
+                    "width": request.width,
+                    "height": request.height,
+                },
+            )
+        except Exception:
+            logger.debug("Wan failure archive failed.", exc_info=True)
 
     def unload_models(self) -> None:
         """Release cached Wan models before another GPU video stage starts."""
@@ -1230,7 +1266,9 @@ class WanService:
     ) -> WanI2VResult:
         preflight = self.preflight(request, image_present=image is not None)
         if not preflight.ok:
-            raise WanUnavailable(preflight.message())
+            exc = WanUnavailable(preflight.message())
+            self._archive_failed_generation(request, exc, image=image, stage="wan_preflight")
+            raise exc
         request = request.model_copy(
             update={
                 "model_id": preflight.model_id or request.model_id,
@@ -1245,25 +1283,32 @@ class WanService:
         )
 
         if image is None:
-            raise WanUnavailable("Upload a source image to animate.")
+            exc = WanUnavailable("Upload a source image to animate.")
+            self._archive_failed_generation(request, exc, stage="wan_preflight")
+            raise exc
         if not self.available():
-            raise WanUnavailable(
+            exc = WanUnavailable(
                 "Wan video is unavailable - update `diffusers` (>=0.35) and install `ftfy`, then restart."
             )
+            self._archive_failed_generation(request, exc, image=image, stage="wan_preflight")
+            raise exc
         tenant_job_id = f"wan_{uuid.uuid4().hex[:8]}"
-        if self.supervisor is not None:
-            # Wan owns the VIDEO tenant for the whole generation/write path so
-            # image models, VSR, and training cannot claim VRAM mid-run.
-            switch = self.supervisor.request_switch(
-                EngineSwitchRequest(
-                    target=EngineTenant.VIDEO,
-                    reason="Wan video generation",
-                    job_id=tenant_job_id,
-                )
-            )
-            if not switch.ok:
-                raise WanUnavailable(f"GPU busy: {switch.message}")
+        tenant_acquired = False
+        output_path: Path | None = None
         try:
+            if self.supervisor is not None:
+                # Wan owns the VIDEO tenant for the whole generation/write path so
+                # image models, VSR, and training cannot claim VRAM mid-run.
+                switch = self.supervisor.request_switch(
+                    EngineSwitchRequest(
+                        target=EngineTenant.VIDEO,
+                        reason="Wan video generation",
+                        job_id=tenant_job_id,
+                    )
+                )
+                if not switch.ok:
+                    raise WanUnavailable(f"GPU busy: {switch.message}")
+                tenant_acquired = True
             if self._unload_image_models is not None:
                 _video_status("Unloading image models before loading video pipeline.")
                 try:
@@ -1612,8 +1657,26 @@ class WanService:
                 vram_limit_fraction=round(vram_limit_fraction, 6),
                 message=message,
             )
+        except WanUnavailable as exc:
+            self._archive_failed_generation(
+                request,
+                exc,
+                image=image,
+                output_path=output_path,
+                stage="wan_video",
+            )
+            raise
+        except Exception as exc:
+            self._archive_failed_generation(
+                request,
+                exc,
+                image=image,
+                output_path=output_path,
+                stage="wan_video",
+            )
+            raise
         finally:
-            if self.supervisor is not None:
+            if self.supervisor is not None and tenant_acquired:
                 self.supervisor.request_switch(
                     EngineSwitchRequest(
                         target=EngineTenant.IDLE,
