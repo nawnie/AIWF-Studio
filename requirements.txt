@@ -40,6 +40,7 @@ kornia>=0.7.0
 PyYAML>=6.0.0
 tqdm>=4.66.0
 sentencepiece>=0.2.0
+protobuf>=4.25.0
 # ControlNet annotators (depth/openpose/HED/PIDI/MLSD/normal/lineart).
 # AIWF imports this lazily; missing annotators degrade to pass-through maps.
 controlnet-aux>=0.0.10
