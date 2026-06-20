@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Local-first AI image generation studio for Stable Diffusion, ControlNet, inpainting, enhancement, and Wan GGUF video"
 requires-python = ">=3.10"
 readme = "README.md"
+license = { file = "LICENSE" }
 keywords = [
     "stable-diffusion",
     "ai-image-generation",
@@ -18,6 +19,12 @@ keywords = [
     "generative-ai",
     "nvidia",
     "windows",
+]
+classifiers = [
+    "License :: Other/Proprietary License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics",
 ]
 
 [project.scripts]

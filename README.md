@@ -197,7 +197,9 @@ Useful project docs:
 
 This is a practical release checklist, not legal advice.
 
-- AIWF Studio's own repo license is not declared yet. Until a root `LICENSE` is added, the code is public/source-available but not formally open source.
+- AIWF Studio's own code is licensed under the **AIWF Non-Commercial Attribution License v1.0** in `LICENSE`.
+- Non-commercial use, study, modification, and sharing are allowed with attribution.
+- Commercial use requires separate written permission from the project owner. Contact: https://github.com/nawnie
 - Model weights, generated outputs, NVIDIA SDK binaries, MMAudio checkout files, and large engine repos are local-only and ignored by git.
 - Users are responsible for the licenses of checkpoints, LoRAs, VAEs, ControlNet models, SAM weights, Wan files, and audio models they install.
 - NVIDIA Video Effects / VFX SDK support is optional. AIWF does not vendor or redistribute NVIDIA SDK binaries or models.
@@ -205,7 +207,7 @@ This is a practical release checklist, not legal advice.
 - InsightFace code is MIT, but InsightFace-trained models and the inswapper face-swap model require separate license care for non-local or commercial use. Face swapping must only be used with consent and applicable-law compliance.
 - Segment Anything is Apache-2.0; AIWF's segment/inpaint path is clean-room integration, with attribution kept in `docs/ATTRIBUTION.md`.
 
-Before a broader public release, choose a root repo license and keep optional restricted components clearly marked as local/user-installed.
+Keep optional restricted components clearly marked as local/user-installed.
 
 ## SageAttention And SDK Cache
 

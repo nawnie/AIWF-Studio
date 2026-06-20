@@ -1,0 +1,85 @@
+AIWF NON-COMMERCIAL ATTRIBUTION LICENSE
+Version 1.0
+
+Copyright (c) 2026 Nawnie and AIWF Studio contributors
+
+This license applies to the AIWF Studio source code and project materials in
+this repository, except where a file or third-party dependency states a
+different license.
+
+1. Permission
+
+You may use, copy, study, modify, run, publish, and share this project for
+personal, educational, research, hobby, evaluation, and other non-commercial
+purposes.
+
+You may share modified versions, forks, patches, and derived non-commercial
+works, provided that you follow the attribution and notice requirements below.
+
+2. Attribution
+
+If you share this project, a modified version, or a public work based on it, you
+must keep reasonable attribution to AIWF Studio and its original author.
+
+At minimum, include:
+
+- the project name: AIWF Studio
+- a link to the original repository when practical
+- this license notice, or a clear reference to it
+- a brief note describing any substantial changes you made
+
+Do not imply that the original author endorses your version, product, service,
+or output unless you have written permission.
+
+3. Non-Commercial Use Only
+
+This license does not grant commercial rights.
+
+Commercial use requires separate written permission from the project owner. This
+includes, without limitation:
+
+- selling or licensing the software or a modified version
+- offering the software as part of a paid product or paid service
+- using the software to provide paid generation, hosting, automation, consulting,
+  production, or managed services
+- bundling the software with commercial hardware, subscriptions, or SaaS
+  offerings
+- using the software primarily for commercial advantage or monetary
+  compensation
+
+To request commercial permission, contact the project owner through:
+
+https://github.com/nawnie
+
+4. Generated Outputs
+
+This license governs this repository's code and project materials. Generated
+images, videos, audio, and other outputs may also be affected by the licenses of
+the models, LoRAs, VAEs, SDKs, checkpoints, datasets, and other components used
+to create them. You are responsible for those third-party licenses and for
+applicable law.
+
+5. Third-Party Components
+
+Third-party projects, dependencies, SDKs, model weights, and assets keep their
+own licenses. Nothing in this license gives you rights to third-party material
+that the third-party license does not grant.
+
+AIWF Studio does not grant rights to NVIDIA SDKs, model checkpoints, face-swap
+models, MMAudio checkpoints, Stable Diffusion checkpoints, Wan checkpoints, or
+other externally supplied assets.
+
+6. No Warranty
+
+THE PROJECT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+THE AUTHORS AND CONTRIBUTORS ARE NOT LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY ARISING FROM USE OF THE PROJECT.
+
+7. Termination
+
+If you violate this license, your permission to use, modify, and share the
+project under this license ends automatically. The project owner may reinstate
+permission in writing.

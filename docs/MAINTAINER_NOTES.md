@@ -28,6 +28,13 @@ The core app should launch even when optional engines are absent. Engine-specifi
 imports belong inside workers, services, or lazily executed methods rather than
 module import paths that run during UI startup.
 
+## License Posture
+
+For AIWF / local AI repos, default to a free non-commercial attribution license:
+people can play, study, modify, and share with credit, while commercial use
+requires contacting the project owner. Keep third-party model and SDK licenses
+separate and explicit.
+
 Use `engines/<name>/` for local engine ownership:
 
 - `.venv/` is ignored and may be rebuilt.
