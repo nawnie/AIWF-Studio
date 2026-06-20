@@ -106,3 +106,11 @@ def test_wan_video_display_path_must_exist(tmp_path):
     assert _existing_video_output_path(out, "Wan") == str(out.resolve())
     with pytest.raises(VideoError, match="Wan did not create a video file"):
         _existing_video_output_path(tmp_path / "missing.mp4", "Wan")
+
+
+def test_wan_video_step_summary_is_route_specific():
+    from aiwf.core.domain.wan import WAN_RUNTIME_FAST_5B, WAN_RUNTIME_HIGH_LOW
+    from aiwf.web.tabs.wan_i2v import _step_summary_for_runtime
+
+    assert _step_summary_for_runtime(WAN_RUNTIME_FAST_5B, 6, 4) == (6, 1.0)
+    assert _step_summary_for_runtime(WAN_RUNTIME_HIGH_LOW, 6, 4) == (10, 0.6)
