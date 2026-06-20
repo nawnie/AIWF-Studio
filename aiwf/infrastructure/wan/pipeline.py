@@ -2676,6 +2676,8 @@ class WanI2VBackend:
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
         temporal_chunks: bool | None = None,
+        high_noise_lora_id: str | None = None,
+        high_noise_lora_scale: float = 1.0,
     ):
         import torch
         from diffusers import WanImageToVideoPipeline
@@ -2692,6 +2694,8 @@ class WanI2VBackend:
             sampler,
             sigma_type,
             round(float(flow_shift), 3),
+            high_noise_lora_id or "",
+            round(float(high_noise_lora_scale), 3),
             int(chunk_size or 24),
             int(chunk_overlap or 0),
             bool(temporal_chunks),
@@ -2768,6 +2772,15 @@ class WanI2VBackend:
             if model_path.exists():
                 load_kwargs["local_files_only"] = True
             pipe = WanImageToVideoPipeline.from_pretrained(str(model_id), **load_kwargs)
+
+        if high_noise_lora_id:
+            _video_status(f"Applying 5B LoRA: {Path(high_noise_lora_id).name}")
+        _apply_transformer_lora(
+            getattr(pipe, "transformer", None),
+            high_noise_lora_id,
+            adapter_name="wan_5b_lora",
+            weight=high_noise_lora_scale,
+        )
 
         if vae_id and not model_path.is_file():
             _video_status(f"Using explicit Wan VAE for 5B path: {Path(vae_id).name}")
@@ -3270,6 +3283,8 @@ class WanI2VBackend:
                 chunk_size=_chunk_size,
                 chunk_overlap=_chunk_overlap,
                 temporal_chunks=_temporal_chunks,
+                high_noise_lora_id=getattr(request, "high_noise_lora_id", None),
+                high_noise_lora_scale=float(getattr(request, "high_noise_lora_scale", 1.0) or 1.0),
             )
         load_seconds = max(0.0, time.perf_counter() - load_started)
 

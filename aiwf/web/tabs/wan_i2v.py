@@ -378,7 +378,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             except (TypeError, ValueError):
                 selected_low_guidance = 1.0
             selected_temporal_chunks = bool(temporal_chunks_value)
-            step_high = high_steps_value if high_steps_value is not None else (8 if selected_runtime == WAN_RUNTIME_FAST_5B else 4)
+            step_high = high_steps_value if high_steps_value is not None else (20 if selected_runtime == WAN_RUNTIME_FAST_5B else 4)
             step_low = low_steps_value if low_steps_value is not None else 4
             selected_total_steps, selected_step_ratio = _step_summary_for_runtime(selected_runtime, step_high, step_low)
             lines: list[str] = []
@@ -670,21 +670,21 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     gr.Markdown("Motion", elem_classes=["aiwf-section-label"])
                     with gr.Row():
                         fps = gr.Slider(1, 24, value=16, step=1, label="FPS")
-                        duration_seconds = gr.Slider(1, 10, value=3, step=1, label="Duration (seconds)")
+                        duration_seconds = gr.Slider(1, 10, value=5, step=1, label="Duration (seconds)")
                     with gr.Row():
-                        num_frames = gr.Number(value=49, precision=0, label="Frames", interactive=False)
-                        guidance = gr.Slider(1.0, 12.0, value=1.0, step=0.5, label="Guidance (CFG)")
+                        num_frames = gr.Number(value=81, precision=0, label="Frames", interactive=False)
+                        guidance = gr.Slider(1.0, 12.0, value=5.0, step=0.5, label="Guidance (CFG)")
                     frame_summary = gr.Markdown(
-                        "**Frames:** 49 - **Duration:** 3.0s snapped for Wan",
+                        "**Frames:** 81 - **Duration:** 5.0s snapped for Wan",
                         elem_classes=["aiwf-settings-paths"],
                     )
 
                     gr.Markdown("Denoising steps", elem_classes=["aiwf-section-label"])
                     with gr.Row():
-                        high_steps = gr.Slider(1, 30, value=8, step=1, label="Steps")
-                        low_steps = gr.Slider(1, 30, value=4, step=1, label="Low noise steps", interactive=False)
+                        high_steps = gr.Slider(1, 30, value=20, step=1, label="Steps")
+                        low_steps = gr.Slider(1, 30, value=1, step=1, label="Low noise steps", interactive=False)
                     with gr.Row():
-                        total_steps = gr.Number(value=8, precision=0, label="Total steps", interactive=False)
+                        total_steps = gr.Number(value=20, precision=0, label="Total steps", interactive=False)
                         boundary_ratio = gr.Number(value=1.0, precision=3, label="Stage split", interactive=False)
 
                     gr.Markdown("Sampler", elem_classes=["aiwf-section-label"])
@@ -700,18 +700,18 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     sigma_type = gr.Dropdown(
                         label="Scheduler",
                         choices=[
-                            ("Beta - smooth motion, best quality at low steps (recommended)", "beta"),
-                            ("Simple - linear uniform spacing (fastest)", "simple"),
+                            ("Simple - linear uniform spacing (tested 5B default)", "simple"),
+                            ("Beta - smooth motion, best quality at low steps", "beta"),
                             ("Exponential - more detail at high noise", "exponential"),
                             ("Karras - SD-style detail preservation", "karras"),
                         ],
-                        value="beta",
-                        info="Simple is fastest; Beta is the quality check.",
+                        value="simple",
+                        info="Simple is the tested 5B baseline; Beta is the quality check.",
                     )
                     with gr.Row():
                         flow_shift = gr.Slider(
-                            0.5, 25.0, value=5.0, step=0.5, label="Flow shift",
-                            info="Default 5.0. Higher shifts more work to high-noise.",
+                            0.5, 25.0, value=8.0, step=0.5, label="Flow shift",
+                            info="Tested 5B default is 8.0. Higher shifts more work to high-noise.",
                         )
                         seed = gr.Number(value=-1, precision=0, label="Seed (-1 = random)")
 
@@ -1781,7 +1781,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 low_noise_steps=low_stage_steps,
                 guidance_scale=float(guidance_v),
                 sampler=str(sampler_v or "euler"),
-                sigma_type=str(sigma_type_v or "beta"),
+                sigma_type=str(sigma_type_v or "simple"),
                 flow_shift=float(flow_v),
                 seed=int(seed_v),
                 runtime_mode=selected_runtime,
@@ -1791,7 +1791,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 vram_reserve_mb=int(vram_reserve_mb_v or 0),
                 high_noise_model_id=high_v if requires_dual_runtime else None,
                 low_noise_model_id=low_v if requires_dual_runtime else None,
-                high_noise_lora_id=high_lora_v if requires_dual_runtime else None,
+                high_noise_lora_id=high_lora_v if (requires_dual_runtime or selected_runtime == WAN_RUNTIME_FAST_5B) else None,
                 high_noise_lora_scale=float(high_lora_scale_v),
                 low_noise_lora_id=low_lora_v if requires_dual_runtime else None,
                 low_noise_lora_scale=float(low_lora_scale_v),

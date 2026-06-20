@@ -112,10 +112,12 @@ def test_request_defaults_and_helpers():
     assert r.chunk_overlap == 0
     assert r.vram_reserve_enabled is False
     assert r.vram_reserve_mb == 1536
-    assert r.guidance_scale == 1.0
-    assert r.normalized_frames() == 49
-    assert r.effective_steps() == 8
-    assert r.effective_boundary_ratio() == 0.5
+    assert r.guidance_scale == 5.0
+    assert r.sigma_type == "simple"
+    assert r.flow_shift == 8.0
+    assert r.normalized_frames() == 81
+    assert r.effective_steps() == 20
+    assert r.effective_boundary_ratio() == 1.0
     assert WanI2VRequest(width=512, height=320).max_area == 512 * 320
 
 
@@ -1300,6 +1302,8 @@ def test_wan_single_5b_passes_temporal_chunk_settings_to_transformer():
         flow_shift=5.0,
         sigma_type="beta",
         sampler="euler",
+        high_noise_lora_id=None,
+        high_noise_lora_scale=1.0,
     )
 
     with patch("aiwf.infrastructure.wan.pipeline._require_wan"), patch(
@@ -1339,6 +1343,88 @@ def test_wan_single_5b_passes_temporal_chunk_settings_to_transformer():
     assert third is not first
     assert loaded == ["Wan-AI/Wan2.2-TI2V-5B-Diffusers", "Wan-AI/Wan2.2-TI2V-5B-Diffusers"]
     assert seen == [(16, 8, True), (16, 4, True)]
+
+
+def test_wan_single_5b_applies_lora_and_caches_by_lora():
+    torch = pytest.importorskip("torch")
+
+    class DummyPipe:
+        def __init__(self) -> None:
+            self.scheduler = object()
+            self.transformer = torch.nn.Module()
+            self.vae = None
+
+        def enable_model_cpu_offload(self):
+            pass
+
+        def to(self, _device):
+            return self
+
+    backend = WanI2VBackend()
+    applied: list[tuple[str | None, str, float]] = []
+
+    def fake_apply(_transformer, lora_path, *, adapter_name, weight):
+        applied.append((lora_path, adapter_name, weight))
+
+    with patch("aiwf.infrastructure.wan.pipeline._require_wan"), patch(
+        "diffusers.WanImageToVideoPipeline.from_pretrained",
+        side_effect=lambda *_args, **_kwargs: DummyPipe(),
+    ), patch(
+        "aiwf.infrastructure.wan.pipeline._new_wan_euler_scheduler",
+        side_effect=lambda scheduler, **_kwargs: scheduler,
+    ), patch(
+        "aiwf.infrastructure.wan.pipeline._ensure_wan_attention_processors"
+    ), patch(
+        "aiwf.infrastructure.wan.pipeline._apply_wan_attention_optimizations"
+    ), patch(
+        "aiwf.infrastructure.wan.pipeline._apply_transformer_lora",
+        side_effect=fake_apply,
+    ), patch(
+        "aiwf.infrastructure.wan.pipeline._free_cuda_memory"
+    ):
+        first = backend._ensure_single_5b(
+            model_id="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+            vae_id=None,
+            components_base=None,
+            text_encoder_path="",
+            offload="model",
+            flow_shift=8.0,
+            sigma_type="simple",
+            sampler="euler",
+            high_noise_lora_id="turbo.safetensors",
+            high_noise_lora_scale=0.75,
+        )
+        second = backend._ensure_single_5b(
+            model_id="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+            vae_id=None,
+            components_base=None,
+            text_encoder_path="",
+            offload="model",
+            flow_shift=8.0,
+            sigma_type="simple",
+            sampler="euler",
+            high_noise_lora_id="turbo.safetensors",
+            high_noise_lora_scale=0.75,
+        )
+        third = backend._ensure_single_5b(
+            model_id="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+            vae_id=None,
+            components_base=None,
+            text_encoder_path="",
+            offload="model",
+            flow_shift=8.0,
+            sigma_type="simple",
+            sampler="euler",
+            high_noise_lora_id="other.safetensors",
+            high_noise_lora_scale=0.75,
+        )
+
+    assert first is second
+    assert third is not first
+    assert applied == [
+        ("turbo.safetensors", "wan_5b_lora", 0.75),
+        ("other.safetensors", "wan_5b_lora", 0.75),
+    ]
 
 
 def test_dequantize_comfy_fp8_state_dict_scales_weights():

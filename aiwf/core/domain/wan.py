@@ -65,16 +65,16 @@ class WanI2VRequest(BaseModel):
 
     prompt: str = ""
     negative_prompt: str = ""
-    num_frames: int = Field(default=49, ge=5, le=257)
-    steps: int = Field(default=8, ge=1, le=100)
-    high_noise_steps: int = Field(default=4, ge=1, le=60)
-    low_noise_steps: int = Field(default=4, ge=1, le=60)
-    guidance_scale: float = Field(default=1.0, ge=1.0, le=20.0)
-    width: int = Field(default=480, ge=128, le=1280)
-    height: int = Field(default=480, ge=128, le=1280)
+    num_frames: int = Field(default=81, ge=5, le=257)
+    steps: int = Field(default=20, ge=1, le=100)
+    high_noise_steps: int = Field(default=20, ge=1, le=60)
+    low_noise_steps: int = Field(default=1, ge=1, le=60)
+    guidance_scale: float = Field(default=5.0, ge=1.0, le=20.0)
+    width: int = Field(default=512, ge=128, le=1280)
+    height: int = Field(default=512, ge=128, le=1280)
     fps: int = Field(default=16, ge=1, le=60)
-    flow_shift: float = Field(default=5.0, ge=0.5, le=25.0)
-    sigma_type: str = Field(default="beta")  # simple | beta | exponential | karras
+    flow_shift: float = Field(default=8.0, ge=0.5, le=25.0)
+    sigma_type: str = Field(default="simple")  # simple | beta | exponential | karras
     sampler: str = Field(default="euler")  # euler | heun
     # Temporal chunk denoise settings. This slices latent frames, not output
     # frames. It is opt-in because every chunk reruns the full transformer.
@@ -164,11 +164,15 @@ class WanI2VRequest(BaseModel):
         return snap_num_frames(self.num_frames)
 
     def effective_steps(self) -> int:
+        if not self.requires_dual_transformers():
+            return max(1, int(self.steps or self.high_noise_steps or 1))
         high = max(1, int(self.high_noise_steps or 0))
         low = max(1, int(self.low_noise_steps or 0))
         return max(1, high + low)
 
     def effective_boundary_ratio(self) -> float:
+        if not self.requires_dual_transformers():
+            return 1.0
         total = self.effective_steps()
         high = max(1, int(self.high_noise_steps or 0))
         return min(1.0, max(0.0, high / total))

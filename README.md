@@ -172,6 +172,8 @@ These areas exist as work-in-progress or need more hardware coverage before they
 
 AIWF Studio is clean-room code, but it is built in conversation with the local AI community: Stable Diffusion, Diffusers, ControlNet, Segment Anything, GroundingDINO, Real-ESRGAN, GFPGAN, CodeFormer, Wan, ComfyUI-GGUF, and the AUTOMATIC1111 web UI ecosystem.
 
+Optional video post-processing can use NVIDIA Video Effects / VFX SDK components for RTX VSR-style upscale, cleanup, AI green screen, and relighting when the user installs the NVIDIA SDK locally. See `docs/ATTRIBUTION.md` for third-party credits and source links.
+
 ## Come Build This
 
 This project is now bigger than one person, even with AI help. If you care about local-first creative AI, consumer GPU workflows, open tooling, clean Python architecture, or making powerful generation tools easier for regular people to run, help create this with us ✨

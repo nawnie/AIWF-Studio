@@ -54,3 +54,18 @@ stored in `{models_dir}/insightface/`.
 
 Face swapping must only be used with the consent of the people depicted and in
 compliance with applicable law.
+
+## NVIDIA Video Effects / VFX SDK integration
+
+AIWF's optional VideoFX/VSR post-processing can call locally installed NVIDIA
+Video Effects / VFX SDK sample applications and runtime components when the user
+configures those paths. NVIDIA describes the VFX SDK as an AI-powered video
+processing SDK with features including video super resolution, relighting, and
+AI green screen, powered by NVIDIA GPUs with Tensor Cores:
+
+- NVIDIA VFX SDK User Guide: https://docs.nvidia.com/maxine/vfx/index.html
+- NVIDIA Video Effects SDK System Guide: https://docs.nvidia.com/deeplearning/maxine/vfx-sdk-system-guide/index.html
+- NVIDIA Broadcast SDK resources: https://www.nvidia.com/en-us/geforce/broadcasting/broadcast-sdk/resources/
+
+AIWF does not vendor or redistribute NVIDIA SDK binaries, models, or samples.
+Users must install and license NVIDIA components separately.
