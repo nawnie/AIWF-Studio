@@ -26,6 +26,8 @@ def catalog(tmp_path):
             title="ClearSkin_v2",
             filename="ClearSkin_v2.safetensors",
             path=str(tmp_path / "ClearSkin_v2.safetensors"),
+            architecture="sdxl",
+            recommended_subdir="Loras/SDXL",
         ),
         LoraInfo(
             id="DetailTweaker",
@@ -87,3 +89,10 @@ def test_checkpoint_details_include_usage_help(catalog):
     text = catalog.checkpoint_details(checkpoint)
     assert "test_model" in text
     assert "How to use" in text
+
+
+def test_lora_details_include_compatibility_metadata(catalog):
+    lora = catalog.find_lora("ClearSkin_v2")
+    text = catalog.lora_details(lora)
+    assert "**Architecture:** SDXL" in text
+    assert "**Recommended folder:** `Loras/SDXL`" in text

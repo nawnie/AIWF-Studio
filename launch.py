@@ -20,6 +20,11 @@ TORCH_CUDA_VERSION = os.environ.get("TORCH_CUDA_VERSION", "2.6.0+cu124")
 TORCHVISION_CUDA_VERSION = os.environ.get("TORCHVISION_CUDA_VERSION", "0.21.0+cu124")
 TORCHAUDIO_CUDA_VERSION = os.environ.get("TORCHAUDIO_CUDA_VERSION", "2.6.0+cu124")
 XFORMERS_PACKAGE = os.environ.get("XFORMERS_PACKAGE", "xformers==0.0.29.post3")
+LAUNCH_ONLY_FLAGS = {
+    "--install-sageattention",
+    "--sageattention",
+    "--skip-sageattention",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +379,16 @@ def install_sageattention(py: str) -> None:
         )
 
 
+def should_install_sageattention(argv: list[str]) -> bool:
+    """SageAttention is opt-in at setup time; runtime falls back when missing."""
+    return "--install-sageattention" in argv or "--sageattention" in argv
+
+
+def strip_launch_only_args(argv: list[str]) -> list[str]:
+    """Remove setup-only flags before invoking webui.py's stricter parser."""
+    return [arg for arg in argv if arg not in LAUNCH_ONLY_FLAGS]
+
+
 def _prepare_engine_venv(spec: EngineSpec, argv: list[str]) -> None:
     """Create and populate the venv for a training engine (Kohya / ED2).
 
@@ -471,8 +486,9 @@ def prepare(skip_prepare: bool, skip_install: bool, argv: list[str]) -> None:
     if not torch_cuda_ready(py):
         print("WARNING: CUDA is still not available after install. Generation will use CPU.")
 
-    # Optional accelerator. Keep startup graceful and benchmark speed claims locally.
-    if "--skip-sageattention" not in argv and not sageattention_ready(py):
+    # Optional accelerator. Do not build/install it during normal startup; Wan
+    # keeps a torch SDPA fallback and benchmark-gates SageAttention separately.
+    if should_install_sageattention(argv) and not sageattention_ready(py):
         install_sageattention(py)
 
     if "--xformers" in argv and not _run_ok([py, "-c", "import xformers"], quiet=True):
@@ -539,6 +555,7 @@ def main() -> None:
     skip_prepare = "--skip-prepare-environment" in argv
     skip_install = "--skip-install" in argv
     prepare(skip_prepare, skip_install, argv)
+    webui_argv = strip_launch_only_args(argv)
 
     env = os.environ.copy()
     env.setdefault("XFORMERS_FORCE_DISABLE_TRITON", "1")
@@ -546,7 +563,7 @@ def main() -> None:
     env["PYTHONPATH"] = str(ROOT) if "PYTHONPATH" not in env else str(ROOT) + os.pathsep + env["PYTHONPATH"]
 
     crash_log = ROOT / "aiwf-crash.log"
-    ret = _tee_run([python(), str(ROOT / "webui.py"), *argv], env=env, log_path=crash_log)
+    ret = _tee_run([python(), str(ROOT / "webui.py"), *webui_argv], env=env, log_path=crash_log)
     if ret != 0:
         print(
             "\n[AIWF] Process exited with code " + str(ret) + ". Full output saved to: " + str(crash_log),

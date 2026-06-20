@@ -13,6 +13,17 @@ from aiwf.web.studio.helpers import generation_style_fields, mode_from_label
 from aiwf.web.studio.session import StudioSession
 
 
+def resolve_checkpoint_id(ckpt_title: str | None, ckpt_map: dict | None) -> str:
+    if not ckpt_map or not ckpt_title:
+        raise gr.Error("No checkpoint available. Refresh models.")
+    ckpt_id = ckpt_map.get(ckpt_title)
+    if ckpt_id is None and ckpt_title in set(ckpt_map.values()):
+        ckpt_id = ckpt_title
+    if ckpt_id is None:
+        raise gr.Error("Selected checkpoint is no longer available. Refresh models and choose a checkpoint.")
+    return ckpt_id
+
+
 def build_generation_request(
     *,
     catalogs: StudioCatalogs,
@@ -88,14 +99,11 @@ def build_generation_request(
 ):
     # Raise gr.Error for user-correctable validation so Gradio renders the
     # message in the UI instead of exposing a traceback.
-    if not ckpt_map or not ckpt_title:
-        raise gr.Error("No checkpoint available. Refresh models.")
-
     if use_file and not prompt_file_path and not (prompt_text or "").strip():
         raise gr.Error("Select a prompt file or enter a prompt.")
 
     mode = mode_from_label(mode_label)
-    ckpt_id = ckpt_map.get(ckpt_title)
+    ckpt_id = resolve_checkpoint_id(ckpt_title, ckpt_map)
     tags = parse_tags(tags_text or "")
     style_fields = generation_style_fields(style_name, style_template_prompt, style_template_negative)
     sampler_id = catalogs.sampler_map.get(sampler_label, "euler_a")

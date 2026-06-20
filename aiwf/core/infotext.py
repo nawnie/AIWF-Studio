@@ -157,8 +157,11 @@ def format_infotext(
     output_height: int | None = None,
 ) -> str:
     """Build A1111-compatible generation parameters text."""
-    width = output_width or request.width
-    height = output_height or request.height
+    width = request.width
+    height = request.height
+    if not (request.mode == GenerationMode.TXT2IMG and request.enable_hr):
+        width = output_width or request.width
+        height = output_height or request.height
     lines = [request.prompt]
     if request.negative_prompt:
         lines.append(f"Negative prompt: {request.negative_prompt}")
@@ -220,6 +223,8 @@ def format_infotext(
                 f"Denoising strength: {request.hr_denoising_strength}",
             ]
         )
+        if output_width and output_height and (output_width != request.width or output_height != request.height):
+            parts.append(f"Hires resize: {output_width}x{output_height}")
 
     if request.tags:
         parts.append(f"Tags: {format_tags_infotext(request.tags)}")

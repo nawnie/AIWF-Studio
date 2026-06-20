@@ -57,10 +57,21 @@ def model_inventory_roots(flags: RuntimeFlags) -> list[Path]:
     for candidate in candidates:
         resolved = candidate.resolve()
         key = os.path.normcase(str(resolved))
-        if resolved.exists() and key not in seen:
-            seen.add(key)
-            roots.append(resolved)
+        if not resolved.exists() or key in seen:
+            continue
+        if any(_is_relative_to(resolved, root) for root in roots):
+            continue
+        seen.add(key)
+        roots.append(resolved)
     return roots
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _relative_subdir(path: Path, roots: list[Path]) -> str:
@@ -108,7 +119,7 @@ def _metadata_architecture(metadata: dict[str, str], path: Path) -> str:
             metadata.get("modelspec.implementation", ""),
             metadata.get("ss_base_model_version", ""),
             metadata.get("ss_sd_model_name", ""),
-            path.name,
+            path.as_posix(),
         )
         if value
     )
@@ -125,11 +136,17 @@ def _recommended_subdir(family: str, architecture: str) -> str:
             return "Loras/Flux"
         if architecture == "wan":
             return "Loras/Wan"
-        return "Loras/SD15"
+        if architecture in {ARCH_SD15, ARCH_INPAINT}:
+            return "Loras/SD15"
+        return "Loras"
     if family == "checkpoint":
         return "Stable-diffusion"
     if family == "vae":
         return "VAE"
+    if family == "embedding":
+        return "embeddings"
+    if family == "hypernetwork":
+        return "hypernetworks"
     if family == "controlnet":
         return "controlnet"
     if family == "text_encoder":
@@ -160,6 +177,10 @@ def _matching_path_family(path: Path) -> str | None:
         return "text_encoder"
     if name.startswith(("clip_g", "clip_l", "t5xxl")):
         return "text_encoder"
+    if any(part in {"embedding", "embeddings"} for part in parent_parts):
+        return "embedding"
+    if any(part in {"hypernetwork", "hypernetworks"} for part in parent_parts):
+        return "hypernetwork"
     if any(part in {"diffusion_models", "unet", "transformer"} for part in parent_parts):
         return "runtime_asset"
     if any(part in {"vae", "vae-approx"} for part in parent_parts) or name.endswith((".vae.safetensors", ".vae.ckpt", ".vae.pt")):

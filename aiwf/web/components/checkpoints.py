@@ -4,6 +4,7 @@ import gradio as gr
 
 from aiwf.bootstrap import AppContext
 from aiwf.core.domain.models import Checkpoint
+from aiwf.infrastructure.diffusers.model_arch import is_inpaint_architecture
 
 
 def _checkpoint_choices(checkpoints: list[Checkpoint]) -> list[tuple[str, str]]:
@@ -32,12 +33,16 @@ def resolve_default_checkpoint(
         return None
     if last_checkpoint_id:
         for checkpoint in checkpoints:
-            if checkpoint.id == last_checkpoint_id:
+            if checkpoint.id == last_checkpoint_id and not _is_inpaint_checkpoint(checkpoint):
                 return checkpoint
     for checkpoint in checkpoints:
-        if checkpoint.kind != "inpaint":
+        if not _is_inpaint_checkpoint(checkpoint):
             return checkpoint
     return checkpoints[0]
+
+
+def _is_inpaint_checkpoint(checkpoint: Checkpoint) -> bool:
+    return checkpoint.kind == "inpaint" or is_inpaint_architecture(checkpoint.architecture)
 
 
 def default_checkpoint_title(

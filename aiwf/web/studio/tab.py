@@ -15,7 +15,7 @@ from aiwf.dev.diagnostics import (
 from aiwf.core.domain.enhance import RestoreOptions
 from aiwf.core.domain.faceswap import FaceSwapOptions
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest, JobState
-from aiwf.core.domain.models import SCHEDULE_TYPES
+from aiwf.core.domain.models import SCHEDULE_TYPES, normalize_schedule_id_for_sampler
 from aiwf.core.domain.segment import SegmentRequest
 from aiwf.core.domain.segment_presets import (
     CUSTOM_SEGMENT_PRESET_ID,
@@ -63,6 +63,7 @@ from aiwf.web.studio.helpers import (
     segment_source_image,
 )
 from aiwf.web.studio.mode_ui import apply_mode_ui, on_mode_change
+from aiwf.web.studio.request_builder import resolve_checkpoint_id
 from aiwf.web.studio.session import StudioSession
 from aiwf.web.studio.summaries import (
     model_help_markdown as _model_help_md,
@@ -1934,16 +1935,18 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         cn3_threshold_b,
         inpaint_source_choice,
     ):
-        if not ckpt_map or not ckpt_title:
-            raise gr.Error("No checkpoint available. Refresh models.")
-
         if use_file and not prompt_file_path and not (prompt_text or "").strip():
             raise gr.Error("Select a prompt file or enter a prompt.")
 
         mode = mode_from_label(mode_label)
-        ckpt_id = ckpt_map.get(ckpt_title)
+        ckpt_id = resolve_checkpoint_id(ckpt_title, ckpt_map)
         tags = parse_tags(tags_text or "")
         style_fields = generation_style_fields(style_name, style_template_prompt, style_template_negative)
+        sampler_id = sampler_map.get(sampler_label, "euler_a")
+        scheduler_id = normalize_schedule_id_for_sampler(
+            sampler_id,
+            schedule_map.get(scheduler_label, "automatic"),
+        )
         before_image = None
         init_images = None
         mask_images = None
@@ -1963,8 +1966,8 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                 width=int(w),
                 height=int(h),
                 seed=int(seed_value),
-                sampler=sampler_map.get(sampler_label, "euler_a"),
-                scheduler=schedule_map.get(scheduler_label, "automatic"),
+                sampler=sampler_id,
+                scheduler=scheduler_id,
                 batch_size=int(bs),
                 batch_count=int(bc),
                 clip_skip=int(clip_skip_value),
@@ -1993,8 +1996,8 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                 steps=int(step_count),
                 cfg_scale=float(cfg_scale),
                 seed=int(seed_value),
-                sampler=sampler_map.get(sampler_label, "euler_a"),
-                scheduler=schedule_map.get(scheduler_label, "automatic"),
+                sampler=sampler_id,
+                scheduler=scheduler_id,
                 denoising_strength=float(img2img_denoise),
                 clip_skip=int(clip_skip_value),
                 checkpoint_id=ckpt_id,
@@ -2040,8 +2043,8 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                 steps=int(step_count),
                 cfg_scale=float(cfg_scale),
                 seed=int(seed_value),
-                sampler=sampler_map.get(sampler_label, "euler_a"),
-                scheduler=schedule_map.get(scheduler_label, "automatic"),
+                sampler=sampler_id,
+                scheduler=scheduler_id,
                 denoising_strength=float(inpaint_denoise_value),
                 mask_blur=int(mask_blur_value),
                 seam_erode=int(seam_erode_value or 0),
@@ -2549,8 +2552,11 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         status_parts = ["**ReActor complete.**"]
 
         if do_blend:
-            if not ckpt_map or not ckpt_title:
-                raise gr.Error("No checkpoint available for seam blend.")
+            try:
+                ckpt_id = resolve_checkpoint_id(ckpt_title, ckpt_map)
+            except gr.Error as exc:
+                raise gr.Error(f"No checkpoint available for seam blend. {exc}") from exc
+            sampler_id = sampler_map.get(sampler_label, "euler_a")
             blend_request = GenerationRequest(
                 mode=GenerationMode.IMG2IMG,
                 prompt=prompt_text,
@@ -2562,10 +2568,11 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                 steps=int(step_count),
                 cfg_scale=float(cfg_scale),
                 seed=int(seed_value),
-                sampler=sampler_map.get(sampler_label, "euler_a"),
+                sampler=sampler_id,
+                scheduler=normalize_schedule_id_for_sampler(sampler_id, "automatic"),
                 denoising_strength=float(blend_denoise),
                 clip_skip=int(clip_skip_value),
-                checkpoint_id=ckpt_map.get(ckpt_title),
+                checkpoint_id=ckpt_id,
                 vae_id=vae_id,
             )
             job = service.submit(blend_request, init_images=[swapped])

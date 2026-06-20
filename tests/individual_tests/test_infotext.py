@@ -42,8 +42,12 @@ def test_round_trip_txt2img_request():
     assert updates["steps"] == 30
     assert updates["sampler"] == "euler_a"
     assert updates["seed"] == 99
+    assert updates["width"] == 640
+    assert updates["height"] == 384
     assert updates["enable_hr"] is True
     assert updates["hr_steps"] == 15
+    assert params["Hires resize-1"] == 1280
+    assert params["Hires resize-2"] == 768
 
 
 def test_format_infotext_includes_tags():

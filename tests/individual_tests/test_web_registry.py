@@ -232,3 +232,25 @@ def test_wan_route_switch_filters_low_model_from_normalized_high(tmp_path):
     assert fast_route[0].get("value") == "Safetensor/wan2.2_ti2v_5B_fp16.safetensors"
     assert fast_route[1].get("value") is None
     assert fast_route[1].get("interactive") is False
+
+    missing_runtime_route = sync_runtime(
+        None,
+        WAN_RUNTIME_HIGH_LOW,
+        gguf_route[0].get("value"),
+        gguf_route[1].get("value"),
+        gguf_route[3].get("value"),
+        "",
+        gguf_route[8].get("value"),
+        gguf_route[9].get("value"),
+        gguf_route[10].get("value"),
+        512,
+        512,
+        81,
+        False,
+        24,
+        0,
+        1.0,
+    )
+    assert missing_runtime_route[0].get("value") == "Safetensor/wan2.2_ti2v_5B_fp16.safetensors"
+    assert missing_runtime_route[1].get("value") is None
+    assert missing_runtime_route[1].get("interactive") is False

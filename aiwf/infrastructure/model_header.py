@@ -38,6 +38,7 @@ ARCH_WAN_VAE             = "wan-vae"
 ARCH_UMT5_ENCODER        = "umt5-encoder"
 ARCH_CLIP                = "clip"
 ARCH_SDXL_CHECKPOINT     = "sdxl-checkpoint"
+ARCH_SD35_CHECKPOINT     = "sd3.5-checkpoint"
 ARCH_SD_CHECKPOINT       = "sd-checkpoint"
 ARCH_SD_LORA             = "sd-lora"
 ARCH_RIFE                = "rife"
@@ -68,7 +69,7 @@ _ST_PATTERNS: list[tuple[str, str, str]] = [
     ("text_model.encoder.layers.0",                              ARCH_CLIP,                ROLE_TEXT_ENCODER),
     ("cond_stage_model.transformer.resblocks.0",                 ARCH_CLIP,                ROLE_TEXT_ENCODER),
     ("conditioner.embedders.0.transformer",                      ARCH_SDXL_CHECKPOINT,     ROLE_CHECKPOINT),
-    ("model.diffusion_model.joint_blocks.0",                     ARCH_SDXL_CHECKPOINT,     ROLE_CHECKPOINT),
+    ("model.diffusion_model.joint_blocks.0",                     ARCH_SD35_CHECKPOINT,     ROLE_CHECKPOINT),
     ("model.diffusion_model.input_blocks.0.0.weight",            ARCH_SD_CHECKPOINT,       ROLE_CHECKPOINT),
     ("cond_stage_model.model.transformer.resblocks.0",           ARCH_SD_CHECKPOINT,       ROLE_CHECKPOINT),
     ("lora_unet_down_blocks_0_attentions_0_proj_in.lora_down.weight", ARCH_SD_LORA,        ROLE_LORA),
@@ -130,6 +131,7 @@ _ARCH_PREFIX: dict[str, str] = {
     ARCH_UMT5_ENCODER:        "UMT5-XXL",
     ARCH_CLIP:                "CLIP",
     ARCH_SDXL_CHECKPOINT:     "SDXL",
+    ARCH_SD35_CHECKPOINT:     "SD3.5",
     ARCH_SD_CHECKPOINT:       "SD",
     ARCH_SD_LORA:             "LoRA",
     ARCH_RIFE:                "RIFE",
@@ -508,6 +510,8 @@ def _clean_stem(stem: str) -> str:
 def _make_display_name(title: str, arch: str, role: str, precision: str, size_mb: float) -> str:
     """Build: '<Title> [<Prec> . <Size>]'"""
     use_title = title.strip()
+    if arch == ARCH_SD35_CHECKPOINT and "sd3.5" not in use_title.lower():
+        use_title = f"SD3.5 {use_title}".strip()
 
     # If no meaningful title, build from arch+role
     if not use_title or " " not in use_title:

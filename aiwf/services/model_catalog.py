@@ -5,6 +5,7 @@ from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.models import Checkpoint, LoraInfo
+from aiwf.infrastructure.diffusers.model_arch import architecture_label
 from aiwf.infrastructure.diffusers.loras import resolve_lora
 from aiwf.infrastructure.safetensors_metadata import (
     CHECKPOINT_HEADER_KEYS,
@@ -94,9 +95,12 @@ class ModelCatalogService:
             f"**File:** `{lora.filename}`  ",
             f"**Size:** {file_size_label(lora.path)}  ",
             f"**Path:** `{lora.path}`  ",
+            f"**Architecture:** {architecture_label(lora.architecture)}  ",
             f"**Shortcut:** `{self.keyword_token(alias or lora.id)}`  ",
             f"**Default strength:** {strength:.2f}",
         ]
+        if lora.recommended_subdir:
+            lines.append(f"**Recommended folder:** `{lora.recommended_subdir}`")
         if keywords:
             lines.append(f"**Trigger words:** {keywords}")
 

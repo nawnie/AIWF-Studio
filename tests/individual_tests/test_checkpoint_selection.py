@@ -12,15 +12,21 @@ from aiwf.web.components.checkpoints import (
 )
 
 
-def _checkpoint(checkpoint_id: str, title: str | None = None) -> Checkpoint:
+def _checkpoint(
+    checkpoint_id: str,
+    title: str | None = None,
+    *,
+    kind: str = "checkpoint",
+    architecture: str = "sd15",
+) -> Checkpoint:
     return Checkpoint(
         id=checkpoint_id,
         title=title or checkpoint_id,
         filename=f"{checkpoint_id}.safetensors",
         path=f"/models/{checkpoint_id}.safetensors",
         hash="abc123",
-        kind="checkpoint",
-        architecture="sd15",
+        kind=kind,
+        architecture=architecture,
     )
 
 
@@ -44,13 +50,25 @@ def test_resolve_default_checkpoint_falls_back_when_saved_missing():
 
 def test_default_checkpoint_title_returns_display_title():
     checkpoints = [
-        _checkpoint("realistic_vision", "realisticVisionV60B1 [inpaint] [f8b8450ebc]"),
+        _checkpoint("realistic_vision", "realisticVisionV60B1 [SD1.5] [f8b8450ebc]"),
         _checkpoint("juggernaut", "Juggernaut_X [SDXL] [0936a4dc33]"),
     ]
 
     title = default_checkpoint_title(checkpoints, "realistic_vision")
 
-    assert title == "realisticVisionV60B1 [inpaint] [f8b8450ebc]"
+    assert title == "realisticVisionV60B1 [SD1.5] [f8b8450ebc]"
+
+
+def test_resolve_default_checkpoint_skips_saved_inpaint_checkpoint():
+    checkpoints = [
+        _checkpoint("inpaint", "Juggernaut inpaint", kind="inpaint", architecture="sdxl_inpaint"),
+        _checkpoint("base", "Juggernaut base", architecture="sdxl"),
+    ]
+
+    selected = resolve_default_checkpoint(checkpoints, "inpaint")
+
+    assert selected is not None
+    assert selected.id == "base"
 
 
 def test_load_checkpoint_persists_last_model_to_config(tmp_path: Path):

@@ -164,6 +164,22 @@ def test_studio_controlnet_stack_builds_multiple_units(tmp_path: Path):
     assert images == [image, image, image]
 
 
+def test_studio_controlnet_stack_rejects_reversed_guidance_window(tmp_path: Path):
+    service = ControlNetService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    service.ensure_dir()
+    (service.models_dir() / "control_canny.safetensors").write_bytes(b"x")
+    image = Image.new("RGB", (8, 8), "red")
+
+    with pytest.raises(ValueError, match="Guidance start"):
+        build_controlnet_stack(
+            mode="txt2img",
+            controlnet=service,
+            slots=[
+                StudioControlNetSlot("Unit 1", True, "control_canny", "canny", image, 1.0, 0.8, 0.2, 100, 200),
+            ],
+        )
+
+
 def test_backend_prepares_multiple_controlnet_units(tmp_path: Path):
     flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models")
     service = ControlNetService(flags)
@@ -188,6 +204,53 @@ def test_backend_prepares_multiple_controlnet_units(tmp_path: Path):
     assert [unit.model for unit, _image, _path in prepared] == ["control_a", "control_b"]
     assert [image.getpixel((0, 0)) for _unit, image, _path in prepared] == [(255, 0, 0), (0, 0, 255)]
     assert [path.name for _unit, _image, path in prepared] == ["control_a.safetensors", "control_b.safetensors"]
+
+
+def test_backend_pairs_control_images_with_enabled_units_only(tmp_path: Path):
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models")
+    service = ControlNetService(flags)
+    service.ensure_dir()
+    (service.models_dir() / "control_b.safetensors").write_bytes(b"x")
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend.flags = flags
+
+    request = GenerationRequest(
+        mode=GenerationMode.TXT2IMG,
+        controlnet_units=[
+            ControlNetUnit(enabled=False, model="control_a", module="none"),
+            ControlNetUnit(model="control_b", module="none", weight=0.8),
+        ],
+    )
+    image_b = Image.new("RGB", (16, 16), "blue")
+
+    prepared = backend._prepare_controlnets(request, [image_b])
+
+    assert [unit.model for unit, _image, _path in prepared] == ["control_b"]
+    assert prepared[0][1].getpixel((0, 0)) == (0, 0, 255)
+
+
+def test_backend_consumes_control_image_for_missing_enabled_unit(tmp_path: Path):
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models")
+    service = ControlNetService(flags)
+    service.ensure_dir()
+    (service.models_dir() / "control_b.safetensors").write_bytes(b"x")
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend.flags = flags
+
+    request = GenerationRequest(
+        mode=GenerationMode.TXT2IMG,
+        controlnet_units=[
+            ControlNetUnit(model="missing", module="none"),
+            ControlNetUnit(model="control_b", module="none", weight=0.8),
+        ],
+    )
+    image_missing = Image.new("RGB", (16, 16), "red")
+    image_b = Image.new("RGB", (16, 16), "blue")
+
+    prepared = backend._prepare_controlnets(request, [image_missing, image_b])
+
+    assert [unit.model for unit, _image, _path in prepared] == ["control_b"]
+    assert prepared[0][1].getpixel((0, 0)) == (0, 0, 255)
 
 
 def test_controlnet_pass_sends_multi_unit_images_and_scales():

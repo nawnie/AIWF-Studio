@@ -1260,6 +1260,94 @@ def test_wan_pipeline_cache_key_includes_temporal_chunk_settings():
     assert loads == [(16, 8, False), (16, 8, True), (20, 8, True), (20, 4, True)]
 
 
+def test_wan_dual_cache_hit_reconfigures_scheduler_without_reload():
+    torch = pytest.importorskip("torch")
+
+    class DummyVae:
+        def enable_tiling(self):
+            pass
+
+        def enable_slicing(self):
+            pass
+
+    class DummyPipe:
+        def __init__(self) -> None:
+            self.scheduler = SimpleNamespace(
+                kind="base",
+                config=SimpleNamespace(
+                    num_train_timesteps=1000,
+                    shift=5.0,
+                    use_dynamic_shifting=False,
+                    time_shift_type="exponential",
+                ),
+            )
+            self.transformer = torch.nn.Module()
+            self.vae = DummyVae()
+            self.sequential_calls = 0
+
+        def enable_sequential_cpu_offload(self):
+            self.sequential_calls += 1
+
+    backend = WanI2VBackend()
+    loads = []
+    scheduler_updates = []
+
+    def fake_load_dual_pipeline(**_kwargs):
+        loads.append("load")
+        return DummyPipe()
+
+    def fake_scheduler(current, *, flow_shift, sigma_type):
+        scheduler_updates.append((getattr(current, "kind", ""), sigma_type, flow_shift))
+        return SimpleNamespace(
+            kind=sigma_type,
+            config=SimpleNamespace(
+                num_train_timesteps=1000,
+                shift=flow_shift,
+                use_dynamic_shifting=False,
+                time_shift_type="exponential",
+            ),
+        )
+
+    ensure_kwargs = dict(
+        high_noise_model_id="high.safetensors",
+        low_noise_model_id="low.safetensors",
+        boundary_ratio=0.5,
+        vae_id="wan_vae.safetensors",
+        high_noise_lora_id=None,
+        high_noise_lora_scale=1.0,
+        low_noise_lora_id=None,
+        low_noise_lora_scale=1.0,
+        components_base="components",
+        offload="sequential",
+        sampler="euler",
+        text_encoder_path="",
+        chunk_size=16,
+        chunk_overlap=8,
+        temporal_chunks=False,
+    )
+
+    with patch("aiwf.infrastructure.wan.pipeline._require_wan"), patch(
+        "aiwf.infrastructure.wan.pipeline._is_native_comfy_fp8_transformer",
+        return_value=False,
+    ), patch("aiwf.infrastructure.wan.pipeline._is_gguf_transformer", return_value=False), patch(
+        "aiwf.infrastructure.wan.pipeline._new_wan_euler_scheduler",
+        side_effect=fake_scheduler,
+    ), patch("aiwf.infrastructure.wan.pipeline._ensure_wan_attention_processors"), patch(
+        "aiwf.infrastructure.wan.pipeline._apply_wan_attention_optimizations"
+    ), patch("aiwf.infrastructure.wan.pipeline._free_cuda_memory"), patch.object(
+        backend,
+        "_load_dual_pipeline",
+        side_effect=fake_load_dual_pipeline,
+    ):
+        first = backend._ensure(**ensure_kwargs, flow_shift=5.0, sigma_type="simple")
+        second = backend._ensure(**ensure_kwargs, flow_shift=9.0, sigma_type="karras")
+
+    assert first is second
+    assert loads == ["load"]
+    assert second.scheduler.kind == "karras"
+    assert scheduler_updates == [("base", "simple", 5.0), ("simple", "karras", 9.0)]
+
+
 def test_wan_single_5b_passes_temporal_chunk_settings_to_transformer():
     torch = pytest.importorskip("torch")
 

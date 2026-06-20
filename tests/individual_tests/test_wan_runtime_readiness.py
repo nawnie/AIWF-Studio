@@ -107,6 +107,23 @@ def test_pass5_fast_5b_preflight_rejects_wan21_vae(tmp_path: Path, monkeypatch):
     assert any("5B TI2V runtime expects the Wan 2.2" in error for error in result.errors)
 
 
+def test_pass5_fast_5b_preflight_rejects_clear_14b_transformer(tmp_path: Path, monkeypatch):
+    service = _svc(tmp_path)
+    monkeypatch.setattr(service, "_wan_file_candidates", lambda: [])
+    _write_component_base(service)
+    transformer = service.models_dir() / "Safetensor" / "wan2.2_i2v_14B_high_noise_fp8.safetensors"
+    vae = service.flags.resolved_models_dir() / "VAE" / "wan2.2_vae.safetensors"
+    _write_fake_safetensors(transformer)
+    _write_fake_safetensors(vae)
+
+    result = service.preflight(
+        WanI2VRequest(runtime_mode=WAN_RUNTIME_FAST_5B, model_id=transformer.name)
+    )
+
+    assert result.ok is False
+    assert any("looks like 14B" in error and "expects Wan TI2V 5B" in error for error in result.errors)
+
+
 def test_pass5_preflight_rejects_flux_t5xxl_text_encoder(tmp_path: Path, monkeypatch):
     service = _svc(tmp_path)
     monkeypatch.setattr(service, "_wan_file_candidates", lambda: [])

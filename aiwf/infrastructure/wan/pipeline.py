@@ -178,6 +178,30 @@ def _new_wan_euler_simple_scheduler(base_scheduler: Any, *, flow_shift: float):
     return _new_wan_euler_scheduler(base_scheduler, flow_shift=flow_shift, sigma_type="simple")
 
 
+def _configure_wan_scheduler(pipe: Any, *, sampler: str, sigma_type: str, flow_shift: float) -> None:
+    _sampler = str(sampler or "euler")
+    _sigma = str(sigma_type or "beta")
+    if _sampler == "heun":
+        from diffusers import FlowMatchHeunDiscreteScheduler
+
+        base_cfg = getattr(pipe.scheduler, "config", pipe.scheduler)
+        shift = float(flow_shift or getattr(base_cfg, "flow_shift", getattr(base_cfg, "shift", 5.0)) or 5.0)
+        pipe.scheduler = FlowMatchHeunDiscreteScheduler(
+            num_train_timesteps=int(getattr(base_cfg, "num_train_timesteps", 1000) or 1000),
+            shift=shift,
+            use_dynamic_shifting=bool(getattr(base_cfg, "use_dynamic_shifting", False)),
+        )
+        _video_status(f"Using Wan sampler: FlowMatch Heun (2nd-order) | shift={shift:g}")
+        return
+
+    pipe.scheduler = _new_wan_euler_scheduler(
+        pipe.scheduler,
+        flow_shift=float(flow_shift),
+        sigma_type=_sigma,
+    )
+    _video_status(f"Using Wan sampler: FlowMatch Euler | scheduler={_sigma} | shift={float(flow_shift):g}")
+
+
 class WanUnavailable(RuntimeError):
     """Raised when the Wan deps or model are missing/unloadable."""
 
@@ -2459,6 +2483,12 @@ class WanI2VBackend:
         )
 
         if self._pipe is not None and self._key == key:
+            _configure_wan_scheduler(
+                self._pipe,
+                sampler=sampler,
+                sigma_type=sigma_type,
+                flow_shift=flow_shift,
+            )
             return self._pipe
 
         # Switching to a different model set: fully evict the previous pipeline and
@@ -2503,27 +2533,12 @@ class WanI2VBackend:
             temporal_chunks=_cache_temporal_chunks,
         )
 
-        _sampler = str(sampler or "euler")
-        _sigma = str(sigma_type or "beta")
-        if _sampler == "heun":
-            from diffusers import FlowMatchHeunDiscreteScheduler
-            base_cfg = getattr(pipe.scheduler, "config", pipe.scheduler)
-            shift = float(flow_shift or getattr(base_cfg, "flow_shift", getattr(base_cfg, "shift", 5.0)) or 5.0)
-            pipe.scheduler = FlowMatchHeunDiscreteScheduler(
-                num_train_timesteps=int(getattr(base_cfg, "num_train_timesteps", 1000) or 1000),
-                shift=shift,
-                use_dynamic_shifting=bool(getattr(base_cfg, "use_dynamic_shifting", False)),
-            )
-            _video_status(f"Using Wan sampler: FlowMatch Heun (2nd-order) | shift={shift:g}")
-        else:
-            pipe.scheduler = _new_wan_euler_scheduler(
-                pipe.scheduler,
-                flow_shift=float(flow_shift),
-                sigma_type=_sigma,
-            )
-            _video_status(
-                f"Using Wan sampler: FlowMatch Euler | scheduler={_sigma} | shift={float(flow_shift):g}"
-            )
+        _configure_wan_scheduler(
+            pipe,
+            sampler=sampler,
+            sigma_type=sigma_type,
+            flow_shift=flow_shift,
+        )
 
         if offload == "sequential":
             pipe.enable_sequential_cpu_offload()
@@ -2788,26 +2803,12 @@ class WanI2VBackend:
             _video_status(f"Using explicit Wan VAE for 5B path: {Path(vae_id).name}")
             pipe.vae = _load_wan_vae(vae_id, torch_dtype=torch.float32)
 
-        _sampler = str(sampler or "euler")
-        _sigma = str(sigma_type or "beta")
-        if _sampler == "heun":
-            from diffusers import FlowMatchHeunDiscreteScheduler
-
-            base_cfg = getattr(pipe.scheduler, "config", pipe.scheduler)
-            shift = float(flow_shift or getattr(base_cfg, "flow_shift", getattr(base_cfg, "shift", 5.0)) or 5.0)
-            pipe.scheduler = FlowMatchHeunDiscreteScheduler(
-                num_train_timesteps=int(getattr(base_cfg, "num_train_timesteps", 1000) or 1000),
-                shift=shift,
-                use_dynamic_shifting=bool(getattr(base_cfg, "use_dynamic_shifting", False)),
-            )
-            _video_status(f"Using Wan sampler: FlowMatch Heun (2nd-order) | shift={shift:g}")
-        else:
-            pipe.scheduler = _new_wan_euler_scheduler(
-                pipe.scheduler,
-                flow_shift=float(flow_shift),
-                sigma_type=_sigma,
-            )
-            _video_status(f"Using Wan sampler: FlowMatch Euler | scheduler={_sigma} | shift={float(flow_shift):g}")
+        _configure_wan_scheduler(
+            pipe,
+            sampler=sampler,
+            sigma_type=sigma_type,
+            flow_shift=flow_shift,
+        )
 
         if offload == "sequential":
             pipe.enable_sequential_cpu_offload()

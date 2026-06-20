@@ -19,6 +19,7 @@ SUITES: dict[str, tuple[str, ...]] = {
         "test_api_security.py",
     ),
     "core": (
+        "test_bootstrap_context.py",
         "test_bootstrap_env.py",
         "test_domain.py",
         "test_engine_domain.py",
@@ -29,7 +30,9 @@ SUITES: dict[str, tuple[str, ...]] = {
         "test_queue.py",
         "test_queue_history.py",
         "test_settings.py",
+        "test_settings_backend_restart.py",
         "test_storage.py",
+        "test_test_runner.py",
         "test_tags.py",
         "test_theme.py",
         "test_web_registry.py",
@@ -37,12 +40,15 @@ SUITES: dict[str, tuple[str, ...]] = {
     "engines": (
         "test_app_startup.py",
         "test_devices.py",
+        "test_engine_supervisor.py",
+        "test_onnx_session.py",
         "test_ollama_client.py",
         "test_pipeline_benchmark.py",
         "test_pipeline_registry.py",
         "test_pipeline_preflight.py",
         "test_process_supervisor.py",
         "test_torch_attention.py",
+        "test_vram_budget.py",
         "test_worker_probe.py",
         "test_worker_tenant.py",
     ),
@@ -59,6 +65,7 @@ SUITES: dict[str, tuple[str, ...]] = {
         "test_mask.py",
         "test_outpaint.py",
         "test_preload_guard.py",
+        "test_prompt_encode.py",
         "test_prompt_dynamics.py",
         "test_prompt_processor.py",
         "test_prompt_style.py",
@@ -67,6 +74,7 @@ SUITES: dict[str, tuple[str, ...]] = {
         "test_samplers.py",
         "test_studio.py",
         "test_studio_lora_stack.py",
+        "test_style_presets.py",
     ),
     "models": (
         "test_civitai_browser.py",
@@ -75,13 +83,19 @@ SUITES: dict[str, tuple[str, ...]] = {
         "test_model_catalog.py",
         "test_model_download.py",
         "test_model_info_lookup.py",
+        "test_model_inventory.py",
+        "test_model_manager_ops.py",
         "test_model_ops.py",
         "test_model_path_imports.py",
         "test_model_profile.py",
         "test_model_scan_paths.py",
         "test_quantization.py",
     ),
+    "optimization": (
+        "tests/test_optimization.py",
+    ),
     "services": (
+        "test_audio.py",
         "test_client_log.py",
         "test_dev_diagnostics.py",
         "test_enhance.py",
@@ -117,11 +131,17 @@ SUITES: dict[str, tuple[str, ...]] = {
         "test_video_export.py",
         "test_video_processing.py",
         "test_video_tools.py",
+        "test_vsr.py",
     ),
     "wan": (
         "test_wan.py",
         "test_wan_acceleration.py",
         "test_wan_gguf_runtime.py",
+        "test_wan_models.py",
+        "test_wan_native_denoise.py",
+        "test_wan_native_runtime.py",
+        "test_wan_quant_format.py",
+        "test_wan_runtime_readiness.py",
         "test_wan_sliced_sampler.py",
         "test_wan_vram.py",
     ),
@@ -198,7 +218,7 @@ def paths_for_suite(name: str) -> list[str]:
         return [str(INDIVIDUAL_ROOT)]
     if key not in SUITES:
         raise ValueError(f"Unknown suite: {name}")
-    return [str(INDIVIDUAL_ROOT / filename) for filename in SUITES[key]]
+    return [resolve_test_path(filename) for filename in SUITES[key]]
 
 
 def resolve_targets(*, full: bool, suites: list[str], tests: list[str], selections: list[str]) -> list[str]:

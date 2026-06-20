@@ -41,16 +41,11 @@ def apply_loras(
 ) -> list[str]:
     """Load LoRA adapters onto an active diffusers pipeline. Returns adapter names."""
     if not loras:
+        clear_loras(pipe)
         return []
 
-    adapter_names: list[str] = []
-    adapter_weights: list[float] = []
-
-    # Pipelines share their UNet (txt2img/img2img/hires), so an adapter loaded
-    # via one pipe is already registered when the next pipe asks for it.
-    existing = set(getattr(getattr(pipe, "unet", None), "peft_config", None) or {})
-
-    for index, ref in enumerate(loras):
+    resolved: list[tuple[LoraRef, LoraInfo]] = []
+    for ref in loras:
         match = resolve_lora(catalog, ref.name)
         if match is None:
             logger.warning("LoRA not found: %s", ref.name)
@@ -60,14 +55,18 @@ def apply_loras(
                 f"LoRA '{match.title}' targets {match.architecture}, "
                 f"but the selected checkpoint is {base_architecture or 'unknown'}."
             )
+        resolved.append((ref, match))
 
+    clear_loras(pipe)
+    if not resolved:
+        return []
+
+    adapter_names: list[str] = []
+    adapter_weights: list[float] = []
+
+    for index, (ref, match) in enumerate(resolved):
         adapter_name = f"aiwf_lora_{index}"
         path = Path(match.path)
-        if adapter_name in existing:
-            adapter_names.append(adapter_name)
-            adapter_weights.append(ref.weight)
-            logger.debug("LoRA adapter %s already registered; reusing", adapter_name)
-            continue
         try:
             if path.is_file():
                 pipe.load_lora_weights(str(path.parent), weight_name=path.name, adapter_name=adapter_name)

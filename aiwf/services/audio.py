@@ -153,7 +153,8 @@ class AudioGenerationService:
         if duration_seconds is None or duration_seconds <= 0:
             info = VideoProcessor().probe(video_path)
             duration_seconds = info.duration_seconds or options.duration_seconds
-        next_options = options.model_copy(update={"duration_seconds": float(duration_seconds)})
+        safe_duration = min(120.0, max(1.0, float(duration_seconds)))
+        next_options = options.model_copy(update={"duration_seconds": safe_duration})
         if str(next_options.kind or "").lower() == "video_audio":
             return self.generate_video_audio(video_path, next_options)
         return self.generate(next_options)
@@ -386,14 +387,34 @@ class AudioGenerationService:
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             raise AudioUnavailable(f"MMAudio video audio failed: {detail}")
-        source = run_dir / f"{video_path.stem}.flac"
-        if not source.is_file() or source.stat().st_size <= 0:
-            raise AudioUnavailable(f"MMAudio did not create expected audio: {source}")
+        source = self._find_mmaudio_audio_output(run_dir, expected_stem=video_path.stem)
         if source.resolve() != dest.resolve():
             if dest.exists():
                 dest.unlink()
             shutil.move(str(source), str(dest))
         return 44100 if "44k" in variant else 16000
+
+    @staticmethod
+    def _find_mmaudio_audio_output(run_dir: Path, *, expected_stem: str) -> Path:
+        expected = run_dir / f"{expected_stem}.flac"
+        if expected.is_file() and expected.stat().st_size > 0:
+            return expected
+        candidates = sorted(
+            (
+                path
+                for path in run_dir.glob("*.flac")
+                if path.is_file() and path.stat().st_size > 0
+            ),
+            key=lambda path: (path.stat().st_mtime, path.name),
+            reverse=True,
+        )
+        if len(candidates) == 1:
+            return candidates[0]
+        found = ", ".join(path.name for path in candidates[:5]) or "none"
+        raise AudioUnavailable(
+            f"MMAudio did not create expected audio: {expected}. "
+            f"Found {len(candidates)} .flac file(s): {found}"
+        )
 
     def _mmaudio_root(self) -> Path:
         return self.flags.data_dir.resolve() / "engines" / "audio" / "MMAudio"

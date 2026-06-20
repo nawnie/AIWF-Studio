@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
 from PIL import Image
+from pydantic import ValidationError
 
 from aiwf.api.schemas import (
     BatchImg2ImgPayload,
@@ -18,10 +19,12 @@ from aiwf.api.schemas import (
     PlotPayload,
     Txt2ImgPayload,
 )
+from aiwf.core.domain.controlnet import ControlNetUnit
 from aiwf.core.domain.enhance import RestoreOptions, UpscaleOptions
 from aiwf.core.domain.generation import JobRecord, JobState
 from aiwf.infrastructure.diffusers.mask import prepare_inpaint_mask
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest
+from aiwf.core.infotext import normalize_sampler
 from aiwf.services.plot import PlotRequest
 
 if TYPE_CHECKING:
@@ -57,8 +60,77 @@ def _job_status(job: JobRecord) -> dict[str, Any]:
     }
 
 
+def _a1111_alwayson_args(data: dict[str, Any], script_name: str) -> list[Any]:
+    scripts = data.get("alwayson_scripts") or {}
+    if not isinstance(scripts, dict):
+        return []
+    for name, script in scripts.items():
+        if str(name).lower() != script_name.lower() or not isinstance(script, dict):
+            continue
+        args = script.get("args", [])
+        return args if isinstance(args, list) else []
+    return []
+
+
+def _a1111_inpaint_mask_content(value: Any) -> str:
+    mapping = {
+        0: "fill",
+        1: "original",
+        2: "latent noise",
+        3: "latent nothing",
+        "0": "fill",
+        "1": "original",
+        "2": "latent noise",
+        "3": "latent nothing",
+        "fill": "fill",
+        "original": "original",
+        "latent noise": "latent noise",
+        "latent_noise": "latent noise",
+        "latent nothing": "latent nothing",
+        "latent_nothing": "latent nothing",
+    }
+    return mapping.get(value, str(value or "original"))
+
+
+def _a1111_controlnet_units(data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_units = data.get("controlnet_units")
+    if raw_units is None:
+        raw_units = _a1111_alwayson_args(data, "controlnet")
+    if not raw_units:
+        return []
+    if not isinstance(raw_units, list):
+        raise HTTPException(422, "controlnet_units must be a list")
+
+    units: list[dict[str, Any]] = []
+    for raw in raw_units:
+        if not isinstance(raw, dict):
+            raise HTTPException(422, "ControlNet units must be objects")
+        unit = dict(raw)
+        image = unit.get("image")
+        if isinstance(image, dict):
+            if "image" in image:
+                unit["image"] = image["image"]
+            if "mask" in image and "mask" not in unit:
+                unit["mask"] = image["mask"]
+        if "input_image" in unit and "image" not in unit:
+            unit["image"] = unit["input_image"]
+        if "mask_image" in unit and "mask" not in unit:
+            unit["mask"] = unit["mask_image"]
+        if "detect_resolution" in unit and "processor_res" not in unit:
+            unit["processor_res"] = unit["detect_resolution"]
+        try:
+            units.append(ControlNetUnit.model_validate(unit).model_dump())
+        except ValidationError as exc:
+            raise HTTPException(422, f"Invalid ControlNet unit: {exc}") from exc
+    return units
+
+
 def _a1111_generation_request(data: dict[str, Any], mode: GenerationMode) -> GenerationRequest:
     override_settings = data.get("override_settings") or {}
+    sampler = normalize_sampler(data.get("sampler_name") or data.get("sampler")) or "euler_a"
+    hr_denoising_strength = data.get("hr_denoising_strength")
+    if hr_denoising_strength is None and mode == GenerationMode.TXT2IMG and "denoising_strength" in data:
+        hr_denoising_strength = data["denoising_strength"]
     mapped = {
         "mode": mode,
         "prompt": data.get("prompt", ""),
@@ -68,17 +140,25 @@ def _a1111_generation_request(data: dict[str, Any], mode: GenerationMode) -> Gen
         "width": data.get("width", 512),
         "height": data.get("height", 512),
         "seed": data.get("seed", -1),
-        "sampler": data.get("sampler_name") or data.get("sampler", "euler_a"),
-        "scheduler": (data.get("scheduler") or "automatic").lower(),
+        "sampler": sampler,
+        "scheduler": str(data.get("scheduler") or "automatic").lower(),
         "batch_size": data.get("batch_size", 1),
         "batch_count": data.get("n_iter", data.get("batch_count", 1)),
         "denoising_strength": data.get("denoising_strength", 0.75),
-        "mask_blur": data.get("mask_blur", 4),
-        "clip_skip": data.get("clip_skip", data.get("CLIP_stop_at_last_layers", 1)),
+        "mask_blur": data.get("mask_blur", data.get("mask_blur_x", 4)),
+        "inpaint_only_masked": data.get("inpaint_full_res", data.get("inpaint_only_masked", False)),
+        "inpaint_masked_padding": data.get("inpaint_full_res_padding", data.get("inpaint_masked_padding", 32)),
+        "inpaint_mask_content": _a1111_inpaint_mask_content(
+            data.get("inpainting_fill", data.get("inpaint_mask_content", "original"))
+        ),
+        "clip_skip": data.get(
+            "clip_skip",
+            data.get("CLIP_stop_at_last_layers", override_settings.get("CLIP_stop_at_last_layers", 1)),
+        ),
         "enable_hr": data.get("enable_hr", False),
         "hr_scale": data.get("hr_scale", 2.0),
         "hr_steps": data.get("hr_second_pass_steps", data.get("hr_steps", 20)),
-        "hr_denoising_strength": data.get("denoising_strength", data.get("hr_denoising_strength", 0.35)),
+        "hr_denoising_strength": 0.35 if hr_denoising_strength is None else hr_denoising_strength,
         "hr_upscaler": data.get("hr_upscaler", "lanczos"),
         "save_before_hires": data.get("save_before_hires", False),
         "save_interrupted": data.get("save_interrupted", False),
@@ -89,9 +169,12 @@ def _a1111_generation_request(data: dict[str, Any], mode: GenerationMode) -> Gen
         "checkpoint_id": override_settings.get("sd_model_checkpoint") or data.get("checkpoint_id"),
         "vae_id": override_settings.get("sd_vae") or data.get("vae_id"),
         "save_images": not data.get("do_not_save_samples", False),
-        "controlnet_units": data.get("controlnet_units") or data.get("alwayson_scripts", {}).get("controlnet", {}).get("args", []),
+        "controlnet_units": _a1111_controlnet_units(data),
     }
-    return GenerationRequest.model_validate(mapped)
+    try:
+        return GenerationRequest.model_validate(mapped)
+    except ValidationError as exc:
+        raise HTTPException(422, f"Invalid generation request: {exc}") from exc
 
 
 def _a1111_response(job: JobRecord, parameters: dict[str, Any]) -> dict[str, Any]:
@@ -375,10 +458,14 @@ def build_router(ctx: AppContext) -> APIRouter:
         images = payload.get("init_images") or []
         if not images:
             raise HTTPException(422, "init_images required")
+        init_image = _decode(images[0])
         mask_images = None
         if payload.get("mask"):
-            mask_images = [prepare_inpaint_mask(_decode(payload["mask"]), size=_decode(images[0]).size)]
-        job = ctx.generation.submit(request, init_images=[_decode(images[0])], mask_images=mask_images)
+            mask = prepare_inpaint_mask(_decode(payload["mask"]), size=init_image.size)
+            if mask is None or mask.getbbox() is None:
+                raise HTTPException(422, "mask must contain painted regions")
+            mask_images = [mask]
+        job = ctx.generation.submit(request, init_images=[init_image], mask_images=mask_images)
         return _a1111_response(job, payload)
 
     @sdapi.get("/progress")

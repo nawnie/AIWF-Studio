@@ -9,7 +9,7 @@ import shutil
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +102,7 @@ class ParsedRemote:
     source: ModelSource
     url: str
     filename: str
+    local_filename: str = ""
     repo_id: str = ""
     civitai_model_id: int | None = None
     civitai_version_id: int | None = None
@@ -396,6 +397,20 @@ def is_unsafe_download_format(filename: str) -> bool:
     return Path(filename).suffix.lower() in _UNSAFE_EXTENSIONS
 
 
+def _safe_filename(filename: str) -> str:
+    name = Path(str(filename).replace("\\", "/")).name.strip()
+    if not name or name in {".", ".."}:
+        raise ValueError("Downloaded filename is invalid.")
+    return name
+
+
+def _safe_repo_dir_name(repo_id: str) -> str:
+    name = Path(str(repo_id).replace("\\", "/").rstrip("/").split("/")[-1]).name.strip()
+    if not name or name in {".", ".."}:
+        raise ValueError("Repository name cannot be used as a folder.")
+    return name
+
+
 def write_download_receipt(dest: Path, *, url: str, source: str) -> None:
     """Write a companion JSON receipt alongside a downloaded model file.
 
@@ -456,26 +471,32 @@ class ModelDownloadService:
         return root
 
     def destination_for(self, category: ModelCategory, filename: str) -> Path:
-        return self.destination_dir(category) / filename
+        return self.destination_dir(category) / _safe_filename(filename)
 
     def snapshot_destination_for(self, category: ModelCategory, repo_id: str) -> Path:
-        name = repo_id.split("/")[-1]
+        name = _safe_repo_dir_name(repo_id)
         if category == "preprocessor" and name.lower() == "annotators":
             return self.destination_dir(category)
         return self.destination_dir(category) / name
 
     def _validate_destination_filename(self, category: ModelCategory, filename: str) -> None:
-        if category in {"controlnet", "preprocessor", "wan_diffusers"} and not filename:
+        safe_name = _safe_filename(filename) if filename else ""
+        if category == "wan_diffusers" and safe_name:
+            raise ValueError(
+                "Wan Diffusers downloads must be full Hugging Face repository folders. "
+                "Leave the filename empty so AIWF can save the folder under models/wan/Diffusers/."
+            )
+        if category in {"controlnet", "preprocessor", "wan_diffusers"} and not safe_name:
             return
         allowed = CATEGORY_EXTENSION_RULES.get(category)
-        if not allowed or not filename:
+        if not allowed or not safe_name:
             return
-        suffix = Path(filename).suffix.lower()
+        suffix = Path(safe_name).suffix.lower()
         if suffix not in allowed:
             pretty = ", ".join(allowed)
             raise ValueError(
                 f"{CATEGORY_LABELS.get(category, category)} downloads must use {pretty} files. "
-                f"Got `{filename}`."
+                f"Got `{safe_name}`."
             )
 
     def list_catalog(self) -> list[CatalogEntry]:
@@ -488,18 +509,67 @@ class ModelDownloadService:
         return None
 
     def is_catalog_installed(self, entry: CatalogEntry) -> bool:
-        filename = entry.filename or self._catalog_filename_hint(entry)
-        if not filename:
+        if entry.snapshot:
             target = self.snapshot_destination_for(entry.category, entry.repo_id)
-            return entry.snapshot and target.is_dir() and any(target.iterdir())
+            return self._snapshot_target_ready(entry.category, target)
+        filename = self._catalog_local_filename_hint(entry)
+        if not filename:
+            return False
         return self.destination_for(entry.category, filename).is_file()
 
     def _catalog_filename_hint(self, entry: CatalogEntry) -> str:
         if entry.filename:
-            return entry.filename
+            return Path(entry.filename.replace("\\", "/")).name
         if entry.url:
             return Path(urllib.parse.urlparse(entry.url).path).name
         return ""
+
+    def _catalog_local_filename_hint(self, entry: CatalogEntry) -> str:
+        filename = self._catalog_filename_hint(entry)
+        if not filename:
+            return ""
+        if self._catalog_filename_needs_prefix(entry, filename):
+            return f"{entry.key}-{filename}"
+        return filename
+
+    def _catalog_filename_needs_prefix(self, entry: CatalogEntry, filename: str) -> bool:
+        lowered = filename.lower()
+        matches = [
+            other
+            for other in MODEL_DOWNLOAD_CATALOG
+            if not other.snapshot
+            and other.category == entry.category
+            and self._catalog_filename_hint(other).lower() == lowered
+        ]
+        return len(matches) > 1
+
+    def _snapshot_target_ready(self, category: ModelCategory, target: Path) -> bool:
+        if not target.is_dir():
+            return False
+        if category in {"checkpoint", "wan_diffusers"}:
+            return (target / "model_index.json").is_file()
+        allowed = CATEGORY_EXTENSION_RULES.get(category, ())
+        if allowed:
+            try:
+                paths = [path for path in target.rglob("*") if path.is_file()]
+                has_model_file = any(
+                    path.is_file() and path.suffix.lower() in allowed
+                    for path in paths
+                )
+                if category == "controlnet":
+                    has_diffusers_weight = any(
+                        path.name.startswith("diffusion_pytorch_model.")
+                        for path in paths
+                    )
+                    if has_diffusers_weight and not (target / "config.json").is_file():
+                        return False
+                return has_model_file
+            except OSError:
+                return False
+        try:
+            return any(target.iterdir())
+        except OSError:
+            return False
 
     def parse_reference(
         self,
@@ -521,16 +591,22 @@ class ModelDownloadService:
 
     def _catalog_to_remote(self, entry: CatalogEntry) -> ParsedRemote:
         if entry.source == "huggingface":
-            return _parse_hf_reference(entry.repo_id, entry.filename, allow_snapshot=entry.snapshot)
-        if entry.source == "civitai":
-            return _resolve_civitai_download(
+            remote = _parse_hf_reference(entry.repo_id, entry.filename, allow_snapshot=entry.snapshot)
+        elif entry.source == "civitai":
+            remote = _resolve_civitai_download(
                 model_id=entry.civitai_model_id,
                 version_id=entry.civitai_version_id,
                 token=_civitai_token(),
             )
-        if entry.source == "direct":
-            return _parse_direct_url(entry.url)
-        raise ValueError(f"Unsupported catalog source: {entry.source}")
+        elif entry.source == "direct":
+            remote = _parse_direct_url(entry.url)
+        else:
+            raise ValueError(f"Unsupported catalog source: {entry.source}")
+        if not remote.snapshot:
+            local_filename = self._catalog_local_filename_hint(entry)
+            if local_filename and local_filename != remote.filename:
+                remote = replace(remote, local_filename=local_filename)
+        return remote
 
     def download_parsed(
         self,
@@ -551,8 +627,9 @@ class ModelDownloadService:
                     "Wan Diffusers folders, ControlNet, and preprocessor categories."
                 )
             return self._download_hf_snapshot(remote, category, on_progress=on_progress)
-        self._validate_destination_filename(category, remote.filename)
-        dest = self.destination_for(category, remote.filename)
+        target_filename = remote.local_filename or remote.filename
+        self._validate_destination_filename(category, target_filename)
+        dest = self.destination_for(category, target_filename)
         if dest.is_file():
             return dest
 

@@ -134,6 +134,8 @@ def _inject_stubs():
         "aiwf.infrastructure.controlnet.images": dict(
             decode_control_image=lambda *a, **k: None),
         "aiwf.infrastructure.controlnet.preprocess": dict(
+            CV2_MODULES=set(),
+            PREPROCESS_MODULES={},
             PreprocessParams=type("PreprocessParams", (), {}),
             preprocess_control_image=lambda *a, **k: None,
         ),

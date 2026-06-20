@@ -7,6 +7,7 @@ from pathlib import Path
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.infrastructure.diffusers.checkpoints import scan_from_flags
 from aiwf.infrastructure.diffusers.loras import scan_loras
+from aiwf.infrastructure.model_header import ARCH_SD35_CHECKPOINT, read_model_info
 from aiwf.infrastructure.model_inventory import inventory_path, scan_and_write_model_inventory
 
 
@@ -131,5 +132,77 @@ def test_sd35_diffusers_folder_is_checkpoint(tmp_path: Path):
     folder_record = next(item for item in records if item.path == str(sd35.resolve()))
     assert folder_record.family == "checkpoint"
     assert folder_record.architecture == "sd35"
+    assert folder_record.current_subdir == "Stable-diffusion"
+    assert folder_record.recommended_subdir == "Stable-diffusion"
+    assert folder_record.should_move is False
     assert [checkpoint.id for checkpoint in checkpoints] == ["stable-diffusion-3.5-medium"]
     assert checkpoints[0].architecture == "sd35"
+
+
+def test_model_header_labels_sd3_joint_blocks_as_sd35(tmp_path: Path):
+    model = tmp_path / "models" / "Stable-diffusion" / "sd3_medium.safetensors"
+    _write_safetensors_header(
+        model,
+        {
+            "model.diffusion_model.joint_blocks.0.attn.qkv.weight": {
+                "dtype": "F16",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+    )
+
+    info = read_model_info(model)
+
+    assert info.arch == ARCH_SD35_CHECKPOINT
+    assert "SD3.5" in info.display_name
+
+
+def test_embeddings_folder_does_not_enter_checkpoint_catalog(tmp_path: Path):
+    models = tmp_path / "models"
+    embedding = models / "embeddings" / "EasyNegative.safetensors"
+    _write_safetensors_header(
+        embedding,
+        {
+            "emb_params": {
+                "dtype": "F16",
+                "shape": [77, 768],
+                "data_offsets": [0, 1024],
+            }
+        },
+    )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+
+    record = next(item for item in records if item.filename == "EasyNegative.safetensors")
+    assert record.family == "embedding"
+    assert record.recommended_subdir == "embeddings"
+    assert checkpoints == []
+
+
+def test_lora_architecture_can_come_from_parent_folder(tmp_path: Path):
+    models = tmp_path / "models"
+    lora = models / "Loras" / "SDXL" / "folder_tagged_style.safetensors"
+    _write_safetensors_header(
+        lora,
+        {
+            "lora_unet_down_blocks_0.lora_down.weight": {
+                "dtype": "F16",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+        {"ss_network_module": "networks.lora"},
+    )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = scan_and_write_model_inventory(flags)
+    image_loras = scan_loras(flags)
+
+    record = next(item for item in records if item.filename == "folder_tagged_style.safetensors")
+    assert record.family == "lora"
+    assert record.architecture == "sdxl"
+    assert record.recommended_subdir == "Loras/SDXL"
+    assert image_loras[0].architecture == "sdxl"

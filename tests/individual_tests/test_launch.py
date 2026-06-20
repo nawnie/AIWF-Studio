@@ -229,3 +229,16 @@ def test_requirements_satisfied_detects_installed_and_missing(monkeypatch, tmp_p
 
     requirements.write_text("definitely-missing-aiwf-package==999\n", encoding="utf-8")
     assert launch.requirements_satisfied(sys.executable) is False
+
+
+def test_sageattention_install_is_opt_in():
+    assert launch.should_install_sageattention([]) is False
+    assert launch.should_install_sageattention(["--skip-sageattention"]) is False
+    assert launch.should_install_sageattention(["--install-sageattention"]) is True
+    assert launch.should_install_sageattention(["--sageattention"]) is True
+
+
+def test_launch_only_flags_are_not_passed_to_webui():
+    argv = ["--install-sageattention", "--listen", "--skip-sageattention", "--port", "7861"]
+
+    assert launch.strip_launch_only_args(argv) == ["--listen", "--port", "7861"]

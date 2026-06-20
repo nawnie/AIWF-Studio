@@ -55,6 +55,8 @@ def build_controlnet_stack(
                 resolved = controlnet.resolve_model(slot.model_id)
                 if resolved is not None:
                     assert_controlnet_checkpoint_compatible(resolved.path, checkpoint_architecture)
+            if float(slot.guidance_start) > float(slot.guidance_end):
+                raise ValueError("Guidance start must be less than or equal to guidance end.")
         except ValueError as exc:
             raise ValueError(f"{slot.label}: {exc}") from exc
 

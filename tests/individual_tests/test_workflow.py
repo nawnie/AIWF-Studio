@@ -33,6 +33,22 @@ def test_builtin_workflow_has_steps():
     assert BUILTIN_WORKFLOWS[0].steps[0].type == WorkflowStepType.TXT2IMG
 
 
+def test_builtin_generation_steps_validate_request_defaults():
+    mode_by_step = {
+        WorkflowStepType.TXT2IMG: GenerationMode.TXT2IMG,
+        WorkflowStepType.IMG2IMG: GenerationMode.IMG2IMG,
+        WorkflowStepType.INPAINT: GenerationMode.INPAINT,
+    }
+    for workflow in BUILTIN_WORKFLOWS:
+        for step in workflow.steps:
+            mode = mode_by_step.get(step.type)
+            if mode is not None:
+                request = GenerationRequest(mode=mode, **step.params)
+                assert request.width % 8 == 0
+                assert request.height % 8 == 0
+                assert request.seed == step.params.get("seed", -1)
+
+
 def test_workflow_store_save_and_load(tmp_path: Path):
     store = WorkflowStore(RuntimeFlags(data_dir=tmp_path), UserSettings())
     workflow = WorkflowDefinition(

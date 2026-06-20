@@ -56,6 +56,14 @@ def _collect():
     return run_params, run_vararg, inputs_names
 
 
+def _function_node(name: str) -> ast.FunctionDef:
+    tree = ast.parse(STUDIO.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name}() not found in studio/tab.py")
+
+
 def test_generate_inputs_match_run_signature_shape():
     run_params, run_vararg, inputs_names = _collect()
     assert run_params is not None, "run() not found in studio/tab.py"
@@ -76,3 +84,23 @@ def test_generate_inputs_anchor_positions_align():
             f"generate_inputs[{ci}]={component!r} feeds run() param "
             f"{run_params[ci]!r}, expected {param!r} (at position {pi})"
         )
+
+
+def test_live_generation_request_normalizes_sampler_schedule_pair():
+    node = _function_node("_generation_request")
+    assert any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "normalize_schedule_id_for_sampler"
+        for call in ast.walk(node)
+    )
+
+
+def test_live_generation_request_rejects_stale_checkpoint_selection():
+    node = _function_node("_generation_request")
+    assert any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "resolve_checkpoint_id"
+        for call in ast.walk(node)
+    )

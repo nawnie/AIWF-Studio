@@ -60,6 +60,26 @@ def test_runner_resolves_multi_suite_and_dedupes():
     assert any(target.endswith("test_settings.py") for target in targets)
 
 
+def test_named_suites_cover_all_release_tests():
+    runner = _load_runner()
+    root = Path(__file__).resolve().parents[2]
+    expected = {
+        path.resolve()
+        for path in (root / "tests" / "individual_tests").glob("test_*.py")
+    }
+    expected.update(
+        path.resolve()
+        for path in (root / "tests").glob("test_*.py")
+    )
+    covered = {
+        Path(path).resolve()
+        for suite in runner.suite_names()
+        for path in runner.paths_for_suite(suite)
+    }
+
+    assert expected - covered == set()
+
+
 def test_runner_builds_pytest_command():
     runner = _load_runner()
 

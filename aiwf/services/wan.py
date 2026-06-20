@@ -31,6 +31,7 @@ from aiwf.services.wan_models import (
     wan_lora_matches,
     wan_model_pair_compatibility,
     wan_model_pair_family_key,
+    wan_model_header_info,
     wan_model_quant_family,
     wan_model_stage_role,
     wan_model_storage_family,
@@ -74,6 +75,35 @@ def _looks_like_incompatible_t5xxl(text_encoder_id: str | None) -> bool:
     if any(token in text for token in ("flux", "sd3", "stable-diffusion-3")):
         return True
     return "t5xxl" in text and not any(token in text for token in ("umt5", "nsfw_wan"))
+
+
+def _clear_wan_size_class(model_path: str | Path | None) -> str:
+    text = str(model_path or "").strip()
+    if not text:
+        return ""
+    try:
+        info = wan_model_header_info(text)
+        if info.ok and info.size_class:
+            return info.size_class
+    except Exception:
+        pass
+    name = Path(text).name.lower()
+    if "5b" in name or "ti2v" in name:
+        return "5b"
+    if "14b" in name or "a14b" in name:
+        return "14b"
+    return ""
+
+
+def _route_size_mismatch_error(label: str, model_path: str | Path, expected_size: str) -> str | None:
+    actual_size = _clear_wan_size_class(model_path)
+    if actual_size and actual_size != expected_size:
+        expected_label = "Wan TI2V 5B" if expected_size == "5b" else "Wan A14B high/low"
+        return (
+            f"{label} transformer looks like {actual_size.upper()}, but this route expects "
+            f"{expected_label} weights: {Path(model_path).name}"
+        )
+    return None
 
 
 def _video_status(message: str) -> None:
@@ -490,6 +520,9 @@ class WanService:
                 e, w = self._validate_transformer_file(Path(high_res), "High noise")
                 errors.extend(e)
                 warnings.extend(w)
+                mismatch = _route_size_mismatch_error("High noise", high_res, "14b")
+                if mismatch:
+                    errors.append(mismatch)
 
             if not request.low_noise_model_id:
                 errors.append("Select a Low noise transformer.")
@@ -498,6 +531,9 @@ class WanService:
                 e, w = self._validate_transformer_file(Path(low_res), "Low noise")
                 errors.extend(e)
                 warnings.extend(w)
+                mismatch = _route_size_mismatch_error("Low noise", low_res, "14b")
+                if mismatch:
+                    errors.append(mismatch)
 
             if high_res and low_res and Path(high_res) == Path(low_res):
                 errors.append("High noise and Low noise transformers must be different files.")
@@ -544,6 +580,9 @@ class WanService:
                 e, w = self._validate_transformer_file(model_path, "Fast 5B")
                 errors.extend(e)
                 warnings.extend(w)
+                mismatch = _route_size_mismatch_error("Fast 5B", model_path, "5b")
+                if mismatch:
+                    errors.append(mismatch)
                 if not self._looks_like_fast_5b_transformer(model_path):
                     warnings.append(
                         f"Fast 5B transformer filename does not clearly look like Wan TI2V 5B: {model_path.name}"

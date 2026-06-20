@@ -98,6 +98,18 @@ def test_wan_download_categories_validate_file_type(tmp_path: Path):
         service.download_parsed(safe, category="wan_gguf")
 
 
+def test_wan_diffusers_rejects_single_file_downloads(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    remote = ParsedRemote(
+        source="direct",
+        url="https://example.com/diffusion_pytorch_model.safetensors",
+        filename="diffusion_pytorch_model.safetensors",
+    )
+
+    with pytest.raises(ValueError, match="full Hugging Face repository folders"):
+        service.download_parsed(remote, category="wan_diffusers")
+
+
 def test_hf_snapshot_allowed_for_wan_diffusers(tmp_path: Path, monkeypatch):
     service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
     remote = service.parse_reference(
@@ -147,6 +159,18 @@ def test_hf_snapshot_allowed_for_checkpoint_diffusers_folder(tmp_path: Path, mon
     assert (path / "model_index.json").is_file()
 
 
+def test_snapshot_catalog_installed_requires_category_marker(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    entry = service.find_catalog("hf-sd35-medium")
+    assert entry is not None
+    target = service.snapshot_destination_for(entry.category, entry.repo_id)
+    (target / ".cache").mkdir(parents=True)
+
+    assert service.is_catalog_installed(entry) is False
+    (target / "model_index.json").write_text("{}", encoding="utf-8")
+    assert service.is_catalog_installed(entry) is True
+
+
 @pytest.mark.parametrize(
     "category,repo_id,expected",
     [
@@ -180,6 +204,45 @@ def test_hf_snapshot_allowed_for_controlnet_and_preprocessors(
     path = service.download_parsed(remote, category=category)
     assert path == tmp_path / "models" / Path(*expected)
     assert (path / "config.json").is_file()
+
+
+def test_sdxl_controlnet_catalog_entries_install_as_diffusers_folders(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    entry = service.find_catalog("cnxl-canny")
+    assert entry is not None
+    assert entry.snapshot is True
+    assert entry.filename == ""
+
+    target = service.snapshot_destination_for(entry.category, entry.repo_id)
+    assert target == tmp_path / "models" / "ControlNet" / "controlnet-canny-sdxl-1.0"
+    target.mkdir(parents=True)
+    (target / "diffusion_pytorch_model.safetensors").write_bytes(b"x")
+    assert service.is_catalog_installed(entry) is False
+    (target / "config.json").write_text("{}", encoding="utf-8")
+    assert service.is_catalog_installed(entry) is True
+
+
+def test_duplicate_catalog_filenames_use_distinct_local_names(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    sdxl = service.find_catalog("hf-lora-lcm-sdxl")
+    sd15 = service.find_catalog("hf-lora-lcm-sd15")
+    assert sdxl is not None
+    assert sd15 is not None
+
+    sdxl_remote = service._catalog_to_remote(sdxl)
+    sd15_remote = service._catalog_to_remote(sd15)
+
+    assert sdxl_remote.filename == "pytorch_lora_weights.safetensors"
+    assert sd15_remote.filename == "pytorch_lora_weights.safetensors"
+    assert sdxl_remote.local_filename == "hf-lora-lcm-sdxl-pytorch_lora_weights.safetensors"
+    assert sd15_remote.local_filename == "hf-lora-lcm-sd15-pytorch_lora_weights.safetensors"
+    assert sdxl_remote.local_filename != sd15_remote.local_filename
+
+    sdxl_dest = service.destination_for(sdxl.category, sdxl_remote.local_filename)
+    sdxl_dest.parent.mkdir(parents=True)
+    sdxl_dest.write_bytes(b"x")
+    assert service.is_catalog_installed(sdxl) is True
+    assert service.is_catalog_installed(sd15) is False
 
 
 def test_catalog_lists_entries(tmp_path: Path):

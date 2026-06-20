@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -14,6 +16,12 @@ from aiwf.core.interfaces.plugins import PluginInfo
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.services.optimization import CapabilityDetector, OptimizationPlanner
 from aiwf.services.optimization_diagnostics import OptimizationDiagnosticsService
+
+
+def _b64(image: Image.Image) -> str:
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 class FakeGeneration:
@@ -106,6 +114,8 @@ def test_sdapi_txt2img_maps_a1111_payload_to_generation_request():
             "prompt": "cat",
             "sampler_name": "Euler a",
             "n_iter": 2,
+            "enable_hr": True,
+            "denoising_strength": 0.42,
             "override_settings": {"sd_model_checkpoint": "model-a"},
         },
     )
@@ -115,9 +125,78 @@ def test_sdapi_txt2img_maps_a1111_payload_to_generation_request():
     assert request.mode == GenerationMode.TXT2IMG
     assert request.prompt == "cat"
     assert request.batch_count == 2
-    assert request.sampler == "Euler a"
+    assert request.sampler == "euler_a"
+    assert request.hr_denoising_strength == 0.42
     assert request.checkpoint_id == "model-a"
     assert response.json()["images"]
+
+
+def test_sdapi_txt2img_maps_a1111_override_and_controlnet_aliases():
+    client, generation = make_client()
+    control = Image.new("RGB", (16, 16), "white")
+
+    response = client.post(
+        "/sdapi/v1/txt2img",
+        json={
+            "prompt": "cat",
+            "sampler_name": "DPM++ 2M Karras",
+            "override_settings": {"CLIP_stop_at_last_layers": 3},
+            "alwayson_scripts": {
+                "ControlNet": {
+                    "args": [
+                        {
+                            "enabled": True,
+                            "model": "control-a",
+                            "module": "canny",
+                            "input_image": _b64(control),
+                            "detect_resolution": 768,
+                            "pixel_perfect": True,
+                        }
+                    ]
+                }
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    request = generation.submitted[0][0]
+    assert request.sampler == "dpmpp_2m_karras"
+    assert request.clip_skip == 3
+    assert len(request.controlnet_units) == 1
+    unit = request.controlnet_units[0]
+    assert unit.model == "control-a"
+    assert unit.image
+    assert unit.processor_res == 768
+
+
+def test_sdapi_img2img_maps_a1111_inpaint_fields():
+    client, generation = make_client()
+    source = Image.new("RGB", (16, 16), "white")
+    mask = Image.new("L", (16, 16), 0)
+    mask.paste(255, (4, 4, 12, 12))
+
+    response = client.post(
+        "/sdapi/v1/img2img",
+        json={
+            "prompt": "painted repair",
+            "init_images": [_b64(source)],
+            "mask": _b64(mask),
+            "mask_blur_x": 6,
+            "inpaint_full_res": True,
+            "inpaint_full_res_padding": 48,
+            "inpainting_fill": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    request, init_images, mask_images = generation.submitted[0]
+    assert request.mode == GenerationMode.INPAINT
+    assert request.mask_blur == 6
+    assert request.inpaint_only_masked is True
+    assert request.inpaint_masked_padding == 48
+    assert request.inpaint_mask_content == "latent noise"
+    assert init_images and init_images[0].size == (16, 16)
+    assert mask_images and mask_images[0].getbbox() is not None
 
 
 def test_sdapi_progress_includes_current_image():

@@ -1169,7 +1169,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_overlap_value,
             low_guidance_value,
         ):
-            selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
+            selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
             previous_runtime = str(previous_runtime_value or WAN_RUNTIME_FAST_5B)
             lora_choices = _filter_lora_choices(selected_runtime)
             offload_choices = _offload_choices_for_runtime(selected_runtime)
@@ -1297,7 +1297,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_overlap_value,
             low_guidance_value,
         ):
-            selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
+            selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
                 status_text = _route_status_from_values(
                     selected_runtime,
@@ -1360,7 +1360,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_overlap_value,
             low_guidance_value,
         ):
-            selected_runtime = str(runtime_value or WAN_RUNTIME_HIGH_LOW)
+            selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
                 status_text = _route_status_from_values(
                     selected_runtime,

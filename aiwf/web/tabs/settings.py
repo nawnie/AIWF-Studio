@@ -340,14 +340,22 @@ def register_settings(registry: WebRegistry) -> None:
         ).strip().lower() in {"1", "true", "yes", "on"}
         launch = _launch_form_values(ctx)
         saved_launch = ctx.load_launch_settings()
-        from aiwf.core.domain.models import SCHEDULE_TYPES
+        from aiwf.core.domain.models import SCHEDULE_TYPES, normalize_schedule_id_for_sampler
 
         samplers = ctx.generation.list_samplers()
         schedule_label_to_id = {s.label: s.id for s in SCHEDULE_TYPES}
         schedule_id_to_label = {s.id: s.label for s in SCHEDULE_TYPES}
-        default_schedule_label = schedule_id_to_label.get(ctx.settings.default_scheduler, "Automatic")
         sampler_label_to_id = {s.label: s.id for s in samplers}
         sampler_id_to_label = {s.id: s.label for s in samplers}
+        default_sampler_id = (
+            ctx.settings.default_sampler
+            if ctx.settings.default_sampler in sampler_id_to_label
+            else (samplers[0].id if samplers else "euler_a")
+        )
+        default_schedule_label = schedule_id_to_label.get(
+            normalize_schedule_id_for_sampler(default_sampler_id, ctx.settings.default_scheduler),
+            "Automatic",
+        )
         default_sampler_label = sampler_id_to_label.get(
             ctx.settings.default_sampler, samplers[0].label if samplers else None
         )
@@ -1696,8 +1704,12 @@ def register_settings(registry: WebRegistry) -> None:
             ctx.settings.send_size_on_click = bool(send_size)
             ctx.settings.prefer_safetensors = bool(prefer_safe)
             ctx.settings.write_download_receipts = bool(write_receipts)
-            ctx.settings.default_sampler = sampler_label_to_id.get(sampler_label, ctx.settings.default_sampler)
-            ctx.settings.default_scheduler = schedule_label_to_id.get(schedule_label, "automatic")
+            selected_sampler_id = sampler_label_to_id.get(sampler_label, ctx.settings.default_sampler)
+            ctx.settings.default_sampler = selected_sampler_id
+            ctx.settings.default_scheduler = normalize_schedule_id_for_sampler(
+                selected_sampler_id,
+                schedule_label_to_id.get(schedule_label, "automatic"),
+            )
             ctx.settings.default_steps = int(d_steps or 20)
             ctx.settings.default_cfg_scale = 7.0 if d_cfg is None else float(d_cfg)
             ctx.settings.default_width = int(d_width or 512)

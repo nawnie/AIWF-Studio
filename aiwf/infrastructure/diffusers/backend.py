@@ -563,7 +563,7 @@ class DiffusersBackend:
 
         logger.info("Loading checkpoint %s (%s)", checkpoint.title, checkpoint.architecture)
 
-        dtype = self.devices.dtype(self.flags.no_half)
+        dtype = self._dtype_for_architecture(checkpoint.architecture)
         path = Path(checkpoint.path)
         # An inpaint checkpoint has a 9-channel UNet conv_in; loading it through the
         # 4-channel txt2img pipeline raises a cryptic
@@ -1080,16 +1080,19 @@ class DiffusersBackend:
         if request.mode not in (GenerationMode.TXT2IMG, GenerationMode.IMG2IMG, GenerationMode.INPAINT):
             return []
         supplied = list(control_images or [])
+        supplied_index = 0
         prepared: list[tuple[ControlNetUnit, Image.Image, Path]] = []
-        for index, unit in enumerate(request.controlnet_units or []):
+        for unit in request.controlnet_units or []:
             if not unit.enabled or not unit.model:
                 continue
+            supplied_control = supplied[supplied_index] if supplied_index < len(supplied) else None
+            supplied_index += 1
             path = self._resolve_controlnet_path(unit.model)
             if path is None:
                 roots = ", ".join(str(root) for root in resolve_controlnet_roots(self.flags)) or str(self._controlnet_dir())
                 logger.warning("ControlNet model %s not found in %s", unit.model, roots)
                 continue
-            control = supplied[index] if index < len(supplied) else decode_control_image(unit.image)
+            control = supplied_control or decode_control_image(unit.image)
             if control is None:
                 logger.warning("ControlNet unit %s has no control image; skipping.", unit.model)
                 continue
