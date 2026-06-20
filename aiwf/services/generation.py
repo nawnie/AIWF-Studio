@@ -18,6 +18,7 @@ from aiwf.core.domain.generation import (
     JobRecord,
     JobState,
 )
+from aiwf.core.domain.errors import GenerationCancelledError
 from aiwf.core.domain.engine import EngineSwitchRequest, EngineTenant
 from aiwf.core.domain.optimization import (
     ModelFamily,
@@ -303,6 +304,118 @@ class GenerationService:
             ),
         )
 
+    def _apply_generation_settings(self, request: GenerationRequest) -> GenerationRequest:
+        updates = {}
+        if getattr(self.settings, "save_before_hires", False):
+            updates["save_before_hires"] = True
+        if getattr(self.settings, "save_interrupted", False):
+            updates["save_interrupted"] = True
+        default_upscaler = getattr(self.settings, "default_hr_upscaler", "")
+        if default_upscaler and request.hr_upscaler in {"", "lanczos"}:
+            updates["hr_upscaler"] = default_upscaler
+        if getattr(self.settings, "sdxl_refiner_enabled", False) and not request.sdxl_refiner_enabled:
+            updates.update(
+                {
+                    "sdxl_refiner_enabled": True,
+                    "sdxl_refiner_checkpoint_id": getattr(self.settings, "sdxl_refiner_checkpoint_id", None),
+                    "sdxl_refiner_steps": getattr(self.settings, "sdxl_refiner_steps", 10),
+                    "sdxl_refiner_strength": getattr(self.settings, "sdxl_refiner_strength", 0.25),
+                }
+            )
+        elif request.sdxl_refiner_enabled and not request.sdxl_refiner_checkpoint_id:
+            refiner_id = getattr(self.settings, "sdxl_refiner_checkpoint_id", None)
+            if refiner_id:
+                updates["sdxl_refiner_checkpoint_id"] = refiner_id
+        return request.model_copy(update=updates) if updates else request
+
+    def _output_subdir(self, mode: GenerationMode) -> str:
+        return {
+            GenerationMode.TXT2IMG: self.settings.txt2img_output_subdir,
+            GenerationMode.IMG2IMG: self.settings.img2img_output_subdir,
+            GenerationMode.INPAINT: self.settings.inpaint_output_subdir,
+        }[mode]
+
+    def _save_generation_result(
+        self,
+        result: GenerationResult,
+        request: GenerationRequest,
+        checkpoint,
+        optimization_plan: OptimizationPlan | None,
+    ) -> None:
+        subdir = self._output_subdir(request.mode)
+        model_name = getattr(checkpoint, "name", None) or getattr(checkpoint, "id", None)
+        artifacts = []
+        saved_images = []
+        for index, image in enumerate(result.images):
+            infotext = result.infotexts[index] if index < len(result.infotexts) else ""
+            infotext = self._enrich_saved_infotext(
+                infotext,
+                request,
+                checkpoint,
+                optimization_plan,
+            )
+            if index < len(result.infotexts):
+                result.infotexts[index] = infotext
+            seed = result.seeds[index] if index < len(result.seeds) else None
+            if self.settings.embed_metadata or request.tags:
+                image = self.metadata.embed(image, infotext, tags=request.tags)
+            artifact = self.store.save(
+                image, infotext, subdir, seed=seed, index=index, model_name=model_name
+            )
+            artifacts.append(artifact)
+            saved_images.append(image)
+        if request.save_before_hires and result.before_hires_images:
+            first_pass_subdir = f"{subdir}/hires-first-pass"
+            for index, image in enumerate(result.before_hires_images):
+                infotext = result.infotexts[index] if index < len(result.infotexts) else ""
+                infotext = f"{infotext}\nHires first pass: true".strip()
+                seed = result.seeds[index] if index < len(result.seeds) else None
+                artifact = self.store.save(
+                    image,
+                    infotext,
+                    first_pass_subdir,
+                    seed=seed,
+                    index=index,
+                    model_name=model_name,
+                )
+                artifacts.append(artifact)
+        if getattr(self.settings, "save_grid", False) and len(saved_images) > 1:
+            grid_info = result.infotexts[0] if result.infotexts else ""
+            grid_artifact = self.store.save_grid(saved_images, subdir, infotext=grid_info)
+            if grid_artifact is not None:
+                artifacts.append(grid_artifact)
+        result.artifacts = artifacts
+
+    def _save_cancelled_preview(
+        self,
+        job: JobRecord,
+        request: GenerationRequest,
+        checkpoint,
+        optimization_plan: OptimizationPlan | None,
+        preview: Image.Image | None,
+    ) -> None:
+        if preview is None or not request.save_interrupted or not self.settings.save_images or not request.save_images:
+            return
+        infotext = self._enrich_saved_infotext(
+            "Interrupted generation preview",
+            request,
+            checkpoint,
+            optimization_plan,
+        )
+        result = GenerationResult(
+            job_id=job.id,
+            images=[preview],
+            seeds=[request.seed],
+            infotexts=[infotext],
+            mode=request.mode,
+        )
+        subdir = f"{self._output_subdir(request.mode)}/interrupted"
+        model_name = getattr(checkpoint, "name", None) or getattr(checkpoint, "id", None)
+        image = self.metadata.embed(preview, infotext, tags=request.tags) if self.settings.embed_metadata else preview
+        artifact = self.store.save(image, infotext, subdir, seed=request.seed, index=0, model_name=model_name)
+        result.artifacts = [artifact]
+        job.result = result
+
     def list_checkpoints(self):
         return self.backend.list_checkpoints()
 
@@ -403,11 +516,14 @@ class GenerationService:
             try:
                 job.request = self._resolve_prompts(job.request)
                 job.request = self._apply_default_negative(job.request)
+                job.request = self._apply_generation_settings(job.request)
                 self.events.publish(BeforeGenerate(job.id, job.request))
                 active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
                 self._persist_last_checkpoint(active.id)
                 job.request = self._guard_distilled_cfg(job.request, active)
                 optimization_plan = self._resolve_optimization_plan(job.request, active)
+
+                latest_preview: Image.Image | None = None
 
                 def on_progress(
                     step: int,
@@ -415,20 +531,28 @@ class GenerationService:
                     message: str,
                     preview: Image.Image | None = None,
                 ) -> None:
+                    nonlocal latest_preview
+                    if preview is not None:
+                        latest_preview = preview
                     self.queue.update_progress(job.id, step, total, message, preview)
                     self.events.publish(JobProgressed(job.id, step, total, message))
 
                 on_progress(0, max(1, int(job.request.steps)), self._loading_model_message(active))
                 _gen_t0 = time.perf_counter()
-                result = self.backend.generate(
-                    job.request,
-                    init_images=init_images,
-                    mask_images=mask_images,
-                    control_images=control_images,
-                    on_progress=on_progress,
-                    should_cancel=lambda: self.queue.should_cancel(job.id),
-                    preview_every_n_steps=0,
-                )
+                preview_every = 1 if job.request.save_interrupted else 0
+                try:
+                    result = self.backend.generate(
+                        job.request,
+                        init_images=init_images,
+                        mask_images=mask_images,
+                        control_images=control_images,
+                        on_progress=on_progress,
+                        should_cancel=lambda: self.queue.should_cancel(job.id),
+                        preview_every_n_steps=preview_every,
+                    )
+                except GenerationCancelledError:
+                    self._save_cancelled_preview(job, job.request, active, optimization_plan, latest_preview)
+                    raise
                 result.elapsed_seconds = time.perf_counter() - _gen_t0
                 trace_model_throughput(
                     kind=str(job.request.mode.value),
@@ -450,39 +574,7 @@ class GenerationService:
                             result.images = [image_postprocess(img) for img in result.images]
 
                 if self.settings.save_images and job.request.save_images:
-                    subdir = {
-                        GenerationMode.TXT2IMG: self.settings.txt2img_output_subdir,
-                        GenerationMode.IMG2IMG: self.settings.img2img_output_subdir,
-                        GenerationMode.INPAINT: self.settings.inpaint_output_subdir,
-                    }[job.request.mode]
-                    checkpoint = self.backend.resolve_checkpoint(job.request.checkpoint_id)
-                    model_name = getattr(checkpoint, "name", None) or getattr(checkpoint, "id", None)
-                    artifacts = []
-                    saved_images = []
-                    for index, image in enumerate(result.images):
-                        infotext = result.infotexts[index] if index < len(result.infotexts) else ""
-                        infotext = self._enrich_saved_infotext(
-                            infotext,
-                            job.request,
-                            checkpoint,
-                            optimization_plan,
-                        )
-                        if index < len(result.infotexts):
-                            result.infotexts[index] = infotext
-                        seed = result.seeds[index] if index < len(result.seeds) else None
-                        if self.settings.embed_metadata or job.request.tags:
-                            image = self.metadata.embed(image, infotext, tags=job.request.tags)
-                        artifact = self.store.save(
-                            image, infotext, subdir, seed=seed, index=index, model_name=model_name
-                        )
-                        artifacts.append(artifact)
-                        saved_images.append(image)
-                    if getattr(self.settings, "save_grid", False) and len(saved_images) > 1:
-                        grid_info = result.infotexts[0] if result.infotexts else ""
-                        grid_artifact = self.store.save_grid(saved_images, subdir, infotext=grid_info)
-                        if grid_artifact is not None:
-                            artifacts.append(grid_artifact)
-                    result.artifacts = artifacts
+                    self._save_generation_result(result, job.request, active, optimization_plan)
 
                 self.events.publish(AfterGenerate(job.id, result))
                 return result
@@ -539,12 +631,16 @@ class GenerationService:
             try:
                 job.request = self._resolve_prompts(job.request)
                 job.request = self._apply_default_negative(job.request)
+                job.request = self._apply_generation_settings(job.request)
                 self.events.publish(BeforeGenerate(job.id, job.request))
                 active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
                 self._persist_last_checkpoint(active.id)
                 job.request = self._guard_distilled_cfg(job.request, active)
                 optimization_plan = self._resolve_optimization_plan(job.request, active)
                 preview_every = self.settings.live_preview_interval()
+                if job.request.save_interrupted and preview_every == 0:
+                    preview_every = 1
+                latest_preview: Image.Image | None = None
 
                 def on_progress(
                     step: int,
@@ -552,21 +648,28 @@ class GenerationService:
                     message: str,
                     preview: Image.Image | None = None,
                 ) -> None:
+                    nonlocal latest_preview
+                    if preview is not None:
+                        latest_preview = preview
                     self.queue.update_progress(job.id, step, total, message, preview)
                     self.events.publish(JobProgressed(job.id, step, total, message))
                     progress_q.put(("progress", step, total, message, preview))
 
                 on_progress(0, max(1, int(job.request.steps)), self._loading_model_message(active))
                 _gen_t0 = time.perf_counter()
-                result = self.backend.generate(
-                    job.request,
-                    init_images=init_images,
-                    mask_images=mask_images,
-                    control_images=control_images,
-                    on_progress=on_progress,
-                    should_cancel=lambda: self.queue.should_cancel(job.id),
-                    preview_every_n_steps=preview_every,
-                )
+                try:
+                    result = self.backend.generate(
+                        job.request,
+                        init_images=init_images,
+                        mask_images=mask_images,
+                        control_images=control_images,
+                        on_progress=on_progress,
+                        should_cancel=lambda: self.queue.should_cancel(job.id),
+                        preview_every_n_steps=preview_every,
+                    )
+                except GenerationCancelledError:
+                    self._save_cancelled_preview(job, job.request, active, optimization_plan, latest_preview)
+                    raise
                 result.elapsed_seconds = time.perf_counter() - _gen_t0
                 trace_model_throughput(
                     kind=str(job.request.mode.value),
@@ -590,38 +693,7 @@ class GenerationService:
                 if self.settings.save_images and job.request.save_images:
                     total = max(1, int(job.request.steps))
                     on_progress(total, total, "Saving output", None)
-                    subdir = {
-                        GenerationMode.TXT2IMG: self.settings.txt2img_output_subdir,
-                        GenerationMode.IMG2IMG: self.settings.img2img_output_subdir,
-                        GenerationMode.INPAINT: self.settings.inpaint_output_subdir,
-                    }[job.request.mode]
-                    model_name = getattr(active, "name", None) or getattr(active, "id", None)
-                    artifacts = []
-                    saved_images = []
-                    for index, image in enumerate(result.images):
-                        infotext = result.infotexts[index] if index < len(result.infotexts) else ""
-                        infotext = self._enrich_saved_infotext(
-                            infotext,
-                            job.request,
-                            active,
-                            optimization_plan,
-                        )
-                        if index < len(result.infotexts):
-                            result.infotexts[index] = infotext
-                        seed = result.seeds[index] if index < len(result.seeds) else None
-                        if self.settings.embed_metadata or job.request.tags:
-                            image = self.metadata.embed(image, infotext, tags=job.request.tags)
-                        artifact = self.store.save(
-                            image, infotext, subdir, seed=seed, index=index, model_name=model_name
-                        )
-                        artifacts.append(artifact)
-                        saved_images.append(image)
-                    if getattr(self.settings, "save_grid", False) and len(saved_images) > 1:
-                        grid_info = result.infotexts[0] if result.infotexts else ""
-                        grid_artifact = self.store.save_grid(saved_images, subdir, infotext=grid_info)
-                        if grid_artifact is not None:
-                            artifacts.append(grid_artifact)
-                    result.artifacts = artifacts
+                    self._save_generation_result(result, job.request, active, optimization_plan)
 
                 self.events.publish(AfterGenerate(job.id, result))
                 return result

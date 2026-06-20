@@ -59,7 +59,13 @@ class GenerationRequest(BaseModel):
     hr_scale: float = Field(default=2.0, ge=1.0, le=4.0)
     hr_steps: int = Field(default=20, ge=1, le=150)
     hr_denoising_strength: float = Field(default=0.35, ge=0.0, le=1.0)
-    hr_upscaler: str = "latent"
+    hr_upscaler: str = "lanczos"
+    save_before_hires: bool = False
+    save_interrupted: bool = False
+    sdxl_refiner_enabled: bool = False
+    sdxl_refiner_checkpoint_id: str | None = None
+    sdxl_refiner_steps: int = Field(default=10, ge=1, le=150)
+    sdxl_refiner_strength: float = Field(default=0.25, ge=0.0, le=1.0)
     checkpoint_id: str | None = None
     vae_id: str | None = None
     tags: list[str] = Field(default_factory=list)
@@ -80,6 +86,16 @@ class GenerationRequest(BaseModel):
         if value % 8 != 0:
             raise ValueError("dimensions must be a multiple of 8")
         return value
+
+    @field_validator("hr_upscaler")
+    @classmethod
+    def normalize_hr_upscaler(cls, value: str) -> str:
+        normalized = (value or "lanczos").strip().lower().replace(" ", "_")
+        if normalized == "latent":
+            normalized = "lanczos"
+        if normalized not in {"lanczos", "bicubic", "nearest"}:
+            raise ValueError("hr_upscaler must be lanczos, bicubic, or nearest")
+        return normalized
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -103,6 +119,7 @@ class GenerationResult(BaseModel):
     seeds: list[int]
     infotexts: list[str]
     artifacts: list[SavedArtifact] = Field(default_factory=list)
+    before_hires_images: list[Image.Image] = Field(default_factory=list)
     mode: GenerationMode
     elapsed_seconds: float = 0.0
 

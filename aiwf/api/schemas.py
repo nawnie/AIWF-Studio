@@ -22,7 +22,13 @@ class Txt2ImgPayload(BaseModel):
     hr_scale: float = 2.0
     hr_steps: int = 20
     hr_denoising_strength: float = 0.35
-    hr_upscaler: str = "latent"
+    hr_upscaler: str = "lanczos"
+    save_before_hires: bool = False
+    save_interrupted: bool = False
+    sdxl_refiner_enabled: bool = False
+    sdxl_refiner_checkpoint_id: str | None = None
+    sdxl_refiner_steps: int = 10
+    sdxl_refiner_strength: float = 0.25
     checkpoint_id: str | None = None
     vae_id: str | None = None
     tags: list[str] = Field(default_factory=list)

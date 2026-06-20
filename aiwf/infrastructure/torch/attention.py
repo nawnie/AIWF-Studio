@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,79 @@ logger = logging.getLogger(__name__)
 
 def _flag(flags, name: str) -> bool:
     return bool(getattr(flags, name, False))
+
+
+def _attention_backend(flags) -> str:
+    backend = getattr(flags, "attention_backend", None)
+    if backend:
+        normalized = str(backend).strip().lower().replace("-", "_")
+    elif _flag(flags, "xformers"):
+        normalized = "xformers"
+    elif _flag(flags, "opt_sdp_attention") or _flag(flags, "opt_split_attention"):
+        normalized = "sdpa"
+    else:
+        normalized = "sage_sdpa"
+    if normalized in {"sage", "sageattention"}:
+        normalized = "sage_sdpa"
+    if normalized not in {"sage_sdpa", "sdpa", "xformers", "none"}:
+        return "sage_sdpa"
+    return normalized
+
+
+def _sage_supported(q, k, v, attn_mask, dropout_p: float) -> bool:
+    if attn_mask is not None or float(dropout_p or 0.0) != 0.0:
+        return False
+    if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
+        return False
+    if q.device.type != "cuda" or k.device.type != "cuda" or v.device.type != "cuda":
+        return False
+    return q.dtype in (torch.float16, torch.bfloat16) and k.dtype == q.dtype and v.dtype == q.dtype
+
+
+@contextmanager
+def attention_call_context(flags):
+    """Apply per-call attention patches that must not leak outside generation."""
+    if _attention_backend(flags) != "sage_sdpa":
+        yield "none"
+        return
+    try:
+        from sageattention import sageattn
+    except Exception:
+        yield "sdpa"
+        return
+
+    original = torch.nn.functional.scaled_dot_product_attention
+
+    def _sage_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
+        if not _sage_supported(query, key, value, attn_mask, dropout_p):
+            return original(
+                query,
+                key,
+                value,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                **kwargs,
+            )
+        try:
+            return sageattn(query, key, value, is_causal=is_causal, tensor_layout="HND")
+        except Exception:
+            logger.debug("SageAttention image call failed; falling back to torch SDPA.", exc_info=True)
+            return original(
+                query,
+                key,
+                value,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                **kwargs,
+            )
+
+    torch.nn.functional.scaled_dot_product_attention = _sage_sdpa
+    try:
+        yield "sage_sdpa"
+    finally:
+        torch.nn.functional.scaled_dot_product_attention = original
 
 
 def _has_conv2d(module) -> bool:
@@ -107,7 +181,12 @@ def apply_attention_optimizations(pipe, flags, *, compile_allowed: bool = True) 
 
     apply_image_pipeline_optimizations(pipe, flags, compile_allowed=compile_allowed)
 
-    if flags.xformers:
+    backend = _attention_backend(flags)
+    if backend == "none":
+        logger.info("Attention optimization: none (user selected)")
+        return "none"
+
+    if backend == "xformers":
         try:
             pipe.enable_xformers_memory_efficient_attention()
             logger.info("Attention optimization: xformers")
@@ -115,16 +194,16 @@ def apply_attention_optimizations(pipe, flags, *, compile_allowed: bool = True) 
         except Exception as exc:
             logger.warning("xformers unavailable (%s), trying fallback", exc)
 
-    use_sdp = flags.opt_sdp_attention or flags.opt_split_attention
+    use_sdp = backend in {"sdpa", "sage_sdpa"} or _flag(flags, "opt_sdp_attention") or _flag(flags, "opt_split_attention")
     if use_sdp and hasattr(torch.nn.functional, "scaled_dot_product_attention"):
         try:
             from diffusers.models.attention_processor import AttnProcessor2_0
 
             processor = AttnProcessor2_0()
             pipe.unet.set_attn_processor(processor)
-            name = "sdp-attention (split-attention equivalent)"
+            name = "sage_sdpa (SageAttention call patch + SDPA fallback)" if backend == "sage_sdpa" else "sdp-attention (split-attention equivalent)"
             logger.info("Attention optimization: %s", name)
-            return "sdp"
+            return "sage_sdpa" if backend == "sage_sdpa" else "sdp"
         except Exception as exc:
             logger.warning("SDP attention failed (%s)", exc)
 

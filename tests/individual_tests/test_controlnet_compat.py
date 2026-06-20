@@ -52,7 +52,7 @@ def test_validate_enabled_requires_model_image_and_supported_mode(tmp_path: Path
     service.ensure_dir()
     (service.models_dir() / "control_canny.safetensors").write_bytes(b"x")
 
-    with pytest.raises(ValueError, match="only available"):
+    with pytest.raises(ValueError, match="control image"):
         service.validate_enabled(enabled=True, mode="inpaint", model_id="control_canny", control_image=None)
 
     with pytest.raises(ValueError, match="control image"):
@@ -61,6 +61,12 @@ def test_validate_enabled_requires_model_image_and_supported_mode(tmp_path: Path
     service.validate_enabled(
         enabled=True,
         mode="txt2img",
+        model_id="control_canny",
+        control_image=Image.new("RGB", (8, 8), "red"),
+    )
+    service.validate_enabled(
+        enabled=True,
+        mode="inpaint",
         model_id="control_canny",
         control_image=Image.new("RGB", (8, 8), "red"),
     )
@@ -103,6 +109,29 @@ def test_controlnet_cache_passes_adjacent_yaml_to_single_file(monkeypatch, tmp_p
     assert calls["path"] == str(model.resolve())
     assert calls["kwargs"]["torch_dtype"] == "float16"
     assert calls["kwargs"]["original_config"] == str(config)
+
+
+def test_build_controlnet_pipeline_uses_inpaint_class(monkeypatch):
+    class FakeBasePipe:
+        vae = object()
+        text_encoder = object()
+        tokenizer = object()
+        unet = object()
+        scheduler = object()
+        text_encoder_2 = None
+
+    class FakeInpaintPipe:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    controlnet = object()
+    monkeypatch.setattr(controlnet_pipe, "StableDiffusionControlNetInpaintPipeline", FakeInpaintPipe)
+
+    pipe = controlnet_pipe.build_controlnet_pipeline(FakeBasePipe(), controlnet, mode="inpaint")
+
+    assert isinstance(pipe, FakeInpaintPipe)
+    assert pipe.kwargs["controlnet"] is controlnet
+    assert pipe.kwargs["requires_safety_checker"] is False
 
 
 def test_studio_controlnet_stack_builds_multiple_units(tmp_path: Path):
@@ -195,3 +224,43 @@ def test_controlnet_pass_sends_multi_unit_images_and_scales():
     assert pipe.kwargs["control_guidance_start"] == [0.0, 0.2]
     assert pipe.kwargs["control_guidance_end"] == [0.6, 1.0]
     assert [image.size for image in pipe.kwargs["image"]] == [(64, 64), (64, 64)]
+
+
+def test_controlnet_inpaint_pass_sends_image_mask_and_control_image():
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    request = GenerationRequest(
+        mode=GenerationMode.INPAINT,
+        width=64,
+        height=64,
+        steps=4,
+        controlnet_units=[
+            ControlNetUnit(model="control_a", module="none", weight=0.4),
+        ],
+    )
+
+    class CapturePipe:
+        text_encoder_2 = None
+
+        def __call__(self, **kwargs):
+            self.kwargs = kwargs
+            return type("Output", (), {"images": [Image.new("RGB", (64, 64), "green")]})()
+
+    pipe = CapturePipe()
+    output, width, height = backend._run_controlnet_pass(
+        pipe,
+        request,
+        "cat",
+        generator=None,
+        callback=None,
+        units=request.controlnet_units,
+        control_images=[Image.new("RGB", (32, 48), "red")],
+        init_images=[Image.new("RGB", (64, 64), "blue")],
+        mask_images=[Image.new("L", (64, 64), 255)],
+    )
+
+    assert width == 64
+    assert height == 64
+    assert len(output.images) == 1
+    assert pipe.kwargs["image"].size == (64, 64)
+    assert pipe.kwargs["mask_image"].size == (64, 64)
+    assert pipe.kwargs["control_image"].size == (64, 64)

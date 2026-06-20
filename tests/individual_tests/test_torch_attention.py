@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
-from aiwf.infrastructure.torch.attention import apply_image_pipeline_optimizations
+from aiwf.infrastructure.torch.attention import apply_attention_optimizations, apply_image_pipeline_optimizations
 
 
 class _TinyConv(nn.Module):
@@ -29,6 +29,21 @@ class _Pipe:
         self.vae = _TinyVae()
 
 
+class _AttentionUnet(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.processor = None
+
+    def set_attn_processor(self, processor):
+        self.processor = processor
+
+
+class _AttentionPipe:
+    def __init__(self) -> None:
+        self.unet = _AttentionUnet()
+        self.vae = _TinyVae()
+
+
 def _flags(**kwargs):
     values = {
         "channels_last": False,
@@ -36,6 +51,7 @@ def _flags(**kwargs):
         "xformers": False,
         "opt_sdp_attention": False,
         "opt_split_attention": False,
+        "attention_backend": "sage_sdpa",
     }
     values.update(kwargs)
     return SimpleNamespace(**values)
@@ -97,3 +113,21 @@ def test_image_compile_updates_unet_and_vae_decode(monkeypatch):
     assert len(compiled) == 2
     assert pipe.unet is not compiled[0]
     assert callable(pipe.vae.decode)
+
+
+def test_attention_backend_none_skips_processor():
+    pipe = _AttentionPipe()
+
+    result = apply_attention_optimizations(pipe, _flags(attention_backend="none"))
+
+    assert result == "none"
+    assert pipe.unet.processor is None
+
+
+def test_attention_backend_sage_uses_sdpa_processor():
+    pipe = _AttentionPipe()
+
+    result = apply_attention_optimizations(pipe, _flags(attention_backend="sage_sdpa"))
+
+    assert result == "sage_sdpa"
+    assert pipe.unet.processor is not None

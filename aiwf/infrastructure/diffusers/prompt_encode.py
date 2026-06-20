@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import inspect
 
 EMPHASIS_PATTERN = re.compile(r"(?<!\\)[(\[]")
 
@@ -13,14 +14,27 @@ def _is_sdxl_pipe(pipe) -> bool:
     return hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None
 
 
+def _pipe_accepts_kwarg(pipe, name: str) -> bool:
+    try:
+        sig = inspect.signature(pipe.__call__)
+    except (TypeError, ValueError):
+        return False
+    if name in sig.parameters:
+        return True
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
+
+
 def build_prompt_kwargs(pipe, prompt: str, negative_prompt: str | None, clip_skip: int) -> dict:
     """Return kwargs for diffusers pipe calls — uses Compel when emphasis syntax is present."""
     negative = negative_prompt or ""
     if not prompt_uses_emphasis(prompt) and not prompt_uses_emphasis(negative):
-        return {
+        kwargs = {
             "prompt": prompt,
             "negative_prompt": negative_prompt or None,
         }
+        if clip_skip and clip_skip > 1 and _pipe_accepts_kwarg(pipe, "clip_skip"):
+            kwargs["clip_skip"] = int(clip_skip)
+        return kwargs
 
     try:
         from compel import Compel, ReturnedEmbeddingsType

@@ -4,6 +4,7 @@ import copy
 import logging
 import random
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
@@ -71,7 +72,18 @@ from aiwf.infrastructure.diffusers.model_arch import (
 )
 from aiwf.infrastructure.diffusers.prompt_encode import build_prompt_kwargs
 from aiwf.infrastructure.diffusers.vae import resolve_vae, scan_vaes
-from aiwf.infrastructure.torch.attention import apply_attention_optimizations, apply_image_pipeline_optimizations
+try:
+    from aiwf.infrastructure.torch.attention import (
+        apply_attention_optimizations,
+        apply_image_pipeline_optimizations,
+        attention_call_context,
+    )
+except ImportError:
+    from aiwf.infrastructure.torch.attention import apply_attention_optimizations, apply_image_pipeline_optimizations
+
+    @contextmanager
+    def attention_call_context(_flags):
+        yield "none"
 from aiwf.infrastructure.torch.devices import DeviceManager
 
 logger = logging.getLogger(__name__)
@@ -181,8 +193,10 @@ class DiffusersBackend:
         self._txt2img: StableDiffusionPipeline | None = None
         self._img2img: StableDiffusionImg2ImgPipeline | None = None
         self._inpaint: StableDiffusionInpaintPipeline | None = None
+        self._refiner: StableDiffusionXLImg2ImgPipeline | None = None
         self._active: Checkpoint | None = None
         self._inpaint_active: Checkpoint | None = None
+        self._refiner_active: Checkpoint | None = None
         self._active_vae_id: str | None = None
         self._lora_catalog: list[LoraInfo] | None = None
         self._vae_catalog: list[VaeInfo] | None = None
@@ -619,12 +633,55 @@ class DiffusersBackend:
         self._inpaint_active = checkpoint
         return pipe
 
+    def _load_refiner_checkpoint(self, checkpoint_id: str | None) -> StableDiffusionXLImg2ImgPipeline:
+        if not checkpoint_id:
+            raise ValueError("SDXL refiner is enabled but no refiner checkpoint is selected.")
+        checkpoint = self._resolve_checkpoint(checkpoint_id)
+        if not is_sdxl_architecture(checkpoint.architecture):
+            raise ValueError("SDXL refiner checkpoint must be an SDXL checkpoint.")
+        if self._refiner is not None and self._refiner_active and self._refiner_active.path == checkpoint.path:
+            return self._refiner
+
+        logger.info("Loading SDXL refiner pipeline for %s", checkpoint.title)
+        dtype = self.devices.dtype(self.flags.no_half)
+        path = Path(checkpoint.path)
+        load_kwargs = {
+            "torch_dtype": dtype,
+            "use_safetensors": path.suffix.lower() == ".safetensors",
+        }
+        _add_cached_single_file_config(load_kwargs, StableDiffusionXLImg2ImgPipeline)
+        pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(checkpoint.path, **load_kwargs)
+        self._remember_base_scheduler_config(pipe)
+        self._apply_fp8_storage(pipe)
+        compile_allowed = self._compile_allowed_for_architecture(checkpoint.architecture)
+        apply_attention_optimizations(pipe, self.flags, compile_allowed=compile_allowed)
+        pipe = self._place_pipeline(pipe, prefer_offload=self._wants_offload(checkpoint.architecture))
+        self._tune_vae_memory(pipe, checkpoint.architecture)
+        self._refiner = pipe
+        self._refiner_active = checkpoint
+        return pipe
+
+    def _call_pipe(self, pipe, **kwargs):
+        with attention_call_context(getattr(self, "flags", None)):
+            return pipe(**kwargs)
+
+    @staticmethod
+    def _hr_resample_filter(upscaler: str) -> int:
+        normalized = (upscaler or "lanczos").strip().lower().replace(" ", "_")
+        if normalized == "bicubic":
+            return Image.Resampling.BICUBIC
+        if normalized == "nearest":
+            return Image.Resampling.NEAREST
+        return Image.Resampling.LANCZOS
+
     def unload(self) -> None:
         self._txt2img = None
         self._img2img = None
         self._inpaint = None
+        self._refiner = None
         self._active = None
         self._inpaint_active = None
+        self._refiner_active = None
         self._active_vae_id = None
         self._controlnet_cache.clear()
         self.devices.empty_cache()
@@ -751,7 +808,8 @@ class DiffusersBackend:
             request.negative_prompt,
             request.clip_skip,
         )
-        return pipe(
+        return self._call_pipe(
+            pipe,
             **prompt_kwargs,
             num_inference_steps=steps,
             guidance_scale=request.cfg_scale,
@@ -781,7 +839,8 @@ class DiffusersBackend:
             request.negative_prompt,
             request.clip_skip,
         )
-        return pipe(
+        return self._call_pipe(
+            pipe,
             **prompt_kwargs,
             num_inference_steps=steps,
             guidance_scale=request.cfg_scale,
@@ -803,6 +862,7 @@ class DiffusersBackend:
         units: list[ControlNetUnit],
         control_images: list[Image.Image],
         init_images: list[Image.Image] | None,
+        mask_images: list[Image.Image] | None = None,
     ):
         if not units or not control_images:
             raise ValueError("ControlNet requires at least one active unit and control image.")
@@ -828,6 +888,87 @@ class DiffusersBackend:
             control_guidance_start=starts if multi else starts[0],
             control_guidance_end=ends if multi else ends[0],
         )
+        if request.mode == GenerationMode.INPAINT:
+            assert init_images is not None and mask_images is not None
+            orig = init_images[0].convert("RGB")
+            raw_mask = mask_images[0]
+            only_masked = bool(getattr(request, "inpaint_only_masked", False))
+            pad = int(getattr(request, "inpaint_masked_padding", 32))
+            content = getattr(request, "inpaint_mask_content", "original") or "original"
+
+            if only_masked:
+                src, msk, crop_box = crop_to_masked(orig, raw_mask, padding=pad)
+                src = apply_masked_content(src, msk, content)
+                if request.mask_blur > 0:
+                    msk = blur_mask(msk, request.mask_blur)
+                pipeline_src, pipeline_msk, width, height = resize_for_inpaint(src, msk)
+                controls = [
+                    image.crop(crop_box).resize((width, height), Image.Resampling.LANCZOS)
+                    for image in control_images
+                ]
+                output = self._call_pipe(
+                    pipe,
+                    **common,
+                    image=pipeline_src,
+                    mask_image=pipeline_msk,
+                    control_image=controls if multi else controls[0],
+                    strength=request.denoising_strength,
+                    width=width,
+                    height=height,
+                )
+                full_mask = prepare_inpaint_mask(raw_mask, size=orig.size)
+                pw = crop_box[2] - crop_box[0]
+                ph = crop_box[3] - crop_box[1]
+                seam_erode = int(getattr(request, "seam_erode", 0) or 0)
+                composites = []
+                for gen in output.images:
+                    full_gen = orig.copy()
+                    gen_r = gen.resize((pw, ph), Image.Resampling.LANCZOS) if gen.size != (pw, ph) else gen
+                    full_gen.paste(gen_r, (crop_box[0], crop_box[1]))
+                    composites.append(
+                        composite_inpaint_result(
+                            full_gen,
+                            orig,
+                            full_mask,
+                            mask_blur=request.mask_blur,
+                            seam_erode=seam_erode,
+                        )
+                    )
+                output.images = composites
+                return output, orig.width, orig.height
+
+            source, mask, width, height = resize_for_inpaint(orig, raw_mask)
+            source = apply_masked_content(source, mask, content)
+            if request.mask_blur > 0:
+                mask = blur_mask(mask, request.mask_blur)
+            controls = [
+                image.resize((width, height), Image.Resampling.LANCZOS)
+                for image in control_images
+            ]
+            output = self._call_pipe(
+                pipe,
+                **common,
+                image=source,
+                mask_image=mask,
+                control_image=controls if multi else controls[0],
+                strength=request.denoising_strength,
+                width=width,
+                height=height,
+            )
+            seam_erode = int(getattr(request, "seam_erode", 0) or 0)
+            paste_mask = prepare_inpaint_mask(raw_mask, size=orig.size)
+            output.images = [
+                composite_inpaint_result(
+                    img if img.size == orig.size else img.resize(orig.size, Image.Resampling.LANCZOS),
+                    orig,
+                    paste_mask,
+                    mask_blur=request.mask_blur,
+                    seam_erode=seam_erode,
+                )
+                for img in output.images
+            ]
+            return output, orig.width, orig.height
+
         if request.mode == GenerationMode.IMG2IMG:
             assert init_images is not None
             base = init_images[0].convert("RGB")
@@ -838,7 +979,8 @@ class DiffusersBackend:
                 image.resize((width, height), Image.Resampling.LANCZOS)
                 for image in control_images
             ]
-            output = pipe(
+            output = self._call_pipe(
+                pipe,
                 **common,
                 image=base,
                 control_image=controls if multi else controls[0],
@@ -851,7 +993,8 @@ class DiffusersBackend:
             image.resize((width, height), Image.Resampling.LANCZOS)
             for image in control_images
         ]
-        output = pipe(
+        output = self._call_pipe(
+            pipe,
             **common,
             image=controls if multi else controls[0],
             width=width,
@@ -881,7 +1024,7 @@ class DiffusersBackend:
         Missing optional units are skipped here; generate() turns an explicitly
         enabled-but-empty ControlNet request into a user-facing error.
         """
-        if request.mode not in (GenerationMode.TXT2IMG, GenerationMode.IMG2IMG):
+        if request.mode not in (GenerationMode.TXT2IMG, GenerationMode.IMG2IMG, GenerationMode.INPAINT):
             return []
         supplied = list(control_images or [])
         prepared: list[tuple[ControlNetUnit, Image.Image, Path]] = []
@@ -926,6 +1069,7 @@ class DiffusersBackend:
         images: list[Image.Image] = []
         seeds: list[int] = []
         infotexts: list[str] = []
+        before_hires_images: list[Image.Image] = []
 
         parsed = parse_extra_networks(request.prompt)
 
@@ -987,7 +1131,9 @@ class DiffusersBackend:
             cn_models = [self._controlnet_cache.load(str(path), dtype=dtype) for path in cn_paths]
             cn_model_arg = cn_models if len(cn_models) > 1 else cn_models[0]
             cn_pipe = build_controlnet_pipeline(
-                pipe, cn_model_arg, img2img=request.mode == GenerationMode.IMG2IMG
+                pipe,
+                cn_model_arg,
+                mode=request.mode.value,
             )
             cn_pipe = self._place_pipeline(cn_pipe, prefer_offload=self._wants_offload(checkpoint.architecture))
 
@@ -1013,7 +1159,10 @@ class DiffusersBackend:
             except Exception:
                 # DirectML (and other non-CUDA backends) reject device generators.
                 generator = torch.Generator()
-            total_steps = request.steps + (request.hr_steps if request.enable_hr else 0)
+            base_step_count = request.steps + (request.hr_steps if request.enable_hr and cn_pipe is None else 0)
+            total_steps = base_step_count
+            if request.sdxl_refiner_enabled and request.mode in (GenerationMode.TXT2IMG, GenerationMode.IMG2IMG):
+                total_steps += request.sdxl_refiner_steps
 
             for batch_index in range(request.batch_count):
                 seed = request.seed if batch_index == 0 and request.seed >= 0 else random.randint(0, 2**32 - 1)
@@ -1038,6 +1187,7 @@ class DiffusersBackend:
                         cn_units,
                         cn_images,
                         init_images,
+                        mask_images,
                     )
                     batch_images = output.images
 
@@ -1069,7 +1219,8 @@ class DiffusersBackend:
                             request.negative_prompt,
                             request.clip_skip,
                         )
-                        output = pipe(
+                        output = self._call_pipe(
+                            pipe,
                             **prompt_kwargs,
                             num_inference_steps=request.steps,
                             guidance_scale=request.cfg_scale,
@@ -1127,7 +1278,8 @@ class DiffusersBackend:
                             request.negative_prompt,
                             request.clip_skip,
                         )
-                        output = pipe(
+                        output = self._call_pipe(
+                            pipe,
                             **prompt_kwargs,
                             num_inference_steps=request.steps,
                             guidance_scale=request.cfg_scale,
@@ -1201,6 +1353,8 @@ class DiffusersBackend:
                         int(request.width * request.hr_scale),
                         int(request.height * request.hr_scale),
                     )
+                    if request.save_before_hires:
+                        before_hires_images.extend(first.images)
                     assert self._img2img is not None
                     callback_pass2 = self._make_callback(
                         self._img2img,
@@ -1211,21 +1365,24 @@ class DiffusersBackend:
                         total_steps=total_steps,
                         preview_every_n_steps=preview_every_n_steps,
                     )
-                    batch_images = []
+                    resample = self._hr_resample_filter(request.hr_upscaler)
+                    upscaled_images = []
                     for image in first.images:
-                        upscaled = image.resize((hr_width, hr_height), Image.Resampling.LANCZOS)
-                        batch_images.append(upscaled)
-                    hr_output = self._run_img2img_pass(
-                        self._img2img,
-                        request,
-                        parsed.prompt,
-                        generator,
-                        callback_pass2,
-                        batch_images[0] if batch_images else first.images[0],
-                        steps=request.hr_steps,
-                        strength=request.hr_denoising_strength,
-                    )
-                    batch_images = hr_output.images
+                        upscaled_images.append(image.resize((hr_width, hr_height), resample))
+                    batch_images = []
+                    hr_request = request.model_copy(update={"batch_size": 1})
+                    for image in upscaled_images:
+                        hr_output = self._run_img2img_pass(
+                            self._img2img,
+                            hr_request,
+                            parsed.prompt,
+                            generator,
+                            callback_pass2,
+                            image,
+                            steps=request.hr_steps,
+                            strength=request.hr_denoising_strength,
+                        )
+                        batch_images.extend(hr_output.images)
                     width, height = hr_width, hr_height
 
                 else:
@@ -1248,6 +1405,43 @@ class DiffusersBackend:
                         steps=request.steps,
                     )
                     batch_images = output.images
+
+                if request.sdxl_refiner_enabled and request.mode != GenerationMode.INPAINT:
+                    if not is_sdxl_architecture(checkpoint.architecture):
+                        raise ValueError("SDXL refiner can only run with an SDXL base checkpoint.")
+                    refiner_pipe = self._load_refiner_checkpoint(request.sdxl_refiner_checkpoint_id)
+                    self._apply_vae(refiner_pipe, request.vae_id)
+                    self._apply_sampler(refiner_pipe, request.sampler, request.scheduler)
+                    self._ensure_embeddings_for_prompt(
+                        refiner_pipe,
+                        request.prompt,
+                        request.negative_prompt,
+                        checkpoint.architecture,
+                    )
+                    callback_refiner = self._make_callback(
+                        refiner_pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        step_offset=base_step_count,
+                        total_steps=total_steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    refiner_request = request.model_copy(update={"batch_size": 1})
+                    refined_images: list[Image.Image] = []
+                    for image in batch_images:
+                        refined = self._run_img2img_pass(
+                            refiner_pipe,
+                            refiner_request,
+                            parsed.prompt,
+                            generator,
+                            callback_refiner,
+                            image,
+                            steps=request.sdxl_refiner_steps,
+                            strength=request.sdxl_refiner_strength,
+                        )
+                        refined_images.extend(refined.images)
+                    batch_images = refined_images
 
                 images.extend(batch_images)
                 seeds.extend([seed] * len(batch_images))
@@ -1273,5 +1467,6 @@ class DiffusersBackend:
             images=images,
             seeds=seeds,
             infotexts=infotexts,
+            before_hires_images=before_hires_images,
             mode=request.mode,
         )

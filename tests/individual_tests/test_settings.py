@@ -40,6 +40,11 @@ def test_saving_output_defaults_preserve_legacy_behavior():
     assert s.metadata_include_app_version is True
     assert s.metadata_include_optimization_profile is True
     assert s.optimization_profile_id == "balanced_sdpa_fp16"
+    assert s.default_hr_upscaler == "lanczos"
+    assert s.sdxl_refiner_enabled is False
+    assert s.sdxl_refiner_checkpoint_id is None
+    assert s.sdxl_refiner_steps == 10
+    assert s.sdxl_refiner_strength == 0.25
     assert s.pnginfo_send_to_studio is True
     assert s.pnginfo_clear_after_apply is True
 
@@ -59,6 +64,11 @@ def test_saving_output_settings_round_trip():
         metadata_include_app_version=False,
         metadata_include_optimization_profile=False,
         optimization_profile_id="safe_eager_cuda",
+        default_hr_upscaler="bicubic",
+        sdxl_refiner_enabled=True,
+        sdxl_refiner_checkpoint_id="sdxl-refiner",
+        sdxl_refiner_steps=8,
+        sdxl_refiner_strength=0.2,
         pnginfo_send_to_studio=False,
         pnginfo_clear_after_apply=False,
     )
@@ -76,5 +86,10 @@ def test_saving_output_settings_round_trip():
     assert restored.metadata_include_app_version is False
     assert restored.metadata_include_optimization_profile is False
     assert restored.optimization_profile_id == "safe_eager_cuda"
+    assert restored.default_hr_upscaler == "bicubic"
+    assert restored.sdxl_refiner_enabled is True
+    assert restored.sdxl_refiner_checkpoint_id == "sdxl-refiner"
+    assert restored.sdxl_refiner_steps == 8
+    assert restored.sdxl_refiner_strength == 0.2
     assert restored.pnginfo_send_to_studio is False
     assert restored.pnginfo_clear_after_apply is False

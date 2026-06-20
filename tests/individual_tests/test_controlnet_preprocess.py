@@ -88,8 +88,9 @@ def test_download_catalog_present_and_resolvable(tmp_path: Path):
     svc = ControlNetService(flags)
     items = svc.list_downloadable()
     keys = {item.key for item in items}
-    assert {"canny", "depth", "openpose"} <= keys
-    canny = svc.find_downloadable("canny")
+    assert {"cn15-canny", "cn15-depth", "cn15-openpose"} <= keys
+    assert {"cnxl-canny", "cnxl-depth", "cnxl-openpose"} <= keys
+    canny = svc.find_downloadable("cn15-canny")
     assert canny is not None
     assert canny.url.startswith("https://huggingface.co/")
     assert not svc.is_installed(canny)

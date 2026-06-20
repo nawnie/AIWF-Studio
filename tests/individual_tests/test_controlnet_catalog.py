@@ -18,10 +18,11 @@ def test_downloadable_catalog_uses_light_sd15_checkpoints():
         assert item.url.endswith(item.filename)
 
 
-def test_controlnet_service_lists_light_catalog(tmp_path: Path):
+def test_controlnet_service_lists_sd15_and_sdxl_catalog(tmp_path: Path):
     service = ControlNetService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
     keys = {item.key for item in service.list_downloadable()}
-    assert {"canny", "depth", "openpose"} <= keys
+    assert {"cn15-canny", "cn15-depth", "cn15-openpose"} <= keys
+    assert {"cnxl-canny", "cnxl-depth", "cnxl-openpose", "cnxl-union-full"} <= keys
 
 
 @pytest.mark.parametrize(

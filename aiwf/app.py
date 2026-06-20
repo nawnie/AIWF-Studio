@@ -140,6 +140,12 @@ def _parse_cli() -> RuntimeFlags:
     )
     parser.add_argument("--medvram", action="store_true")
     parser.add_argument("--lowvram", action="store_true")
+    parser.add_argument(
+        "--attention-backend",
+        choices=["sage_sdpa", "sdpa", "xformers", "none"],
+        default=None,
+        help="Image attention backend: SageAttention with SDPA fallback, SDPA, xFormers, or none",
+    )
     parser.add_argument("--xformers", action="store_true", help="Use xformers memory-efficient attention")
     parser.add_argument(
         "--opt-sdp-attention",
@@ -211,6 +217,10 @@ def _parse_cli() -> RuntimeFlags:
         onnx_provider=args.onnx_provider,
         medvram=args.medvram,
         lowvram=args.lowvram,
+        attention_backend=(
+            args.attention_backend
+            or ("xformers" if args.xformers else "sdpa" if args.opt_sdp_attention or args.opt_split_attention else "sage_sdpa")
+        ),
         xformers=args.xformers,
         opt_sdp_attention=args.opt_sdp_attention,
         opt_split_attention=args.opt_split_attention,

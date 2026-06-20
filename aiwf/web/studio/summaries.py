@@ -9,7 +9,9 @@ def result_summary_markdown(job, new_seed, job_status):
     """Format the post-generation status summary shown in Studio."""
     req = job.request
     res = job.result
-    if new_seed >= 0:
+    if getattr(job, "state", None) and getattr(job.state, "value", job.state) == "cancelled":
+        head = "**Stopped** — saved interrupted preview"
+    elif new_seed >= 0:
         head = f"**Done** \u2014 seed **{new_seed}**"
     elif job_status.startswith("**"):
         head = job_status
@@ -40,6 +42,10 @@ def result_summary_markdown(job, new_seed, job_status):
     loras = list(dict.fromkeys(re.findall(r"<lora:([^:>]+)", req.prompt or "")))
     if loras:
         lines.append("LoRA: " + ", ".join(loras))
+
+    artifacts = getattr(res, "artifacts", []) or []
+    if artifacts and getattr(job, "state", None) and getattr(job.state, "value", job.state) == "cancelled":
+        lines.append(f"Saved: `{artifacts[0].path}`")
 
     return "  \n".join(lines)
 

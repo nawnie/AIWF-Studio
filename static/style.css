@@ -434,6 +434,74 @@ footer {
     font-weight: 600 !important;
 }
 
+.aiwf-backend-restart-strip {
+    position: sticky;
+    top: 0.65rem;
+    z-index: 30;
+    align-items: center !important;
+    gap: 0.85rem !important;
+    padding: 0.85rem 1rem !important;
+    background: color-mix(in srgb, var(--aiwf-accent-soft) 36%, var(--aiwf-surface)) !important;
+    border: 1px solid color-mix(in srgb, var(--aiwf-accent) 35%, var(--aiwf-border)) !important;
+    border-radius: var(--aiwf-radius-lg) !important;
+    box-shadow: var(--aiwf-shadow-soft), var(--aiwf-shadow-inset) !important;
+    backdrop-filter: blur(18px) saturate(1.15);
+    -webkit-backdrop-filter: blur(18px) saturate(1.15);
+}
+
+.aiwf-backend-restart-strip > .block,
+.aiwf-backend-restart-copy > .block,
+.aiwf-backend-restart-action > .block {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.aiwf-backend-restart-copy {
+    gap: 0.25rem !important;
+}
+
+.aiwf-backend-restart-copy .aiwf-section-label p {
+    margin: 0 !important;
+}
+
+.aiwf-backend-restart-copy .aiwf-settings-hint {
+    padding: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+.aiwf-backend-restart-action {
+    justify-content: center !important;
+}
+
+.aiwf-restart-backend-btn,
+.aiwf-restart-backend-btn button {
+    width: 100%;
+    min-height: 3.15rem !important;
+    padding: 0.7rem 1rem !important;
+    font-family: var(--aiwf-font-display) !important;
+    font-size: 0.84rem !important;
+    font-weight: 800 !important;
+    letter-spacing: 0.04em !important;
+    text-transform: uppercase !important;
+    color: #06120f !important;
+    background: linear-gradient(135deg, var(--aiwf-accent-bright), var(--aiwf-accent)) !important;
+    border: 1px solid color-mix(in srgb, var(--aiwf-accent-bright) 70%, transparent) !important;
+    border-radius: var(--aiwf-radius) !important;
+    box-shadow: 0 8px 28px var(--aiwf-accent-glow), var(--aiwf-shadow-inset) !important;
+}
+
+.aiwf-restart-backend-btn:hover,
+.aiwf-restart-backend-btn button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 12px 34px var(--aiwf-accent-glow), var(--aiwf-shadow-inset) !important;
+}
+
+.aiwf-backend-restart-status {
+    min-height: 2.3rem;
+}
+
 .aiwf-page-path {
     margin: 0 !important;
     padding: 0.55rem 0.75rem !important;
@@ -2352,6 +2420,19 @@ fieldset.aiwf-resolution-ratio-square {
 
     .aiwf-settings {
         max-width: 100%;
+    }
+
+    .aiwf-backend-restart-strip {
+        position: sticky;
+        top: 0.45rem;
+        flex-direction: column !important;
+        align-items: stretch !important;
+        padding: 0.8rem !important;
+    }
+
+    .aiwf-restart-backend-btn,
+    .aiwf-restart-backend-btn button {
+        min-height: 3rem !important;
     }
 
     .aiwf-remote-access code {

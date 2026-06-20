@@ -62,10 +62,12 @@ def test_controlnet_downloadable_lists_catalog(tmp_path: Path):
     assert resp.status_code == 200
     payload = resp.json()
     keys = {item["key"] for item in payload}
-    assert {"canny", "depth", "openpose"} <= keys
-    for item in payload:
-        assert item["size_mb"] <= 150
-        assert "control_lora_rank128" in item["filename"]
+    assert {"cn15-canny", "cn15-depth", "cn15-openpose"} <= keys
+    assert {"cnxl-canny", "cnxl-depth", "cnxl-openpose"} <= keys
+    sd15_keys = {"cn15-canny", "cn15-depth", "cn15-openpose"}
+    for item in [item for item in payload if item["key"] in sd15_keys]:
+        assert item["size_mb"] <= 700
+        assert item["filename"].endswith(".safetensors")
 
 
 def test_sdapi_controlnet_detect_alias(tmp_path: Path):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aiwf.core.domain.prompt_style import PromptStyle
@@ -44,6 +44,7 @@ class RuntimeFlags(BaseSettings):
     onnx_provider: str = "auto"   # auto | cuda | directml | cpu
     medvram: bool = False
     lowvram: bool = False
+    attention_backend: str = "sage_sdpa"
     xformers: bool = False
     opt_sdp_attention: bool = False
     opt_split_attention: bool = False
@@ -70,6 +71,16 @@ class RuntimeFlags(BaseSettings):
     vsr_model_dir: Path | None = None
     vae_path: Path | None = None
     default_checkpoint: Path | None = None
+
+    @field_validator("attention_backend")
+    @classmethod
+    def validate_attention_backend(cls, value: str) -> str:
+        normalized = (value or "sage_sdpa").strip().lower().replace("-", "_")
+        if normalized in {"sage", "sageattention"}:
+            normalized = "sage_sdpa"
+        if normalized not in {"sage_sdpa", "sdpa", "xformers", "none"}:
+            raise ValueError("attention_backend must be sage_sdpa, sdpa, xformers, or none")
+        return normalized
 
     def resolved_models_dir(self) -> Path:
         return (self.models_dir or self.data_dir / "models").resolve()
@@ -136,6 +147,7 @@ class UserSettings(BaseSettings):
     default_width: int = Field(default=512, ge=64, le=2048)
     default_height: int = Field(default=512, ge=64, le=2048)
     default_clip_skip: int = Field(default=1, ge=1, le=12)
+    default_hr_upscaler: str = "lanczos"
 
     # Last checkpoint the user loaded in Studio — restored on next launch.
     last_checkpoint_id: str | None = None
@@ -160,8 +172,7 @@ class UserSettings(BaseSettings):
     # Filename template. Tokens: [datetime] [date] [time] [seed] [model_name]
     # [width] [height] [seq]. "[datetime]" reproduces the legacy timestamp name.
     filename_pattern: str = "[datetime]"
-    # Capture intermediate / partial images. Both require backend support to take
-    # effect and are no-ops until that lands (the setting is persisted regardless).
+    # Capture intermediate / partial images.
     save_before_hires: bool = False
     save_interrupted: bool = False
 
@@ -173,6 +184,23 @@ class UserSettings(BaseSettings):
     metadata_include_app_version: bool = True
     metadata_include_optimization_profile: bool = True
     optimization_profile_id: str = "balanced_sdpa_fp16"
+
+    # Optional SDXL refiner. This is intentionally explicit instead of tied to a
+    # profile so user-visible quality controls remain under the user's control.
+    sdxl_refiner_enabled: bool = False
+    sdxl_refiner_checkpoint_id: str | None = None
+    sdxl_refiner_steps: int = Field(default=10, ge=1, le=150)
+    sdxl_refiner_strength: float = Field(default=0.25, ge=0.0, le=1.0)
+
+    @field_validator("default_hr_upscaler")
+    @classmethod
+    def validate_default_hr_upscaler(cls, value: str) -> str:
+        normalized = (value or "lanczos").strip().lower().replace(" ", "_")
+        if normalized == "latent":
+            normalized = "lanczos"
+        if normalized not in {"lanczos", "bicubic", "nearest"}:
+            raise ValueError("default_hr_upscaler must be lanczos, bicubic, or nearest")
+        return normalized
 
     # PNG Info handoff behavior.
     pnginfo_send_to_studio: bool = True

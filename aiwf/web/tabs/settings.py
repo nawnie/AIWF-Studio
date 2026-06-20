@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import os
 import platform
+import sys
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import gradio as gr
@@ -34,6 +38,53 @@ TAB_VISIBILITY_CHOICES = [
     "History",
 ]
 
+_BACKEND_RESTART_LOCK = threading.Lock()
+_BACKEND_RESTART_REQUESTED = False
+
+
+def _current_process_restart_command() -> tuple[str, list[str]]:
+    return sys.executable, [sys.executable, *sys.argv]
+
+
+def _schedule_backend_restart(
+    *,
+    delay_seconds: float = 1.25,
+    exec_fn: Callable[[str, list[str]], object] | None = None,
+    sleep_fn: Callable[[float], object] | None = None,
+) -> bool:
+    """Restart the current AIWF process after the Gradio response is sent."""
+    global _BACKEND_RESTART_REQUESTED
+
+    with _BACKEND_RESTART_LOCK:
+        if _BACKEND_RESTART_REQUESTED:
+            return False
+        _BACKEND_RESTART_REQUESTED = True
+
+    exec_fn = exec_fn or os.execv
+    sleep_fn = sleep_fn or time.sleep
+
+    def restart_worker() -> None:
+        sleep_fn(delay_seconds)
+        executable, argv = _current_process_restart_command()
+        exec_fn(executable, argv)
+
+    threading.Thread(
+        target=restart_worker,
+        name="aiwf-backend-restart",
+        daemon=True,
+    ).start()
+    return True
+
+
+def _restart_backend_message() -> str:
+    queued = _schedule_backend_restart()
+    if queued:
+        return (
+            "**Backend restart queued.** AIWF Studio will drop briefly while the "
+            "Python process restarts. Refresh the browser when the console says it is ready."
+        )
+    return "**Backend restart already queued.** Wait for AIWF Studio to come back up."
+
 
 def _paths_text(value: str) -> list[str]:
     return [line.strip() for line in (value or "").splitlines() if line.strip()]
@@ -53,11 +104,14 @@ def _launch_form_values(ctx: AppContext) -> LaunchSettings:
 
 
 def _attention_summary(ctx: AppContext) -> str:
-    if ctx.flags.xformers:
+    backend = getattr(ctx.flags, "attention_backend", "sage_sdpa")
+    if backend == "sage_sdpa":
+        return "Sage -> SDPA"
+    if backend == "sdpa":
+        return "PyTorch SDPA"
+    if backend == "xformers" or ctx.flags.xformers:
         return "xFormers"
-    if ctx.flags.opt_sdp_attention or ctx.flags.opt_split_attention:
-        return "SDP attention"
-    return "Default attention"
+    return "Off/default"
 
 
 def _format_gb(value: int | float | None) -> str:
@@ -225,9 +279,7 @@ def _launch_component_values(settings: LaunchSettings) -> list:
         settings.autolaunch,
         settings.theme,
         settings.cpu,
-        settings.xformers,
-        settings.opt_sdp_attention,
-        settings.opt_split_attention,
+        settings.attention_backend,
         settings.medvram,
         settings.lowvram,
         settings.no_half,
@@ -299,6 +351,14 @@ def register_settings(registry: WebRegistry) -> None:
         default_sampler_label = sampler_id_to_label.get(
             ctx.settings.default_sampler, samplers[0].label if samplers else None
         )
+        checkpoints = ctx.generation.list_checkpoints()
+        checkpoint_choices = [(checkpoint.title, checkpoint.id) for checkpoint in checkpoints]
+        checkpoint_ids = {checkpoint.id for checkpoint in checkpoints}
+        refiner_checkpoint_value = (
+            ctx.settings.sdxl_refiner_checkpoint_id
+            if ctx.settings.sdxl_refiner_checkpoint_id in checkpoint_ids
+            else None
+        )
 
         initial_qr, initial_qr_status = _connect_qr(ctx)
 
@@ -309,6 +369,23 @@ def register_settings(registry: WebRegistry) -> None:
                     "Manage workspace defaults and next-start launch settings.",
                     elem_classes=["aiwf-page-intro"],
                 )
+            with gr.Row(equal_height=False, elem_classes=["aiwf-backend-restart-strip"]):
+                with gr.Column(scale=3, min_width=280, elem_classes=["aiwf-backend-restart-copy"]):
+                    gr.Markdown("Backend session", elem_classes=["aiwf-section-label"])
+                    gr.Markdown(
+                        "Restart after code, CSS/JS, model path, or launch profile changes.",
+                        elem_classes=["aiwf-settings-hint"],
+                    )
+                with gr.Column(scale=1, min_width=190, elem_classes=["aiwf-backend-restart-action"]):
+                    restart_backend_btn = gr.Button(
+                        "Restart backend",
+                        variant="primary",
+                        elem_classes=["aiwf-restart-backend-btn"],
+                    )
+            backend_restart_status = gr.Markdown(
+                "",
+                elem_classes=["aiwf-status-bar", "aiwf-backend-restart-status"],
+            )
 
             with gr.Tabs(elem_classes=["aiwf-settings-tabs"]):
                 with gr.Tab("Workspace"):
@@ -427,14 +504,14 @@ def register_settings(registry: WebRegistry) -> None:
                                 value=ctx.settings.save_sidecar_txt,
                             )
                             save_before_hires = gr.Checkbox(
-                                label="Save image before hires fix (planned)",
+                                label="Save image before hires fix",
                                 value=ctx.settings.save_before_hires,
-                                info="Saved as a preference now; takes effect once backend pre-hires capture lands.",
+                                info="Saves the first pass under the output folder's hires-first-pass subfolder.",
                             )
                             save_interrupted = gr.Checkbox(
-                                label="Save interrupted generations (planned)",
+                                label="Save interrupted generations",
                                 value=ctx.settings.save_interrupted,
-                                info="Saved as a preference now; takes effect once partial-image capture lands.",
+                                info="Saves the latest preview under the output folder's interrupted subfolder when you press Stop.",
                             )
                             gr.Markdown("Metadata & PNG Info", elem_classes=["aiwf-section-label"])
                             metadata_include_model_hash = gr.Checkbox(
@@ -562,9 +639,42 @@ def register_settings(registry: WebRegistry) -> None:
                             with gr.Row():
                                 default_width = gr.Slider(64, 2048, value=ctx.settings.default_width, step=8, label="Width")
                                 default_height = gr.Slider(64, 2048, value=ctx.settings.default_height, step=8, label="Height")
-                            default_clip_skip = gr.Slider(1, 12, value=ctx.settings.default_clip_skip, step=1, label="Clip skip")
+                            with gr.Row():
+                                default_clip_skip = gr.Slider(1, 12, value=ctx.settings.default_clip_skip, step=1, label="Clip skip")
+                                default_hr_upscaler = gr.Dropdown(
+                                    label="Default hires upscaler",
+                                    choices=[("Lanczos", "lanczos"), ("Bicubic", "bicubic"), ("Nearest", "nearest")],
+                                    value=ctx.settings.default_hr_upscaler,
+                                )
+                            gr.Markdown("SDXL refiner", elem_classes=["aiwf-section-label"])
+                            sdxl_refiner_enabled = gr.Checkbox(
+                                label="Use SDXL refiner after base image",
+                                value=ctx.settings.sdxl_refiner_enabled,
+                                info="Optional second pass for SDXL checkpoints. Leave off for SD1.5 and speed tests.",
+                            )
+                            sdxl_refiner_checkpoint = gr.Dropdown(
+                                label="Refiner checkpoint",
+                                choices=checkpoint_choices,
+                                value=refiner_checkpoint_value,
+                                info="Use an SDXL refiner/img2img-compatible checkpoint.",
+                            )
+                            with gr.Row():
+                                sdxl_refiner_steps = gr.Slider(
+                                    1,
+                                    150,
+                                    value=ctx.settings.sdxl_refiner_steps,
+                                    step=1,
+                                    label="Refiner steps",
+                                )
+                                sdxl_refiner_strength = gr.Slider(
+                                    0,
+                                    1,
+                                    value=ctx.settings.sdxl_refiner_strength,
+                                    step=0.01,
+                                    label="Refiner denoise",
+                                )
                             gr.Markdown(
-                                "Resolution, sampler, and clip skip defaults are stored in `config.json`.",
+                                "Resolution, sampler, clip skip, hires, and refiner defaults are stored in `config.json`.",
                                 elem_classes=["aiwf-settings-hint"],
                             )
 
@@ -722,17 +832,16 @@ def register_settings(registry: WebRegistry) -> None:
                                 label="Force CPU only (--cpu)",
                                 value=launch.cpu,
                             )
-                            launch_xformers = gr.Checkbox(
-                                label="xFormers memory-efficient attention",
-                                value=launch.xformers,
-                            )
-                            launch_sdp = gr.Checkbox(
-                                label="PyTorch SDP attention",
-                                value=launch.opt_sdp_attention,
-                            )
-                            launch_split = gr.Checkbox(
-                                label="Split attention",
-                                value=launch.opt_split_attention,
+                            launch_attention_backend = gr.Radio(
+                                label="Image attention backend",
+                                choices=[
+                                    ("Sage -> SDPA", "sage_sdpa"),
+                                    ("PyTorch SDPA", "sdpa"),
+                                    ("xFormers", "xformers"),
+                                    ("Off/default", "none"),
+                                ],
+                                value=launch.attention_backend,
+                                info="Sage is attempted only for safe CUDA attention calls; everything else falls back to PyTorch SDPA.",
                             )
                             launch_medvram = gr.Checkbox(
                                 label="Medium VRAM mode",
@@ -1057,9 +1166,7 @@ def register_settings(registry: WebRegistry) -> None:
             launch_autolaunch,
             launch_theme,
             launch_cpu,
-            launch_xformers,
-            launch_sdp,
-            launch_split,
+            launch_attention_backend,
             launch_medvram,
             launch_lowvram,
             launch_no_half,
@@ -1116,6 +1223,11 @@ def register_settings(registry: WebRegistry) -> None:
             js="() => window.location.reload()",
             inputs=None,
             outputs=None,
+            show_progress=False,
+        )
+        restart_backend_btn.click(
+            _restart_backend_message,
+            outputs=[backend_restart_status],
             show_progress=False,
         )
 
@@ -1347,9 +1459,7 @@ def register_settings(registry: WebRegistry) -> None:
                 autolaunch,
                 theme,
                 cpu,
-                xformers,
-                sdp,
-                split,
+                attention_backend,
                 medvram,
                 lowvram,
                 no_half,
@@ -1378,9 +1488,10 @@ def register_settings(registry: WebRegistry) -> None:
                 autolaunch=bool(autolaunch),
                 theme=theme,
                 cpu=bool(cpu),
-                xformers=bool(xformers),
-                opt_sdp_attention=bool(sdp),
-                opt_split_attention=bool(split),
+                attention_backend=attention_backend or "sage_sdpa",
+                xformers=attention_backend == "xformers",
+                opt_sdp_attention=attention_backend == "sdpa",
+                opt_split_attention=False,
                 medvram=bool(medvram),
                 lowvram=bool(lowvram),
                 no_half=bool(no_half),
@@ -1543,6 +1654,11 @@ def register_settings(registry: WebRegistry) -> None:
             d_width,
             d_height,
             d_clip,
+            d_hr_upscaler,
+            refiner_enabled,
+            refiner_checkpoint,
+            refiner_steps,
+            refiner_strength,
             accent,
             selected_tabs,
         ):
@@ -1587,6 +1703,11 @@ def register_settings(registry: WebRegistry) -> None:
             ctx.settings.default_width = int(d_width or 512)
             ctx.settings.default_height = int(d_height or 512)
             ctx.settings.default_clip_skip = int(d_clip or 1)
+            ctx.settings.default_hr_upscaler = d_hr_upscaler or "lanczos"
+            ctx.settings.sdxl_refiner_enabled = bool(refiner_enabled)
+            ctx.settings.sdxl_refiner_checkpoint_id = refiner_checkpoint or None
+            ctx.settings.sdxl_refiner_steps = int(refiner_steps or 10)
+            ctx.settings.sdxl_refiner_strength = float(refiner_strength or 0.25)
             ctx.settings.accent_preset = accent or "mint"
             # Store hidden names instead of visible names so newly added tabs
             # appear by default unless the maintainer adds them to this list.
@@ -1643,6 +1764,11 @@ def register_settings(registry: WebRegistry) -> None:
                 default_width,
                 default_height,
                 default_clip_skip,
+                default_hr_upscaler,
+                sdxl_refiner_enabled,
+                sdxl_refiner_checkpoint,
+                sdxl_refiner_steps,
+                sdxl_refiner_strength,
                 accent_preset,
                 visible_tabs,
             ],

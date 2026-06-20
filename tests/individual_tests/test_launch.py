@@ -22,6 +22,13 @@ def test_launch_settings_argv_includes_cpu_and_api_flags():
     assert "--nowebui" in argv
 
 
+def test_launch_settings_argv_includes_attention_backend():
+    settings = LaunchSettings(attention_backend="sdpa")
+    argv = settings.argv()
+    assert "--attention-backend" in argv
+    assert "sdpa" in argv
+
+
 def test_launch_settings_argv_includes_api_security_flags():
     settings = LaunchSettings(
         api_cors_origins="http://127.0.0.1:3000, https://studio.example",
@@ -119,6 +126,14 @@ def test_merge_launch_settings_applies_saved_cpu_flag(tmp_path: Path):
     merged = merge_launch_settings(cli, saved, explicit=set())
     assert merged.cpu is True
     assert merged.api is True
+
+
+def test_merge_launch_settings_applies_saved_attention_backend(tmp_path: Path):
+    cli = RuntimeFlags(data_dir=tmp_path, attention_backend="sage_sdpa")
+    saved = LaunchSettings(attention_backend="xformers", xformers=True)
+    merged = merge_launch_settings(cli, saved, explicit=set())
+    assert merged.attention_backend == "xformers"
+    assert merged.xformers is True
 
 
 def test_merge_launch_settings_applies_api_security(tmp_path: Path):

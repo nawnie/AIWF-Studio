@@ -36,6 +36,7 @@ class LaunchSettings(BaseSettings):
     share: bool = False
     medvram: bool = False
     lowvram: bool = False
+    attention_backend: str = "sage_sdpa"
     xformers: bool = False
     opt_sdp_attention: bool = False
     opt_split_attention: bool = False
@@ -106,6 +107,16 @@ class LaunchSettings(BaseSettings):
             raise ValueError("onnx_provider must be auto, cuda, directml, or cpu")
         return normalized
 
+    @field_validator("attention_backend")
+    @classmethod
+    def validate_attention_backend(cls, value: str) -> str:
+        normalized = (value or "sage_sdpa").strip().lower().replace("-", "_")
+        if normalized in {"sage", "sageattention"}:
+            normalized = "sage_sdpa"
+        if normalized not in {"sage_sdpa", "sdpa", "xformers", "none"}:
+            raise ValueError("attention_backend must be sage_sdpa, sdpa, xformers, or none")
+        return normalized
+
     @classmethod
     def from_runtime_flags(cls, flags: RuntimeFlags) -> LaunchSettings:
         return cls(
@@ -120,6 +131,7 @@ class LaunchSettings(BaseSettings):
             share=flags.share,
             medvram=flags.medvram,
             lowvram=flags.lowvram,
+            attention_backend=flags.attention_backend,
             xformers=flags.xformers,
             opt_sdp_attention=flags.opt_sdp_attention,
             opt_split_attention=flags.opt_split_attention,
@@ -170,6 +182,7 @@ class LaunchSettings(BaseSettings):
                 "share": self.share,
                 "medvram": self.medvram,
                 "lowvram": self.lowvram,
+                "attention_backend": self.attention_backend,
                 "xformers": self.xformers,
                 "opt_sdp_attention": self.opt_sdp_attention,
                 "opt_split_attention": self.opt_split_attention,
@@ -239,6 +252,8 @@ class LaunchSettings(BaseSettings):
             args.append("--medvram")
         if self.lowvram:
             args.append("--lowvram")
+        if self.attention_backend != "sage_sdpa":
+            args.extend(["--attention-backend", self.attention_backend])
         if self.xformers:
             args.append("--xformers")
         if self.opt_sdp_attention:
@@ -371,6 +386,7 @@ def merge_launch_settings(
         "share": "--share",
         "medvram": "--medvram",
         "lowvram": "--lowvram",
+        "attention_backend": "--attention-backend",
         "xformers": "--xformers",
         "opt_sdp_attention": "--opt-sdp-attention",
         "opt_split_attention": "--opt-split-attention",

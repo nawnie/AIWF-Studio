@@ -5,6 +5,7 @@ import os
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from PIL import Image
 
@@ -17,6 +18,7 @@ from aiwf.infrastructure.controlnet.preprocess import (
     PreprocessParams,
     preprocess_control_image,
 )
+from aiwf.services.model_download_catalog import MODEL_DOWNLOAD_CATALOG
 
 # Preprocessor vocabulary is owned by the preprocess module (single source of truth).
 CONTROLNET_MODULES = list(PREPROCESS_MODULES)
@@ -39,6 +41,8 @@ class DownloadableControlNet:
     preprocessor: str
     size_mb: int
     base: str = "SD1.5"
+    repo_id: str = ""
+    snapshot: bool = False
 
 
 def _cn(key: str, title: str, filename: str, preproc: str, size_mb: int) -> "DownloadableControlNet":
@@ -125,6 +129,56 @@ DOWNLOADABLE_CONTROLNETS: list[DownloadableControlNet] = [
     ),
 ]
 
+
+def _catalog_preprocessor(entry_key: str, title: str) -> str:
+    text = f"{entry_key} {title}".lower()
+    for key, module in (
+        ("canny", "canny"),
+        ("depth", "depth"),
+        ("openpose", "openpose"),
+        ("pose", "openpose"),
+        ("softedge", "softedge"),
+        ("lineart", "lineart"),
+        ("tile", "tile"),
+        ("normal", "normal"),
+        ("scribble", "scribble"),
+        ("seg", "segmentation"),
+        ("inpaint", "none"),
+    ):
+        if key in text:
+            return module
+    return "none"
+
+
+def _catalog_controlnets() -> list[DownloadableControlNet]:
+    items: list[DownloadableControlNet] = []
+    seen: set[str] = set()
+    for entry in MODEL_DOWNLOAD_CATALOG:
+        if entry.category != "controlnet" or entry.key in seen:
+            continue
+        seen.add(entry.key)
+        text = f"{entry.key} {entry.title} {entry.repo_id}".lower()
+        base = "SDXL" if "sdxl" in text else "SD1.5"
+        filename = entry.filename
+        if not filename and entry.url:
+            filename = Path(urlparse(entry.url).path).name
+        if not filename:
+            filename = entry.repo_id.split("/")[-1] if entry.repo_id else entry.key
+        items.append(
+            DownloadableControlNet(
+                key=entry.key,
+                title=entry.title,
+                filename=filename,
+                url=entry.url or (f"https://huggingface.co/{entry.repo_id}" if entry.repo_id else ""),
+                preprocessor=_catalog_preprocessor(entry.key, entry.title),
+                size_mb=int(entry.size_mb or 0),
+                base=base,
+                repo_id=entry.repo_id,
+                snapshot=entry.snapshot,
+            )
+        )
+    return items or list(DOWNLOADABLE_CONTROLNETS)
+
 class ControlNetService:
     """Catalog and request surface for ControlNet without coupling UI/API to diffusers."""
 
@@ -169,9 +223,9 @@ class ControlNetService:
         """Raise ValueError when ControlNet is enabled but the request cannot run."""
         if not enabled:
             return
-        if mode not in ("txt2img", "img2img"):
+        if mode not in ("txt2img", "img2img", "inpaint"):
             raise ValueError(
-                "ControlNet is only available in Text and Image2Image modes. "
+                "ControlNet is only available in Text, Image2Image, and Inpaint modes. "
                 "Disable ControlNet or switch mode."
             )
         if not model_id:
@@ -219,13 +273,16 @@ class ControlNetService:
         return resolved
 
     def list_downloadable(self) -> list[DownloadableControlNet]:
-        return list(DOWNLOADABLE_CONTROLNETS)
+        return _catalog_controlnets()
 
     def is_installed(self, item: DownloadableControlNet) -> bool:
+        if item.snapshot and item.repo_id:
+            target = self.models_dir() / item.repo_id.split("/")[-1]
+            return target.is_dir() and any(target.iterdir())
         return (self.models_dir() / item.filename).is_file()
 
     def find_downloadable(self, key: str) -> DownloadableControlNet | None:
-        for item in DOWNLOADABLE_CONTROLNETS:
+        for item in self.list_downloadable():
             if item.key == key:
                 return item
         return None
@@ -241,6 +298,17 @@ class ControlNetService:
             raise ValueError(f"Unknown ControlNet '{key}'")
         self.ensure_dir()
         dest = self.models_dir() / item.filename
+        if item.snapshot:
+            if not item.repo_id:
+                raise ValueError(f"ControlNet '{key}' is a folder download but has no Hugging Face repo id.")
+            from huggingface_hub import snapshot_download
+
+            target = self.models_dir() / item.repo_id.split("/")[-1]
+            if target.is_dir() and any(target.iterdir()):
+                return target
+            target.mkdir(parents=True, exist_ok=True)
+            snapshot_download(repo_id=item.repo_id, local_dir=str(target))
+            return target
         if dest.is_file():
             return dest
 

@@ -36,7 +36,6 @@ from aiwf.web.components.results import format_generation_outputs, results_galle
 from aiwf.web.studio.catalogs import StudioCatalogs
 from aiwf.web.studio.controlnet_stack import StudioControlNetSlot, build_controlnet_stack
 from aiwf.web.studio.constants import EMPTY_CANVAS, MODE_TITLES, MODES, TOOLBAR_HINTS
-from aiwf.web.studio.generation_runner import GenerationRunner
 from aiwf.web.studio.handlers import compare as compare_handlers
 from aiwf.web.studio.handlers import inpaint as inpaint_handlers
 from aiwf.web.studio.handlers import models as model_handlers
@@ -130,7 +129,6 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
     service = ctx.generation
     catalogs = StudioCatalogs.from_context(ctx)
     session = StudioSession()
-    runner = GenerationRunner(ctx, service, catalogs, session)
     samplers = service.list_samplers()
     vaes = service.list_vaes()
     vae_choices = [("Automatic", None)] + [(v.title, v.id) for v in vaes]
@@ -826,6 +824,11 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                             hr_scale = gr.Slider(1.0, 4.0, value=2.0, step=0.05, label="Upscale")
                             hr_steps = gr.Slider(1, 150, value=20, step=1, label="Hires steps")
                             hr_denoise = gr.Slider(0, 1, value=0.35, step=0.01, label="Hires denoise")
+                        hr_upscaler = gr.Dropdown(
+                            label="Hires upscaler",
+                            choices=[("Lanczos", "lanczos"), ("Bicubic", "bicubic"), ("Nearest", "nearest")],
+                            value=ctx.settings.default_hr_upscaler,
+                        )
                 with gr.Accordion("ReActor", open=False, elem_classes=["aiwf-prompt-tools", "aiwf-reactor-panel"]):
                     gr.Markdown(
                         "Swap a **source face** onto the current canvas result. "
@@ -1884,6 +1887,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         hires_scale,
         hires_steps,
         hires_denoise,
+        hires_upscaler,
         img2img_denoise,
         inpaint_denoise_value,
         mask_blur_value,
@@ -1968,6 +1972,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                 hr_scale=float(hires_scale),
                 hr_steps=int(hires_steps),
                 hr_denoising_strength=float(hires_denoise),
+                hr_upscaler=str(hires_upscaler or ctx.settings.default_hr_upscaler),
                 checkpoint_id=ckpt_id,
                 vae_id=vae_id,
             )
@@ -2269,6 +2274,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         hires_scale,
         hires_steps,
         hires_denoise,
+        hires_upscaler,
         img2img_denoise,
         inpaint_denoise_value,
         mask_blur_value,
@@ -2402,6 +2408,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                     hires_scale,
                     hires_steps,
                     hires_denoise,
+                    hires_upscaler,
                     img2img_denoise,
                     inpaint_denoise_value,
                     mask_blur_value,
@@ -2710,6 +2717,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         hr_scale,
         hr_steps,
         hr_denoise,
+        hr_upscaler,
         denoise,
         inpaint_denoise,
         mask_blur,

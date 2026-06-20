@@ -18,8 +18,10 @@ import torch
 from diffusers import (
     ControlNetModel,
     StableDiffusionControlNetImg2ImgPipeline,
+    StableDiffusionControlNetInpaintPipeline,
     StableDiffusionControlNetPipeline,
     StableDiffusionXLControlNetImg2ImgPipeline,
+    StableDiffusionXLControlNetInpaintPipeline,
     StableDiffusionXLControlNetPipeline,
 )
 
@@ -148,19 +150,22 @@ def build_controlnet_pipeline(
     base_pipe,
     controlnet: ControlNetModel | list[ControlNetModel],
     *,
-    img2img: bool,
+    mode: str | None = None,
+    img2img: bool = False,
 ):
     """Build a ControlNet pipeline reusing the base pipeline's components.
 
     The returned pipeline shares the base UNet/VAE/text-encoders (no reload) and
     adds the ControlNet conditioning branch.
     """
+    mode = mode or ("img2img" if img2img else "txt2img")
     if _is_sdxl(base_pipe):
-        cls = (
-            StableDiffusionXLControlNetImg2ImgPipeline
-            if img2img
-            else StableDiffusionXLControlNetPipeline
-        )
+        if mode == "inpaint":
+            cls = StableDiffusionXLControlNetInpaintPipeline
+        elif mode == "img2img":
+            cls = StableDiffusionXLControlNetImg2ImgPipeline
+        else:
+            cls = StableDiffusionXLControlNetPipeline
         return cls(
             vae=base_pipe.vae,
             text_encoder=base_pipe.text_encoder,
@@ -172,11 +177,12 @@ def build_controlnet_pipeline(
             scheduler=base_pipe.scheduler,
         )
 
-    cls = (
-        StableDiffusionControlNetImg2ImgPipeline
-        if img2img
-        else StableDiffusionControlNetPipeline
-    )
+    if mode == "inpaint":
+        cls = StableDiffusionControlNetInpaintPipeline
+    elif mode == "img2img":
+        cls = StableDiffusionControlNetImg2ImgPipeline
+    else:
+        cls = StableDiffusionControlNetPipeline
     return cls(
         vae=base_pipe.vae,
         text_encoder=base_pipe.text_encoder,

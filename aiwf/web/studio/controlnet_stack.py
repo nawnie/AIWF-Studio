@@ -45,8 +45,8 @@ def build_controlnet_stack(
                     model_id=slot.model_id,
                     control_image=slot.image,
                 )
-            elif mode not in ("txt2img", "img2img"):
-                raise ValueError("ControlNet is only available in Text and Image2Image modes.")
+            elif mode not in ("txt2img", "img2img", "inpaint"):
+                raise ValueError("ControlNet is only available in Text, Image2Image, and Inpaint modes.")
             elif not slot.model_id:
                 raise ValueError("Select a ControlNet model or disable ControlNet.")
             elif slot.image is None:
@@ -58,7 +58,7 @@ def build_controlnet_stack(
         except ValueError as exc:
             raise ValueError(f"{slot.label}: {exc}") from exc
 
-        if slot.model_id and slot.image is not None and mode in ("txt2img", "img2img"):
+        if slot.model_id and slot.image is not None and mode in ("txt2img", "img2img", "inpaint"):
             units.append(
                 ControlNetUnit(
                     enabled=True,
