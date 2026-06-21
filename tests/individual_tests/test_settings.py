@@ -27,6 +27,8 @@ def test_live_preview_unsupported_decoder_disables_interval():
 
 def test_saving_output_defaults_preserve_legacy_behavior():
     s = UserSettings()
+    assert "Chat" in s.hidden_tabs
+    assert "Training" in s.hidden_tabs
     assert s.save_grid is False
     assert s.save_sidecar_txt is False
     assert s.filename_pattern == "[datetime]"
