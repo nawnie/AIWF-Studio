@@ -106,6 +106,16 @@ def _relative_subdir(path: Path, roots: list[Path]) -> str:
     return parent.as_posix()
 
 
+def _relative_path_text(path: Path, roots: list[Path]) -> str:
+    resolved = path.resolve()
+    for root in sorted((root.resolve() for root in roots), key=lambda p: len(str(p)), reverse=True):
+        try:
+            return resolved.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return path.name
+
+
 def _metadata_text(metadata: dict[str, str]) -> str:
     return " ".join(f"{key} {value}" for key, value in metadata.items()).lower()
 
@@ -324,10 +334,11 @@ def classify_model_dir(path: Path, roots: list[Path]) -> ModelInventoryRecord | 
 
     model_index = _read_model_index(path)
     class_name = str(model_index.get("_class_name") or "")
-    text = f"{path.name} {' '.join(path.parts)} {class_name}"
+    text = f"{path.name} {_relative_path_text(path, roots)} {class_name}"
     family = "checkpoint"
     architecture = _architecture_from_text(text)
     lowered = text.lower()
+    path_parts = {part.lower() for part in path.parts}
     identifiers = {"model_index": class_name or "model_index.json"}
 
     if "wan" in lowered:
@@ -336,6 +347,8 @@ def classify_model_dir(path: Path, roots: list[Path]) -> ModelInventoryRecord | 
     elif "ltx" in lowered:
         family = "runtime_asset"
         architecture = "ltx"
+    elif "components" in path_parts and architecture in {ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}:
+        family = "text_encoder"
     elif architecture in {ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}:
         family = "runtime_asset"
     elif "flux" in lowered:
@@ -481,19 +494,35 @@ def scan_model_inventory(flags: RuntimeFlags) -> list[ModelInventoryRecord]:
     seen: set[str] = set()
     records: list[ModelInventoryRecord] = []
     for root in roots:
-        try:
-            paths = [root, *sorted(root.rglob("*"), key=lambda p: str(p).lower())]
-        except OSError:
-            continue
-        for path in paths:
-            key = os.path.normcase(str(path.resolve()))
+        for current, dir_names, file_names in os.walk(root):
+            dir_names.sort(key=str.lower)
+            file_names.sort(key=str.lower)
+            path = Path(current)
+            try:
+                key = os.path.normcase(str(path.resolve()))
+            except OSError:
+                continue
             if key in seen:
                 continue
-            record = classify_model_dir(path, roots) if path.is_dir() else classify_model_file(path, roots)
-            if record is None:
+            record = classify_model_dir(path, roots)
+            if record is not None:
+                seen.add(key)
+                records.append(record)
+                dir_names[:] = []
                 continue
-            seen.add(key)
-            records.append(record)
+            for filename in file_names:
+                file_path = path / filename
+                try:
+                    file_key = os.path.normcase(str(file_path.resolve()))
+                except OSError:
+                    continue
+                if file_key in seen:
+                    continue
+                file_record = classify_model_file(file_path, roots)
+                if file_record is None:
+                    continue
+                seen.add(file_key)
+                records.append(file_record)
     records.sort(key=lambda item: (item.family, item.architecture, item.filename.lower()))
     return records
 

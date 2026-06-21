@@ -650,6 +650,200 @@ class DiffusersBackend:
         path = component_dir / subfolder
         return str(path) if (path / "config.json").is_file() else None
 
+    @staticmethod
+    def _component_dir_matches_repo(component_dir: Path, repo_name: str) -> bool:
+        normalized_path = component_dir.as_posix().lower()
+        normalized_repo = repo_name.lower()
+        return normalized_repo in normalized_path or normalized_repo.replace(".", "-") in normalized_path
+
+    @staticmethod
+    @contextmanager
+    def _gguf_singleton_shape_compat():
+        """Allow GGUF files that omit leading singleton dims on non-linear params.
+
+        Some Comfy-style Z-Image GGUF files store pad tokens as `[dim]`, while
+        Diffusers declares those parameters as `[1, dim]`. Linear weights must
+        stay quantized, so this only reshapes/dequantizes params whose inferred
+        unquantized shape has the same element count but not the exact target
+        shape.
+        """
+        try:
+            import torch
+            from diffusers.quantizers.gguf.gguf_quantizer import GGUFQuantizer
+            from diffusers.quantizers.gguf.utils import GGUFParameter, dequantize_gguf_tensor
+            from diffusers.quantizers.gguf.utils import _quant_shape_from_byte_shape
+            from diffusers.quantizers.gguf.utils import GGML_QUANT_SIZES
+            from diffusers.utils import get_module_from_name
+        except Exception:
+            yield
+            return
+
+        original_check = GGUFQuantizer.check_quantized_param_shape
+        original_create = GGUFQuantizer.create_quantized_param
+
+        def _numel(shape) -> int:
+            total = 1
+            for dim in shape:
+                total *= int(dim)
+            return total
+
+        def _inferred_shape(param):
+            block_size, type_size = GGML_QUANT_SIZES[param.quant_type]
+            return tuple(_quant_shape_from_byte_shape(tuple(param.shape), type_size, block_size))
+
+        def check_quantized_param_shape(self, param_name, current_param, loaded_param):
+            try:
+                return original_check(self, param_name, current_param, loaded_param)
+            except ValueError:
+                if isinstance(loaded_param, GGUFParameter):
+                    inferred = _inferred_shape(loaded_param)
+                    current = tuple(current_param.shape)
+                    if inferred != current and _numel(inferred) == _numel(current):
+                        logger.info(
+                            "Allowing GGUF singleton reshape for %s: %s -> %s",
+                            param_name,
+                            inferred,
+                            current,
+                        )
+                        return True
+                raise
+
+        def create_quantized_param(
+            self,
+            model,
+            param_value,
+            param_name,
+            target_device,
+            state_dict=None,
+            unexpected_keys=None,
+            **kwargs,
+        ):
+            if isinstance(param_value, GGUFParameter):
+                module, tensor_name = get_module_from_name(model, param_name)
+                target = None
+                is_parameter = tensor_name in module._parameters
+                if is_parameter:
+                    target = module._parameters[tensor_name]
+                elif tensor_name in module._buffers:
+                    target = module._buffers[tensor_name]
+                if target is not None:
+                    inferred = _inferred_shape(param_value)
+                    target_shape = tuple(target.shape)
+                    if inferred != target_shape and _numel(inferred) == _numel(target_shape):
+                        value = dequantize_gguf_tensor(param_value).reshape(target_shape).to(target_device)
+                        if is_parameter:
+                            module._parameters[tensor_name] = torch.nn.Parameter(
+                                value,
+                                requires_grad=getattr(target, "requires_grad", False),
+                            )
+                        else:
+                            module._buffers[tensor_name] = value
+                        return
+            return original_create(
+                self,
+                model,
+                param_value,
+                param_name,
+                target_device,
+                state_dict=state_dict,
+                unexpected_keys=unexpected_keys,
+                **kwargs,
+            )
+
+        GGUFQuantizer.check_quantized_param_shape = check_quantized_param_shape
+        GGUFQuantizer.create_quantized_param = create_quantized_param
+        try:
+            yield
+        finally:
+            GGUFQuantizer.check_quantized_param_shape = original_check
+            GGUFQuantizer.create_quantized_param = original_create
+
+    @staticmethod
+    def _flux2_config_from_gguf(path: Path, fallback: dict) -> dict:
+        if path.suffix.lower() != ".gguf":
+            return fallback
+        try:
+            from gguf import GGUFReader
+        except Exception:
+            return fallback
+        try:
+            reader = GGUFReader(str(path))
+            shapes = {tensor.name: [int(dim) for dim in tensor.shape] for tensor in reader.tensors}
+        except Exception:
+            logger.debug("Could not derive Flux.2 config from GGUF header for %s", path, exc_info=True)
+            return fallback
+
+        image_in = shapes.get("img_in.weight")
+        text_in = shapes.get("txt_in.weight")
+        time_in = shapes.get("time_in.in_layer.weight")
+        norm = next(
+            (
+                shape
+                for name, shape in shapes.items()
+                if name.endswith("img_attn.norm.query_norm.weight") and shape
+            ),
+            None,
+        )
+        if not image_in or len(image_in) < 2:
+            return fallback
+        hidden = int(image_in[1])
+        attention_head_dim = int(norm[0]) if norm else int(fallback.get("attention_head_dim", 128))
+        num_attention_heads = max(1, hidden // max(1, attention_head_dim))
+        double_layers = {
+            int(name.split(".", 2)[1])
+            for name in shapes
+            if name.startswith("double_blocks.") and name.split(".", 2)[1].isdigit()
+        }
+        single_layers = {
+            int(name.split(".", 2)[1])
+            for name in shapes
+            if name.startswith("single_blocks.") and name.split(".", 2)[1].isdigit()
+        }
+        derived = dict(fallback)
+        derived.update(
+            {
+                "in_channels": int(image_in[0]),
+                "num_layers": len(double_layers) or int(fallback.get("num_layers", 5)),
+                "num_single_layers": len(single_layers) or int(fallback.get("num_single_layers", 20)),
+                "attention_head_dim": attention_head_dim,
+                "num_attention_heads": num_attention_heads,
+                "joint_attention_dim": int(text_in[0]) if text_in and len(text_in) >= 2 else fallback.get("joint_attention_dim", 7680),
+                "timestep_guidance_channels": int(time_in[0]) if time_in and len(time_in) >= 2 else fallback.get("timestep_guidance_channels", 256),
+                "guidance_embeds": False,
+            }
+        )
+        logger.info(
+            "Derived Flux.2 GGUF config for %s: hidden=%s, heads=%s, double=%s, single=%s, joint=%s",
+            path.name,
+            hidden,
+            num_attention_heads,
+            derived["num_layers"],
+            derived["num_single_layers"],
+            derived["joint_attention_dim"],
+        )
+        return derived
+
+    @staticmethod
+    def _patch_gguf_linear_input_dtype() -> None:
+        try:
+            import torch
+            from diffusers.quantizers.gguf import utils as gguf_utils
+        except Exception:
+            return
+        cls = getattr(gguf_utils, "GGUFLinear", None)
+        if cls is None or getattr(cls, "_aiwf_input_dtype_patch", False):
+            return
+        original = cls.forward_native
+
+        def forward_native(self, inputs: torch.Tensor):
+            compute_dtype = getattr(self, "compute_dtype", None)
+            if compute_dtype is not None and inputs.dtype != compute_dtype:
+                inputs = inputs.to(compute_dtype)
+            return original(self, inputs)
+
+        cls.forward_native = forward_native
+        cls._aiwf_input_dtype_patch = True
+
     def _resolve_flux_component_paths(self) -> dict[str, Path]:
         clip = self._find_flux_component(
             ("clip_l.safetensors",),
@@ -1074,10 +1268,16 @@ class DiffusersBackend:
                 if repo_name.endswith("4B")
                 else _FLUX2_KLEIN_9B_TRANSFORMER_CONFIG
             )
+            fallback_config = self._flux2_config_from_gguf(path, fallback_config)
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_root = Path(tmp)
                 transformer_config_dir = (
-                    self._local_config_dir(component_dir, "transformer")
+                    (
+                        self._local_config_dir(component_dir, "transformer")
+                        if path.suffix.lower() != ".gguf"
+                        and self._component_dir_matches_repo(component_dir, repo_name)
+                        else None
+                    )
                     or self._write_temp_config(tmp_root, "transformer", fallback_config)
                 )
                 load_kwargs = {
@@ -1169,7 +1369,11 @@ class DiffusersBackend:
                 }
                 if path.suffix.lower() == ".gguf":
                     load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
-                transformer = ZImageTransformer2DModel.from_single_file(str(path), **load_kwargs)
+                    self._patch_gguf_linear_input_dtype()
+                    with self._gguf_singleton_shape_compat():
+                        transformer = ZImageTransformer2DModel.from_single_file(str(path), **load_kwargs)
+                else:
+                    transformer = ZImageTransformer2DModel.from_single_file(str(path), **load_kwargs)
 
             vae = AutoencoderKL.from_pretrained(
                 str(component_dir / "vae"),
@@ -2024,7 +2228,7 @@ class DiffusersBackend:
         # Load textual inversions referenced by the (processed) prompt/negative.
         # Only embeddings the user actually uses in the prompt text are loaded here;
         # the rest stay on disk and are never injected into the text encoders.
-        if not is_flux_checkpoint:
+        if not is_transformer_image_checkpoint:
             self._ensure_embeddings_for_prompt(
                 pipe, request.prompt, request.negative_prompt, checkpoint.architecture
             )

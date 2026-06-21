@@ -256,6 +256,47 @@ def test_z_image_gguf_is_runtime_asset_and_selectable_z_image_checkpoint(tmp_pat
     assert checkpoints[0].kind == "z-image"
 
 
+def test_flux2_and_z_image_component_dirs_are_support_assets_not_checkpoints(tmp_path: Path):
+    models = tmp_path / "models"
+    component_specs = [
+        (
+            models / "flux2" / "Components" / "FLUX.2-klein-4B",
+            "Flux2KleinPipeline",
+            "flux2_klein",
+            "flux2/Components",
+        ),
+        (
+            models / "z-image" / "Components" / "Z-Image-Turbo",
+            "ZImagePipeline",
+            "z_image",
+            "z-image/Components",
+        ),
+    ]
+    for component, class_name, _, _ in component_specs:
+        (component / "text_encoder").mkdir(parents=True)
+        (component / "model_index.json").write_text(
+            json.dumps({"_class_name": class_name}),
+            encoding="utf-8",
+        )
+        (component / "text_encoder" / "model-00001-of-00002.safetensors").write_bytes(
+            b"not-a-real-safetensors-header"
+        )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+    by_path = {Path(record.path): record for record in records}
+
+    for component, _, architecture, recommended_subdir in component_specs:
+        record = by_path[component.resolve()]
+        assert record.family == "text_encoder"
+        assert record.architecture == architecture
+        assert record.recommended_subdir == recommended_subdir
+        assert record.should_move is False
+    assert all(record.filename != "model-00001-of-00002.safetensors" for record in records)
+    assert checkpoints == []
+
+
 def test_flux_lora_header_overrides_wrong_folder(tmp_path: Path):
     models = tmp_path / "models"
     flux_lora = models / "Loras" / "Wan" / "flux_motion_rank16.safetensors"

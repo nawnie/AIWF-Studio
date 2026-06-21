@@ -423,3 +423,33 @@ def test_transformer_image_preload_requires_component_folder(
     assert service.can_preload_checkpoint_locally() is False
     _make_component_dir(root.joinpath(*component_rel))
     assert service.can_preload_checkpoint_locally() is True
+
+
+def test_flux2_klein_9b_preload_rejects_public_4b_components(
+    preload_backend,
+    monkeypatch,
+    tmp_path,
+):
+    backend, _, _ = preload_backend
+    root = tmp_path / "models"
+    model_path = root / "flux2" / "GGUF" / "fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf"
+    model_path.parent.mkdir(parents=True)
+    model_path.write_bytes(b"GGUF")
+    _make_component_dir(root / "flux2" / "Components" / "FLUX.2-klein-4B")
+
+    monkeypatch.setattr(backend, "is_flux2_klein_architecture", lambda arch: arch == "flux2_klein")
+    monkeypatch.setattr(backend, "is_z_image_architecture", lambda arch: arch == "z_image")
+
+    service = object.__new__(backend.DiffusersBackend)
+    service._flux_search_roots = lambda: [root]
+    checkpoint = types.SimpleNamespace(
+        id=model_path.stem,
+        title=model_path.stem,
+        filename=model_path.name,
+        path=str(model_path),
+        architecture="flux2_klein",
+    )
+    service._resolve_checkpoint = lambda checkpoint_id=None: checkpoint
+
+    assert service._flux2_component_repo_name(checkpoint) == "FLUX.2-klein-9B"
+    assert service.can_preload_checkpoint_locally() is False
