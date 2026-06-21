@@ -99,7 +99,7 @@ function wireWipButtons() {
     if (button.id === "generateBtn") return;
     button.addEventListener("click", (event) => {
       const target = event.currentTarget;
-      if (target.classList.contains("mode-tab") && target.dataset.mode === "image") return;
+      if (target.classList.contains("mode-tab")) return;
       if (target.matches("#showAdvanced")) return;
       wip(target.dataset.feature || target.textContent.trim());
     });
