@@ -80,6 +80,11 @@ Current focus: make image generation, inpainting, video generation, and video-au
 
 Wan optimization work is still active. FP8, resident high/low mode, streamed block offload, SageAttention, and similar accelerator paths must stay benchmark-gated.
 
+Recent local receipts:
+
+- [Wan post-driver benchmark, June 20 2026](docs/benchmark-reports/wan-post-driver-20260620.md)
+- [Fluxtrait Flux.2 Klein / Z-Image settings check](docs/benchmark-reports/fluxtrait-settings-check-20260620.md)
+
 ### Library, History, And Settings
 
 - generated-output history

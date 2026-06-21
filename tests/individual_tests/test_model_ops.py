@@ -66,6 +66,24 @@ def test_inspect_onnx_folder(tmp_path: Path):
     assert asset.family == "image"
 
 
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        ("fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf", "flux2_klein"),
+        ("fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf", "z_image"),
+    ],
+)
+def test_inspect_transformer_assets_keeps_flux2_and_z_image_separate(tmp_path: Path, filename: str, expected: str):
+    model = tmp_path / filename
+    model.write_bytes(b"GGUF")
+
+    asset = inspect_model_asset(model)
+
+    assert asset.storage == "gguf"
+    assert asset.family == "video-or-transformer"
+    assert asset.architecture == expected
+
+
 def test_checkpoint_blend_blocks_architecture_mismatch(tmp_path: Path):
     svc = ModelOpsService(_flags(tmp_path))
     left = _ckpt(tmp_path, "left", "sd15")

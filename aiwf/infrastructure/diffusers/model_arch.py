@@ -20,6 +20,20 @@ ARCH_SDXL = "sdxl"
 ARCH_SDXL_INPAINT = "sdxl_inpaint"
 ARCH_SD35 = "sd35"
 ARCH_FLUX = "flux"
+ARCH_FLUX2_KLEIN = "flux2_klein"
+ARCH_Z_IMAGE = "z_image"
+
+
+def _architecture_from_name(filename: str) -> str | None:
+    lower = filename.lower().replace("_", "-")
+    compact = lower.replace("-", "")
+    if "z-image" in lower or "zimage" in compact:
+        return ARCH_Z_IMAGE
+    if "flux.2" in lower or "flux2" in compact or "klein" in lower:
+        return ARCH_FLUX2_KLEIN
+    if "flux" in lower:
+        return ARCH_FLUX
+    return None
 
 
 def _safetensors_tensor_shapes(path: Path) -> dict[str, list[int]]:
@@ -79,10 +93,12 @@ def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: st
         for key in shapes
     )
 
+    name_arch = _architecture_from_name(filename)
+
     if has_sd3 or "sd3.5" in lower or "sd35" in lower or "stable-diffusion-3.5" in lower:
         return ARCH_SD35
-    if "flux" in lower:
-        return ARCH_FLUX
+    if name_arch:
+        return name_arch
 
     if unet_in and len(unet_in) >= 2 and unet_in[1] == 9:
         if has_sdxl:
@@ -121,8 +137,9 @@ def detect_checkpoint_architecture(path: Path | str) -> str:
         return ARCH_SD35
     if normalized.startswith("sd3-") or normalized.startswith("sd3.") or normalized.startswith("sd3_"):
         return ARCH_SD35
-    if "flux" in normalized:
-        return ARCH_FLUX
+    name_arch = _architecture_from_name(resolved.name)
+    if name_arch:
+        return name_arch
     if "inpaint" in lower and "xl" in lower.replace("_", " "):
         return ARCH_SDXL_INPAINT
     if "inpaint" in lower:
@@ -138,6 +155,8 @@ def architecture_label(architecture: str) -> str:
         ARCH_SDXL_INPAINT: "SDXL inpaint",
         ARCH_SD35: "SD3.5",
         ARCH_FLUX: "Flux",
+        ARCH_FLUX2_KLEIN: "Flux.2 Klein",
+        ARCH_Z_IMAGE: "Z-Image",
         ARCH_INPAINT: "inpaint",
         ARCH_SD15: "SD1.5",
     }.get(architecture, architecture)
@@ -157,3 +176,15 @@ def is_sd3_architecture(architecture: str) -> bool:
 
 def is_flux_architecture(architecture: str) -> bool:
     return (architecture or "").lower() == ARCH_FLUX
+
+
+def is_flux2_klein_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() == ARCH_FLUX2_KLEIN
+
+
+def is_z_image_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() == ARCH_Z_IMAGE
+
+
+def is_transformer_image_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() in {ARCH_FLUX, ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}

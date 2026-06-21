@@ -9,6 +9,8 @@ from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.models import Checkpoint
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
+    ARCH_FLUX2_KLEIN,
+    ARCH_Z_IMAGE,
     architecture_label,
     detect_checkpoint_architecture,
     is_inpaint_architecture,
@@ -195,10 +197,12 @@ def scan_from_flags(flags: RuntimeFlags) -> list[Checkpoint]:
     roots = resolve_search_roots(flags)
     logger.info("Scanning for checkpoints in: %s", ", ".join(str(r) for r in roots))
     inventory = scan_and_write_model_inventory(flags)
+    selectable_runtime_arches = {ARCH_FLUX, ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}
     checkpoints = [
         _checkpoint_from_inventory(record)
         for record in inventory
-        if record.family == "checkpoint" or (record.family == "runtime_asset" and record.architecture == ARCH_FLUX)
+        if record.family == "checkpoint"
+        or (record.family == "runtime_asset" and record.architecture in selectable_runtime_arches)
     ]
     checkpoints.sort(key=lambda item: (1 if item.kind == "inpaint" else 0, item.title.lower()))
 
@@ -219,13 +223,21 @@ def _checkpoint_from_inventory(record: ModelInventoryRecord) -> Checkpoint:
     title = f"{checkpoint_id} [{architecture_label(architecture)}]"
     if short_hash:
         title = f"{title} [{short_hash}]"
-    is_flux_runtime = record.family == "runtime_asset" and architecture == ARCH_FLUX
+    is_runtime_asset = record.family == "runtime_asset"
+    if is_runtime_asset and architecture == ARCH_FLUX:
+        kind = "flux"
+    elif is_runtime_asset and architecture == ARCH_FLUX2_KLEIN:
+        kind = "flux2"
+    elif is_runtime_asset and architecture == ARCH_Z_IMAGE:
+        kind = "z-image"
+    else:
+        kind = "inpaint" if is_inpaint_architecture(architecture) else "checkpoint"
     return Checkpoint(
         id=checkpoint_id,
         title=title,
         filename=path.name,
         path=str(path.resolve()),
         hash=short_hash,
-        kind="flux" if is_flux_runtime else ("inpaint" if is_inpaint_architecture(architecture) else "checkpoint"),
+        kind=kind,
         architecture=architecture,
     )

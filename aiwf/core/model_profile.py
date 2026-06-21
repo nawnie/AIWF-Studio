@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ModelProfile:
-    family: str            # lightning | hyper | turbo | lcm | tcd | standard
+    family: str            # lightning | hyper | turbo | lcm | tcd | flux2_klein | z_image | standard
     is_distilled: bool
     recommended_cfg: float
     cfg_max: float         # above this, a distilled model overexposes
@@ -27,11 +27,13 @@ class ModelProfile:
     @property
     def title(self) -> str:
         labels = {
-            "lightning": "⚡ Lightning model",
-            "hyper": "⚡ Hyper-SD model",
-            "turbo": "⚡ Turbo model",
-            "lcm": "⚡ LCM model",
-            "tcd": "⚡ TCD model",
+            "lightning": "Lightning model",
+            "hyper": "Hyper-SD model",
+            "turbo": "Turbo model",
+            "lcm": "LCM model",
+            "tcd": "TCD model",
+            "flux2_klein": "Flux.2 Klein model",
+            "z_image": "Z-Image model",
             "standard": "Standard model",
         }
         return labels.get(self.family, "Model")
@@ -49,6 +51,10 @@ _PROFILES = {
             "Use CFG 1.0-2.0 and 4-8 steps with the LCM sampler."),
     "tcd": (1.5, 2.0, 8, "tcd", "automatic",
             "Use CFG 1.0-2.0 and 4-8 steps with the TCD sampler."),
+    "flux2_klein": (1.0, 1.5, 12, "euler", "automatic",
+                    "Use Euler, CFG 1, and 10-15 steps for Fluxtrait Flux.2 Klein variants."),
+    "z_image": (1.0, 1.5, 8, "euler", "automatic",
+                "Use Euler, CFG 1, and 8+ steps for Fluxtrait Z-Image Turbo variants."),
 }
 
 # Ordered so the most specific / least ambiguous markers win.
@@ -57,7 +63,9 @@ _MARKERS = [
     ("turbo", [r"turbo"]),
     ("lcm", [r"lcm"]),
     ("tcd", [r"tcd"]),
-    # Hyper-SD only — must NOT match a baked "HyperVAE" on a normal checkpoint.
+    ("z_image", [r"z[\s_-]?image", r"zimage"]),
+    ("flux2_klein", [r"flux[\s._-]?2", r"klein"]),
+    # Hyper-SD only -- must NOT match a baked "HyperVAE" on a normal checkpoint.
     ("hyper", [r"hyper[\s_-]?sd", r"hyper[\s_-]?sdxl"]),
 ]
 
@@ -81,7 +89,7 @@ def detect_model_profile(*names: str | None) -> ModelProfile:
             recommended_steps=20,
             recommended_sampler="euler_a",
             recommended_scheduler="automatic",
-            help_text="Standard model — CFG ~5-8 and 20-30 steps work well.",
+            help_text="Standard model -- CFG ~5-8 and 20-30 steps work well.",
         )
 
     cfg, cfg_max, steps, sampler, scheduler, blurb = _PROFILES[family]

@@ -104,6 +104,12 @@ def test_destination_dirs(tmp_path: Path):
     assert service.destination_dir("flux_unet_gguf") == tmp_path / "models" / "flux" / "GGUF"
     assert service.destination_dir("flux_text_encoder") == tmp_path / "models" / "flux" / "Textencoder"
     assert service.destination_dir("flux_vae") == tmp_path / "models" / "flux" / "VAE"
+    assert service.destination_dir("flux2_unet_safetensor") == tmp_path / "models" / "flux2" / "UNet"
+    assert service.destination_dir("flux2_unet_gguf") == tmp_path / "models" / "flux2" / "GGUF"
+    assert service.destination_dir("flux2_components") == tmp_path / "models" / "flux2" / "Components"
+    assert service.destination_dir("z_image_unet_safetensor") == tmp_path / "models" / "z-image" / "UNet"
+    assert service.destination_dir("z_image_unet_gguf") == tmp_path / "models" / "z-image" / "GGUF"
+    assert service.destination_dir("z_image_components") == tmp_path / "models" / "z-image" / "Components"
     assert service.destination_dir("ltx_checkpoint") == tmp_path / "models" / "ltx" / "checkpoints"
     assert service.destination_dir("ltx_upscaler") == tmp_path / "models" / "ltx" / "upscalers"
     assert service.destination_dir("ltx_lora") == tmp_path / "models" / "ltx" / "loras"
@@ -121,6 +127,10 @@ def test_ensure_dirs_creates_nested_category_folders(tmp_path: Path):
     assert (tmp_path / "models" / "flux" / "GGUF").is_dir()
     assert (tmp_path / "models" / "flux" / "Textencoder").is_dir()
     assert (tmp_path / "models" / "flux" / "VAE").is_dir()
+    assert (tmp_path / "models" / "flux2" / "GGUF").is_dir()
+    assert (tmp_path / "models" / "flux2" / "Components").is_dir()
+    assert (tmp_path / "models" / "z-image" / "GGUF").is_dir()
+    assert (tmp_path / "models" / "z-image" / "Components").is_dir()
     assert (tmp_path / "models" / "ltx" / "checkpoints").is_dir()
     assert (tmp_path / "models" / "ltx" / "upscalers").is_dir()
     assert (tmp_path / "models" / "ltx" / "text_encoder").is_dir()
@@ -170,6 +180,29 @@ def test_flux_download_categories_validate_file_type(tmp_path: Path):
         service.download_parsed(gguf, category="flux_unet_safetensor")
     with pytest.raises(ValueError, match="Flux VAE"):
         service.download_parsed(gguf, category="flux_vae")
+
+
+def test_flux2_and_z_image_download_categories_validate_file_type(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    gguf = ParsedRemote(source="direct", url="https://example.com/model.gguf", filename="model.gguf")
+    safetensors = ParsedRemote(source="direct", url="https://example.com/model.safetensors", filename="model.safetensors")
+
+    assert service.destination_for("flux2_unet_gguf", gguf.filename) == (
+        tmp_path / "models" / "flux2" / "GGUF" / "model.gguf"
+    )
+    assert service.destination_for("flux2_unet_safetensor", safetensors.filename) == (
+        tmp_path / "models" / "flux2" / "UNet" / "model.safetensors"
+    )
+    assert service.destination_for("z_image_unet_gguf", gguf.filename) == (
+        tmp_path / "models" / "z-image" / "GGUF" / "model.gguf"
+    )
+    assert service.destination_for("z_image_unet_safetensor", safetensors.filename) == (
+        tmp_path / "models" / "z-image" / "UNet" / "model.safetensors"
+    )
+    with pytest.raises(ValueError, match="Flux.2 Klein transformer"):
+        service.download_parsed(safetensors, category="flux2_unet_gguf")
+    with pytest.raises(ValueError, match="Z-Image transformer"):
+        service.download_parsed(safetensors, category="z_image_unet_gguf")
 
 
 def test_ltx_download_categories_validate_file_type(tmp_path: Path):
@@ -273,6 +306,41 @@ def test_hf_snapshot_allowed_for_ltx_text_encoder(tmp_path: Path, monkeypatch):
     assert (path / "config.json").is_file()
 
 
+@pytest.mark.parametrize(
+    "category,repo_id,expected",
+    [
+        ("flux2_components", "black-forest-labs/FLUX.2-klein-4B", ("flux2", "Components", "FLUX.2-klein-4B")),
+        ("z_image_components", "Tongyi-MAI/Z-Image-Turbo", ("z-image", "Components", "Z-Image-Turbo")),
+    ],
+)
+def test_hf_snapshot_allowed_for_flux2_and_z_image_components(
+    tmp_path: Path,
+    monkeypatch,
+    category,
+    repo_id,
+    expected,
+):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    remote = service.parse_reference(
+        source="huggingface",
+        url_or_repo=repo_id,
+        filename="",
+        category=category,
+    )
+    assert remote.snapshot is True
+
+    def fake_snapshot_download(*, repo_id, local_dir, token=None):
+        target = Path(local_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "model_index.json").write_text("{}", encoding="utf-8")
+        return str(target)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    path = service.download_parsed(remote, category=category)
+    assert path == tmp_path / "models" / Path(*expected)
+    assert (path / "model_index.json").is_file()
+
+
 def test_snapshot_catalog_installed_requires_category_marker(tmp_path: Path):
     service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
     entry = service.find_catalog("hf-sd35-medium")
@@ -372,6 +440,11 @@ def test_catalog_lists_entries(tmp_path: Path):
     assert "flux-t5-fp16" in keys
     assert "flux-clip-l" in keys
     assert "flux-ae-vae" in keys
+    assert "flux2-klein-4b-components" in keys
+    assert "flux2-klein-9b-components" in keys
+    assert "fluxtrait-klein9b-v2-q4km" in keys
+    assert "fluxtrait-zimage-v2-q4" in keys
+    assert "z-image-turbo-components" in keys
     assert "ltx23-distilled" in keys
     assert "ltx23-upscaler-x2" in keys
     assert "ltx23-gemma-q4" in keys
@@ -410,6 +483,38 @@ def test_flux_quick_start_uses_supported_runtime_assets(tmp_path: Path):
     remote = service._catalog_to_remote(vae)
     assert remote.filename == "ae.safetensors"
     assert remote.repo_filename == "split_files/vae/ae.safetensors"
+
+
+def test_flux2_and_z_image_quick_start_use_separate_runtime_assets(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+
+    assert QUICK_START_BUNDLES["flux2"] == ["fluxtrait-klein9b-v2-q4km", "flux2-klein-9b-components"]
+    flux2_entries = [service.find_catalog(key) for key in QUICK_START_BUNDLES["flux2"]]
+    assert all(entry is not None for entry in flux2_entries)
+    assert [entry.category for entry in flux2_entries if entry is not None] == [
+        "flux2_unet_gguf",
+        "flux2_components",
+    ]
+    assert service.destination_for("flux2_unet_gguf", "fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf") == (
+        tmp_path / "models" / "flux2" / "GGUF" / "fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf"
+    )
+    assert service.snapshot_destination_for("flux2_components", "black-forest-labs/FLUX.2-klein-9B") == (
+        tmp_path / "models" / "flux2" / "Components" / "FLUX.2-klein-9B"
+    )
+
+    assert QUICK_START_BUNDLES["zimage"] == ["fluxtrait-zimage-v2-q4", "z-image-turbo-components"]
+    z_entries = [service.find_catalog(key) for key in QUICK_START_BUNDLES["zimage"]]
+    assert all(entry is not None for entry in z_entries)
+    assert [entry.category for entry in z_entries if entry is not None] == [
+        "z_image_unet_gguf",
+        "z_image_components",
+    ]
+    assert service.destination_for("z_image_unet_gguf", "fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf") == (
+        tmp_path / "models" / "z-image" / "GGUF" / "fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf"
+    )
+    assert service.snapshot_destination_for("z_image_components", "Tongyi-MAI/Z-Image-Turbo") == (
+        tmp_path / "models" / "z-image" / "Components" / "Z-Image-Turbo"
+    )
 
 
 def test_ltx_quick_start_uses_ltx_categories(tmp_path: Path):

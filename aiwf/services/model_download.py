@@ -49,6 +49,12 @@ CATEGORY_LABELS: dict[ModelCategory, str] = {
     "flux_unet_gguf": "Flux UNet / transformer (.gguf)",
     "flux_text_encoder": "Flux text encoder",
     "flux_vae": "Flux VAE",
+    "flux2_unet_safetensor": "Flux.2 Klein transformer (.safetensors)",
+    "flux2_unet_gguf": "Flux.2 Klein transformer (.gguf)",
+    "flux2_components": "Flux.2 Klein components",
+    "z_image_unet_safetensor": "Z-Image transformer (.safetensors)",
+    "z_image_unet_gguf": "Z-Image transformer (.gguf)",
+    "z_image_components": "Z-Image components",
     "ltx_checkpoint": "LTX 2.3 checkpoint",
     "ltx_upscaler": "LTX 2.3 upscaler",
     "ltx_lora": "LTX 2.3 LoRA",
@@ -81,6 +87,12 @@ CATEGORY_FOLDERS: dict[ModelCategory, tuple[str, ...]] = {
     "flux_unet_gguf": ("flux", "GGUF"),
     "flux_text_encoder": ("flux", "Textencoder"),
     "flux_vae": ("flux", "VAE"),
+    "flux2_unet_safetensor": ("flux2", "UNet"),
+    "flux2_unet_gguf": ("flux2", "GGUF"),
+    "flux2_components": ("flux2", "Components"),
+    "z_image_unet_safetensor": ("z-image", "UNet"),
+    "z_image_unet_gguf": ("z-image", "GGUF"),
+    "z_image_components": ("z-image", "Components"),
     "ltx_checkpoint": ("ltx", "checkpoints"),
     "ltx_upscaler": ("ltx", "upscalers"),
     "ltx_lora": ("ltx", "loras"),
@@ -112,6 +124,12 @@ CATEGORY_EXTENSION_RULES: dict[ModelCategory, tuple[str, ...]] = {
     "flux_unet_gguf": (".gguf",),
     "flux_text_encoder": (".safetensors", ".gguf"),
     "flux_vae": (".safetensors",),
+    "flux2_unet_safetensor": (".safetensors",),
+    "flux2_unet_gguf": (".gguf",),
+    "flux2_components": (".safetensors", ".json", ".txt"),
+    "z_image_unet_safetensor": (".safetensors",),
+    "z_image_unet_gguf": (".gguf",),
+    "z_image_components": (".safetensors", ".json", ".txt"),
     "ltx_checkpoint": (".safetensors",),
     "ltx_upscaler": (".safetensors",),
     "ltx_lora": (".safetensors",),
@@ -650,6 +668,8 @@ class ModelDownloadService:
                     "preprocessor",
                     "wan_diffusers",
                     "ltx_text_encoder",
+                    "flux2_components",
+                    "z_image_components",
                 },
             )
         if source == "civitai":
@@ -694,10 +714,12 @@ class ModelDownloadService:
                 "preprocessor",
                 "wan_diffusers",
                 "ltx_text_encoder",
+                "flux2_components",
+                "z_image_components",
             }:
                 raise ValueError(
                     "Full repository downloads are only supported for checkpoint Diffusers folders, "
-                    "Wan Diffusers folders, LTX text encoders, ControlNet, and preprocessor categories."
+                    "Wan Diffusers folders, LTX/Flux2/Z-Image component folders, ControlNet, and preprocessor categories."
                 )
             return self._download_hf_snapshot(remote, category, on_progress=on_progress)
         target_filename = remote.local_filename or remote.filename

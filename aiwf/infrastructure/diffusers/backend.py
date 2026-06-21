@@ -76,12 +76,17 @@ from aiwf.infrastructure.controlnet.images import decode_control_image
 from aiwf.infrastructure.controlnet.preprocess import PreprocessParams, preprocess_control_image
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
+    ARCH_FLUX2_KLEIN,
     ARCH_SDXL,
     ARCH_SDXL_INPAINT,
+    ARCH_Z_IMAGE,
     is_inpaint_architecture,
+    is_flux2_klein_architecture,
     is_flux_architecture,
     is_sd3_architecture,
     is_sdxl_architecture,
+    is_transformer_image_architecture,
+    is_z_image_architecture,
 )
 from aiwf.infrastructure.diffusers.prompt_encode import build_prompt_kwargs
 from aiwf.infrastructure.diffusers.vae import resolve_vae, scan_vaes
@@ -196,6 +201,56 @@ _FLUX_VAE_CONFIG = {
     "shift_factor": 0.1159,
     "use_quant_conv": False,
     "use_post_quant_conv": False,
+}
+
+_FLUX2_KLEIN_9B_TRANSFORMER_CONFIG = {
+    "_class_name": "Flux2Transformer2DModel",
+    "_diffusers_version": "0.38.0",
+    "patch_size": 1,
+    "in_channels": 128,
+    "out_channels": None,
+    "num_layers": 8,
+    "num_single_layers": 48,
+    "attention_head_dim": 128,
+    "num_attention_heads": 48,
+    "joint_attention_dim": 15360,
+    "timestep_guidance_channels": 256,
+    "mlp_ratio": 3.0,
+    "axes_dims_rope": [32, 32, 32, 32],
+    "rope_theta": 2000,
+    "eps": 1e-6,
+    # Distilled Klein variants ignore CFG in the official Diffusers pipeline.
+    # Fluxtrait's model page still recommends CFG 1, which is safe here.
+    "guidance_embeds": False,
+}
+
+_FLUX2_KLEIN_4B_TRANSFORMER_CONFIG = {
+    **_FLUX2_KLEIN_9B_TRANSFORMER_CONFIG,
+    "num_layers": 5,
+    "num_single_layers": 20,
+    "num_attention_heads": 24,
+    "joint_attention_dim": 7680,
+}
+
+_Z_IMAGE_TRANSFORMER_CONFIG = {
+    "_class_name": "ZImageTransformer2DModel",
+    "_diffusers_version": "0.38.0",
+    "all_patch_size": [2],
+    "all_f_patch_size": [1],
+    "in_channels": 16,
+    "dim": 3840,
+    "n_layers": 30,
+    "n_refiner_layers": 2,
+    "n_heads": 30,
+    "n_kv_heads": 30,
+    "norm_eps": 1e-5,
+    "qk_norm": True,
+    "cap_feat_dim": 2560,
+    "siglip_feat_dim": None,
+    "rope_theta": 256.0,
+    "t_scale": 1000.0,
+    "axes_dims": [32, 48, 48],
+    "axes_lens": [1536, 512, 512],
 }
 
 
@@ -430,7 +485,7 @@ class DiffusersBackend:
     def _dtype_for_architecture(self, architecture: str) -> torch.dtype:
         if self.flags.no_half:
             return torch.float32
-        if (is_sd3_architecture(architecture) or is_flux_architecture(architecture)) and self.devices.device().type == "cuda":
+        if (is_sd3_architecture(architecture) or is_transformer_image_architecture(architecture)) and self.devices.device().type == "cuda":
             try:
                 if torch.cuda.is_bf16_supported():
                     return torch.bfloat16
@@ -480,6 +535,120 @@ class DiffusersBackend:
                     if candidate.is_file():
                         return candidate.resolve()
         return None
+
+    def _diffusers_component_search_roots(self) -> list[Path]:
+        return self._flux_search_roots()
+
+    @staticmethod
+    def _looks_like_diffusers_component_dir(path: Path) -> bool:
+        try:
+            if not (path / "model_index.json").is_file():
+                return False
+            required_dirs = ("scheduler", "text_encoder", "tokenizer", "vae")
+            if not all((path / name).is_dir() for name in required_dirs):
+                return False
+            if not (path / "scheduler" / "scheduler_config.json").is_file():
+                return False
+            if not any((path / "tokenizer" / name).is_file() for name in ("tokenizer.json", "vocab.json")):
+                return False
+            if not any((path / "text_encoder").glob("*.safetensors")) and not any((path / "text_encoder").glob("*.bin")):
+                return False
+            if not any((path / "vae").glob("*.safetensors")) and not any((path / "vae").glob("*.bin")):
+                return False
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _flux2_component_repo_name(checkpoint: Checkpoint) -> str:
+        blob = f"{checkpoint.id} {checkpoint.title} {checkpoint.filename} {checkpoint.path}".lower()
+        if "4b" in blob or "klein-4" in blob:
+            return "FLUX.2-klein-4B"
+        return "FLUX.2-klein-9B"
+
+    def _cached_hf_component_dir(self, repo_id: str) -> Path | None:
+        if _try_to_load_from_cache is None:
+            return None
+        try:
+            cached = _try_to_load_from_cache(repo_id, "model_index.json")
+        except Exception:
+            return None
+        if not isinstance(cached, str):
+            return None
+        path = Path(cached).parent
+        return path if path.is_dir() else None
+
+    def _component_dir_candidates(self, architecture: str, checkpoint: Checkpoint) -> list[Path]:
+        roots = self._diffusers_component_search_roots()
+        candidates: list[Path] = []
+        if is_flux2_klein_architecture(architecture):
+            repo_name = self._flux2_component_repo_name(checkpoint)
+            candidates.extend(
+                root / subdir
+                for root in roots
+                for subdir in (
+                    f"flux2/Components/{repo_name}",
+                    f"flux2/{repo_name}",
+                    f"Flux2/{repo_name}",
+                    repo_name,
+                )
+            )
+            cached = self._cached_hf_component_dir(f"black-forest-labs/{repo_name}")
+            if cached:
+                candidates.append(cached)
+        elif is_z_image_architecture(architecture):
+            repo_name = "Z-Image-Turbo"
+            candidates.extend(
+                root / subdir
+                for root in roots
+                for subdir in (
+                    f"z-image/Components/{repo_name}",
+                    f"z-image/{repo_name}",
+                    f"Z-Image/{repo_name}",
+                    repo_name,
+                )
+            )
+            cached = self._cached_hf_component_dir("Tongyi-MAI/Z-Image-Turbo")
+            if cached:
+                candidates.append(cached)
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for candidate in candidates:
+            key = str(candidate).lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(candidate)
+        return unique
+
+    def _resolve_component_dir(self, architecture: str, checkpoint: Checkpoint) -> Path:
+        for candidate in self._component_dir_candidates(architecture, checkpoint):
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if self._looks_like_diffusers_component_dir(resolved):
+                return resolved
+
+        searched = ", ".join(str(path) for path in self._component_dir_candidates(architecture, checkpoint))
+        if is_flux2_klein_architecture(architecture):
+            repo_name = self._flux2_component_repo_name(checkpoint)
+            key = "flux2-klein-4b-components" if repo_name.endswith("4B") else "flux2-klein-9b-components"
+            raise ModelNotFoundError(
+                f"Flux.2 Klein needs the matching Diffusers component folder for {repo_name}: "
+                "text_encoder, tokenizer, scheduler, and VAE. "
+                f"Download `{key}` from Models, or place a full `{repo_name}` snapshot under "
+                f"`models/flux2/Components/{repo_name}`. Searched: {searched}"
+            )
+        raise ModelNotFoundError(
+            "Z-Image needs the Z-Image-Turbo Diffusers component folder: text_encoder, tokenizer, "
+            "scheduler, and VAE. Download `z-image-turbo-components` from Models, or place the full "
+            f"snapshot under `models/z-image/Components/Z-Image-Turbo`. Searched: {searched}"
+        )
+
+    @staticmethod
+    def _local_config_dir(component_dir: Path, subfolder: str) -> str | None:
+        path = component_dir / subfolder
+        return str(path) if (path / "config.json").is_file() else None
 
     def _resolve_flux_component_paths(self) -> dict[str, Path]:
         clip = self._find_flux_component(
@@ -632,6 +801,14 @@ class DiffusersBackend:
     def _is_flux_pipe(pipe) -> bool:
         return isinstance(pipe, FluxPipeline)
 
+    @staticmethod
+    def _is_flux2_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "Flux2KleinPipeline"
+
+    @staticmethod
+    def _is_z_image_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "ZImagePipeline"
+
     def _apply_fp8_storage(self, pipe) -> None:
         """Store denoiser weights in FP8, compute in fp16 (diffusers layerwise casting)."""
         if not self.flags.fp8:
@@ -670,6 +847,8 @@ class DiffusersBackend:
         if is_flux_architecture(architecture):
             return False
         vram = self.devices.total_vram_gb()
+        if is_flux2_klein_architecture(architecture) or is_z_image_architecture(architecture):
+            return 0.0 < vram < 24.0
         if is_sd3_architecture(architecture):
             return 0.0 < vram < 24.0
         if not is_sdxl_architecture(architecture) or vram <= 0.0:
@@ -680,13 +859,17 @@ class DiffusersBackend:
         return vram < threshold
 
     def _compile_allowed_for_architecture(self, architecture: str) -> bool:
-        if is_flux_architecture(architecture):
+        if is_transformer_image_architecture(architecture):
             return False
         return not (self.flags.lowvram or self.flags.medvram or self._wants_offload(architecture))
 
     def _tune_vae_memory(self, pipe, architecture: str) -> None:
         """SDXL's 1024px VAE decode is the peak-VRAM step — slice and tile it."""
-        if not (is_sdxl_architecture(architecture) or is_sd3_architecture(architecture) or is_flux_architecture(architecture)):
+        if not (
+            is_sdxl_architecture(architecture)
+            or is_sd3_architecture(architecture)
+            or is_transformer_image_architecture(architecture)
+        ):
             return
         vae = getattr(pipe, "vae", None)
         if vae is None:
@@ -782,6 +965,15 @@ class DiffusersBackend:
             except ModelNotFoundError:
                 return False
             return Path(checkpoint.path).is_file()
+        if is_flux2_klein_architecture(checkpoint.architecture) or is_z_image_architecture(checkpoint.architecture):
+            path = Path(checkpoint.path)
+            if path.is_dir():
+                return (path / "model_index.json").is_file()
+            try:
+                self._resolve_component_dir(checkpoint.architecture, checkpoint)
+            except ModelNotFoundError:
+                return False
+            return path.is_file()
         pipeline_cls = self._txt2img_pipeline_cls_for_architecture(checkpoint.architecture)
         if Path(checkpoint.path).is_dir():
             return (Path(checkpoint.path) / "model_index.json").is_file()
@@ -848,10 +1040,183 @@ class DiffusersBackend:
         self._img2img = None
         return checkpoint
 
+    def _load_flux2_klein_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            return checkpoint
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        try:
+            from diffusers import AutoencoderKLFlux2, Flux2KleinPipeline, Flux2Transformer2DModel
+            from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Flux.2 Klein support needs a newer Diffusers/Transformers stack. "
+                "Install the optional Flux.2 Klein engine dependencies first."
+            ) from exc
+
+        dtype = self._dtype_for_architecture(ARCH_FLUX2_KLEIN)
+        path = Path(checkpoint.path)
+        if path.is_dir():
+            pipe = Flux2KleinPipeline.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+        else:
+            if path.suffix.lower() not in {".gguf", ".safetensors"}:
+                raise ModelNotFoundError("Flux.2 Klein expects a .gguf or .safetensors transformer file.")
+            component_dir = self._resolve_component_dir(ARCH_FLUX2_KLEIN, checkpoint)
+            repo_name = self._flux2_component_repo_name(checkpoint)
+            fallback_config = (
+                _FLUX2_KLEIN_4B_TRANSFORMER_CONFIG
+                if repo_name.endswith("4B")
+                else _FLUX2_KLEIN_9B_TRANSFORMER_CONFIG
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_root = Path(tmp)
+                transformer_config_dir = (
+                    self._local_config_dir(component_dir, "transformer")
+                    or self._write_temp_config(tmp_root, "transformer", fallback_config)
+                )
+                load_kwargs = {
+                    "config": transformer_config_dir,
+                    "torch_dtype": dtype,
+                    "local_files_only": True,
+                }
+                if path.suffix.lower() == ".gguf":
+                    load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
+                transformer = Flux2Transformer2DModel.from_single_file(str(path), **load_kwargs)
+
+            vae = AutoencoderKLFlux2.from_pretrained(
+                str(component_dir / "vae"),
+                torch_dtype=dtype,
+                local_files_only=True,
+            )
+            text_encoder = Qwen3ForCausalLM.from_pretrained(
+                str(component_dir / "text_encoder"),
+                torch_dtype=dtype,
+                local_files_only=True,
+            )
+            tokenizer = Qwen2TokenizerFast.from_pretrained(str(component_dir / "tokenizer"), local_files_only=True)
+            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                str(component_dir / "scheduler"),
+                local_files_only=True,
+            )
+            pipe = Flux2KleinPipeline(
+                scheduler=scheduler,
+                vae=vae,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                transformer=transformer,
+                is_distilled=True,
+            )
+
+        self._remember_base_scheduler_config(pipe)
+        apply_attention_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=self._compile_allowed_for_architecture(ARCH_FLUX2_KLEIN),
+        )
+        pipe = self._place_pipeline(pipe, prefer_offload=self._wants_offload(ARCH_FLUX2_KLEIN))
+        pipe.set_progress_bar_config(disable=True)
+        self._tune_vae_memory(pipe, ARCH_FLUX2_KLEIN)
+
+        self._active = checkpoint
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
+    def _load_z_image_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            return checkpoint
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        try:
+            from diffusers import ZImagePipeline, ZImageTransformer2DModel
+            from transformers import AutoModel, AutoTokenizer
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Z-Image support needs a newer Diffusers/Transformers stack. "
+                "Install the optional Z-Image engine dependencies first."
+            ) from exc
+
+        dtype = self._dtype_for_architecture(ARCH_Z_IMAGE)
+        path = Path(checkpoint.path)
+        if path.is_dir():
+            pipe = ZImagePipeline.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+        else:
+            if path.suffix.lower() not in {".gguf", ".safetensors"}:
+                raise ModelNotFoundError("Z-Image expects a .gguf or .safetensors transformer file.")
+            component_dir = self._resolve_component_dir(ARCH_Z_IMAGE, checkpoint)
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_root = Path(tmp)
+                transformer_config_dir = (
+                    self._local_config_dir(component_dir, "transformer")
+                    or self._write_temp_config(tmp_root, "transformer", _Z_IMAGE_TRANSFORMER_CONFIG)
+                )
+                load_kwargs = {
+                    "config": transformer_config_dir,
+                    "torch_dtype": dtype,
+                    "local_files_only": True,
+                }
+                if path.suffix.lower() == ".gguf":
+                    load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
+                transformer = ZImageTransformer2DModel.from_single_file(str(path), **load_kwargs)
+
+            vae = AutoencoderKL.from_pretrained(
+                str(component_dir / "vae"),
+                torch_dtype=dtype,
+                local_files_only=True,
+            )
+            text_encoder = AutoModel.from_pretrained(
+                str(component_dir / "text_encoder"),
+                torch_dtype=dtype,
+                local_files_only=True,
+            )
+            tokenizer = AutoTokenizer.from_pretrained(str(component_dir / "tokenizer"), local_files_only=True)
+            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                str(component_dir / "scheduler"),
+                local_files_only=True,
+            )
+            pipe = ZImagePipeline(
+                scheduler=scheduler,
+                vae=vae,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                transformer=transformer,
+            )
+
+        self._remember_base_scheduler_config(pipe)
+        apply_attention_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=self._compile_allowed_for_architecture(ARCH_Z_IMAGE),
+        )
+        pipe = self._place_pipeline(pipe, prefer_offload=self._wants_offload(ARCH_Z_IMAGE))
+        pipe.set_progress_bar_config(disable=True)
+        self._tune_vae_memory(pipe, ARCH_Z_IMAGE)
+
+        self._active = checkpoint
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
     def load_checkpoint(self, checkpoint_id: str | None = None) -> Checkpoint:
         checkpoint = self._resolve_checkpoint(checkpoint_id)
         if is_flux_architecture(checkpoint.architecture):
             return self._load_flux_checkpoint(checkpoint)
+        if is_flux2_klein_architecture(checkpoint.architecture):
+            return self._load_flux2_klein_checkpoint(checkpoint)
+        if is_z_image_architecture(checkpoint.architecture):
+            return self._load_z_image_checkpoint(checkpoint)
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
             return checkpoint
 
@@ -1056,6 +1421,12 @@ class DiffusersBackend:
         if self._is_flux_pipe(pipe):
             logger.info("Flux uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
             return
+        if self._is_flux2_pipe(pipe):
+            logger.info("Flux.2 Klein uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            return
+        if self._is_z_image_pipe(pipe):
+            logger.info("Z-Image uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            return
         if self._is_sd3_pipe(pipe):
             logger.info("SD3.5 uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
             return
@@ -1224,6 +1595,59 @@ class DiffusersBackend:
             width=width,
             height=height,
             max_sequence_length=256,
+            output_type="pil",
+        )
+
+    def _run_flux2_klein_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+    ):
+        return self._call_pipe(
+            pipe,
+            prompt=parsed_prompt,
+            num_inference_steps=steps,
+            guidance_scale=float(request.cfg_scale),
+            num_images_per_prompt=request.batch_size,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
+            output_type="pil",
+        )
+
+    def _run_z_image_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+    ):
+        return self._call_pipe(
+            pipe,
+            prompt=parsed_prompt,
+            negative_prompt=request.negative_prompt or None,
+            num_inference_steps=steps,
+            guidance_scale=float(request.cfg_scale),
+            num_images_per_prompt=request.batch_size,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
             output_type="pil",
         )
 
@@ -1482,6 +1906,9 @@ class DiffusersBackend:
 
         parsed = parse_extra_networks(request.prompt)
         is_flux_checkpoint = is_flux_architecture(checkpoint.architecture)
+        is_flux2_checkpoint = is_flux2_klein_architecture(checkpoint.architecture)
+        is_z_image_checkpoint = is_z_image_architecture(checkpoint.architecture)
+        is_transformer_image_checkpoint = is_transformer_image_architecture(checkpoint.architecture)
         if is_sd3_architecture(checkpoint.architecture):
             if request.vae_id:
                 raise ValueError("External SD1.5/SDXL VAE selection is not supported with SD3.5 checkpoints.")
@@ -1489,21 +1916,33 @@ class DiffusersBackend:
                 raise ValueError("SDXL refiner only works with SDXL checkpoints, not SD3.5.")
             if any(unit.enabled for unit in (request.controlnet_units or [])):
                 raise ValueError(
-                    "The current ControlNet stack is for SD1.5/SDXL. Disable ControlNet for SD3.5."
+                "The current ControlNet stack is for SD1.5/SDXL. Disable ControlNet for SD3.5."
                 )
-        if is_flux_checkpoint:
+        if is_transformer_image_checkpoint:
+            family_label = (
+                "Flux.2 Klein"
+                if is_flux2_checkpoint
+                else ("Z-Image" if is_z_image_checkpoint else "Flux")
+            )
             if request.mode != GenerationMode.TXT2IMG:
-                raise ValueError("Flux is currently wired for txt2img only. Use SD/SDXL/SD3.5 for img2img or inpaint.")
+                raise ValueError(
+                    f"{family_label} is currently wired for txt2img only. "
+                    "Use SD/SDXL/SD3.5 for img2img or inpaint."
+                )
             if request.vae_id:
-                raise ValueError("External SD VAE selection is not supported with Flux.")
+                raise ValueError(f"External SD VAE selection is not supported with {family_label}.")
             if request.enable_hr:
-                raise ValueError("Hires fix is not wired for Flux yet. Generate Flux at the target resolution directly.")
+                raise ValueError(
+                    f"Hires fix is not wired for {family_label} yet. Generate at the target resolution directly."
+                )
             if request.sdxl_refiner_enabled:
-                raise ValueError("SDXL refiner only works with SDXL checkpoints, not Flux.")
+                raise ValueError(f"SDXL refiner only works with SDXL checkpoints, not {family_label}.")
             if any(unit.enabled for unit in (request.controlnet_units or [])):
-                raise ValueError("ControlNet is not wired for Flux yet. Disable ControlNet or use an SD/SDXL model.")
+                raise ValueError(
+                    f"ControlNet is not wired for {family_label} yet. Disable ControlNet or use an SD/SDXL model."
+                )
             if parsed.loras:
-                raise ValueError("Flux LoRA application is not wired yet. Remove Flux LoRAs for this pass.")
+                raise ValueError(f"{family_label} LoRA application is not wired yet. Remove LoRAs for this pass.")
 
         if request.mode == GenerationMode.INPAINT:
             if not init_images:
@@ -1528,7 +1967,7 @@ class DiffusersBackend:
             pipe = self._txt2img
             assert pipe is not None
 
-        if not is_flux_checkpoint:
+        if not is_transformer_image_checkpoint:
             self._apply_vae(pipe, request.vae_id)
             if request.mode != GenerationMode.INPAINT and self._img2img is not None:
                 self._apply_vae(self._img2img, request.vae_id)
@@ -1538,7 +1977,7 @@ class DiffusersBackend:
             self._apply_sampler(self._img2img, request.sampler, request.scheduler)
 
         adapter_names = []
-        if not is_flux_checkpoint:
+        if not is_transformer_image_checkpoint:
             adapter_names = apply_loras(
                 pipe,
                 parsed.loras,
@@ -1625,6 +2064,48 @@ class DiffusersBackend:
                         preview_every_n_steps=preview_every_n_steps,
                     )
                     output = self._run_flux_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=request.width,
+                        height=request.height,
+                        steps=request.steps,
+                    )
+                    batch_images = output.images
+
+                elif is_flux2_checkpoint:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_flux2_klein_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=request.width,
+                        height=request.height,
+                        steps=request.steps,
+                    )
+                    batch_images = output.images
+
+                elif is_z_image_checkpoint:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_z_image_txt2img_pass(
                         pipe,
                         request,
                         parsed.prompt,

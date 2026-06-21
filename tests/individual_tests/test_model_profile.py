@@ -28,6 +28,24 @@ def test_turbo_and_lcm_and_tcd():
     assert detect_model_profile("somemodel-TCD").family == "tcd"
 
 
+def test_flux2_klein_profile_uses_model_page_defaults():
+    p = detect_model_profile("fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf")
+    assert p.family == "flux2_klein"
+    assert p.recommended_cfg == 1.0
+    assert p.cfg_max == 1.5
+    assert p.recommended_steps == 12
+    assert p.recommended_sampler == "euler"
+
+
+def test_z_image_profile_wins_over_flux2_name_prefix():
+    p = detect_model_profile("fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf")
+    assert p.family == "z_image"
+    assert p.recommended_cfg == 1.0
+    assert p.cfg_max == 1.5
+    assert p.recommended_steps == 8
+    assert p.recommended_sampler == "euler"
+
+
 def test_standard_model():
     p = detect_model_profile("dreamshaper_8", "dreamshaper.safetensors")
     assert p.family == "standard" and not p.is_distilled

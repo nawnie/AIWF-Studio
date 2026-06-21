@@ -16,6 +16,7 @@ from aiwf.infrastructure.safetensors_metadata import read_safetensors_metadata
 
 MODEL_OP_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".bin", ".pth", ".gguf", ".onnx"}
 IMAGE_MODEL_ARCHES = {"sd15", "sdxl", "sdxl_inpaint", "inpaint"}
+TRANSFORMER_MODEL_ARCHES = {"wan", "flux", "flux2_klein", "z_image"}
 JOB_OUTPUT_DIRNAME = "model-ops"
 DTYPE_EXPORT_QUANTS = {"fp16", "bf16"}
 FP8_READY_EXPORT_QUANTS = {"aiwf_fp8_ready"}
@@ -105,7 +106,12 @@ def inspect_model_asset(path: str | Path, *, architecture: str | None = None) ->
 
     detected_arch = (architecture or "").strip().lower() or "unknown"
     if detected_arch == "unknown":
-        if "sdxl" in combined or "xl" in combined:
+        compact = combined.replace("_", "").replace("-", "").replace(" ", "")
+        if "z-image" in combined or "zimage" in compact:
+            detected_arch = "z_image"
+        elif "flux.2" in combined or "flux2" in compact or "klein" in combined:
+            detected_arch = "flux2_klein"
+        elif "sdxl" in combined or "xl" in combined:
             detected_arch = "sdxl"
         elif "sd1" in combined or "sd 1" in combined or "v1-5" in combined or "1.5" in combined:
             detected_arch = "sd15"
@@ -114,13 +120,13 @@ def inspect_model_asset(path: str | Path, *, architecture: str | None = None) ->
         elif "flux" in combined:
             detected_arch = "flux"
 
-    if family == "unknown":
+    if family in {"unknown", "llm-or-quantized"} and detected_arch in TRANSFORMER_MODEL_ARCHES:
+        family = "video-or-transformer"
+    elif family == "unknown":
         if "lora" in combined or metadata.get("ss_network_module"):
             family = "lora"
         elif "vae" in combined:
             family = "vae"
-        elif detected_arch in {"wan", "flux"}:
-            family = "video-or-transformer"
         elif storage != "unknown":
             family = "image"
 

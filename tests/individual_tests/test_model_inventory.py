@@ -8,11 +8,13 @@ from aiwf.core.config.settings import RuntimeFlags
 from aiwf.infrastructure.diffusers.checkpoints import scan_from_flags
 from aiwf.infrastructure.diffusers.loras import scan_loras
 from aiwf.infrastructure.model_header import (
+    ARCH_FLUX2_KLEIN_TRANSFORMER,
     ARCH_FLUX_LORA,
     ARCH_FLUX_VAE,
     ARCH_SD35_CHECKPOINT,
     ARCH_T5XXL_ENCODER,
     ARCH_UMT5_ENCODER,
+    ARCH_Z_IMAGE_TRANSFORMER,
     read_model_info,
 )
 from aiwf.infrastructure.model_inventory import inventory_path, scan_and_write_model_inventory
@@ -208,6 +210,50 @@ def test_flux_gguf_is_runtime_asset_and_selectable_flux_checkpoint(tmp_path: Pat
     assert [checkpoint.id for checkpoint in checkpoints] == ["flux1-dev-Q5_K_M"]
     assert checkpoints[0].architecture == "flux"
     assert checkpoints[0].kind == "flux"
+
+
+def test_flux2_klein_gguf_is_runtime_asset_and_selectable_flux2_checkpoint(tmp_path: Path):
+    models = tmp_path / "models"
+    klein = models / "Stable-diffusion" / "fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf"
+    klein.parent.mkdir(parents=True)
+    klein.write_bytes(b"GGUF")
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    info = read_model_info(klein)
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+
+    record = next(item for item in records if item.filename == klein.name)
+    assert info.arch == ARCH_FLUX2_KLEIN_TRANSFORMER
+    assert record.family == "runtime_asset"
+    assert record.architecture == "flux2_klein"
+    assert record.recommended_subdir == "flux2/GGUF"
+    assert [checkpoint.id for checkpoint in checkpoints] == ["fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM"]
+    assert checkpoints[0].architecture == "flux2_klein"
+    assert checkpoints[0].kind == "flux2"
+
+
+def test_z_image_gguf_is_runtime_asset_and_selectable_z_image_checkpoint(tmp_path: Path):
+    models = tmp_path / "models"
+    z_image = models / "flux" / "GGUF" / "fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf"
+    z_image.parent.mkdir(parents=True)
+    z_image.write_bytes(b"GGUF")
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    info = read_model_info(z_image)
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+
+    record = next(item for item in records if item.filename == z_image.name)
+    assert info.arch == ARCH_Z_IMAGE_TRANSFORMER
+    assert record.family == "runtime_asset"
+    assert record.architecture == "z_image"
+    assert record.current_subdir == "flux/GGUF"
+    assert record.recommended_subdir == "z-image/GGUF"
+    assert record.should_move is True
+    assert [checkpoint.id for checkpoint in checkpoints] == ["fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4"]
+    assert checkpoints[0].architecture == "z_image"
+    assert checkpoints[0].kind == "z-image"
 
 
 def test_flux_lora_header_overrides_wrong_folder(tmp_path: Path):

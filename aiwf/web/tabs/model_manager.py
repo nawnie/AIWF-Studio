@@ -66,6 +66,15 @@ def _run_download(worker, progress_q: queue.Queue, result: dict) -> None:
 
 
 CONTROLNET_CATALOG_CATEGORIES = ["controlnet", "preprocessor"]
+MODEL_OP_ARCH_CHOICES = [
+    ("Auto/unknown", "unknown"),
+    ("SD 1.x", "sd15"),
+    ("SDXL", "sdxl"),
+    ("Wan/video", "wan"),
+    ("Flux", "flux"),
+    ("Flux.2 Klein", "flux2_klein"),
+    ("Z-Image", "z_image"),
+]
 
 
 def _cn_download_choices(ctx: AppContext) -> list[tuple[str, str]]:
@@ -390,7 +399,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                         )
                         convert_arch = gr.Radio(
                             label="Architecture hint",
-                            choices=[("Auto/unknown", "unknown"), ("SD 1.x", "sd15"), ("SDXL", "sdxl"), ("Wan/video", "wan"), ("Flux", "flux")],
+                            choices=MODEL_OP_ARCH_CHOICES,
                             value="unknown",
                         )
                         convert_operation = gr.Radio(
@@ -435,7 +444,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                         )
                         quant_arch = gr.Radio(
                             label="Architecture hint",
-                            choices=[("Auto/unknown", "unknown"), ("SD 1.x", "sd15"), ("SDXL", "sdxl"), ("Wan/video", "wan"), ("Flux", "flux")],
+                            choices=MODEL_OP_ARCH_CHOICES,
                             value="unknown",
                         )
                         quant_choice = gr.Radio(

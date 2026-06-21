@@ -9,11 +9,14 @@ from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.infrastructure.diffusers.model_arch import (
+    ARCH_FLUX,
+    ARCH_FLUX2_KLEIN,
     ARCH_INPAINT,
     ARCH_SD15,
     ARCH_SD35,
     ARCH_SDXL,
     ARCH_SDXL_INPAINT,
+    ARCH_Z_IMAGE,
     UNET_INPUT_KEY,
     detect_checkpoint_architecture,
     infer_architecture_from_shapes,
@@ -22,6 +25,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
 )
 from aiwf.infrastructure.model_header import (
     ARCH_CLIP,
+    ARCH_FLUX2_KLEIN_TRANSFORMER,
     ARCH_FLUX_LORA,
     ARCH_FLUX_TRANSFORMER,
     ARCH_FLUX_VAE,
@@ -31,6 +35,7 @@ from aiwf.infrastructure.model_header import (
     ARCH_WAN_TRANSFORMER,
     ARCH_WAN_TRANSFORMER_FP8,
     ARCH_WAN_VAE,
+    ARCH_Z_IMAGE_TRANSFORMER,
     ROLE_LORA,
     ROLE_TEXT_ENCODER,
     ROLE_VAE,
@@ -107,6 +112,12 @@ def _metadata_text(metadata: dict[str, str]) -> str:
 
 def _architecture_from_text(text: str) -> str:
     normalized = text.lower().replace("_", " ").replace("-", " ")
+    compact = normalized.replace(" ", "")
+    lowered = text.lower().replace("_", "-")
+    if "z-image" in lowered or "zimage" in compact:
+        return ARCH_Z_IMAGE
+    if "flux.2" in lowered or "flux2" in compact or "klein" in normalized:
+        return ARCH_FLUX2_KLEIN
     if (
         "stable diffusion 3.5" in normalized
         or "sd3.5" in text.lower()
@@ -119,7 +130,7 @@ def _architecture_from_text(text: str) -> str:
     if "sdxl" in normalized or "sd xl" in normalized or "xl base" in normalized:
         return ARCH_SDXL
     if "flux" in normalized:
-        return "flux"
+        return ARCH_FLUX
     if "ltx" in normalized or "lightricks" in normalized:
         return "ltx"
     if "wan" in normalized:
@@ -150,7 +161,7 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
             return "Loras/SD3.5"
         if architecture == ARCH_SDXL:
             return "Loras/SDXL"
-        if architecture == "flux":
+        if architecture == ARCH_FLUX:
             return "Loras/Flux"
         if architecture == "ltx":
             return "ltx/loras"
@@ -160,9 +171,15 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
             return "Loras/SD15"
         return "Loras"
     if family == "runtime_asset":
-        if architecture == "flux":
+        if architecture == ARCH_FLUX:
             suffix = Path(filename).suffix.lower()
             return "flux/GGUF" if suffix == ".gguf" else "flux/UNet"
+        if architecture == ARCH_FLUX2_KLEIN:
+            suffix = Path(filename).suffix.lower()
+            return "flux2/GGUF" if suffix == ".gguf" else "flux2/UNet"
+        if architecture == ARCH_Z_IMAGE:
+            suffix = Path(filename).suffix.lower()
+            return "z-image/GGUF" if suffix == ".gguf" else "z-image/UNet"
         if architecture == "ltx":
             lowered = filename.lower()
             if "upscaler" in lowered:
@@ -172,7 +189,7 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
     if family == "checkpoint":
         return "Stable-diffusion"
     if family == "vae":
-        if architecture == "flux":
+        if architecture == ARCH_FLUX:
             return "flux/VAE"
         return "VAE"
     if family == "embedding":
@@ -182,8 +199,12 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
     if family == "controlnet":
         return "controlnet"
     if family == "text_encoder":
-        if architecture == "flux":
+        if architecture == ARCH_FLUX:
             return "flux/Textencoder"
+        if architecture == ARCH_FLUX2_KLEIN:
+            return "flux2/Components"
+        if architecture == ARCH_Z_IMAGE:
+            return "z-image/Components"
         if architecture == "ltx":
             return "ltx/text_encoder"
         return "Textencoder"
@@ -219,15 +240,19 @@ def _header_family_architecture(path: Path) -> tuple[str, str, dict[str, str]] |
         identifiers["header_precision"] = info.precision
 
     if info.arch in {ARCH_FLUX_TRANSFORMER}:
-        return "runtime_asset", "flux", identifiers
+        return "runtime_asset", ARCH_FLUX, identifiers
+    if info.arch == ARCH_FLUX2_KLEIN_TRANSFORMER:
+        return "runtime_asset", ARCH_FLUX2_KLEIN, identifiers
+    if info.arch == ARCH_Z_IMAGE_TRANSFORMER:
+        return "runtime_asset", ARCH_Z_IMAGE, identifiers
     if info.arch in {ARCH_FLUX_LORA}:
-        return "lora", "flux", identifiers
+        return "lora", ARCH_FLUX, identifiers
     if info.arch in {ARCH_FLUX_VAE}:
-        return "vae", "flux", identifiers
+        return "vae", ARCH_FLUX, identifiers
     if info.arch == ARCH_T5XXL_ENCODER:
-        return "text_encoder", "flux", identifiers
-    if info.arch == ARCH_CLIP and _architecture_from_text(path.as_posix()) == "flux":
-        return "text_encoder", "flux", identifiers
+        return "text_encoder", ARCH_FLUX, identifiers
+    if info.arch == ARCH_CLIP and _architecture_from_text(path.as_posix()) == ARCH_FLUX:
+        return "text_encoder", ARCH_FLUX, identifiers
 
     if info.arch in {ARCH_WAN_TRANSFORMER, ARCH_WAN_TRANSFORMER_FP8}:
         return "wan", "wan", identifiers
@@ -311,9 +336,11 @@ def classify_model_dir(path: Path, roots: list[Path]) -> ModelInventoryRecord | 
     elif "ltx" in lowered:
         family = "runtime_asset"
         architecture = "ltx"
+    elif architecture in {ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}:
+        family = "runtime_asset"
     elif "flux" in lowered:
         family = "runtime_asset"
-        architecture = "flux"
+        architecture = ARCH_FLUX
     elif "stablediffusionxl" in class_name.lower() or "stable-diffusion-xl" in lowered:
         architecture = ARCH_SDXL
     elif "stablediffusion3" in class_name.lower() or architecture == ARCH_SD35:
@@ -412,9 +439,9 @@ def classify_model_file(path: Path, roots: list[Path]) -> ModelInventoryRecord |
             family = "wan"
             architecture = "wan"
             identifiers["filename_marker"] = "wan gguf"
-        elif path.suffix.lower() == ".gguf" and architecture == "flux":
+        elif path.suffix.lower() == ".gguf" and architecture in {ARCH_FLUX, ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}:
             family = "runtime_asset"
-            identifiers["filename_marker"] = "flux gguf"
+            identifiers["filename_marker"] = f"{architecture} gguf"
         elif architecture == "ltx" and path.suffix.lower() == ".safetensors":
             family = "ltx"
             identifiers["filename_marker"] = "ltx safetensors"

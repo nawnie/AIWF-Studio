@@ -137,6 +137,10 @@ def _inject_stubs():
         ),
         "aiwf.infrastructure.controlnet.images": dict(
             decode_control_image=lambda *a, **k: None),
+        "aiwf.infrastructure.controlnet.catalog": dict(
+            iter_controlnet_model_paths=lambda *a, **k: [],
+            resolve_controlnet_roots=lambda *a, **k: [],
+        ),
         "aiwf.infrastructure.controlnet.preprocess": dict(
             CV2_MODULES=set(),
             PREPROCESS_MODULES={},
@@ -145,12 +149,17 @@ def _inject_stubs():
         ),
         "aiwf.infrastructure.diffusers.model_arch": dict(
             ARCH_FLUX="flux",
+            ARCH_FLUX2_KLEIN="flux2_klein",
             ARCH_SDXL="sdxl", ARCH_SDXL_INPAINT="sdxl_inpaint",
             ARCH_SD35="sd35",
+            ARCH_Z_IMAGE="z_image",
+            is_flux2_klein_architecture=lambda *a: False,
             is_flux_architecture=lambda *a: False,
             is_sdxl_architecture=lambda *a: False,
             is_sd3_architecture=lambda *a: False,
             is_inpaint_architecture=lambda *a: False,
+            is_transformer_image_architecture=lambda *a: False,
+            is_z_image_architecture=lambda *a: False,
         ),
         "aiwf.infrastructure.diffusers.prompt_encode": dict(
             build_prompt_kwargs=lambda *a, **k: {}),
@@ -351,3 +360,66 @@ def test_load_inpaint_checkpoint_uses_inpaint_cache(preload_backend, monkeypatch
     assert service._inpaint is pipe
     assert service._txt2img == "existing txt2img"
     assert service._inpaint_active is checkpoint
+
+
+def _make_component_dir(path):
+    (path / "scheduler").mkdir(parents=True)
+    (path / "text_encoder").mkdir()
+    (path / "tokenizer").mkdir()
+    (path / "vae").mkdir()
+    (path / "model_index.json").write_text("{}", encoding="utf-8")
+    (path / "scheduler" / "scheduler_config.json").write_text("{}", encoding="utf-8")
+    (path / "tokenizer" / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (path / "text_encoder" / "model.safetensors").write_bytes(b"x")
+    (path / "vae" / "diffusion_pytorch_model.safetensors").write_bytes(b"x")
+
+
+@pytest.mark.parametrize(
+    "architecture,filename,component_rel,kind",
+    [
+        (
+            "flux2_klein",
+            "fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf",
+            ("flux2", "Components", "FLUX.2-klein-9B"),
+            "flux2",
+        ),
+        (
+            "z_image",
+            "fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf",
+            ("z-image", "Components", "Z-Image-Turbo"),
+            "z-image",
+        ),
+    ],
+)
+def test_transformer_image_preload_requires_component_folder(
+    preload_backend,
+    monkeypatch,
+    tmp_path,
+    architecture,
+    filename,
+    component_rel,
+    kind,
+):
+    backend, _, _ = preload_backend
+    root = tmp_path / "models"
+    model_path = root / kind / "GGUF" / filename
+    model_path.parent.mkdir(parents=True)
+    model_path.write_bytes(b"GGUF")
+
+    monkeypatch.setattr(backend, "is_flux2_klein_architecture", lambda arch: arch == "flux2_klein")
+    monkeypatch.setattr(backend, "is_z_image_architecture", lambda arch: arch == "z_image")
+
+    service = object.__new__(backend.DiffusersBackend)
+    service._flux_search_roots = lambda: [root]
+    checkpoint = types.SimpleNamespace(
+        id=model_path.stem,
+        title=model_path.stem,
+        filename=filename,
+        path=str(model_path),
+        architecture=architecture,
+    )
+    service._resolve_checkpoint = lambda checkpoint_id=None: checkpoint
+
+    assert service.can_preload_checkpoint_locally() is False
+    _make_component_dir(root.joinpath(*component_rel))
+    assert service.can_preload_checkpoint_locally() is True

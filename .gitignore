@@ -77,6 +77,11 @@ docs/benchmark_log.jsonl
 docs/projectskill-list.use-cases.json
 docs/WAN_STANDALONE_RUNTIME_PLAN.md
 assets/
+!docs/assets/
+!docs/assets/benchmarks/
+!docs/assets/benchmarks/**
+!docs/benchmark-reports/
+!docs/benchmark-reports/**
 outreach/
 convert_wan_to_diffusers.py
 copy_pipeline_for_debug.bat

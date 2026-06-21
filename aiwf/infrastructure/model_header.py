@@ -39,6 +39,8 @@ ARCH_UMT5_ENCODER        = "umt5-encoder"
 ARCH_T5XXL_ENCODER       = "t5xxl-encoder"
 ARCH_CLIP                = "clip"
 ARCH_FLUX_TRANSFORMER    = "flux-transformer"
+ARCH_FLUX2_KLEIN_TRANSFORMER = "flux2-klein-transformer"
+ARCH_Z_IMAGE_TRANSFORMER = "z-image-transformer"
 ARCH_FLUX_LORA           = "flux-lora"
 ARCH_FLUX_VAE            = "flux-vae"
 ARCH_SDXL_CHECKPOINT     = "sdxl-checkpoint"
@@ -91,6 +93,7 @@ _GGUF_ARCH_MAP: dict[str, str] = {
     "t5encoder": ARCH_T5XXL_ENCODER,
     "clip":      ARCH_CLIP,
     "flux":      ARCH_FLUX_TRANSFORMER,
+    "lumina2":   ARCH_Z_IMAGE_TRANSFORMER,
 }
 
 _ST_DTYPE_DISPLAY: dict[str, str] = {
@@ -106,6 +109,12 @@ _FOLDER_CLUES: list[tuple[str, str, str]] = [
     ("flux/textencoder", ARCH_T5XXL_ENCODER,   ROLE_TEXT_ENCODER),
     ("flux/VAE",        ARCH_FLUX_VAE,         ROLE_VAE),
     ("flux/vae",        ARCH_FLUX_VAE,         ROLE_VAE),
+    ("flux2/GGUF",      ARCH_FLUX2_KLEIN_TRANSFORMER, ""),
+    ("flux2/UNet",      ARCH_FLUX2_KLEIN_TRANSFORMER, ""),
+    ("flux2/Components", ARCH_FLUX2_KLEIN_TRANSFORMER, ""),
+    ("z-image/GGUF",    ARCH_Z_IMAGE_TRANSFORMER, ""),
+    ("z-image/UNet",    ARCH_Z_IMAGE_TRANSFORMER, ""),
+    ("z-image/Components", ARCH_Z_IMAGE_TRANSFORMER, ""),
     ("Loras/Flux",      ARCH_FLUX_LORA,        ROLE_LORA),
     ("Lora/Flux",       ARCH_FLUX_LORA,        ROLE_LORA),
     ("wan/GGUF",       ARCH_WAN_TRANSFORMER,     ""),
@@ -152,6 +161,8 @@ _ARCH_PREFIX: dict[str, str] = {
     ARCH_T5XXL_ENCODER:       "T5-XXL",
     ARCH_CLIP:                "CLIP",
     ARCH_FLUX_TRANSFORMER:    "Flux",
+    ARCH_FLUX2_KLEIN_TRANSFORMER: "Flux.2 Klein",
+    ARCH_Z_IMAGE_TRANSFORMER: "Z-Image",
     ARCH_FLUX_LORA:           "Flux LoRA",
     ARCH_FLUX_VAE:            "Flux VAE",
     ARCH_SDXL_CHECKPOINT:     "SDXL",
@@ -274,6 +285,9 @@ def _read_gguf(p: Path, size_mb: float) -> ModelInfo:
         title = meta.get("general.name", "").strip()
         size_label_str = meta.get("general.size_label", "").strip()
         quant = _gguf_dominant_quant(reader, filename=p.name)
+        family_arch = _transformer_family_arch_from_name(p, title)
+        if family_arch:
+            arch = family_arch
 
         # Refine arch / role
         if "umt5" in title.lower() or "umt5" in p.name.lower():
@@ -514,6 +528,9 @@ def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple
 
 def _arch_from_folder_and_filename(p: Path) -> tuple:
     path_str = p.as_posix()
+    transformer_arch = _transformer_family_arch_from_name(p)
+    if transformer_arch:
+        return transformer_arch, _role_from_filename(p.name)
     if p.name.lower() == "ae.safetensors":
         return ARCH_FLUX_VAE, ROLE_VAE
     if _looks_like_t5xxl_file(p, ""):
@@ -529,6 +546,16 @@ def _arch_from_folder_and_filename(p: Path) -> tuple:
         if f"/{fragment}/" in path_str or path_str.endswith(f"/{fragment}"):
             return arch, role or _role_from_filename(p.name)
     return ARCH_UNKNOWN, _role_from_filename(p.name)
+
+
+def _transformer_family_arch_from_name(p: Path, title: str = "") -> str | None:
+    text = f"{p.as_posix()} {title}".lower().replace("_", "-")
+    compact = text.replace("-", "").replace(" ", "")
+    if "z-image" in text or "zimage" in compact or "lumina2" in compact:
+        return ARCH_Z_IMAGE_TRANSFORMER
+    if "flux.2" in text or "flux2" in compact or "klein" in text:
+        return ARCH_FLUX2_KLEIN_TRANSFORMER
+    return None
 
 
 def _role_from_filename(filename: str) -> str:
