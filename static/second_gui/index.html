@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIWF Studio Second GUI</title>
+  <link rel="stylesheet" href="./css/app.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail" aria-label="Primary navigation">
+      <div class="brand-mark">A</div>
+      <nav class="rail-nav">
+        <button class="rail-item active" data-feature="Explore"><span>⌂</span><strong>Explore</strong></button>
+        <button class="rail-item" data-feature="Create"><span>✎</span><strong>Create</strong></button>
+        <button class="rail-item" data-feature="Canvas"><span>▦</span><strong>Canvas</strong></button>
+        <button class="rail-item advanced-tab" data-feature="Batch"><span>☷</span><strong>Batch</strong></button>
+        <button class="rail-item advanced-tab" data-feature="Workflows"><span>◇</span><strong>Workflows</strong></button>
+        <button class="rail-item" data-feature="Models"><span>⬡</span><strong>Models</strong></button>
+        <button class="rail-item" data-feature="Data"><span>◉</span><strong>Data</strong></button>
+        <button class="rail-item advanced-tab" data-feature="Logs"><span>▤</span><strong>Logs</strong></button>
+      </nav>
+      <div class="rail-bottom">
+        <button class="rail-item" data-feature="Settings"><span>⚙</span><strong>Settings</strong></button>
+        <div class="local-chip"><b></b><span>Local First</span><small>All systems go</small></div>
+        <span class="version">v0.2.0</span>
+      </div>
+    </aside>
+
+    <section class="main-frame">
+      <header class="topbar">
+        <div class="title-wrap">
+          <h1>AIWF Studio</h1>
+          <span>Second GUI</span>
+        </div>
+        <div class="top-actions">
+          <div class="engine-pill"><b></b><span>Local Engine<br><strong id="engineState">Ready</strong></span></div>
+          <div class="vram-pill"><span>VRAM</span><strong id="topVram">WIP</strong><i><em id="topVramBar"></em></i></div>
+          <button class="icon-btn" data-feature="Settings">⚙</button>
+          <span class="window-dot">─</span><span class="window-dot">□</span><span class="window-dot">×</span>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <div class="mode-tabs" role="tablist">
+          <button class="mode-tab active" data-mode="image">▧ Image</button>
+          <button class="mode-tab" data-mode="video" data-feature="Video">▣ Video <span>WIP</span></button>
+          <button class="mode-tab" data-mode="inpaint" data-feature="Inpaint">◈ Inpaint <span>WIP</span></button>
+          <button class="mode-tab" data-mode="models" data-feature="Models">⬡ Models</button>
+          <button class="mode-tab" data-mode="data" data-feature="Data">◉ Data</button>
+        </div>
+
+        <div class="panes">
+          <section class="panel prompt-panel" aria-label="Prompt controls">
+            <label class="field-label" for="prompt">Prompt</label>
+            <div class="textarea-wrap">
+              <textarea id="prompt" maxlength="1500">A futuristic overgrown city in the rain, neon lights reflecting on wet streets, cinematic, ultra detailed, moody lighting, photorealistic</textarea>
+              <span class="count" data-count-for="prompt">0 / 1500</span>
+            </div>
+
+            <label class="field-label" for="negativePrompt">Negative prompt</label>
+            <div class="textarea-wrap small">
+              <textarea id="negativePrompt" maxlength="1500">blurry, low quality, distorted, text, watermark, signature</textarea>
+              <span class="count" data-count-for="negativePrompt">0 / 1500</span>
+            </div>
+
+            <label class="field-label" for="modelSelect">Model</label>
+            <div class="select-row">
+              <select id="modelSelect">
+                <option>sdxl-base-1.0 (Diffusers)</option>
+                <option>Stable Diffusion 1.5</option>
+                <option>SD3.5 Large</option>
+                <option>Flux txt2img route</option>
+              </select>
+              <button class="icon-btn" data-feature="Model refresh">↻</button>
+            </div>
+
+            <div class="field-label">Aspect ratio</div>
+            <div class="ratio-row" id="ratioRow">
+              <button data-width="1024" data-height="1024">1:1</button>
+              <button class="active" data-width="1536" data-height="1024">3:2</button>
+              <button data-width="1344" data-height="768">16:9</button>
+              <button data-width="768" data-height="1344">9:16</button>
+              <button data-width="1216" data-height="832">2:3</button>
+              <button data-feature="More ratios">…</button>
+            </div>
+
+            <div class="settings-block">
+              <div class="slider-row"><label for="steps">Steps</label><input id="steps" type="range" min="1" max="80" value="30" /><output for="steps">30</output></div>
+              <div class="slider-row"><label for="cfg">CFG Scale</label><input id="cfg" type="range" min="1" max="20" step="0.5" value="7" /><output for="cfg">7.0</output></div>
+              <label class="field-label" for="sampler">Sampler</label>
+              <select id="sampler"><option>DPM++ 2M Karras</option><option>Euler a</option><option>UniPC</option><option>DDIM</option></select>
+              <label class="field-label" for="seed">Seed</label>
+              <div class="select-row"><input id="seed" type="number" value="-1" /><button class="icon-btn" data-feature="Random seed">🎲</button></div>
+            </div>
+
+            <button class="advanced-toggle" id="advancedToggle">Advanced <span>⌄</span></button>
+            <div class="advanced-box" id="advancedBox">
+              <p>ControlNet, LoRA stack, hires fix, prompt styles, and API route overrides are marked WIP in this shell until each backend route is attached.</p>
+            </div>
+
+            <div class="generate-row">
+              <button class="generate-btn" id="generateBtn">✦ Generate</button>
+              <button class="tune-btn" data-feature="Generation presets">☷</button>
+            </div>
+          </section>
+
+          <section class="panel canvas-panel" aria-label="Canvas output preview">
+            <div class="panel-title"><strong>Canvas / Output Preview</strong><div><button class="icon-btn" data-feature="Pan">☝</button><button class="icon-btn" data-feature="Fit">⛶</button><select id="zoom"><option>100%</option><option>75%</option><option>50%</option></select><button class="icon-btn" data-feature="Fullscreen">⛶</button></div></div>
+            <div class="preview-stage" id="previewStage">
+              <div class="city-art" aria-label="Generated preview placeholder">
+                <div class="rain"></div>
+                <div class="tower t1"></div><div class="tower t2"></div><div class="tower t3"></div><div class="tower t4"></div>
+                <div class="street-glow"></div>
+                <p id="previewStatus">Preview shell ready. Generate is linked to WIP until proxy mode is enabled.</p>
+              </div>
+            </div>
+          </section>
+
+          <aside class="panel status-panel" aria-label="Runtime status">
+            <div class="status-title"><strong>Runtime Status</strong><span><b></b>Idle</span></div>
+            <dl class="runtime-list">
+              <div><dt>Backend</dt><dd id="backendName">Second GUI shell</dd></div>
+              <div><dt>Device</dt><dd id="deviceName">Detected by main runtime</dd></div>
+              <div><dt>Precision</dt><dd id="precisionName">WIP</dd></div>
+              <div><dt>Attention</dt><dd id="attentionName">WIP</dd></div>
+              <div><dt>Max Resolution</dt><dd id="maxRes">1024 x 1024</dd></div>
+            </dl>
+            <h3>Resource Usage</h3>
+            <div class="meter"><span>VRAM</span><strong id="vramText">WIP</strong><i><em style="width:46%"></em></i></div>
+            <div class="meter"><span>RAM</span><strong id="ramText">WIP</strong><i><em style="width:37%"></em></i></div>
+            <div class="meter amber"><span>Storage</span><strong id="storageText">WIP</strong><i><em style="width:25%"></em></i></div>
+            <div class="meter blue"><span>CPU</span><strong id="cpuText">WIP</strong><i><em style="width:18%"></em></i></div>
+            <h3>Loaded Model</h3>
+            <div class="loaded-card">
+              <p><strong id="loadedModel">sdxl-base-1.0 (Diffusers)</strong><span>● Loaded</span></p>
+              <dl>
+                <div><dt>Type</dt><dd>Text-to-Image</dd></div>
+                <div><dt>Base Model</dt><dd>SDXL 1.0</dd></div>
+                <div><dt>Size on Disk</dt><dd>WIP</dd></div>
+                <div><dt>Text Encoder</dt><dd>WIP</dd></div>
+                <div><dt>UNet</dt><dd>WIP</dd></div>
+              </dl>
+              <button class="danger-btn" data-feature="Unload model">🗑 Unload Model</button>
+            </div>
+            <h3>Queue</h3>
+            <p class="queue-text" id="queueText">0 tasks</p>
+          </aside>
+        </div>
+
+        <section class="recent panel">
+          <div class="panel-title"><strong>Recent Outputs</strong><div><button class="soft-btn" data-feature="Open folder">▱ Open folder</button><button class="icon-btn" data-feature="Grid view">▦</button><button class="icon-btn" data-feature="Compact view">▥</button></div></div>
+          <div class="thumb-row" id="thumbRow">
+            <button class="thumb city active"><span>1536×1024</span><small>2m ago</small></button>
+            <button class="thumb mountain"><span>1536×1024</span><small>7m ago</small></button>
+            <button class="thumb forest"><span>1536×1024</span><small>15m ago</small></button>
+            <button class="thumb planet"><span>1026×1024</span><small>21m ago</small></button>
+            <button class="thumb astronaut"><span>1536×1024</span><small>28m ago</small></button>
+            <button class="thumb room"><span>1024×1365</span><small>35m ago</small></button>
+            <button class="thumb desert"><span>1536×1024</span><small>42m ago</small></button>
+            <button class="thumb alley"><span>1024×1365</span><small>51m ago</small></button>
+          </div>
+        </section>
+      </main>
+    </section>
+  </div>
+
+  <div class="welcome-backdrop" id="welcomeModal" role="dialog" aria-modal="true" aria-labelledby="welcomeTitle">
+    <div class="welcome-card">
+      <button class="close-btn" id="closeWelcome" aria-label="Close">×</button>
+      <div class="welcome-head"><div class="brand-mark large">A</div><div><h2 id="welcomeTitle">Welcome to AIWF Studio</h2><p>AIWF Studio is a local-first workstation for open-source image and video generation.</p></div></div>
+      <div class="welcome-list">
+        <div><span>▰</span><p><strong>Run locally, stay private</strong><br>Everything runs on your machine. Your data never leaves.</p></div>
+        <div><span>▣</span><p><strong>Optional service tabs</strong><br>Enable integrations when you need them.</p></div>
+        <div><span>◌</span><p><strong>Hidden tool tabs</strong><br>Advanced tabs are hidden until you turn them on.</p></div>
+        <div><span>⬡</span><p><strong>Models & datasets</strong><br>Manage local model folders with full control.</p></div>
+        <div><span>🛡</span><p><strong>Safety by default</strong><br>Local processing. You own your outputs and prompts.</p></div>
+      </div>
+      <div class="welcome-actions">
+        <div class="account-card"><div class="avatar"></div><p><strong>nawnie</strong><br>GitHub account<br><small>Avatar will load from GitHub when signed in.</small></p></div>
+        <div class="action-stack"><button class="primary" id="getStarted">Get started →</button><label class="switch-line">Show advanced tabs <input type="checkbox" id="showAdvanced" /></label><button class="secondary" data-feature="Dataset reference">Open dataset reference ↗</button></div>
+      </div>
+      <small class="muted">You can change preferences anytime in Settings.</small>
+    </div>
+  </div>
+
+  <div class="toast-zone" id="toastZone" aria-live="polite"></div>
+  <script src="./js/app.js"></script>
+</body>
+</html>
