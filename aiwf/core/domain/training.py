@@ -50,6 +50,21 @@ ED2_LR_SCHEDULERS = (
 
 MIXED_PRECISION_OPTS = ("no", "fp16", "bf16")
 
+LLM_TRAINING_METHODS = ("lora", "qlora", "full")
+"""Supported text-model post-training methods."""
+
+LLM_DATASET_FORMATS = ("auto", "messages", "prompt_completion", "text")
+"""Dataset layouts accepted by the AI bot trainer."""
+
+LLM_OPTIMIZERS = (
+    "adamw_torch",
+    "adamw_bnb_8bit",
+    "paged_adamw_8bit",
+    "paged_adamw_32bit",
+    "adafactor",
+)
+"""Optimizer names accepted by Transformers/TRL for text-model training."""
+
 
 # ---------------------------------------------------------------------------
 # Kohya LoRA training request
@@ -279,3 +294,98 @@ class ED2TrainingRequest(BaseModel):
             cfg["sample_steps"] = self.sample_steps
             cfg["sample_prompts"] = self.sample_prompts
         return cfg
+
+
+# ---------------------------------------------------------------------------
+# AI bot text-model training request
+# ---------------------------------------------------------------------------
+
+class LLMBotTrainingRequest(BaseModel):
+    """Parameters for local Causal LM post-training jobs.
+
+    The worker translates this request into a TRL SFT run. It supports:
+      - LoRA adapters on an unquantized base model
+      - QLoRA adapters on a 4-bit loaded base model
+      - full fine-tuning of all model weights
+
+    The request is intentionally text-model specific so it stays separate
+    from image LoRA and EveryDream2 checkpoint training.
+    """
+
+    # ---- Identity ----
+    job_name: str = Field(..., min_length=1, max_length=80)
+
+    # ---- Model ----
+    base_model_path: str = Field(..., min_length=1,
+        description="Local model directory or HuggingFace ID for the base Causal LM.")
+    trust_remote_code: bool = Field(default=True)
+    local_files_only: bool = Field(default=True,
+        description="Prefer already-downloaded model files during training.")
+
+    # ---- Dataset ----
+    dataset_path: str = Field(..., min_length=1,
+        description="JSONL/JSON file or directory containing JSONL/JSON training rows.")
+    dataset_format: Literal["auto", "messages", "prompt_completion", "text"] = Field(default="auto")
+
+    # ---- Method / output ----
+    method: Literal["lora", "qlora", "full"] = Field(default="qlora")
+    output_dir: str = Field(default="outputs/training/llm")
+    save_steps: int = Field(default=100, ge=1, le=100_000)
+    save_total_limit: int = Field(default=2, ge=1, le=100)
+
+    # ---- Optimization ----
+    max_steps: int = Field(default=100, ge=1, le=1_000_000)
+    num_train_epochs: float = Field(default=1.0, ge=0.0, le=1000.0)
+    batch_size: int = Field(default=1, ge=1, le=64)
+    gradient_accumulation_steps: int = Field(default=8, ge=1, le=1024)
+    learning_rate: float = Field(default=2e-5, ge=1e-9, le=1.0)
+    max_seq_length: int = Field(default=1024, ge=128, le=32768)
+    packing: bool = Field(default=False)
+    mixed_precision: str = Field(default="bf16")
+    gradient_checkpointing: bool = Field(default=True)
+    optimizer: str = Field(default="",
+        description="Leave blank to use the recommended optimizer for the selected method.")
+    logging_steps: int = Field(default=10, ge=1, le=100_000)
+    seed: int = Field(default=42, ge=0)
+
+    # ---- PEFT / LoRA ----
+    lora_rank: int = Field(default=16, ge=1, le=512)
+    lora_alpha: float = Field(default=32.0, ge=0.1, le=1024.0)
+    lora_dropout: float = Field(default=0.05, ge=0.0, le=1.0)
+    target_modules: str = Field(default="all-linear",
+        description="PEFT target modules. all-linear works for most modern Causal LMs.")
+
+    # ---- QLoRA quantization ----
+    bnb_4bit_quant_type: Literal["nf4", "fp4"] = Field(default="nf4")
+    bnb_4bit_use_double_quant: bool = Field(default=True)
+
+    @field_validator("mixed_precision")
+    @classmethod
+    def _validate_mixed_precision(cls, v: str) -> str:
+        if v not in MIXED_PRECISION_OPTS:
+            raise ValueError(f"mixed_precision must be one of {MIXED_PRECISION_OPTS}, got {v!r}")
+        return v
+
+    @field_validator("optimizer")
+    @classmethod
+    def _validate_optimizer(cls, v: str) -> str:
+        if v and v not in LLM_OPTIMIZERS:
+            raise ValueError(f"optimizer must be blank or one of {LLM_OPTIMIZERS}, got {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def _apply_defaults(self) -> "LLMBotTrainingRequest":
+        if not self.optimizer:
+            default_optimizer = {
+                "lora": "adamw_bnb_8bit",
+                "qlora": "paged_adamw_8bit",
+                "full": "adamw_torch",
+            }[self.method]
+            object.__setattr__(self, "optimizer", default_optimizer)
+        return self
+
+    def dataset_file_path(self) -> Path:
+        return Path(self.dataset_path)
+
+    def output_path(self) -> Path:
+        return Path(self.output_dir) / self.job_name

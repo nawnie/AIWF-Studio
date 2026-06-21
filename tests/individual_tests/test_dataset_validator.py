@@ -1,6 +1,7 @@
 """Tests for aiwf/services/training/dataset_validator.py."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -231,6 +232,73 @@ class TestValidateED2:
         r = validator.validate_ed2(req)
         assert r.ok   # warning, not error
         assert any("vae" in w.lower() for w in r.warnings)
+
+
+class TestValidateLLM:
+    def _req(self, tmp_path: Path) -> dict:
+        ds = tmp_path / "dataset.jsonl"
+        ds.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "user", "content": "Write Python."},
+                        {"role": "assistant", "content": "Use functions."},
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        model = tmp_path / "model"
+        model.mkdir()
+        return {
+            "job_name": "llm_job",
+            "base_model_path": str(model),
+            "dataset_path": str(ds),
+            "dataset_format": "messages",
+            "output_dir": str(tmp_path / "out"),
+            "method": "qlora",
+            "max_seq_length": 1024,
+        }
+
+    def test_messages_jsonl_passes(self, tmp_path):
+        result = validator.validate_llm(self._req(tmp_path))
+
+        assert result.ok
+        assert any("qlora" in warning.lower() for warning in result.warnings)
+
+    def test_prompt_completion_passes(self, tmp_path):
+        ds = tmp_path / "prompt_completion.jsonl"
+        ds.write_text(json.dumps({"prompt": "p", "completion": "c"}) + "\n", encoding="utf-8")
+        req = self._req(tmp_path)
+        req["dataset_path"] = str(ds)
+        req["dataset_format"] = "prompt_completion"
+
+        result = validator.validate_llm(req)
+
+        assert result.ok
+
+    def test_invalid_shape_fails(self, tmp_path):
+        ds = tmp_path / "bad.jsonl"
+        ds.write_text(json.dumps({"foo": "bar"}) + "\n", encoding="utf-8")
+        req = self._req(tmp_path)
+        req["dataset_path"] = str(ds)
+
+        result = validator.validate_llm(req)
+
+        assert not result.ok
+        assert any("supported LLM dataset shape" in error for error in result.errors)
+
+    def test_full_method_warns_about_vram(self, tmp_path):
+        req = self._req(tmp_path)
+        req["method"] = "full"
+        req["max_seq_length"] = 4096
+
+        result = validator.validate_llm(req)
+
+        assert result.ok
+        assert any("Full fine-tuning" in warning for warning in result.warnings)
+        assert any("max_seq_length=4096" in warning for warning in result.warnings)
 
 
 # ---------------------------------------------------------------------------

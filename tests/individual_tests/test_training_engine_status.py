@@ -114,6 +114,25 @@ def test_ed2_can_use_shared_studio_venv_for_full_tune_readiness(tmp_path: Path):
     assert "Studio runtime" in statuses["ed2"].markdown_line()
 
 
+def test_llm_training_engine_ready_when_enabled_venv_and_worker_exist(tmp_path: Path):
+    repo = tmp_path / "engines" / "llm"
+    python = tmp_path / "engines" / "llm" / ".venv" / "Scripts" / "python.exe"
+    worker = tmp_path / "engines" / "llm" / "worker.py"
+    repo.mkdir(parents=True)
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    worker.write_text("print('worker')", encoding="utf-8")
+    (tmp_path / "engines.json").write_text(
+        json.dumps({"llm": {"enabled": True}}),
+        encoding="utf-8",
+    )
+
+    statuses = training_engine_statuses(tmp_path)
+
+    assert statuses["llm"].ready
+    assert "AI Bot Trainer" in ready_engine_choices(statuses)
+
+
 def test_training_status_markdown_mentions_optional_setup(tmp_path: Path):
     statuses = training_engine_statuses(tmp_path)
 

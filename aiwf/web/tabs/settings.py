@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import platform
+import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from collections.abc import Callable
 from pathlib import Path
 
@@ -28,9 +30,11 @@ from aiwf.web.theme import accent_preset_names
 TAB_VISIBILITY_CHOICES = [
     "Video",
     "Models",
+    "Chat",
     "Enhance",
     "Segment",
     "Face Swap",
+    "Training",
     "Audio",
     "RIFE",
     "Library",
@@ -265,6 +269,46 @@ def _probe_worker_markdown(engine: str) -> str:
         message = event.get("message") or event.get("detail") or ""
         lines.append(f"- `{kind}` {message}")
     return "\n".join(lines)
+
+
+def _start_ltx_install_markdown() -> str:
+    root = WorkerTenantRegistry().repo_root
+    script = root / "scripts" / "bootstrap_ltx.ps1"
+    if not script.is_file():
+        return f"**LTX install unavailable:** bootstrap script missing at `{script}`"
+
+    log_dir = root / "outputs" / "engine-installs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"ltx-bootstrap-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-Enable",
+    ]
+    out = open(log_path, "w", encoding="utf-8", errors="replace")
+    popen_kwargs = {
+        "cwd": str(root),
+        "stdout": out,
+        "stderr": subprocess.STDOUT,
+        "stdin": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        subprocess.Popen(command, **popen_kwargs)
+        out.close()
+    except Exception as exc:
+        out.close()
+        return f"**LTX install failed to start:** `{exc}`"
+    return (
+        "**LTX 2.3 install started.**  \n"
+        f"Log: `{log_path}`  \n"
+        "When the install finishes, refresh this panel and probe the LTX engine."
+    )
 
 
 def _launch_component_values(settings: LaunchSettings) -> list:
@@ -1071,6 +1115,14 @@ def register_settings(registry: WebRegistry) -> None:
                                 "Probe Wan Video Engine",
                                 elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
                             )
+                            install_ltx_btn = gr.Button(
+                                "Install / repair LTX 2.3 Engine",
+                                elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                            )
+                            probe_ltx_btn = gr.Button(
+                                "Probe LTX 2.3 Engine",
+                                elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                            )
                             worker_probe_status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
 
                     with gr.Row(elem_classes=["aiwf-settings-actions"]):
@@ -1400,6 +1452,16 @@ def register_settings(registry: WebRegistry) -> None:
         )
         probe_wan_btn.click(
             lambda: _probe_worker_markdown("wan"),
+            outputs=[worker_probe_status],
+            show_progress=True,
+        )
+        install_ltx_btn.click(
+            _start_ltx_install_markdown,
+            outputs=[worker_probe_status],
+            show_progress=False,
+        )
+        probe_ltx_btn.click(
+            lambda: _probe_worker_markdown("ltx"),
             outputs=[worker_probe_status],
             show_progress=True,
         )

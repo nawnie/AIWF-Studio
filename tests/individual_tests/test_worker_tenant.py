@@ -83,6 +83,26 @@ def test_worker_tenant_ed2_default_repo_lives_under_engines(tmp_path: Path):
     assert any("EveryDream2trainer" in message for message in status.messages)
 
 
+def test_worker_tenant_ltx_default_repo_lives_under_engines(tmp_path: Path):
+    registry = WorkerTenantRegistry(tmp_path)
+
+    status = registry.status("ltx")
+
+    assert status.repo_dir == (tmp_path / "engines" / "ltx" / "LTX-2").resolve()
+    assert status.worker_script == (tmp_path / "engines" / "ltx" / "worker.py").resolve()
+    assert any("enabled=true" in message for message in status.messages)
+
+
+def test_worker_tenant_llm_default_is_builtin_worker_without_repo(tmp_path: Path):
+    registry = WorkerTenantRegistry(tmp_path)
+
+    status = registry.status("llm")
+
+    assert status.repo_dir is None
+    assert status.worker_script == (tmp_path / "engines" / "llm" / "worker.py").resolve()
+    assert any("enabled=true" in message for message in status.messages)
+
+
 def test_worker_tenant_build_command_injects_root_and_pythonpath(tmp_path: Path):
     worker, python = _write_engine_files(tmp_path)
     request = tmp_path / "request.json"
@@ -148,6 +168,29 @@ def test_wan_worker_probe_emits_jsonl_events(tmp_path: Path):
     root = _repo_root()
     result = subprocess.run(
         [sys.executable, "engines/wan/worker.py", str(request)],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    assert events[0]["kind"] == "status"
+    assert any(event["kind"] == "complete" for event in events)
+
+
+def test_llm_worker_probe_emits_jsonl_events(tmp_path: Path):
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps({"_job_id": "llm-probe-test", "_engine": "llm", "mode": "probe"}),
+        encoding="utf-8",
+    )
+
+    root = _repo_root()
+    result = subprocess.run(
+        [sys.executable, "engines/llm/worker.py", str(request)],
         cwd=root,
         env={**os.environ, "PYTHONPATH": str(root)},
         capture_output=True,

@@ -12,6 +12,7 @@ AIWF Studio is moving to a two-tier runtime:
 
 2. **Optional worker venvs**
    - `engines/wan/.venv` for volatile video runtime packages
+   - `engines/ltx/.venv` for the optional LTX 2.3 video runtime
    - `engines/kohya/.venv` for LoRA training stacks
    - `engines/ed2/.venv` for full fine-tuning stacks
    - future engines can be added without poisoning the core UI venv
@@ -63,3 +64,16 @@ methods move toward explicit backend choices:
 Benchmark receipts must identify the method, model pair, text encoder, LoRAs,
 resolution, frames, steps, elapsed time, and output path before speed claims are
 made.
+
+## LTX Direction
+
+LTX 2.3 stays isolated from Wan and the core image stack:
+
+- upstream checkout: `engines/ltx/LTX-2`
+- venv: `engines/ltx/.venv`
+- worker: `engines/ltx/worker.py`
+- bootstrap: `scripts/bootstrap_ltx.ps1`
+
+The generic `launch.py` engine installer intentionally skips LTX because LTX
+uses its own recommended Python/CUDA/torch stack. Use the specialized bootstrap
+or the Settings install button instead.

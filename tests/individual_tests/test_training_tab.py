@@ -46,6 +46,18 @@ def test_ed2_training_uses_ed2_runner(monkeypatch):
     assert training._runner_for_engine("ED2 Full Fine-tune") is created
 
 
+def test_llm_training_uses_llm_runner(monkeypatch):
+    created = object()
+
+    class FakeLLMRunner:
+        def __new__(cls):
+            return created
+
+    monkeypatch.setattr("aiwf.services.training.llm_runner.LLMBotTrainerRunner", FakeLLMRunner)
+
+    assert training._runner_for_engine("AI Bot Trainer") is created
+
+
 def test_validate_training_request_routes_lora_to_kohya_validator(monkeypatch):
     calls = []
 
@@ -58,11 +70,38 @@ def test_validate_training_request_routes_lora_to_kohya_validator(monkeypatch):
             calls.append(("ed2", request))
             return ValidationResult.passed()
 
+        def validate_llm(self, request):
+            calls.append(("llm", request))
+            return ValidationResult.passed()
+
     monkeypatch.setattr(training, "_validator", FakeValidator())
 
     training._validate_training_request("Kohya LoRA", {"job_name": "x"})
 
     assert calls == [("kohya", {"job_name": "x"})]
+
+
+def test_validate_training_request_routes_ai_bot_to_llm_validator(monkeypatch):
+    calls = []
+
+    class FakeValidator:
+        def validate_kohya(self, request):
+            calls.append(("kohya", request))
+            return ValidationResult.passed()
+
+        def validate_ed2(self, request):
+            calls.append(("ed2", request))
+            return ValidationResult.passed()
+
+        def validate_llm(self, request):
+            calls.append(("llm", request))
+            return ValidationResult.passed()
+
+    monkeypatch.setattr(training, "_validator", FakeValidator())
+
+    training._validate_training_request("AI Bot Trainer", {"job_name": "x"})
+
+    assert calls == [("llm", {"job_name": "x"})]
 
 
 def test_release_tenant_uses_supervisor_idle_switch():

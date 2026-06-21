@@ -45,4 +45,13 @@ def test_pipeline_registry_lists_wan_diffusers_and_gguf_methods(tmp_path: Path):
 
     ids = {pipeline.id for pipeline in registry.video_pipelines()}
 
-    assert {"wan-diffusers", "wan-gguf"}.issubset(ids)
+    assert {"wan-diffusers", "wan-gguf", "ltx-2.3"}.issubset(ids)
+
+
+def test_pipeline_registry_marks_ltx_missing_until_worker_ready(tmp_path: Path):
+    registry = PipelineRegistry(RuntimeFlags(data_dir=tmp_path), UserSettings())
+
+    ltx = [pipeline for pipeline in registry.video_pipelines() if pipeline.id == "ltx-2.3"][0]
+
+    assert not ltx.ready
+    assert "enabled=true" in ltx.message or "missing" in ltx.message

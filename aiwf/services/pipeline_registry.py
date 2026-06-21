@@ -45,6 +45,7 @@ class PipelineRegistry:
         ]
 
     def video_pipelines(self) -> list[PipelineInfo]:
+        ltx = self._ltx_pipeline()
         return [
             PipelineInfo(
                 id="wan-diffusers",
@@ -64,6 +65,7 @@ class PipelineRegistry:
                 ready=True,
                 message="available when GGUF high/low transformer files are configured",
             ),
+            ltx,
         ]
 
     def launch_choices(self) -> list[tuple[str, str]]:
@@ -103,3 +105,18 @@ class PipelineRegistry:
             path = Path(raw)
             return path.resolve() if path.is_absolute() else (self.flags.data_dir / path).resolve()
         return (self.flags.resolved_models_dir() / "onnx").resolve()
+
+    def _ltx_pipeline(self) -> PipelineInfo:
+        from aiwf.services.worker_tenant import WorkerTenantRegistry
+
+        status = WorkerTenantRegistry(self.flags.data_dir).status("ltx")
+        message = "ready via isolated LTX worker" if status.ready else "; ".join(status.messages)
+        return PipelineInfo(
+            id="ltx-2.3",
+            label="LTX 2.3 worker pipeline",
+            kind="video",
+            engine="LTX 2.3 Video Engine",
+            summary="Optional Lightricks LTX 2.3 text/image-to-video path in engines/ltx/.venv.",
+            ready=status.ready,
+            message=message or "enable/install the LTX worker in Settings",
+        )

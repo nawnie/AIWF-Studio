@@ -49,6 +49,10 @@ CATEGORY_LABELS: dict[ModelCategory, str] = {
     "flux_unet_gguf": "Flux UNet / transformer (.gguf)",
     "flux_text_encoder": "Flux text encoder",
     "flux_vae": "Flux VAE",
+    "ltx_checkpoint": "LTX 2.3 checkpoint",
+    "ltx_upscaler": "LTX 2.3 upscaler",
+    "ltx_lora": "LTX 2.3 LoRA",
+    "ltx_text_encoder": "LTX 2.3 Gemma text encoder",
     "rife": "RIFE (frame interpolation)",
     "sam": "SAM (segmentation)",
     "other": "Other (models root)",
@@ -77,6 +81,10 @@ CATEGORY_FOLDERS: dict[ModelCategory, tuple[str, ...]] = {
     "flux_unet_gguf": ("flux", "GGUF"),
     "flux_text_encoder": ("flux", "Textencoder"),
     "flux_vae": ("flux", "VAE"),
+    "ltx_checkpoint": ("ltx", "checkpoints"),
+    "ltx_upscaler": ("ltx", "upscalers"),
+    "ltx_lora": ("ltx", "loras"),
+    "ltx_text_encoder": ("ltx", "text_encoder"),
     "rife": ("rife",),
     "sam": ("sam",),
     "other": (),
@@ -104,6 +112,10 @@ CATEGORY_EXTENSION_RULES: dict[ModelCategory, tuple[str, ...]] = {
     "flux_unet_gguf": (".gguf",),
     "flux_text_encoder": (".safetensors", ".gguf"),
     "flux_vae": (".safetensors",),
+    "ltx_checkpoint": (".safetensors",),
+    "ltx_upscaler": (".safetensors",),
+    "ltx_lora": (".safetensors",),
+    "ltx_text_encoder": (".safetensors", ".json", ".model", ".txt"),
     "rife": (".pth",),
     "sam": (".pth",),
 }
@@ -632,7 +644,13 @@ class ModelDownloadService:
             return _parse_hf_reference(
                 url_or_repo,
                 filename,
-                allow_snapshot=category in {"checkpoint", "controlnet", "preprocessor", "wan_diffusers"},
+                allow_snapshot=category in {
+                    "checkpoint",
+                    "controlnet",
+                    "preprocessor",
+                    "wan_diffusers",
+                    "ltx_text_encoder",
+                },
             )
         if source == "civitai":
             return _parse_civitai_reference(url_or_repo)
@@ -670,10 +688,16 @@ class ModelDownloadService:
         if self.flags.block_private_download_urls and remote.source == "direct" and is_private_url(remote.url):
             raise ValueError("Private, loopback, and local-network download URLs are blocked by Settings.")
         if remote.snapshot:
-            if category not in {"checkpoint", "controlnet", "preprocessor", "wan_diffusers"}:
+            if category not in {
+                "checkpoint",
+                "controlnet",
+                "preprocessor",
+                "wan_diffusers",
+                "ltx_text_encoder",
+            }:
                 raise ValueError(
                     "Full repository downloads are only supported for checkpoint Diffusers folders, "
-                    "Wan Diffusers folders, ControlNet, and preprocessor categories."
+                    "Wan Diffusers folders, LTX text encoders, ControlNet, and preprocessor categories."
                 )
             return self._download_hf_snapshot(remote, category, on_progress=on_progress)
         target_filename = remote.local_filename or remote.filename

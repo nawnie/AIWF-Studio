@@ -10,6 +10,7 @@ import gradio as gr
 from aiwf.core.domain.audio import AudioGenerationOptions
 from aiwf.core.domain.enhance import RestoreOptions
 from aiwf.core.domain.faceswap import FaceSwapOptions
+from aiwf.core.domain.ltx import LTX_PIPELINE_DISTILLED, LTX_PIPELINE_ONE_STAGE, LtxVideoRequest, snap_ltx_num_frames
 from aiwf.core.domain.rife import RifeOptions
 from aiwf.core.domain.vsr import VideoFxAigsOptions, VideoFxDenoiseOptions, VideoFxRelightOptions, VsrOptions
 from aiwf.bootstrap import AppContext
@@ -28,6 +29,7 @@ from aiwf.infrastructure.video import VideoError, extract_first_frame
 from aiwf.infrastructure.wan import WanUnavailable
 from aiwf.services.rife import RifeService
 from aiwf.services.audio import AudioGenerationService, AudioUnavailable
+from aiwf.services.ltx import LtxService, LtxUnavailable
 from aiwf.services.vsr import VsrService, VsrUnavailable
 from aiwf.services.wan import (
     WanService,
@@ -52,6 +54,7 @@ _SERVICES: dict[int, WanService] = {}
 _RIFE_SERVICES: dict[int, RifeService] = {}
 _VSR_SERVICES: dict[int, VsrService] = {}
 _AUDIO_SERVICES: dict[int, AudioGenerationService] = {}
+_LTX_SERVICES: dict[int, LtxService] = {}
 VIDEO_SIZE_PRESETS: tuple[int, ...] = (480, 512, 568, 640, 768, 896, 1024)
 _WAN_FAST_OFFLOAD_CHOICES = [
     ("Balanced: model offload", "balanced"),
@@ -146,6 +149,14 @@ def _audio_service(ctx: AppContext) -> AudioGenerationService:
             supervisor=ctx.supervisor,
         )
         _AUDIO_SERVICES[id(ctx)] = svc
+    return svc
+
+
+def _ltx_service(ctx: AppContext) -> LtxService:
+    svc = _LTX_SERVICES.get(id(ctx))
+    if svc is None:
+        svc = LtxService(ctx.flags, ctx.settings, supervisor=ctx.supervisor)
+        _LTX_SERVICES[id(ctx)] = svc
     return svc
 
 
@@ -246,6 +257,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         rife_service = _rife_service(ctx)
         vsr_service = _vsr_service(ctx)
         audio_service = _audio_service(ctx)
+        ltx_service = _ltx_service(ctx)
         rife_ckpts = rife_service.list_checkpoints()
         default_rife_ckpt = rife_service.default_checkpoint()
         vsr_help = vsr_service.folder_help()
@@ -1043,6 +1055,86 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     video_out = gr.Video(label="Result", interactive=False)
                     save_bad_video = gr.Button("Save bad result", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
                     status = gr.Markdown("**Ready** - upload an image and generate.", elem_classes=["aiwf-status-bar"])
+
+                    with gr.Accordion("LTX 2.3 optional engine", open=False, elem_classes=["aiwf-prompt-tools"]):
+                        gr.Markdown(ltx_service.status_markdown(), elem_classes=["aiwf-settings-paths"])
+                        ltx_source = gr.Image(
+                            label="LTX source image (optional)",
+                            type="filepath",
+                            sources=["upload", "clipboard"],
+                        )
+                        ltx_prompt = gr.Textbox(
+                            label="LTX prompt",
+                            lines=3,
+                            placeholder="A simple dance performance, natural movement, stable camera",
+                        )
+                        ltx_negative = gr.Textbox(label="LTX negative prompt", lines=2, value="")
+                        ltx_pipeline = gr.Radio(
+                            label="LTX route",
+                            choices=[
+                                ("Distilled two-stage (fast/default)", LTX_PIPELINE_DISTILLED),
+                                ("Full one-stage checkpoint", LTX_PIPELINE_ONE_STAGE),
+                            ],
+                            value=LTX_PIPELINE_DISTILLED,
+                        )
+                        with gr.Row():
+                            ltx_width = gr.Slider(256, 1280, value=512, step=32, label="Width")
+                            ltx_height = gr.Slider(256, 1280, value=512, step=32, label="Height")
+                            ltx_frames = gr.Slider(
+                                9,
+                                257,
+                                value=81,
+                                step=8,
+                                label="Frames",
+                                info="LTX uses 8*k+1 frame counts.",
+                            )
+                        with gr.Row():
+                            ltx_fps = gr.Slider(1, 60, value=25, step=1, label="FPS")
+                            ltx_steps = gr.Slider(
+                                1,
+                                80,
+                                value=20,
+                                step=1,
+                                label="One-stage steps",
+                                info="Distilled uses its fixed upstream sigma schedule.",
+                            )
+                            ltx_seed = gr.Number(value=-1, precision=0, label="Seed")
+                        with gr.Row():
+                            ltx_offload = gr.Radio(
+                                label="Offload",
+                                choices=[("CPU offload", "cpu"), ("None", "none"), ("Disk fallback", "disk")],
+                                value="cpu",
+                            )
+                            ltx_quantization = gr.Radio(
+                                label="Quantization",
+                                choices=[("FP8 cast", "fp8-cast"), ("None", ""), ("FP8 scaled MM", "fp8-scaled-mm")],
+                                value="fp8-cast",
+                            )
+                            ltx_enhance_prompt = gr.Checkbox(label="Enhance prompt", value=False)
+                        ltx_checkpoint = gr.Textbox(
+                            label="LTX checkpoint",
+                            value=str(ltx_service.default_checkpoint_path()),
+                            info="Distilled route expects ltx-2.3-22b-distilled-1.1.safetensors.",
+                        )
+                        ltx_upsampler = gr.Textbox(
+                            label="LTX spatial upscaler",
+                            value=str(ltx_service.default_spatial_upsampler_path()),
+                            info="Required for the distilled two-stage route.",
+                        )
+                        ltx_gemma = gr.Textbox(
+                            label="LTX Gemma text encoder folder",
+                            value=str(ltx_service.default_gemma_root()),
+                        )
+                        ltx_run = gr.Button("Generate LTX 2.3 video", variant="primary")
+                        ltx_video_out = gr.Video(label="LTX result", interactive=False)
+                        ltx_save_bad_video = gr.Button(
+                            "Save bad LTX result",
+                            elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
+                        )
+                        ltx_status = gr.Markdown(
+                            "**LTX ready when installed** - use Settings to install/probe the LTX engine.",
+                            elem_classes=["aiwf-status-bar"],
+                        )
 
         def _active_resolution_ratio(ratio_value, square_ratio_value):
             return square_ratio_value or ratio_value or "1:1"
@@ -2154,6 +2246,62 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 return f"**Failure gallery** -- saved with archive warnings: {record.archive_dir}"
             return f"**Failure gallery** -- saved bad result: {record.archive_dir}"
 
+        def _clear_previous_ltx_video():
+            return gr.update(value=None), "**Generating** -- preparing LTX 2.3 video..."
+
+        def _run_ltx(
+            source_path,
+            prompt_v,
+            negative_v,
+            pipeline_v,
+            width_v,
+            height_v,
+            frames_v,
+            fps_v,
+            steps_v,
+            seed_v,
+            offload_v,
+            quantization_v,
+            enhance_prompt_v,
+            checkpoint_v,
+            upsampler_v,
+            gemma_v,
+            progress=gr.Progress(),
+        ):
+            prompt_text = str(prompt_v or "").strip()
+            if not prompt_text:
+                raise gr.Error("Enter an LTX prompt first.")
+            progress(0.02, desc="Validating LTX 2.3 engine and model paths")
+            try:
+                request = LtxVideoRequest(
+                    prompt=prompt_text,
+                    negative_prompt=str(negative_v or ""),
+                    source_image_path=str(source_path or "") or None,
+                    pipeline=str(pipeline_v or LTX_PIPELINE_DISTILLED),
+                    width=int(width_v or 512),
+                    height=int(height_v or 512),
+                    num_frames=snap_ltx_num_frames(int(frames_v or 81)),
+                    fps=float(fps_v or 25),
+                    steps=int(steps_v or 20),
+                    seed=int(seed_v if seed_v is not None else -1),
+                    offload=str(offload_v or "cpu"),
+                    quantization=str(quantization_v or ""),
+                    enhance_prompt=bool(enhance_prompt_v),
+                    checkpoint_path=str(checkpoint_v or ""),
+                    spatial_upsampler_path=str(upsampler_v or ""),
+                    gemma_root=str(gemma_v or ""),
+                )
+                progress(0.05, desc="Launching isolated LTX 2.3 worker")
+                result = ltx_service.generate(request)
+            except LtxUnavailable as exc:
+                raise gr.Error(str(exc))
+            except ValueError as exc:
+                raise gr.Error(str(exc))
+            except Exception as exc:
+                logger.exception("LTX 2.3 generation failed")
+                raise gr.Error(f"LTX 2.3 generation failed: {exc}") from exc
+            return result.output_path, f"**Done** -- {result.message}"
+
         run_event = run.click(
             _clear_previous_video,
             outputs=[video_out, status],
@@ -2249,6 +2397,42 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             _save_bad_video,
             inputs=[video_out],
             outputs=[status],
+            show_progress=False,
+        )
+        ltx_event = ltx_run.click(
+            _clear_previous_ltx_video,
+            outputs=[ltx_video_out, ltx_status],
+            show_progress="hidden",
+            queue=False,
+        )
+        ltx_event.then(
+            _run_ltx,
+            inputs=[
+                ltx_source,
+                ltx_prompt,
+                ltx_negative,
+                ltx_pipeline,
+                ltx_width,
+                ltx_height,
+                ltx_frames,
+                ltx_fps,
+                ltx_steps,
+                ltx_seed,
+                ltx_offload,
+                ltx_quantization,
+                ltx_enhance_prompt,
+                ltx_checkpoint,
+                ltx_upsampler,
+                ltx_gemma,
+            ],
+            outputs=[ltx_video_out, ltx_status],
+            show_progress="minimal",
+            show_progress_on=[ltx_status],
+        )
+        ltx_save_bad_video.click(
+            _save_bad_video,
+            inputs=[ltx_video_out],
+            outputs=[ltx_status],
             show_progress=False,
         )
 

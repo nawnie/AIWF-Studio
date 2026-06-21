@@ -52,14 +52,17 @@ Gradio / routing / config / logs / model browser / phone companion
 
 ### Initial grouping recommendation
 
-For the first maintainable version, do **not** split image generation, Wan, and LTX into separate environments immediately. Start with one generation engine venv.
+For the first maintainable version, keep the core UI/import path stable. Image generation can share the main Studio runtime, while engines with incompatible stacks move behind explicit optional workers. LTX 2.3 now uses a dedicated optional worker because its upstream Python/CUDA/torch requirements differ from the core Studio stack.
 
 ```text
 Main AIWF UI venv
     â””â”€â”€ Gradio, routing, config models, logs, API routes, process supervision
 
 Generation engine venv
-    â””â”€â”€ image generation, Wan, LTX, VAE decode, RIFE, FFmpeg/NVENC calls
+    â””â”€â”€ image generation, Wan, VAE decode, RIFE, FFmpeg/NVENC calls
+
+LTX engine venv
+    â””â”€â”€ LTX 2.3 video generation through engines/ltx/worker.py
 
 Kohya engine venv
     â””â”€â”€ LoRA training
@@ -71,7 +74,7 @@ Ollama
     â””â”€â”€ independent local service
 ```
 
-This gives the best balance between maintainability and isolation. If Wan later proves to require an incompatible dependency stack, the generation engine can be split into dedicated image, Wan, and LTX workers.
+This gives the best balance between maintainability and isolation. If Wan later proves to require an incompatible dependency stack, it can be split the same way LTX was split.
 
 ---
 
@@ -965,7 +968,8 @@ The project should proceed with this architecture:
 ```text
 One Gradio UI.
 One main AIWF Python 3.10 environment.
-One generation engine venv for image/Wan/LTX at first.
+One stable Studio runtime for image generation and current Wan paths.
+One optional LTX 2.3 worker venv.
 One Kohya LoRA training venv.
 One ED2 full-training venv.
 Ollama as an external local service.

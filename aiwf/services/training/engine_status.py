@@ -44,6 +44,13 @@ _ENGINE_DEFAULTS = {
         "worker_script": "engines/ed2/worker.py",
         "entry_script": "train.py",
     },
+    "llm": {
+        "label": "AI Bot Trainer",
+        "repo_dir": "engines/llm",
+        "venv_dir": "engines/llm/.venv",
+        "worker_script": "engines/llm/worker.py",
+        "entry_script": "",
+    },
 }
 
 FULL_TUNE_ENGINE = "ed2"
@@ -77,6 +84,8 @@ def ready_engine_choices(statuses: dict[str, TrainingEngineStatus]) -> list[str]
         choices.append("Kohya LoRA")
     if statuses.get("ed2") and statuses["ed2"].ready:
         choices.append("ED2 Full Fine-tune")
+    if statuses.get("llm") and statuses["llm"].ready:
+        choices.append("AI Bot Trainer")
     return choices
 
 

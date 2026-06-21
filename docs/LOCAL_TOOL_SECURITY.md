@@ -28,7 +28,7 @@ No tool accepts a string that is executed as a shell command (`subprocess.run(..
 
 ### R2 â€” No unconstrained file write
 
-Tools may not write to arbitrary filesystem paths. The only permitted write target is the configured `output_dir` (from `AppContext`). Creating or overwriting files outside `output_dir` is forbidden.
+Tools may not write to arbitrary filesystem paths. Write tools must be bounded to configured roots, must reject path traversal, and must be explicitly enabled by the user. The default safe write target remains the configured `output_dir` (from `AppContext`). Chat agent workspace edits are allowed only when the user enables the Chat `Allow file edits` control and only for text-like files inside the Chat allowed roots.
 
 **Why:** Prevents overwriting model checkpoints, config files, or system files.
 
@@ -113,6 +113,8 @@ Metadata values returned from tool calls must be treated as untrusted strings by
 |--------|-----------------------|
 | List checkpoints / LoRAs | No |
 | Read safetensors metadata | No |
+| Read text files / PDFs in Chat allowed roots | No |
+| Replace text or create text files in Chat allowed roots | Yes - Chat `Allow file edits` must be enabled |
 | Build prompt draft | No |
 | Recommend settings | No |
 | Submit generation request (GPU idle) | Optional â€” configurable per user |
@@ -145,6 +147,6 @@ Log entries are written even if the call is rejected (rule violation). This prov
 
 Changes to this document require a code review that includes:
 1. Updated tests demonstrating the rule is enforced.
-2. Review of every tool in `aiwf/services/prompt_tools.py` for conformance.
+2. Review of every tool in `aiwf/services/prompt_tools.py` and `aiwf/services/chat_agent_tools.py` for conformance.
 
 No tool may be merged that contradicts a Hard Rule, even if marked experimental.

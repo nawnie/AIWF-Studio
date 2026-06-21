@@ -13,6 +13,7 @@ from aiwf.bootstrap import AppContext
 from aiwf.web.registry import WebRegistry
 from aiwf.web.studio import register_studio
 from aiwf.web.tabs.audio import register_audio
+from aiwf.web.tabs.chat_workspace import register_chat_workspace
 from aiwf.web.tabs.enhance import register_enhance
 from aiwf.web.tabs.faceswap import register_faceswap
 from aiwf.web.tabs.history import register_history
@@ -22,6 +23,7 @@ from aiwf.web.tabs.model_manager import register_model_manager
 from aiwf.web.tabs.pnginfo import register_pnginfo
 from aiwf.web.tabs.segment import register_segment
 from aiwf.web.tabs.settings import register_settings
+from aiwf.web.tabs.training import register_training
 from aiwf.web.theme import build_theme, theme_css_overrides
 
 logger = logging.getLogger(__name__)
@@ -92,18 +94,18 @@ def register_default_tabs(registry: WebRegistry) -> None:
 
     register_rife(registry)
     register_audio(registry)
+    register_chat_workspace(registry)
     register_model_manager(registry)
     register_enhance(registry)
     register_segment(registry)
     register_faceswap(registry)
+    register_training(registry)
     register_library(registry)
     register_pnginfo(registry)
     register_history(registry)
     if enable_wip_tabs:
-        from aiwf.web.tabs.chat_workspace import register_chat_workspace
         from aiwf.web.tabs.workflows import register_workflows
 
-        register_chat_workspace(registry)
         register_workflows(registry)
     register_settings(registry)
 

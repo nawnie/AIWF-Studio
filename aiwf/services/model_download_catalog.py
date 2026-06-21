@@ -27,6 +27,7 @@ QUICK_START_BUNDLES: dict[str, list[str]] = {
     "sdxl": ["hf-sdxl-base", "hf-vae-sdxl", "hf-sdxl-refiner"],
     "sd35": ["hf-sd35-medium"],
     "flux": ["flux-fusion-v2-q4km", "flux-t5-fp16", "flux-clip-l", "flux-ae-vae"],
+    "ltx23": ["ltx23-distilled", "ltx23-upscaler-x2", "ltx23-gemma-q4"],
     "controlnet-sd15": [
         "cn15-canny", "cn15-depth", "cn15-openpose",
         "cn15-tile", "cn15-lineart", "cn15-softedge",
@@ -77,6 +78,52 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
     ),
 
     # ── Checkpoints — Hugging Face ───────────────────────────────────────────
+    CatalogEntry(
+        key="ltx23-distilled",
+        title="LTX 2.3 22B distilled checkpoint",
+        category="ltx_checkpoint",
+        source="huggingface",
+        repo_id="Lightricks/LTX-2.3",
+        filename="ltx-2.3-22b-distilled-1.1.safetensors",
+        notes="Fast LTX 2.3 checkpoint used by AIWF's default LTX worker route.",
+    ),
+    CatalogEntry(
+        key="ltx23-full-dev",
+        title="LTX 2.3 22B dev checkpoint",
+        category="ltx_checkpoint",
+        source="huggingface",
+        repo_id="Lightricks/LTX-2.3",
+        filename="ltx-2.3-22b-dev.safetensors",
+        notes="Full checkpoint for one-stage/prototyping LTX routes. Higher VRAM and slower than distilled.",
+    ),
+    CatalogEntry(
+        key="ltx23-upscaler-x2",
+        title="LTX 2.3 spatial upscaler x2",
+        category="ltx_upscaler",
+        source="huggingface",
+        repo_id="Lightricks/LTX-2.3",
+        filename="ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+        notes="Required by the current distilled two-stage LTX worker route.",
+    ),
+    CatalogEntry(
+        key="ltx23-distilled-lora",
+        title="LTX 2.3 distilled LoRA 384",
+        category="ltx_lora",
+        source="huggingface",
+        repo_id="Lightricks/LTX-2.3",
+        filename="ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+        notes="Kept in the LTX LoRA folder so it cannot be mixed with SD, Flux, or Wan LoRAs.",
+    ),
+    CatalogEntry(
+        key="ltx23-gemma-q4",
+        title="LTX 2.3 Gemma text encoder QAT Q4",
+        category="ltx_text_encoder",
+        source="huggingface",
+        repo_id="google/gemma-3-12b-it-qat-q4_0-unquantized",
+        notes="Repository-shaped Gemma text encoder required by LTX 2.3. May require accepted HF access.",
+        snapshot=True,
+    ),
+
     CatalogEntry(
         key="hf-sd15-pruned",
         title="Stable Diffusion 1.5 (fp16 pruned)",

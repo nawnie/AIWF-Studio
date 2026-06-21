@@ -367,3 +367,28 @@ def test_lora_architecture_can_come_from_parent_folder(tmp_path: Path):
     assert record.architecture == "sdxl"
     assert record.recommended_subdir == "Loras/SDXL"
     assert image_loras[0].architecture == "sdxl"
+
+
+def test_ltx_assets_are_recommended_to_ltx_folders(tmp_path: Path):
+    models = tmp_path / "models"
+    checkpoint = models / "Stable-diffusion" / "ltx-2.3-22b-distilled-1.1.safetensors"
+    upscaler = models / "upscalers" / "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+    for path in (checkpoint, upscaler):
+        _write_safetensors_header(
+            path,
+            {
+                "transformer_blocks.0.weight": {
+                    "dtype": "F16",
+                    "shape": [4, 4],
+                    "data_offsets": [0, 32],
+                }
+            },
+        )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = {item.filename: item for item in scan_and_write_model_inventory(flags)}
+
+    assert records[checkpoint.name].family == "ltx"
+    assert records[checkpoint.name].architecture == "ltx"
+    assert records[checkpoint.name].recommended_subdir == "ltx/checkpoints"
+    assert records[upscaler.name].recommended_subdir == "ltx/upscalers"

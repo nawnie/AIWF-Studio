@@ -120,6 +120,8 @@ def _architecture_from_text(text: str) -> str:
         return ARCH_SDXL
     if "flux" in normalized:
         return "flux"
+    if "ltx" in normalized or "lightricks" in normalized:
+        return "ltx"
     if "wan" in normalized:
         return "wan"
     if "sd 1" in normalized or "sd1" in normalized or "1.5" in normalized or "v1 5" in normalized:
@@ -150,6 +152,8 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
             return "Loras/SDXL"
         if architecture == "flux":
             return "Loras/Flux"
+        if architecture == "ltx":
+            return "ltx/loras"
         if architecture == "wan":
             return "Loras/Wan"
         if architecture in {ARCH_SD15, ARCH_INPAINT}:
@@ -159,6 +163,11 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
         if architecture == "flux":
             suffix = Path(filename).suffix.lower()
             return "flux/GGUF" if suffix == ".gguf" else "flux/UNet"
+        if architecture == "ltx":
+            lowered = filename.lower()
+            if "upscaler" in lowered:
+                return "ltx/upscalers"
+            return "ltx/checkpoints"
         return "misc"
     if family == "checkpoint":
         return "Stable-diffusion"
@@ -175,11 +184,20 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
     if family == "text_encoder":
         if architecture == "flux":
             return "flux/Textencoder"
+        if architecture == "ltx":
+            return "ltx/text_encoder"
         return "Textencoder"
     if family == "face_embedding":
         return "reactor/faces"
     if family == "wan":
         return "wan/Safetensor"
+    if family == "ltx":
+        lowered = filename.lower()
+        if "upscaler" in lowered:
+            return "ltx/upscalers"
+        if "lora" in lowered:
+            return "ltx/loras"
+        return "ltx/checkpoints"
     return "misc"
 
 
@@ -261,6 +279,8 @@ def _matching_path_family(path: Path) -> str | None:
         return "vae"
     if any(part == "wan" or part.startswith("wan_") or part.startswith("wan-") for part in parent_parts) or "wan" in name:
         return "wan"
+    if any(part == "ltx" or part.startswith("ltx_") or part.startswith("ltx-") for part in parent_parts) or "ltx" in name:
+        return "ltx"
     if any(part in {"lora", "loras"} for part in parent_parts):
         return "lora"
     return None
@@ -288,6 +308,9 @@ def classify_model_dir(path: Path, roots: list[Path]) -> ModelInventoryRecord | 
     if "wan" in lowered:
         family = "wan"
         architecture = "wan"
+    elif "ltx" in lowered:
+        family = "runtime_asset"
+        architecture = "ltx"
     elif "flux" in lowered:
         family = "runtime_asset"
         architecture = "flux"
@@ -392,6 +415,9 @@ def classify_model_file(path: Path, roots: list[Path]) -> ModelInventoryRecord |
         elif path.suffix.lower() == ".gguf" and architecture == "flux":
             family = "runtime_asset"
             identifiers["filename_marker"] = "flux gguf"
+        elif architecture == "ltx" and path.suffix.lower() == ".safetensors":
+            family = "ltx"
+            identifiers["filename_marker"] = "ltx safetensors"
 
     if family == "unknown" and path.suffix.lower() in {".ckpt", ".pt", ".safetensors"}:
         family = "checkpoint"

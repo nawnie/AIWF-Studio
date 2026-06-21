@@ -50,6 +50,9 @@ Rules:
 - Shared Studio runtime mode may install AIWF overlay requirements only; do not
   install upstream legacy requirements into the main `venv`.
 - Heavy engine work runs through `ProcessSupervisor` and `EngineSupervisor`.
+- Engines with a specialized bootstrap, such as LTX 2.3, must not be prepared by
+  the generic launch installer because their Python/CUDA/torch stack differs
+  from the core Studio runtime.
 
 ## ED2 Fork
 

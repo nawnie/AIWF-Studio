@@ -71,6 +71,19 @@ MMAudio code is MIT licensed. The released checkpoints are hosted on Hugging
 Face under CC-BY-NC 4.0, so AIWF must treat MMAudio-backed output as
 non-commercial unless the user has separate permission.
 
+## LTX 2.3 video generation
+
+AIWF can optionally call [Lightricks LTX-2](https://github.com/Lightricks/LTX-2)
+from an isolated worker venv under `engines/ltx/`. LTX model weights and the
+Gemma text encoder are user-installed assets fetched from Hugging Face, not
+vendored or redistributed by AIWF:
+
+- LTX 2.3 model repository: https://huggingface.co/Lightricks/LTX-2.3
+- Gemma text encoder repository: https://huggingface.co/google/gemma-3-12b-it-qat-q4_0-unquantized
+
+Users are responsible for accepting and following the upstream licenses and
+model terms for any downloaded LTX/Gemma assets.
+
 ## NVIDIA Video Effects / VFX SDK integration
 
 AIWF's optional VideoFX/VSR post-processing can call locally installed NVIDIA

@@ -17,6 +17,10 @@ from aiwf.services.training.ed2_config import (
     build_ed2_config,
     write_ed2_config,
 )
+from aiwf.services.training.llm_config import (
+    build_llm_training_config,
+    write_llm_training_config,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -275,3 +279,49 @@ class TestWriteED2Config:
         assert result == dest
         data = json.loads(dest.read_text())
         assert data["project_name"] == "x"
+
+
+class TestBuildLLMTrainingConfig:
+    def _base_req(self) -> dict:
+        return {
+            "job_name": "coder_bot",
+            "base_model_path": "Qwen/Qwen3.5-2B",
+            "dataset_path": "datasets/coder.jsonl",
+            "dataset_format": "messages",
+            "method": "qlora",
+            "output_dir": "outputs/training/llm",
+            "max_steps": 100,
+            "num_train_epochs": 1.0,
+            "batch_size": 1,
+            "gradient_accumulation_steps": 8,
+            "learning_rate": 2e-5,
+            "max_seq_length": 1024,
+            "mixed_precision": "bf16",
+            "gradient_checkpointing": True,
+            "lora_rank": 16,
+            "lora_alpha": 32,
+            "lora_dropout": 0.05,
+        }
+
+    def test_qlora_enables_quantization_and_peft(self):
+        cfg = build_llm_training_config(self._base_req())
+
+        assert cfg["job"]["method"] == "qlora"
+        assert cfg["quantization"]["enabled"] is True
+        assert cfg["peft"]["enabled"] is True
+        assert cfg["training_args"]["optim"] == "paged_adamw_8bit"
+
+    def test_full_disables_adapter_and_quantization(self):
+        cfg = build_llm_training_config({**self._base_req(), "method": "full"})
+
+        assert cfg["peft"]["enabled"] is False
+        assert cfg["quantization"]["enabled"] is False
+        assert cfg["training_args"]["optim"] == "adamw_torch"
+
+    def test_write_llm_training_config_creates_json(self, tmp_path):
+        dest = tmp_path / "llm_config.json"
+        result = write_llm_training_config(self._base_req(), dest)
+
+        assert result == dest
+        data = json.loads(dest.read_text())
+        assert data["model"]["base_model_path"] == "Qwen/Qwen3.5-2B"

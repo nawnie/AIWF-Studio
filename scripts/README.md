@@ -9,6 +9,8 @@ should be boring, explicit, and safe to run from PowerShell on Windows.
   needed, then installs the engine requirements.
 - `bootstrap_mmaudio.ps1`: sets up the optional MMAudio audio engine without
   installing it into the shared Studio venv.
+- `bootstrap_ltx.ps1`: clones Lightricks LTX-2, creates `engines/ltx/.venv`,
+  installs the LTX 2.3 runtime stack, and can enable the worker in `engines.json`.
 - `verify_engine.ps1`: probes an engine worker with a small JSON request.
 - `run_tests.py`: groups pytest files into practical suites so maintainers do
   not need to remember every test filename.
@@ -32,6 +34,7 @@ python scripts/run_tests.py --list
 python scripts/run_tests.py core engines
 python scripts/run_tests.py --test test_launch.py --pytest-arg=-x
 .\scripts\bootstrap_engine.ps1 -Name wan
+.\scripts\bootstrap_ltx.ps1 -Enable
 .\scripts\verify_engine.ps1 -Name wan
 ```
 

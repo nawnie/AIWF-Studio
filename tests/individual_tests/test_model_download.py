@@ -104,6 +104,10 @@ def test_destination_dirs(tmp_path: Path):
     assert service.destination_dir("flux_unet_gguf") == tmp_path / "models" / "flux" / "GGUF"
     assert service.destination_dir("flux_text_encoder") == tmp_path / "models" / "flux" / "Textencoder"
     assert service.destination_dir("flux_vae") == tmp_path / "models" / "flux" / "VAE"
+    assert service.destination_dir("ltx_checkpoint") == tmp_path / "models" / "ltx" / "checkpoints"
+    assert service.destination_dir("ltx_upscaler") == tmp_path / "models" / "ltx" / "upscalers"
+    assert service.destination_dir("ltx_lora") == tmp_path / "models" / "ltx" / "loras"
+    assert service.destination_dir("ltx_text_encoder") == tmp_path / "models" / "ltx" / "text_encoder"
 
 
 def test_ensure_dirs_creates_nested_category_folders(tmp_path: Path):
@@ -117,6 +121,9 @@ def test_ensure_dirs_creates_nested_category_folders(tmp_path: Path):
     assert (tmp_path / "models" / "flux" / "GGUF").is_dir()
     assert (tmp_path / "models" / "flux" / "Textencoder").is_dir()
     assert (tmp_path / "models" / "flux" / "VAE").is_dir()
+    assert (tmp_path / "models" / "ltx" / "checkpoints").is_dir()
+    assert (tmp_path / "models" / "ltx" / "upscalers").is_dir()
+    assert (tmp_path / "models" / "ltx" / "text_encoder").is_dir()
 
 
 def test_wan_download_categories_validate_file_type(tmp_path: Path):
@@ -163,6 +170,24 @@ def test_flux_download_categories_validate_file_type(tmp_path: Path):
         service.download_parsed(gguf, category="flux_unet_safetensor")
     with pytest.raises(ValueError, match="Flux VAE"):
         service.download_parsed(gguf, category="flux_vae")
+
+
+def test_ltx_download_categories_validate_file_type(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    safetensors = ParsedRemote(source="direct", url="https://example.com/ltx.safetensors", filename="ltx.safetensors")
+    gguf = ParsedRemote(source="direct", url="https://example.com/ltx.gguf", filename="ltx.gguf")
+
+    assert service.destination_for("ltx_checkpoint", safetensors.filename) == (
+        tmp_path / "models" / "ltx" / "checkpoints" / "ltx.safetensors"
+    )
+    assert service.destination_for("ltx_upscaler", safetensors.filename) == (
+        tmp_path / "models" / "ltx" / "upscalers" / "ltx.safetensors"
+    )
+    assert service.destination_for("ltx_lora", safetensors.filename) == (
+        tmp_path / "models" / "ltx" / "loras" / "ltx.safetensors"
+    )
+    with pytest.raises(ValueError, match="LTX 2.3 checkpoint"):
+        service.download_parsed(gguf, category="ltx_checkpoint")
 
 
 def test_wan_diffusers_rejects_single_file_downloads(tmp_path: Path):
@@ -224,6 +249,28 @@ def test_hf_snapshot_allowed_for_checkpoint_diffusers_folder(tmp_path: Path, mon
     path = service.download_parsed(remote, category="checkpoint")
     assert path == tmp_path / "models" / "Stable-diffusion" / "stable-diffusion-3.5-medium"
     assert (path / "model_index.json").is_file()
+
+
+def test_hf_snapshot_allowed_for_ltx_text_encoder(tmp_path: Path, monkeypatch):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    remote = service.parse_reference(
+        source="huggingface",
+        url_or_repo="google/gemma-3-12b-it-qat-q4_0-unquantized",
+        filename="",
+        category="ltx_text_encoder",
+    )
+    assert remote.snapshot is True
+
+    def fake_snapshot_download(*, repo_id, local_dir, token=None):
+        target = Path(local_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "config.json").write_text("{}", encoding="utf-8")
+        return str(target)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    path = service.download_parsed(remote, category="ltx_text_encoder")
+    assert path == tmp_path / "models" / "ltx" / "text_encoder" / "gemma-3-12b-it-qat-q4_0-unquantized"
+    assert (path / "config.json").is_file()
 
 
 def test_snapshot_catalog_installed_requires_category_marker(tmp_path: Path):
@@ -325,6 +372,9 @@ def test_catalog_lists_entries(tmp_path: Path):
     assert "flux-t5-fp16" in keys
     assert "flux-clip-l" in keys
     assert "flux-ae-vae" in keys
+    assert "ltx23-distilled" in keys
+    assert "ltx23-upscaler-x2" in keys
+    assert "ltx23-gemma-q4" in keys
     assert "cn15-v11-full-suite" in keys
     assert "cn15-canny" in keys          # renamed from cn-canny-light
     assert "civit-dreamshaper-8" in keys
@@ -360,6 +410,25 @@ def test_flux_quick_start_uses_supported_runtime_assets(tmp_path: Path):
     remote = service._catalog_to_remote(vae)
     assert remote.filename == "ae.safetensors"
     assert remote.repo_filename == "split_files/vae/ae.safetensors"
+
+
+def test_ltx_quick_start_uses_ltx_categories(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+
+    assert QUICK_START_BUNDLES["ltx23"] == ["ltx23-distilled", "ltx23-upscaler-x2", "ltx23-gemma-q4"]
+    entries = [service.find_catalog(key) for key in QUICK_START_BUNDLES["ltx23"]]
+    assert all(entry is not None for entry in entries)
+    assert [entry.category for entry in entries if entry is not None] == [
+        "ltx_checkpoint",
+        "ltx_upscaler",
+        "ltx_text_encoder",
+    ]
+    gemma = service.find_catalog("ltx23-gemma-q4")
+    assert gemma is not None
+    assert gemma.snapshot is True
+    assert service.snapshot_destination_for(gemma.category, gemma.repo_id) == (
+        tmp_path / "models" / "ltx" / "text_encoder" / "gemma-3-12b-it-qat-q4_0-unquantized"
+    )
 
 
 def test_fluxtrait_civitai_variants_stay_in_flux_categories(tmp_path: Path):

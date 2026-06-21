@@ -255,3 +255,22 @@ def test_launch_only_flags_are_not_passed_to_webui():
     argv = ["--install-sageattention", "--listen", "--skip-sageattention", "--port", "7861"]
 
     assert launch.strip_launch_only_args(argv) == ["--listen", "--port", "7861"]
+
+
+def test_llm_training_engine_is_optional_by_default():
+    specs = {spec.name: spec for spec in launch._build_engine_registry()}
+
+    assert "llm" in specs
+    assert specs["llm"].enabled_by_default is False
+    assert specs["llm"].skip_flag == "--skip-llm"
+    assert specs["llm"].venv_dir.name == ".venv"
+
+
+def test_ltx_video_engine_uses_specialized_bootstrap():
+    specs = {spec.name: spec for spec in launch._build_engine_registry()}
+
+    assert "ltx" in specs
+    assert specs["ltx"].enabled_by_default is False
+    assert specs["ltx"].skip_flag == "--skip-ltx"
+    assert specs["ltx"].manual_bootstrap_script == "scripts/bootstrap_ltx.ps1"
+    assert specs["ltx"].cuda_torch is False

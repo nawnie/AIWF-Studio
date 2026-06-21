@@ -163,6 +163,7 @@ def register_model_manager(registry: WebRegistry) -> None:
                             qs_sdxl_btn   = gr.Button("Text-to-image SDXL",    variant="secondary")
                             qs_sd35_btn   = gr.Button("Text-to-image SD3.5",   variant="secondary")
                             qs_flux_btn   = gr.Button("Text-to-image Flux",    variant="secondary")
+                            qs_ltx_btn    = gr.Button("Video LTX 2.3",          variant="secondary")
                         qs_status = gr.Markdown("", elem_classes=["aiwf-status-bar"])
 
                     with gr.Column(elem_classes=["aiwf-panel"]):
@@ -715,6 +716,7 @@ def register_model_manager(registry: WebRegistry) -> None:
             (qs_sdxl_btn,   "sdxl"),
             (qs_sd35_btn,   "sd35"),
             (qs_flux_btn,   "flux"),
+            (qs_ltx_btn,    "ltx23"),
         ]:
             _btn.click(_download_bundle, inputs=gr.State(_key), outputs=[qs_status], show_progress="minimal")
 

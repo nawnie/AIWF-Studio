@@ -18,6 +18,7 @@ missing.
 ## Current Engine Roles
 
 - `wan`: optional video generation runtime and experimental acceleration work.
+- `ltx`: optional LTX 2.3 video generation runtime under `engines/ltx/LTX-2`.
 - `generation`: image-generation dependency boundary for heavier backends.
 - `ed2`: EveryDream2 full fine-tuning integration; local fork checkout lives
   under `engines/ed2/EveryDream2trainer` when installed.
@@ -39,7 +40,7 @@ Use the helper scripts from the repo root:
 ```
 
 Specialized engines may have their own bootstrap script, such as
-`scripts/bootstrap_mmaudio.ps1`.
+`scripts/bootstrap_mmaudio.ps1` or `scripts/bootstrap_ltx.ps1`.
 
 ## Adding An Engine
 

@@ -67,6 +67,7 @@ Current focus: make image generation, inpainting, video generation, and video-au
 ### Video
 
 - Wan image-to-video through three explicit local routes: 5B safetensors, 14B FP8/safetensors, or matched GGUF High Noise + Low Noise transformer pairs
+- optional LTX 2.3 text/image-to-video through an isolated worker engine
 - optional RIFE post-processing to write 30 FPS or 60 FPS output after generation
 - optional ReActor post-processing from the first key frame, an uploaded image, or a saved face model
 - optional NVIDIA RTX VSR / Video Effects SDK upscale post-processing when the SDK is installed
@@ -140,6 +141,9 @@ models/flux/GGUF/          Flux GGUF transformers
 models/flux/UNet/          Flux safetensors transformers
 models/flux/Textencoder/   Flux CLIP-L and T5-XXL encoders
 models/flux/VAE/           Flux ae.safetensors VAE
+models/ltx/checkpoints/    LTX 2.3 checkpoints
+models/ltx/upscalers/      LTX 2.3 spatial upscalers
+models/ltx/text_encoder/   LTX 2.3 Gemma text encoder snapshot
 models/insightface/        ReActor inswapper ONNX models
 models/reactor/faces/      saved ReActor face models
 ```
@@ -166,6 +170,26 @@ models/wan/Diffusers/Wan2.2-TI2V-5B-Diffusers/
 ```
 
 The Video tab keeps 5B safetensors, 14B FP8/safetensors, and GGUF high/low pairs as separate runtime routes. The UI should filter settings based on that route so a user cannot accidentally send GGUF options into a safetensors backend or vice versa.
+
+## LTX 2.3 Video Setup
+
+LTX 2.3 is optional and runs in `engines/ltx/.venv`, not the main Studio venv.
+Install or repair the engine from **Settings -> Engines & pipelines**, or run:
+
+```powershell
+.\scripts\bootstrap_ltx.ps1 -Enable
+```
+
+The default LTX route expects:
+
+```text
+models/ltx/checkpoints/ltx-2.3-22b-distilled-1.1.safetensors
+models/ltx/upscalers/ltx-2.3-spatial-upscaler-x2-1.1.safetensors
+models/ltx/text_encoder/gemma-3-12b-it-qat-q4_0-unquantized/
+```
+
+Use the Models tab's **Video LTX 2.3** quick-start bundle to download those
+assets when Hugging Face access is configured.
 
 ## Flux Image Setup
 

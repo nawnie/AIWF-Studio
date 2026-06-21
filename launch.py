@@ -24,6 +24,7 @@ LAUNCH_ONLY_FLAGS = {
     "--install-sageattention",
     "--sageattention",
     "--skip-sageattention",
+    "--skip-ltx",
 }
 
 
@@ -65,6 +66,9 @@ class EngineSpec:
         Generation = True; training engines = False.
     cuda_torch:
         Whether this engine needs CUDA torch (True for all GPU engines).
+    manual_bootstrap_script:
+        Specialized bootstrap path for engines that must not use the generic
+        torch/install flow.
     setup_hook:
         Optional callable for extra post-install setup steps.
     """
@@ -78,6 +82,7 @@ class EngineSpec:
     skip_flag: str = ""
     enabled_by_default: bool = False
     cuda_torch: bool = True
+    manual_bootstrap_script: str = ""
     setup_hook: Callable[["EngineSpec"], None] | None = field(default=None, repr=False)
 
     @property
@@ -202,7 +207,30 @@ def _build_engine_registry() -> list[EngineSpec]:
         cuda_torch=True,
     )
 
-    return [generation, wan, kohya, ed2]
+    ltx = EngineSpec(
+        name="ltx",
+        label="LTX 2.3 video engine",
+        worker_script=ROOT / "engines" / "ltx" / "worker.py",
+        venv_dir=_engine_venv_dir("ltx", cfg, "engines/ltx/.venv"),
+        repo_dir=_engine_path("ltx", "repo_dir", cfg, "engines/ltx/LTX-2"),
+        skip_flag="--skip-ltx",
+        enabled_by_default=False,
+        cuda_torch=False,
+        manual_bootstrap_script="scripts/bootstrap_ltx.ps1",
+    )
+
+    llm = EngineSpec(
+        name="llm",
+        label="AI bot trainer",
+        worker_script=ROOT / "engines" / "llm" / "worker.py",
+        venv_dir=_engine_venv_dir("llm", cfg, "engines/llm/.venv"),
+        extra_requirements=ROOT / "engines" / "llm" / "requirements.txt",
+        skip_flag="--skip-llm",
+        enabled_by_default=False,
+        cuda_torch=True,
+    )
+
+    return [generation, wan, ltx, kohya, ed2, llm]
 
 
 def print_startup_banner() -> None:
@@ -400,6 +428,14 @@ def _prepare_engine_venv(spec: EngineSpec, argv: list[str]) -> None:
         print(f"[{spec.label}] Skipped ({spec.skip_flag} passed).")
         return
 
+    if spec.manual_bootstrap_script:
+        print(
+            f"[{spec.label}] Uses a specialized bootstrap. Run "
+            f".\\{spec.manual_bootstrap_script} -Enable from the repo root; "
+            "generic launch.py setup will not alter this engine."
+        )
+        return
+
     if spec.repo_dir and not spec.repo_dir.exists():
         print(
             f"[{spec.label}] Repository not found at {spec.repo_dir}. "
@@ -495,7 +531,7 @@ def prepare(skip_prepare: bool, skip_install: bool, argv: list[str]) -> None:
         install_xformers(py)
 
     # ------------------------------------------------------------------
-    # Training engine venvs (Kohya, ED2) â€” opt-in via engines.json
+    # Training engine venvs (Kohya, ED2, LLM) â€” opt-in via engines.json
     # ------------------------------------------------------------------
     engines_cfg = _load_engines_config()
     for spec in _build_engine_registry():

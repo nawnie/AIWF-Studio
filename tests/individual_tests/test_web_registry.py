@@ -42,34 +42,30 @@ def test_default_tabs_include_shipped_workspace_tabs():
 
     names = [name for name, _builder, _order in registry.tabs]
 
-    for expected in ("Image", "Models", "Segment", "Face Swap", "Video", "RIFE", "Settings"):
+    for expected in ("Image", "Chat", "Models", "Segment", "Face Swap", "Video", "RIFE", "Training", "Settings"):
         assert expected in names
-    for hidden_by_default in ("Chat", "Training"):
-        assert hidden_by_default not in names
 
-    assert names[:3] == ["Image", "Video", "Models"]
+    assert names[:3] == ["Image", "Video", "Chat"]
 
 
-def test_training_tab_stays_disabled_even_with_wip_tabs(monkeypatch):
+def test_training_tab_is_shipped_even_with_wip_tabs(monkeypatch):
     monkeypatch.setenv("AIWF_ENABLE_WIP_TABS", "1")
     registry = WebRegistry()
 
     register_default_tabs(registry)
 
     names = [name for name, _builder, _order in registry.tabs]
-    assert "Training" not in names
+    assert "Training" in names
     assert "Face Swap" in names
     assert "Chat" in names
     assert "Workflows" in names
 
 
 def test_settings_visibility_choices_include_secondary_shipped_tabs():
-    for expected in ("Models", "Segment", "Enhance", "Face Swap", "Video", "RIFE"):
+    for expected in ("Models", "Chat", "Segment", "Enhance", "Face Swap", "Video", "RIFE", "Training"):
         assert expected in TAB_VISIBILITY_CHOICES
-    for hidden_by_default in ("Chat", "Training"):
-        assert hidden_by_default not in TAB_VISIBILITY_CHOICES
 
-    assert TAB_VISIBILITY_CHOICES[:3] == ["Video", "Models", "Enhance"]
+    assert TAB_VISIBILITY_CHOICES[:3] == ["Video", "Models", "Chat"]
 
 
 def test_wan_video_route_filters_keep_runtime_families_separate():
