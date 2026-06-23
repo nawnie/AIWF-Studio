@@ -9,6 +9,16 @@ AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion 
 
 This `main` branch is the stable sharing branch. It only advertises features that are intended to work for normal local use. Experimental work lives on `dev`.
 
+## UI Rebuild
+
+AIWF Studio now ships three interchangeable web UIs on top of the same backend, instead of a single Gradio surface:
+
+- **Studio** (`webui.bat` / `python launch.py`, `aiwf/app.py`) - the original Gradio-based tabbed workspace. Still the default and most complete surface for image, inpaint, ControlNet, enhance, segment, and video.
+- **Modern** (`webui_modern.py`, `aiwf/app_modern.py`) - a restyled Gradio shell (`aiwf/web/modern/`) with the same backend, aimed at a cleaner layout pass.
+- **Pro** (`webui_pro.py`, `aiwf/app_pro.py`) - a from-scratch FastAPI + React/TypeScript/Vite frontend (`frontend/`) talking to a dedicated `aiwf/web/pro_api.py` API. This is the active UI rebuild track and the long-term direction for the project; it currently covers image, video, inpaint, and model browsing, and needs a frontend build (`cd frontend && npm install && npm run build`) before `webui_pro.py` will serve it.
+
+All three read and write the same model folders, history, and settings, so switching between them is safe. Studio remains the one to recommend for new users until Pro reaches parity.
+
 ## Release Gate
 
 Current focus: make image generation, inpainting, video generation, and video-audio post-processing boringly reliable before adding more features.
@@ -64,6 +74,12 @@ Current focus: make image generation, inpainting, video generation, and video-au
 - SAM mask generation when SAM weights are installed
 - text-guided boxes through GroundingDINO when the optional dependency is available
 
+### Image Lab
+
+- maturity matrix tracking each image route against the AUTOMATIC1111 parity baseline (`docs/IMAGE_MATURITY_MATRIX.md`)
+- XYZ plot runner, batch img2img/inpaint runner, and loopback runner
+- native `GET /api/v1/image/maturity` endpoint
+
 ### Video
 
 - Wan image-to-video through three explicit local routes: 5B safetensors, 14B FP8/safetensors, or matched GGUF High Noise + Low Noise transformer pairs
@@ -100,7 +116,7 @@ Recent local receipts:
 
 ## Quick Start
 
-Run:
+Run the classic Studio UI:
 
 ```bat
 webui.bat
@@ -110,6 +126,13 @@ Or:
 
 ```powershell
 python launch.py
+```
+
+Other UI entry points, see [UI Rebuild](#ui-rebuild):
+
+```powershell
+python webui_modern.py   # Modern Gradio shell
+python webui_pro.py      # Pro FastAPI + React frontend (build frontend/ first)
 ```
 
 Optional local speed/settings logging:
@@ -237,6 +260,7 @@ Use Tailscale when possible. If you launch with network listening enabled, add a
 
 - `main` is the stable runtime branch for users.
 - `dev` keeps broader experiments and active research work.
+- `frontend/` is the React/TypeScript/Vite source for the Pro UI; build it with `npm install && npm run build` to populate `frontend/dist`, which `webui_pro.py` serves.
 - `docs/`, `tests/`, and `scripts/` are part of the public maintainability story.
 - runtime data such as models, outputs, local configs, and agent notes are ignored.
 
@@ -278,9 +302,10 @@ Current rule for `main`: do not wire SageAttention as a required path until a co
 
 These areas exist as work-in-progress or need more hardware coverage before they should be treated as stable:
 
+- Pro UI (React/Vite frontend) feature parity with Studio
 - Wan FP8 high/low video speed path
 - Wan resident / streamed offload modes
-- training engines
+- training engines (Chat and Training tabs are hidden by default in Studio/Modern)
 - Ollama or llama.cpp chat workspace
 - Face Swap tab
 - workflow authoring
