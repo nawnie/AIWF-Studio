@@ -104,6 +104,12 @@ def _pipeline_kind_from_config(config: dict[str, Any]) -> PipelineKind:
     kind = str(config.get("kind") or "").strip().lower()
     if kind == "img2img":
         return PipelineKind.IMG2IMG
+    if kind == "inpaint":
+        return PipelineKind.INPAINT
+    if kind == "controlnet":
+        return PipelineKind.CONTROLNET
+    if kind == "hires":
+        return PipelineKind.HIRES
     if kind == "wan_i2v":
         return PipelineKind.VIDEO
     return PipelineKind.TXT2IMG
@@ -289,7 +295,16 @@ def _load_image(config: dict[str, Any], *keys: str) -> Image.Image:
     raise ValueError(f"Missing image path; expected one of: {', '.join(keys)}")
 
 
-def run_img2img_benchmark(config: dict[str, Any]) -> dict[str, Any]:
+def _run_diffusion_image_benchmark(
+    config: dict[str, Any],
+    *,
+    kind: str,
+    default_mode: str,
+    require_init: bool = False,
+    require_mask: bool = False,
+    require_control: bool = False,
+    request_updates: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from aiwf.core.domain.generation import GenerationRequest
     from aiwf.infrastructure.diffusers.backend import DiffusersBackend
     from aiwf.infrastructure.torch.devices import DeviceManager
@@ -298,17 +313,26 @@ def run_img2img_benchmark(config: dict[str, Any]) -> dict[str, Any]:
     devices = DeviceManager(flags)
     backend = DiffusersBackend(flags, devices)
     request_data = dict(config.get("request") or {})
-    request_data.setdefault("mode", "img2img")
+    request_data.setdefault("mode", default_mode)
     request_data.setdefault("save_images", False)
+    request_data.update(request_updates or {})
     request = GenerationRequest.model_validate(request_data)
-    image = _load_image(config, "init_image", "image")
+    init_images = [_load_image(config, "init_image", "image")] if require_init else None
+    mask_images = [_load_image(config, "mask_image", "mask")] if require_mask else None
+    control_images = [_load_image(config, "control_image", "image")] if require_control else None
 
     started = time.perf_counter()
-    result = backend.generate(request, init_images=[image], preview_every_n_steps=0)
+    result = backend.generate(
+        request,
+        init_images=init_images,
+        mask_images=mask_images,
+        control_images=control_images,
+        preview_every_n_steps=0,
+    )
     elapsed = time.perf_counter() - started
     steps = max(1, int(request.steps))
     return {
-        "kind": "img2img",
+        "kind": kind,
         "elapsed_seconds": elapsed,
         "units": steps,
         "units_label": "steps",
@@ -316,7 +340,53 @@ def run_img2img_benchmark(config: dict[str, Any]) -> dict[str, Any]:
         "iterations_per_second": steps / elapsed if elapsed > 0 else None,
         "image_count": len(result.images),
         "request": request.model_dump(mode="json"),
+        "inputs": {
+            "init_image": bool(init_images),
+            "mask_image": bool(mask_images),
+            "control_image": bool(control_images),
+        },
     }
+
+
+def run_txt2img_benchmark(config: dict[str, Any]) -> dict[str, Any]:
+    return _run_diffusion_image_benchmark(config, kind="txt2img", default_mode="txt2img")
+
+
+def run_img2img_benchmark(config: dict[str, Any]) -> dict[str, Any]:
+    return _run_diffusion_image_benchmark(
+        config,
+        kind="img2img",
+        default_mode="img2img",
+        require_init=True,
+    )
+
+
+def run_inpaint_benchmark(config: dict[str, Any]) -> dict[str, Any]:
+    return _run_diffusion_image_benchmark(
+        config,
+        kind="inpaint",
+        default_mode="inpaint",
+        require_init=True,
+        require_mask=True,
+    )
+
+
+def run_controlnet_benchmark(config: dict[str, Any]) -> dict[str, Any]:
+    return _run_diffusion_image_benchmark(
+        config,
+        kind="controlnet",
+        default_mode=str(config.get("mode") or "txt2img"),
+        require_control=True,
+    )
+
+
+def run_hires_benchmark(config: dict[str, Any]) -> dict[str, Any]:
+    return _run_diffusion_image_benchmark(
+        config,
+        kind="hires",
+        default_mode="txt2img",
+        request_updates={"enable_hr": True},
+    )
 
 
 def run_wan_i2v_benchmark(config: dict[str, Any]) -> dict[str, Any]:
@@ -436,11 +506,19 @@ def run_benchmark(config: dict[str, Any]) -> dict[str, Any]:
     kind = str(config.get("kind") or "").strip().lower()
     if kind == "probe":
         return run_probe(config)
+    if kind == "txt2img":
+        return run_txt2img_benchmark(config)
     if kind == "img2img":
         return run_img2img_benchmark(config)
+    if kind == "inpaint":
+        return run_inpaint_benchmark(config)
+    if kind == "controlnet":
+        return run_controlnet_benchmark(config)
+    if kind == "hires":
+        return run_hires_benchmark(config)
     if kind == "wan_i2v":
         return run_wan_i2v_benchmark(config)
-    raise ValueError("Benchmark kind must be 'probe', 'img2img', or 'wan_i2v'.")
+    raise ValueError("Benchmark kind must be 'probe', 'txt2img', 'img2img', 'inpaint', 'controlnet', 'hires', or 'wan_i2v'.")
 
 
 def run_probe(config: dict[str, Any] | None = None) -> dict[str, Any]:

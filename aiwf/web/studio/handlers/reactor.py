@@ -6,16 +6,17 @@ from aiwf.bootstrap import AppContext
 from aiwf.core.domain.enhance import RestoreOptions
 from aiwf.core.domain.faceswap import FaceSwapOptions
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest
+from aiwf.core.domain.models import normalize_schedule_id_for_sampler
 from aiwf.core.tags import parse_tags
 from aiwf.infrastructure.faceswap import FaceSwapUnavailable
 from aiwf.web.studio.catalogs import StudioCatalogs
+from aiwf.web.studio.request_builder import resolve_checkpoint_id
 
 
 def run_reactor(
     ctx: AppContext,
     service,
     catalogs: StudioCatalogs,
-    *,
     workspace_result,
     stored_result,
     source_image,
@@ -41,6 +42,10 @@ def run_reactor(
     tags_text,
     use_file,
     prompt_file_path,
+    model_id,
+    gender_source,
+    gender_target,
+    mask_face,
 ) -> tuple:
     target = stored_result or workspace_result
     if target is None:
@@ -51,6 +56,10 @@ def run_reactor(
     options = FaceSwapOptions(
         source_face_index=max(0, int(source_idx or 0)),
         target_face_index=int(target_idx if target_idx is not None else -1),
+        model_id=model_id or "inswapper_128",
+        gender_source=int(gender_source or 0),
+        gender_target=int(gender_target or 0),
+        mask_face=bool(mask_face),
         restore_face=bool(do_restore),
         restorer_id=restorer_id,
         restore_visibility=float(visibility),
@@ -79,8 +88,11 @@ def run_reactor(
     status_parts = ["**ReActor complete.**"]
 
     if do_blend:
-        if not ckpt_map or not ckpt_title:
-            raise gr.Error("No checkpoint available for seam blend.")
+        try:
+            ckpt_id = resolve_checkpoint_id(ckpt_title, ckpt_map)
+        except gr.Error as exc:
+            raise gr.Error(f"No checkpoint available for seam blend. {exc}") from exc
+        sampler_id = catalogs.sampler_map.get(sampler_label, "euler_a")
         blend_request = GenerationRequest(
             mode=GenerationMode.IMG2IMG,
             prompt=prompt_text,
@@ -92,10 +104,11 @@ def run_reactor(
             steps=int(step_count),
             cfg_scale=float(cfg_scale),
             seed=int(seed_value),
-            sampler=catalogs.sampler_map.get(sampler_label, "euler_a"),
+            sampler=sampler_id,
+            scheduler=normalize_schedule_id_for_sampler(sampler_id, "automatic"),
             denoising_strength=float(blend_denoise),
             clip_skip=int(clip_skip_value),
-            checkpoint_id=ckpt_map.get(ckpt_title),
+            checkpoint_id=ckpt_id,
             vae_id=vae_id,
         )
         job = service.submit(blend_request, init_images=[swapped])

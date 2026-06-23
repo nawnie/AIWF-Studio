@@ -170,8 +170,8 @@ class TestONNXBootstrap:
             encoding="utf-8",
         )
 
-        with patch("aiwf.bootstrap.DeviceManager", FakeDevices), patch(
-            "aiwf.bootstrap.ONNXBackend", FakeONNXBackend
+        with patch("aiwf.bootstrap._create_device_manager", lambda flags: FakeDevices(flags)), patch(
+            "aiwf.infrastructure.onnx.backend.ONNXBackend", FakeONNXBackend
         ), patch(
             "aiwf.dev.diagnostics.install_dev_diagnostics", lambda ctx: None
         ):

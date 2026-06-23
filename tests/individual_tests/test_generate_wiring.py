@@ -1,9 +1,7 @@
-"""Guard against misalignment between the generate event's inputs list and run()'s signature.
+"""Guard Studio generate input order against controller index drift.
 
-AST-level test — runs without torch/gradio installed. A one-position shift here
-is what caused the "No checkpoint available. Refresh models." bug: an input was
-inserted mid-list while run() expected it near the end, so every parameter
-after it received the wrong component's value.
+AST-level tests run without torch/gradio. A one-position shift here previously
+caused stale checkpoint values to feed the wrong callback argument.
 """
 from __future__ import annotations
 
@@ -19,75 +17,133 @@ def _repo_root() -> Path:
 
 
 STUDIO = _repo_root() / "aiwf" / "web" / "studio" / "tab.py"
+RUNNER = _repo_root() / "aiwf" / "web" / "studio" / "generation_runner.py"
+REQUEST_BUILDER = _repo_root() / "aiwf" / "web" / "studio" / "request_builder.py"
+REACTOR_WORKFLOW = _repo_root() / "aiwf" / "web" / "studio" / "reactor_workflow.py"
+WAN_TAB = _repo_root() / "aiwf" / "web" / "tabs" / "wan_i2v.py"
 
-# Anchor pairs: (component name in generate_inputs, parameter name in run()).
-# Each pair must sit at the same position in both sequences.
 ANCHORS = [
-    ("mode_toggle", "mode_label"),
-    ("show_editor", "editing_mask"),
-    ("checkpoint", "ckpt_title"),
-    ("sampler", "sampler_label"),
-    ("scheduler", "scheduler_label"),
-    ("workspace_image", "source_image"),
-    ("mask_editor_value", "editor_value"),
-    ("state", "ckpt_map"),
-    ("prompt_file", "prompt_file_path"),
-    ("inpaint_source", "inpaint_source"),
-    ("continuous_toggle", "continuous_enabled"),
-    ("cooldown_seconds", "cooldown_wait"),
+    ("mode_toggle", 0),
+    ("show_editor", 1),
+    ("checkpoint", 4),
+    ("sampler", 5),
+    ("scheduler", 6),
+    ("workspace_image", 28),
+    ("mask_editor_value", 29),
+    ("state", 30),
+    ("prompt_file", 33),
+    ("style_select", 34),
+    ("cn3_threshold_b", 63),
+    ("inpaint_source", 64),
+    ("continuous_toggle", 65),
+    ("cooldown_seconds", 66),
+    ("reactor_at_gen", 67),
+]
+
+WAN_RUN_ANCHORS = [
+    ("image", 0),
+    ("runtime_mode_v", 17),
+    ("rife_enabled_v", 30),
+    ("reactor_enabled_v", 37),
+    ("vsr_enabled_v", 49),
+    ("videofx_denoise_enabled_v", 54),
+    ("audio_enabled_v", 69),
+    ("audio_cfg_v", 76),
 ]
 
 
-def _collect():
-    tree = ast.parse(STUDIO.read_text(encoding="utf-8"))
-    run_params = None
-    run_vararg = None
-    inputs_names = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "run":
-            run_params = [a.arg for a in node.args.args]
-            run_vararg = node.args.vararg.arg if node.args.vararg else None
+def _tree(path: Path) -> ast.Module:
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _generate_input_names() -> list[str]:
+    for node in ast.walk(_tree(STUDIO)):
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "generate_inputs":
-                    inputs_names = [
-                        elt.id for elt in node.value.elts if isinstance(elt, ast.Name)
-                    ]
-    return run_params, run_vararg, inputs_names
+                    return [elt.id for elt in node.value.elts if isinstance(elt, ast.Name)]
+    raise AssertionError("generate_inputs not found in studio/tab.py")
 
 
-def _function_node(name: str) -> ast.FunctionDef:
-    tree = ast.parse(STUDIO.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
+def _function_node(path: Path, name: str) -> ast.FunctionDef:
+    for node in ast.walk(_tree(path)):
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
-    raise AssertionError(f"{name}() not found in studio/tab.py")
+    raise AssertionError(f"{name}() not found in {path}")
 
 
-def test_generate_inputs_match_run_signature_shape():
-    run_params, run_vararg, inputs_names = _collect()
-    assert run_params is not None, "run() not found in studio/tab.py"
-    assert inputs_names is not None, "generate_inputs not found in studio/tab.py"
-    assert len(inputs_names) >= len(run_params)
-    if len(inputs_names) > len(run_params):
-        assert run_vararg is not None
+def _module_constant(path: Path, name: str):
+    for node in _tree(path).body:
+        if isinstance(node, ast.Assign):
+            if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+                if isinstance(node.value, ast.Constant):
+                    return node.value.value
+    raise AssertionError(f"{name} not found in {path}")
 
 
-def test_generate_inputs_anchor_positions_align():
-    run_params, _run_vararg, inputs_names = _collect()
-    for component, param in ANCHORS:
+def test_generate_inputs_anchor_positions_align_with_runner_indexes():
+    inputs_names = _generate_input_names()
+    for component, expected_index in ANCHORS:
         assert component in inputs_names, f"{component} missing from generate_inputs"
-        assert param in run_params, f"{param} missing from run() signature"
-        ci = inputs_names.index(component)
-        pi = run_params.index(param)
-        assert ci == pi, (
-            f"generate_inputs[{ci}]={component!r} feeds run() param "
-            f"{run_params[ci]!r}, expected {param!r} (at position {pi})"
-        )
+        assert inputs_names.index(component) == expected_index
 
 
-def test_live_generation_request_normalizes_sampler_schedule_pair():
-    node = _function_node("_generation_request")
+def test_studio_tab_delegates_generation_to_runner():
+    node = _function_node(STUDIO, "run")
+    assert _module_constant(RUNNER, "GENERATION_RUNNER_INPUT_COUNT") == 67
+    assert any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "run"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "generation_runner"
+        for call in ast.walk(node)
+    )
+    assert any(
+        isinstance(subscript, ast.Subscript)
+        and isinstance(subscript.value, ast.Name)
+        and subscript.value.id == "args"
+        and isinstance(subscript.slice, ast.Slice)
+        and isinstance(subscript.slice.lower, ast.Name)
+        and subscript.slice.lower.id == "GENERATION_RUNNER_INPUT_COUNT"
+        for subscript in ast.walk(node)
+    ), "ReActor arguments must start after cooldown_seconds at index 67"
+    assert any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "build_reactor_generation_postprocess_from_args"
+        for call in ast.walk(node)
+    ), "ReActor generation args should be unpacked outside the tab callback"
+
+
+def test_reactor_generation_arg_count_matches_generate_inputs_tail():
+    inputs_names = _generate_input_names()
+    assert len(inputs_names) - _module_constant(RUNNER, "GENERATION_RUNNER_INPUT_COUNT") == _module_constant(
+        REACTOR_WORKFLOW,
+        "REACTOR_GENERATION_ARG_COUNT",
+    )
+
+
+def test_generation_runner_delegates_to_request_builder():
+    node = _function_node(RUNNER, "build_request")
+    assert any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "build_generation_request"
+        for call in ast.walk(node)
+    )
+
+
+def test_wan_run_input_order_has_named_anchors():
+    node = _function_node(WAN_TAB, "_run")
+    args = [arg.arg for arg in node.args.args]
+    for name, expected_index in WAN_RUN_ANCHORS:
+        assert name in args, f"{name} missing from Wan _run arguments"
+        assert args.index(name) == expected_index
+
+
+def test_request_builder_normalizes_sampler_schedule_pair():
+    node = _function_node(REQUEST_BUILDER, "build_generation_request")
     assert any(
         isinstance(call, ast.Call)
         and isinstance(call.func, ast.Name)
@@ -96,8 +152,8 @@ def test_live_generation_request_normalizes_sampler_schedule_pair():
     )
 
 
-def test_live_generation_request_rejects_stale_checkpoint_selection():
-    node = _function_node("_generation_request")
+def test_request_builder_rejects_stale_checkpoint_selection():
+    node = _function_node(REQUEST_BUILDER, "build_generation_request")
     assert any(
         isinstance(call, ast.Call)
         and isinstance(call.func, ast.Name)

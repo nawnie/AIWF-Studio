@@ -39,6 +39,13 @@ _BACKEND_SETUP = (
 )
 
 
+def _format_chat_signals(*, alive: bool, models: list[str], trainer_ready: bool) -> str:
+    backend = "online" if alive else "offline"
+    trainer = "ready" if trainer_ready else "not ready"
+    model_count = len(models)
+    return f"**Backend:** {backend}  \n**Models:** {model_count}  \n**Trainer:** {trainer}"
+
+
 def _get_client(base_url: str = _DEFAULT_OLLAMA_URL) -> OllamaClient:
     global _client
     normalized = (base_url or _DEFAULT_OLLAMA_URL).strip().rstrip("/")
@@ -184,130 +191,158 @@ def register_chat_workspace(registry: WebRegistry) -> None:
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         client = _get_client()
         alive, models = _check_ollama(client)
+        trainer_ready = _llm_trainer_ready()
 
         with gr.Column(elem_classes=["aiwf-page-header"]):
             gr.Markdown("Chat", elem_classes=["aiwf-section-label"])
-            gr.Markdown("Local chat starts with Ollama. Atlas RAG builds source-backed cards and trains a QLoRA adapter when activated.", elem_classes=["aiwf-page-intro"])
+            gr.Markdown("Local LLM workbench", elem_classes=["aiwf-page-intro"])
 
-        with gr.Group():
-            gr.Markdown("Backend", elem_classes=["aiwf-section-label"])
-            with gr.Row():
-                backend = gr.Dropdown(label="Backend", choices=["Ollama"], value="Ollama", interactive=False)
-                ollama_url = gr.Textbox(label="Ollama URL", value=_DEFAULT_OLLAMA_URL)
-                refresh_btn = gr.Button("Refresh", variant="secondary")
-            status_pill = gr.Markdown(value=_STATUS_OK if alive else _STATUS_ERR, elem_id="ollama-status")
-            install_note = gr.Markdown(value=_INSTALL_NOTE if not alive else "", visible=not alive)
-            backend_setup = gr.Markdown(value=_BACKEND_SETUP if not alive else "", visible=not alive)
+        with gr.Row(elem_classes=["aiwf-chat-workbench"]):
+            with gr.Column(scale=8, min_width=520, elem_classes=["aiwf-chat-main"]):
+                chatbot = gr.Chatbot(label="Conversation", height=620, buttons=["copy"], elem_classes=["aiwf-chatbot"])
+                with gr.Row(elem_classes=["aiwf-chat-composer"]):
+                    msg_box = gr.Textbox(placeholder="Type a message...", show_label=False, scale=9)
+                    send_btn = gr.Button("Send", variant="primary", scale=1)
+                with gr.Row(elem_classes=["aiwf-chat-actions"]):
+                    clear_btn = gr.Button("Clear", variant="secondary")
+                    unload_btn = gr.Button("Unload model", variant="stop")
 
-        model_dd = gr.Dropdown(
-            choices=models,
-            value=models[0] if models else None,
-            label="Model",
-            interactive=True,
-        )
-
-        with gr.Accordion("Agent tools", open=False):
-            with gr.Row():
-                agent_enabled = gr.Checkbox(label="Agent mode", value=False)
-                agent_allow_edits = gr.Checkbox(label="Allow file edits", value=False)
-                agent_max_steps = gr.Number(label="Max tool steps", value=4, precision=0, minimum=1, maximum=12)
-                agent_preview_btn = gr.Button("Refresh tools", variant="secondary")
-            with gr.Row():
-                agent_allowed_roots = gr.Textbox(
-                    label="Allowed file roots",
-                    value="\n".join(str(path) for path in _default_agent_roots(ctx)),
-                    lines=3,
-                    scale=1,
+            with gr.Column(scale=4, min_width=360, elem_classes=["aiwf-chat-control-panel"]):
+                gr.Markdown("Controls", elem_classes=["aiwf-section-label"])
+                status_pill = gr.Markdown(
+                    value=_STATUS_OK if alive else _STATUS_ERR,
+                    elem_id="ollama-status",
+                    elem_classes=["aiwf-chat-status"],
                 )
-                agent_skill_roots = gr.Textbox(
-                    label="Skill/plugin roots",
-                    value="\n".join(str(path) for path in _default_skill_roots(ctx)),
-                    lines=3,
-                    scale=1,
+                chat_signals = gr.Markdown(
+                    value=_format_chat_signals(alive=alive, models=models, trainer_ready=trainer_ready),
+                    elem_classes=["aiwf-chat-signals"],
                 )
-            agent_status = gr.Markdown("")
-            agent_trace = gr.Textbox(label="Agent trace", lines=8, interactive=False)
+                model_dd = gr.Dropdown(
+                    choices=models,
+                    value=models[0] if models else None,
+                    label="Model",
+                    interactive=True,
+                )
 
-        with gr.Accordion("Atlas RAG", open=False):
-            with gr.Row():
-                atlas_enabled = gr.Checkbox(label="Use Atlas cards as chat context", value=False)
-                atlas_top_k = gr.Number(label="Cards", value=4, precision=0, minimum=1, maximum=20)
-            with gr.Row():
-                atlas_packet_path = gr.Textbox(
-                    label="Atlas packet folder or atlas_cards.jsonl",
-                    placeholder=r"datasets\atlas_rag\...\atlas_cards.jsonl",
-                    scale=7,
-                )
-                atlas_query = gr.Textbox(label="Retrieval query preview", placeholder="What should Atlas retrieve?", scale=5)
-            with gr.Row():
-                atlas_source_paths = gr.Textbox(
-                    label="Sources to cartograph",
-                    value=str(Path(__file__).resolve().parents[3]),
-                    lines=4,
-                    scale=7,
-                )
-                with gr.Column(scale=3):
-                    atlas_packet_name = gr.Textbox(label="Packet name", value="atlas_chat_rag")
-                    atlas_output_root = gr.Textbox(label="Output root", value="datasets/atlas_rag")
-            with gr.Row():
-                atlas_max_files = gr.Number(label="Max files", value=200, precision=0, minimum=1, maximum=10_000)
-                atlas_max_chars = gr.Number(label="Max chars/source", value=6000, precision=0, minimum=500, maximum=50_000)
-                atlas_build_btn = gr.Button("Build Atlas packet", variant="secondary")
-                atlas_preview_btn = gr.Button("Preview retrieval", variant="secondary")
-            atlas_status = gr.Markdown("")
-            atlas_context_preview = gr.Textbox(label="Atlas preview / QLoRA data", lines=8, interactive=False)
+                with gr.Tabs(elem_classes=["aiwf-chat-tool-tabs"]):
+                    with gr.Tab("Backend"):
+                        with gr.Group(elem_classes=["aiwf-chat-tab-panel"]):
+                            with gr.Row():
+                                backend = gr.Dropdown(label="Backend", choices=["Ollama"], value="Ollama", interactive=False)
+                                refresh_btn = gr.Button("Refresh", variant="secondary")
+                            ollama_url = gr.Textbox(label="Ollama URL", value=_DEFAULT_OLLAMA_URL)
+                            install_note = gr.Markdown(value=_INSTALL_NOTE if not alive else "", visible=not alive)
+                            backend_setup = gr.Markdown(value=_BACKEND_SETUP if not alive else "", visible=not alive)
 
-            gr.Markdown("Atlas adapter activation", elem_classes=["aiwf-section-label"])
-            with gr.Row():
-                atlas_base_model = gr.Textbox(
-                    label="Trainable base model path or HuggingFace ID",
-                    placeholder=r"F:\Ai_Models\hf\posttrain_candidates\Qwen--Qwen3.5-2B",
-                    scale=6,
-                )
-                atlas_adapter_name = gr.Textbox(label="Adapter name", value="atlas_rag_adapter", scale=3)
-                atlas_adapter_output = gr.Textbox(label="Adapter output", value="outputs/training/atlas_adapters", scale=4)
-            with gr.Row():
-                atlas_steps = gr.Number(label="Max steps", value=100, precision=0, minimum=1, maximum=1_000_000)
-                atlas_batch = gr.Number(label="Batch size", value=1, precision=0, minimum=1, maximum=64)
-                atlas_grad_accum = gr.Number(label="Gradient accumulation", value=8, precision=0, minimum=1, maximum=1024)
-                atlas_lr = gr.Number(label="Learning rate", value=2e-5, step=1e-6)
-            with gr.Row():
-                atlas_seq_len = gr.Number(label="Max sequence length", value=1024, precision=0, minimum=128, maximum=32768)
-                atlas_rank = gr.Number(label="LoRA rank", value=16, precision=0, minimum=1, maximum=512)
-                atlas_alpha = gr.Number(label="LoRA alpha", value=32, minimum=0.1, maximum=1024)
-            with gr.Row():
-                atlas_config_btn = gr.Button("Preview QLoRA config", variant="secondary")
-                atlas_activate_btn = gr.Button("Activate RAG adapter", variant="primary", interactive=_llm_trainer_ready())
-                atlas_stop_btn = gr.Button("Stop adapter training", variant="stop", interactive=False)
-            atlas_train_log = gr.Textbox(label="Atlas adapter training log", lines=12, interactive=False, autoscroll=True)
+                    with gr.Tab("Agent"):
+                        with gr.Group(elem_classes=["aiwf-chat-tab-panel"]):
+                            with gr.Row():
+                                agent_enabled = gr.Checkbox(label="Agent mode", value=False)
+                                agent_allow_edits = gr.Checkbox(label="Allow file edits", value=False)
+                            with gr.Row():
+                                agent_max_steps = gr.Number(label="Max tool steps", value=4, precision=0, minimum=1, maximum=12)
+                                agent_preview_btn = gr.Button("Refresh tools", variant="secondary")
+                            agent_allowed_roots = gr.Textbox(
+                                label="Allowed file roots",
+                                value="\n".join(str(path) for path in _default_agent_roots(ctx)),
+                                lines=3,
+                            )
+                            agent_skill_roots = gr.Textbox(
+                                label="Skill/plugin roots",
+                                value="\n".join(str(path) for path in _default_skill_roots(ctx)),
+                                lines=3,
+                            )
+                            agent_status = gr.Markdown("")
 
-        chatbot = gr.Chatbot(label="Chat", height=480, buttons=["copy"])
-        with gr.Row():
-            msg_box = gr.Textbox(placeholder="Type a message...", show_label=False, scale=8)
-            send_btn = gr.Button("Send", variant="primary", scale=1)
-        with gr.Row():
-            clear_btn = gr.Button("Clear", variant="secondary")
-            unload_btn = gr.Button("Unload model", variant="stop")
-        with gr.Accordion("System prompt", open=False):
-            system_prompt = gr.Textbox(placeholder="Optional system prompt", lines=3, show_label=False)
+                    with gr.Tab("Atlas"):
+                        with gr.Group(elem_classes=["aiwf-chat-tab-panel"]):
+                            with gr.Row():
+                                atlas_enabled = gr.Checkbox(label="Use Atlas cards", value=False)
+                                atlas_top_k = gr.Number(label="Cards", value=4, precision=0, minimum=1, maximum=20)
+                            atlas_packet_path = gr.Textbox(
+                                label="Atlas packet folder or atlas_cards.jsonl",
+                                placeholder=r"datasets\atlas_rag\...\atlas_cards.jsonl",
+                            )
+                            atlas_query = gr.Textbox(label="Retrieval query preview", placeholder="What should Atlas retrieve?")
+                            with gr.Accordion("Cartographer", open=False):
+                                atlas_source_paths = gr.Textbox(
+                                    label="Sources to cartograph",
+                                    value=str(Path(__file__).resolve().parents[3]),
+                                    lines=4,
+                                )
+                                with gr.Row():
+                                    atlas_packet_name = gr.Textbox(label="Packet name", value="atlas_chat_rag")
+                                    atlas_output_root = gr.Textbox(label="Output root", value="datasets/atlas_rag")
+                                with gr.Row():
+                                    atlas_max_files = gr.Number(label="Max files", value=200, precision=0, minimum=1, maximum=10_000)
+                                    atlas_max_chars = gr.Number(label="Max chars/source", value=6000, precision=0, minimum=500, maximum=50_000)
+                                with gr.Row():
+                                    atlas_build_btn = gr.Button("Build Atlas packet", variant="secondary")
+                                    atlas_preview_btn = gr.Button("Preview retrieval", variant="secondary")
+                            atlas_status = gr.Markdown("")
+                            atlas_context_preview = gr.Textbox(label="Atlas preview / QLoRA data", lines=7, interactive=False)
+
+                            with gr.Accordion("Adapter activation", open=False):
+                                atlas_base_model = gr.Textbox(
+                                    label="Trainable base model path or HuggingFace ID",
+                                    placeholder=r"F:\Ai_Models\hf\posttrain_candidates\Qwen--Qwen3.5-2B",
+                                )
+                                with gr.Row():
+                                    atlas_adapter_name = gr.Textbox(label="Adapter name", value="atlas_rag_adapter")
+                                    atlas_adapter_output = gr.Textbox(label="Adapter output", value="outputs/training/atlas_adapters")
+                                with gr.Row():
+                                    atlas_steps = gr.Number(label="Max steps", value=100, precision=0, minimum=1, maximum=1_000_000)
+                                    atlas_batch = gr.Number(label="Batch size", value=1, precision=0, minimum=1, maximum=64)
+                                with gr.Row():
+                                    atlas_grad_accum = gr.Number(label="Gradient accumulation", value=8, precision=0, minimum=1, maximum=1024)
+                                    atlas_lr = gr.Number(label="Learning rate", value=2e-5, step=1e-6)
+                                with gr.Row():
+                                    atlas_seq_len = gr.Number(label="Max sequence length", value=1024, precision=0, minimum=128, maximum=32768)
+                                    atlas_rank = gr.Number(label="LoRA rank", value=16, precision=0, minimum=1, maximum=512)
+                                    atlas_alpha = gr.Number(label="LoRA alpha", value=32, minimum=0.1, maximum=1024)
+                                with gr.Row():
+                                    atlas_config_btn = gr.Button("Preview QLoRA config", variant="secondary")
+                                    atlas_activate_btn = gr.Button("Activate RAG adapter", variant="primary", interactive=trainer_ready)
+                                    atlas_stop_btn = gr.Button("Stop adapter training", variant="stop", interactive=False)
+
+                    with gr.Tab("System"):
+                        with gr.Group(elem_classes=["aiwf-chat-tab-panel"]):
+                            system_prompt = gr.Textbox(placeholder="Optional system prompt", lines=6, show_label=False)
+
+                    with gr.Tab("Trace"):
+                        with gr.Group(elem_classes=["aiwf-chat-tab-panel"]):
+                            agent_trace = gr.Textbox(label="Agent trace", lines=8, interactive=False)
+                            atlas_train_log = gr.Textbox(
+                                label="Atlas adapter training log",
+                                lines=10,
+                                interactive=False,
+                                autoscroll=True,
+                            )
 
         def on_refresh(base_url: str):
             active_client = _get_client(base_url)
             is_alive, names = _check_ollama(active_client)
+            llm_trainer_ready = _llm_trainer_ready()
             return (
                 gr.update(value=_STATUS_OK if is_alive else _STATUS_ERR),
                 gr.update(choices=names, value=names[0] if names else None),
                 gr.update(value=_INSTALL_NOTE if not is_alive else "", visible=not is_alive),
                 gr.update(value=_BACKEND_SETUP if not is_alive else "", visible=not is_alive),
+                gr.update(value=_format_chat_signals(alive=is_alive, models=names, trainer_ready=llm_trainer_ready)),
             )
 
         refresh_btn.click(
             fn=on_refresh,
             inputs=[ollama_url],
-            outputs=[status_pill, model_dd, install_note, backend_setup],
+            outputs=[status_pill, model_dd, install_note, backend_setup, chat_signals],
         )
         if tab is not None:
-            tab.select(fn=on_refresh, inputs=[ollama_url], outputs=[status_pill, model_dd, install_note, backend_setup])
+            tab.select(
+                fn=on_refresh,
+                inputs=[ollama_url],
+                outputs=[status_pill, model_dd, install_note, backend_setup, chat_signals],
+            )
 
         def on_agent_preview(roots_text: str, skill_roots_text: str, allow_edits: bool):
             try:

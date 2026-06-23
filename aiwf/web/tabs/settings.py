@@ -28,6 +28,7 @@ from aiwf.web.registry import PINNED_TABS, WebRegistry
 from aiwf.web.theme import accent_preset_names
 
 TAB_VISIBILITY_CHOICES = [
+    "Image Lab",
     "Video",
     "Models",
     "Chat",

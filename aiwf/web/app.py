@@ -17,6 +17,7 @@ from aiwf.web.tabs.chat_workspace import register_chat_workspace
 from aiwf.web.tabs.enhance import register_enhance
 from aiwf.web.tabs.faceswap import register_faceswap
 from aiwf.web.tabs.history import register_history
+from aiwf.web.tabs.image_lab import register_image_lab
 from aiwf.web.tabs.wan_i2v import register_wan_i2v
 from aiwf.web.tabs.library import register_library
 from aiwf.web.tabs.model_manager import register_model_manager
@@ -89,6 +90,7 @@ def register_default_tabs(registry: WebRegistry) -> None:
     # Registration order defines the primary navigation order after per-tab
     # order values are sorted by WebRegistry.tab.
     register_studio(registry)
+    register_image_lab(registry)
     register_wan_i2v(registry)
     from aiwf.web.tabs.rife import register_rife
 

@@ -13,12 +13,8 @@ from aiwf.core.config.launch import LaunchSettings, launch_settings_path, load_l
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.events.bus import EventBus
 from aiwf.core.events.types import AppStarted
-from aiwf.infrastructure.diffusers.backend import DiffusersBackend
-from aiwf.infrastructure.onnx.backend import ONNXBackend
 from aiwf.infrastructure.storage.filesystem import FilesystemImageStore
-from aiwf.infrastructure.torch.devices import DeviceManager
 from aiwf.plugins.registry import PluginRegistry
-from aiwf.services.enhance import EnhanceService
 from aiwf.services.engine_supervisor import EngineSupervisor, get_supervisor
 from aiwf.services.faceswap import FaceSwapService
 from aiwf.services.controlnet import ControlNetService
@@ -27,7 +23,6 @@ from aiwf.services.generation import GenerationService
 from aiwf.services.genlog import GenerationLogService
 from aiwf.services.metadata import MetadataService
 from aiwf.services.model_catalog import ModelCatalogService
-from aiwf.services.model_download import ModelDownloadService
 from aiwf.services.benchmark_receipts import BenchmarkReceiptService
 from aiwf.services.optimization import CapabilityDetector, OptimizationPlanner
 from aiwf.services.optimization_diagnostics import OptimizationDiagnosticsService
@@ -35,7 +30,6 @@ from aiwf.services.plot import PlotService
 from aiwf.services.prompt_processor import PromptProcessorService
 from aiwf.services.queue import JobQueue
 from aiwf.services.tags import TagService
-from aiwf.services.segment import SegmentService
 from aiwf.services.workflow import WorkflowService
 
 @dataclass
@@ -117,6 +111,57 @@ def _load_user_settings(settings: UserSettings, settings_path: Path) -> None:
         pass
 
 
+def _create_device_manager(flags: RuntimeFlags):
+    from aiwf.infrastructure.torch.devices import DeviceManager
+
+    return DeviceManager(flags)
+
+
+def _create_diffusers_backend(flags: RuntimeFlags, devices):
+    from aiwf.infrastructure.diffusers.backend import DiffusersBackend
+
+    return DiffusersBackend(flags, devices)
+
+
+def _create_onnx_backend(flags: RuntimeFlags, settings: UserSettings):
+    from aiwf.infrastructure.onnx.backend import ONNXBackend
+
+    onnx_root = Path(settings.onnx_model_dir) if settings.onnx_model_dir else flags.resolved_models_dir() / "onnx"
+    backend = ONNXBackend(
+        models_root=onnx_root,
+        provider=flags.onnx_provider,  # type: ignore[arg-type]
+        device_id=0,
+    )
+    logger.info("Inference backend: ONNX Runtime (provider=%s, models=%s)", flags.onnx_provider, onnx_root)
+    return backend
+
+
+def _create_inference_backend(flags: RuntimeFlags, settings: UserSettings, devices):
+    if flags.inference_backend == "onnx":
+        return _create_onnx_backend(flags, settings)
+    backend = _create_diffusers_backend(flags, devices)
+    logger.info("Inference backend: Diffusers")
+    return backend
+
+
+def _create_enhance_service(flags: RuntimeFlags, settings: UserSettings, devices, store, *, supervisor):
+    from aiwf.services.enhance import EnhanceService
+
+    return EnhanceService(flags, settings, devices, store, supervisor=supervisor)
+
+
+def _create_model_download_service(flags: RuntimeFlags):
+    from aiwf.services.model_download import ModelDownloadService
+
+    return ModelDownloadService(flags)
+
+
+def _create_segment_service(flags: RuntimeFlags, settings: UserSettings, devices, *, supervisor):
+    from aiwf.services.segment import SegmentService
+
+    return SegmentService(flags, settings, devices, supervisor=supervisor)
+
+
 def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     _check_transformers_compat()
     flags = flags or RuntimeFlags()
@@ -140,7 +185,7 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
         directory.mkdir(parents=True, exist_ok=True)
 
     events = EventBus()
-    devices = DeviceManager(flags)
+    devices = _create_device_manager(flags)
     devices.log_status()
     settings_path = flags.data_dir / "config.json"
     settings = UserSettings()
@@ -173,21 +218,7 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
         if _v is not None:
             _os.environ.setdefault(_k, str(_v))
 
-    if flags.inference_backend == "onnx":
-        from pathlib import Path as _Path
-        _onnx_root = (
-            _Path(settings.onnx_model_dir) if settings.onnx_model_dir
-            else flags.resolved_models_dir() / "onnx"
-        )
-        backend = ONNXBackend(
-            models_root=_onnx_root,
-            provider=flags.onnx_provider,  # type: ignore[arg-type]
-            device_id=0,
-        )
-        logger.info("Inference backend: ONNX Runtime (provider=%s, models=%s)", flags.onnx_provider, _onnx_root)
-    else:
-        backend = DiffusersBackend(flags, devices)
-        logger.info("Inference backend: Diffusers")
+    backend = _create_inference_backend(flags, settings, devices)
     metadata = MetadataService()
     queue = JobQueue(events)
     store = FilesystemImageStore(flags.resolved_output_dir(), settings=settings)
@@ -218,19 +249,19 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
         failure_archive=failure_archive,
         genlog=genlog,
     )
-    enhance = EnhanceService(flags, settings, devices, store, supervisor=supervisor)
+    enhance = _create_enhance_service(flags, settings, devices, store, supervisor=supervisor)
     controlnet = ControlNetService(flags)
     controlnet.ensure_dir()
     faceswap = FaceSwapService(flags, supervisor=supervisor)
     faceswap.ensure_dir()
     plots = PlotService(generation)
     models = ModelCatalogService(generation, flags, settings)
-    model_download = ModelDownloadService(flags)
+    model_download = _create_model_download_service(flags)
     model_download.ensure_dirs()
     prompts = PromptProcessorService(flags, settings, models)
     prompts.ensure_dirs()
     generation.prompts = prompts
-    segment = SegmentService(flags, settings, devices, supervisor=supervisor)
+    segment = _create_segment_service(flags, settings, devices, supervisor=supervisor)
     workflows = WorkflowService(flags, settings, generation, enhance, segment)
     workflows.ensure_dir()
     ctx = AppContext(

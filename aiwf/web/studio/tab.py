@@ -1,21 +1,13 @@
 from __future__ import annotations
 
-import time
+from functools import partial
 
 import gradio as gr
 from PIL import Image as PILImage
 
 from aiwf.bootstrap import AppContext
-from aiwf.dev.diagnostics import (
-    trace_exception_safe,
-    trace_job_record_state,
-    trace_studio_generate,
-    trace_studio_request_built,
-)
-from aiwf.core.domain.enhance import RestoreOptions
-from aiwf.core.domain.faceswap import FaceSwapOptions
-from aiwf.core.domain.generation import GenerationMode, GenerationRequest, JobState
-from aiwf.core.domain.models import SCHEDULE_TYPES, normalize_schedule_id_for_sampler
+from aiwf.core.domain.generation import GenerationMode
+from aiwf.core.domain.models import SCHEDULE_TYPES
 from aiwf.core.domain.segment import SegmentRequest
 from aiwf.core.domain.segment_presets import (
     CUSTOM_SEGMENT_PRESET_ID,
@@ -28,14 +20,12 @@ from aiwf.infrastructure.diffusers.mask import (
     editor_from_mask,
     inpaint_session_background,
     prepare_outpaint,
-    resolve_inpaint_mask,
 )
-from aiwf.infrastructure.faceswap import FaceSwapUnavailable
 from aiwf.web.components.checkpoints import checkpoint_dropdown, format_model_status, refresh_checkpoints
-from aiwf.web.components.results import format_generation_outputs, results_gallery
+from aiwf.web.components.results import results_gallery
 from aiwf.web.studio.catalogs import StudioCatalogs
-from aiwf.web.studio.controlnet_stack import StudioControlNetSlot, build_controlnet_stack
 from aiwf.web.studio.constants import EMPTY_CANVAS, MODE_TITLES, MODES, TOOLBAR_HINTS
+from aiwf.web.studio.generation_runner import GENERATION_RUNNER_INPUT_COUNT, GenerationRunner
 from aiwf.web.studio.handlers import compare as compare_handlers
 from aiwf.web.studio.handlers import inpaint as inpaint_handlers
 from aiwf.web.studio.handlers import models as model_handlers
@@ -54,16 +44,14 @@ from aiwf.web.studio.resolution import (
     resize_to_bucket,
 )
 from aiwf.web.studio.helpers import (
-    align_compare_pair,
-    format_tag_summary,
-    generation_style_fields,
     load_uploaded_image,
     mode_from_label,
     paste_control_values,
     segment_source_image,
 )
 from aiwf.web.studio.mode_ui import apply_mode_ui, on_mode_change
-from aiwf.web.studio.request_builder import resolve_checkpoint_id
+from aiwf.web.studio.reactor_workflow import build_reactor_generation_postprocess_from_args
+from aiwf.web.studio import result_actions
 from aiwf.web.studio.session import StudioSession
 from aiwf.web.studio.summaries import (
     model_help_markdown as _model_help_md,
@@ -135,9 +123,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
     vae_choices = [("Automatic", None)] + [(v.title, v.id) for v in vaes]
     default_sampler_label = catalogs.default_sampler_label
     default_schedule_label = catalogs.default_schedule_label
-    sampler_map = catalogs.sampler_map
     sampler_id_to_label = catalogs.sampler_id_to_label
-    schedule_map = catalogs.schedule_map
     default_resolution_size = min(
         GENERATION_SIZE_PRESETS,
         key=lambda size: abs(size - max(ctx.settings.default_width, ctx.settings.default_height)),
@@ -1875,730 +1861,18 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         show_progress=False,
     )
 
-    def _generation_request(
-        mode_label,
-        editing_mask,
-        prompt_text,
-        negative_text,
-        ckpt_title,
-        sampler_label,
-        scheduler_label,
-        step_count,
-        cfg_scale,
-        clip_skip_value,
-        w,
-        h,
-        bs,
-        bc,
-        seed_value,
-        vae_id,
-        hires_enabled,
-        hires_scale,
-        hires_steps,
-        hires_denoise,
-        hires_upscaler,
-        img2img_denoise,
-        inpaint_denoise_value,
-        mask_blur_value,
-        seam_erode_value,
-        inpaint_area_value,
-        inpaint_padding_value,
-        masked_content_value,
-        source_image,
-        editor_value,
-        ckpt_map,
-        tags_text,
-        use_file,
-        prompt_file_path,
-        dynamic_seed,
-        style_name,
-        style_template_prompt,
-        style_template_negative,
-        cn_enable,
-        cn_model_id,
-        cn_module,
-        cn_image,
-        cn_weight,
-        cn_guidance_start,
-        cn_guidance_end,
-        cn_threshold_a,
-        cn_threshold_b,
-        cn2_enable,
-        cn2_model_id,
-        cn2_module,
-        cn2_image,
-        cn2_weight,
-        cn2_guidance_start,
-        cn2_guidance_end,
-        cn2_threshold_a,
-        cn2_threshold_b,
-        cn3_enable,
-        cn3_model_id,
-        cn3_module,
-        cn3_image,
-        cn3_weight,
-        cn3_guidance_start,
-        cn3_guidance_end,
-        cn3_threshold_a,
-        cn3_threshold_b,
-        inpaint_source_choice,
-    ):
-        if use_file and not prompt_file_path and not (prompt_text or "").strip():
-            raise gr.Error("Select a prompt file or enter a prompt.")
+    generation_runner = GenerationRunner(ctx, service, catalogs, session)
 
-        mode = mode_from_label(mode_label)
-        ckpt_id = resolve_checkpoint_id(ckpt_title, ckpt_map)
-        tags = parse_tags(tags_text or "")
-        style_fields = generation_style_fields(style_name, style_template_prompt, style_template_negative)
-        sampler_id = sampler_map.get(sampler_label, "euler_a")
-        scheduler_id = normalize_schedule_id_for_sampler(
-            sampler_id,
-            schedule_map.get(scheduler_label, "automatic"),
-        )
-        before_image = None
-        init_images = None
-        mask_images = None
-
-        if mode == "txt2img":
-            request = GenerationRequest(
-                mode=GenerationMode.TXT2IMG,
-                prompt=prompt_text,
-                negative_prompt=negative_text,
-                prompt_file=prompt_file_path,
-                use_prompt_file=bool(use_file),
-                prompt_seed=dynamic_seed,
-                **style_fields,
-                tags=tags,
-                steps=int(step_count),
-                cfg_scale=float(cfg_scale),
-                width=int(w),
-                height=int(h),
-                seed=int(seed_value),
-                sampler=sampler_id,
-                scheduler=scheduler_id,
-                batch_size=int(bs),
-                batch_count=int(bc),
-                clip_skip=int(clip_skip_value),
-                enable_hr=bool(hires_enabled),
-                hr_scale=float(hires_scale),
-                hr_steps=int(hires_steps),
-                hr_denoising_strength=float(hires_denoise),
-                hr_upscaler=str(hires_upscaler or ctx.settings.default_hr_upscaler),
-                checkpoint_id=ckpt_id,
-                vae_id=vae_id,
-            )
-        elif mode == "img2img":
-            if source_image is None:
-                raise gr.Error("Upload an image first.")
-            before_image = source_image.copy()
-            init_images = [source_image]
-            request = GenerationRequest(
-                mode=GenerationMode.IMG2IMG,
-                prompt=prompt_text,
-                negative_prompt=negative_text,
-                prompt_file=prompt_file_path,
-                use_prompt_file=bool(use_file),
-                prompt_seed=dynamic_seed,
-                **style_fields,
-                tags=tags,
-                steps=int(step_count),
-                cfg_scale=float(cfg_scale),
-                seed=int(seed_value),
-                sampler=sampler_id,
-                scheduler=scheduler_id,
-                denoising_strength=float(img2img_denoise),
-                clip_skip=int(clip_skip_value),
-                checkpoint_id=ckpt_id,
-            )
-        else:
-            background = inpaint_session_background(
-                inpaint_source_choice,
-                source_image,
-                editor_value,
-                session.inpaint_session,
-            )
-            if background is None:
-                raise gr.Error("Upload an image and paint a mask.")
-
-            mask = resolve_inpaint_mask(
-                editor_value,
-                session.inpaint_session,
-                session.sam_mask,
-                background.size,
-                editing_mask=bool(editing_mask),
-            )
-            if mask is None or mask.getbbox() is None:
-                raise gr.Error(
-                    "No mask found. Paint over the area, use Segment, or click **Paint mask** to restore the last mask."
-                )
-
-            session.inpaint.mask = mask.copy()
-            if session.inpaint.original is None:
-                session.inpaint.original = background.copy()
-
-            before_image = background.copy()
-            init_images = [background]
-            mask_images = [mask]
-            request = GenerationRequest(
-                mode=GenerationMode.INPAINT,
-                prompt=prompt_text,
-                negative_prompt=negative_text,
-                prompt_file=prompt_file_path,
-                use_prompt_file=bool(use_file),
-                prompt_seed=dynamic_seed,
-                **style_fields,
-                tags=tags,
-                steps=int(step_count),
-                cfg_scale=float(cfg_scale),
-                seed=int(seed_value),
-                sampler=sampler_id,
-                scheduler=scheduler_id,
-                denoising_strength=float(inpaint_denoise_value),
-                mask_blur=int(mask_blur_value),
-                seam_erode=int(seam_erode_value or 0),
-                inpaint_only_masked=(inpaint_area_value == "Only masked"),
-                inpaint_masked_padding=int(inpaint_padding_value),
-                inpaint_mask_content=str(masked_content_value or "original"),
-                clip_skip=int(clip_skip_value),
-                checkpoint_id=ckpt_id,
-            )
-
-        control_images = None
-        try:
-            checkpoint_architecture = None
-            if ckpt_id:
-                checkpoint_architecture = ctx.generation.resolve_checkpoint(ckpt_id).architecture
-            units, control_images_list = build_controlnet_stack(
-                slots=[
-                    StudioControlNetSlot(
-                        "ControlNet unit 1",
-                        bool(cn_enable),
-                        cn_model_id,
-                        cn_module,
-                        cn_image,
-                        float(cn_weight),
-                        float(cn_guidance_start),
-                        float(cn_guidance_end),
-                        float(cn_threshold_a),
-                        float(cn_threshold_b),
-                    ),
-                    StudioControlNetSlot(
-                        "ControlNet unit 2",
-                        bool(cn2_enable),
-                        cn2_model_id,
-                        cn2_module,
-                        cn2_image,
-                        float(cn2_weight),
-                        float(cn2_guidance_start),
-                        float(cn2_guidance_end),
-                        float(cn2_threshold_a),
-                        float(cn2_threshold_b),
-                    ),
-                    StudioControlNetSlot(
-                        "ControlNet unit 3",
-                        bool(cn3_enable),
-                        cn3_model_id,
-                        cn3_module,
-                        cn3_image,
-                        float(cn3_weight),
-                        float(cn3_guidance_start),
-                        float(cn3_guidance_end),
-                        float(cn3_threshold_a),
-                        float(cn3_threshold_b),
-                    ),
-                ],
-                mode=mode,
-                controlnet=ctx.controlnet,
-                checkpoint_architecture=checkpoint_architecture,
-            )
-        except ValueError as exc:
-            raise gr.Error(str(exc)) from exc
-        if units:
-            request = request.model_copy(update={"controlnet_units": units})
-            control_images = control_images_list
-
-        trace_studio_request_built(
-            mode=mode,
-            width=getattr(request, "width", None),
-            height=getattr(request, "height", None),
-            init_count=len(init_images or []),
-            mask_count=len(mask_images or []),
-            control_count=len(control_images or []),
-            checkpoint_id=ckpt_id,
-        )
-        return request, init_images, mask_images, before_image, mode, control_images
-
-    def _progress_outputs(mode_label, message, preview_image=None, hold_image=None):
-        mode_ui = apply_mode_ui(ctx, mode_label, False, hide_empty=True)
-        if preview_image is not None:
-            workspace_update = gr.update(value=preview_image, visible=True)
-        elif hold_image is not None:
-            workspace_update = gr.update(value=hold_image, visible=True)
-        else:
-            workspace_update = gr.update()
-        status_text = message if message.startswith("**") else f"**{message}**"
-        return (
-            workspace_update,
-            gr.update(visible=False),
-            gr.update(visible=False),
-            gr.update(),
-            gr.update(visible=False, value=""),
-            "",
-            status_text,
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            False,
-            False,
-            *mode_ui,
-        )
-
-    def _finished_outputs(mode_label, job, before_image, *, continuous_on: bool):
-        mode_ui = apply_mode_ui(ctx, mode_label, False, hide_empty=True)
-        can_compare = before_image is not None
-
-        if job.result is None:
-            session.loop_active = False
-            if job.state == JobState.CANCELLED:
-                status_text = "**Stopped** — generation cancelled"
-            else:
-                err = job.error or job.state.value
-                status_text = f"**Error** — {err}"
-            return (
-                gr.update(visible=True),
-                gr.update(visible=False),
-                gr.update(visible=False),
-                gr.update(visible=False, value=[]),
-                gr.update(visible=False, value=""),
-                "",
-                status_text,
-                -1,
-                [],
-                None,
-                before_image,
-                gr.update(),
-                gr.update(value=False),
-                False,
-                False,
-                *apply_mode_ui(ctx, mode_label, False),
-            )
-
-        infotext = job.result.infotexts[0] if job.result.infotexts else ""
-        primary, images, infotext, job_status = format_generation_outputs(
-            job.result.images,
-            infotext,
-            job.state.value,
-        )
-        gallery_update = gr.update(value=images, visible=len(images) > 1, columns=min(2, len(images)))
-        new_seed = job.result.seeds[0] if job.result.seeds else -1
-        done_status = _result_summary_md(job, new_seed, job_status)
-        applied_tags = job.request.tags
-        if applied_tags:
-            ctx.tags.remember_tags(applied_tags, save=ctx.save_settings)
-        tag_line = format_tag_summary(applied_tags)
-        quick_tag_update = gr.update(choices=ctx.tags.recent_tag_choices())
-        toggle_update = gr.update(value=continuous_on) if continuous_on else gr.update()
-        return (
-            gr.update(value=primary, visible=True),
-            gr.update(visible=False),
-            gr.update(visible=can_compare, value="Compare"),
-            gallery_update,
-            gr.update(value=tag_line, visible=bool(tag_line)),
-            infotext,
-            done_status,
-            new_seed,
-            list(job.result.seeds),
-            primary,
-            before_image,
-            quick_tag_update,
-            toggle_update,
-            False,
-            False,
-            *mode_ui,
-        )
-
-    def _run_once(mode_label, all_inputs, *, keep_continuous_toggle: bool, image_postprocess=None):
-        try:
-            request, init_images, mask_images, before_image, mode, control_images = _generation_request(
-                *all_inputs
-            )
-        except Exception as exc:
-            trace_exception_safe("studio.request_build", exc, mode=mode_label)
-            raise
-        hold_image = before_image or (init_images[0] if init_images else None)
-        yield _progress_outputs(mode_label, "Queued", hold_image=hold_image)
-        try:
-            for event in service.submit_streaming(
-                request,
-                init_images=init_images,
-                mask_images=mask_images,
-                control_images=control_images,
-                image_postprocess=image_postprocess,
-            ):
-                if event[0] == "progress":
-                    _, _step, _total, message, preview = event
-                    yield _progress_outputs(
-                        mode_label,
-                        message,
-                        preview_image=preview,
-                        hold_image=hold_image if preview is None else None,
-                    )
-                else:
-                    _, job = event
-                    trace_job_record_state(job.id, job.state, job.error)
-                    yield _finished_outputs(
-                        mode_label,
-                        job,
-                        before_image if mode != "txt2img" else None,
-                        continuous_on=keep_continuous_toggle,
-                    )
-        except Exception as exc:
-            trace_exception_safe(
-                "studio.generate_stream",
-                exc,
-                mode=mode_label,
-                checkpoint_id=request.checkpoint_id,
-            )
-            raise
-
-    def run(
-        mode_label,
-        editing_mask,
-        prompt_text,
-        negative_text,
-        ckpt_title,
-        sampler_label,
-        scheduler_label,
-        step_count,
-        cfg_scale,
-        clip_skip_value,
-        w,
-        h,
-        bs,
-        bc,
-        seed_value,
-        vae_id,
-        hires_enabled,
-        hires_scale,
-        hires_steps,
-        hires_denoise,
-        hires_upscaler,
-        img2img_denoise,
-        inpaint_denoise_value,
-        mask_blur_value,
-        seam_erode_value,
-        inpaint_area_value,
-        inpaint_padding_value,
-        masked_content_value,
-        source_image,
-        editor_value,
-        ckpt_map,
-        tags_text,
-        use_file,
-        prompt_file_path,
-        style_name,
-        style_template_prompt,
-        style_template_negative,
-        cn_enable,
-        cn_model,
-        cn_module,
-        cn_image,
-        cn_weight,
-        cn_guidance_start,
-        cn_guidance_end,
-        cn_threshold_a,
-        cn_threshold_b,
-        cn2_enable,
-        cn2_model,
-        cn2_module,
-        cn2_image,
-        cn2_weight,
-        cn2_guidance_start,
-        cn2_guidance_end,
-        cn2_threshold_a,
-        cn2_threshold_b,
-        cn3_enable,
-        cn3_model,
-        cn3_module,
-        cn3_image,
-        cn3_weight,
-        cn3_guidance_start,
-        cn3_guidance_end,
-        cn3_threshold_a,
-        cn3_threshold_b,
-        inpaint_source,
-        continuous_enabled,
-        cooldown_wait,
-        *reactor_args,
-    ):
-        session.loop_active = True
-        ctx.settings.generation_cooldown_seconds = float(cooldown_wait or 0)
-        ctx.save_settings()
-
-        post_swap = None
-        if reactor_args:
-            (rx_on, rx_src, rx_sidx, rx_tidx, rx_restore, rx_restorer,
-             rx_vis, rx_cf, rx_model, rx_gs, rx_gt, rx_mask) = reactor_args
-            if rx_on and rx_src is not None:
-                def post_swap(image):
-                    try:
-                        opts = FaceSwapOptions(
-                            source_face_index=max(0, int(rx_sidx or 0)),
-                            target_face_index=int(rx_tidx if rx_tidx is not None else -1),
-                            model_id=rx_model or "inswapper_128",
-                            gender_source=int(rx_gs or 0),
-                            gender_target=int(rx_gt or 0),
-                            mask_face=bool(rx_mask),
-                            restore_face=bool(rx_restore),
-                            restorer_id=rx_restorer,
-                            restore_visibility=float(rx_vis),
-                            codeformer_weight=float(rx_cf),
-                        )
-                        rfn = None
-                        if rx_restore and rx_restorer:
-                            def rfn(im):
-                                return ctx.enhance.restore(
-                                    im,
-                                    RestoreOptions(
-                                        model_id=rx_restorer,
-                                        visibility=float(rx_vis),
-                                        codeformer_weight=float(rx_cf),
-                                    ),
-                                )
-                        return ctx.faceswap.swap(image, rx_src, opts, restore_fn=rfn)
-                    except Exception as exc:
-                        trace_exception_safe("studio.reactor_at_gen", exc)
-                        return image
-
-        try:
-            run_number = 0
-            while session.loop_active:
-                run_number += 1
-                trace_studio_generate(
-                    run_number=run_number,
-                    mode_label=mode_label,
-                    continuous=bool(continuous_enabled),
-                    editing_mask=bool(editing_mask),
-                    has_source=source_image is not None,
-                    has_editor_value=editor_value is not None,
-                    cn_enabled=bool(cn_enable),
-                    input_count=len(generate_inputs),
-                )
-                if continuous_enabled and run_number > 1:
-                    yield _progress_outputs(mode_label, f"Run {run_number}", hold_image=source_image)
-
-                base_seed = int(seed_value)
-                if base_seed < 0:
-                    dynamic_seed = None
-                elif continuous_enabled:
-                    dynamic_seed = base_seed + run_number - 1
-                else:
-                    dynamic_seed = base_seed
-
-                request_inputs = (
-                    mode_label,
-                    editing_mask,
-                    prompt_text,
-                    negative_text,
-                    ckpt_title,
-                    sampler_label,
-                    scheduler_label,
-                    step_count,
-                    cfg_scale,
-                    clip_skip_value,
-                    w,
-                    h,
-                    bs,
-                    bc,
-                    seed_value,
-                    vae_id,
-                    hires_enabled,
-                    hires_scale,
-                    hires_steps,
-                    hires_denoise,
-                    hires_upscaler,
-                    img2img_denoise,
-                    inpaint_denoise_value,
-                    mask_blur_value,
-                    seam_erode_value,
-                    inpaint_area_value,
-                    inpaint_padding_value,
-                    masked_content_value,
-                    source_image,
-                    editor_value,
-                    ckpt_map,
-                    tags_text,
-                    use_file,
-                    prompt_file_path,
-                    dynamic_seed,
-                    style_name,
-                    style_template_prompt,
-                    style_template_negative,
-                    cn_enable,
-                    cn_model,
-                    cn_module,
-                    cn_image,
-                    cn_weight,
-                    cn_guidance_start,
-                    cn_guidance_end,
-                    cn_threshold_a,
-                    cn_threshold_b,
-                    cn2_enable,
-                    cn2_model,
-                    cn2_module,
-                    cn2_image,
-                    cn2_weight,
-                    cn2_guidance_start,
-                    cn2_guidance_end,
-                    cn2_threshold_a,
-                    cn2_threshold_b,
-                    cn3_enable,
-                    cn3_model,
-                    cn3_module,
-                    cn3_image,
-                    cn3_weight,
-                    cn3_guidance_start,
-                    cn3_guidance_end,
-                    cn3_threshold_a,
-                    cn3_threshold_b,
-                    inpaint_source,
-                )
-
-                for update in _run_once(
-                    mode_label,
-                    request_inputs,
-                    keep_continuous_toggle=continuous_enabled and session.loop_active,
-                    image_postprocess=post_swap,
-                ):
-                    yield update
-
-                if not session.loop_active:
-                    break
-                if not continuous_enabled:
-                    break
-
-                wait_s = max(0, int(cooldown_wait or 0))
-                for remaining in range(wait_s, 0, -1):
-                    if not session.loop_active:
-                        break
-                    yield _progress_outputs(mode_label, f"Cooling — next run in {remaining}s")
-                    time.sleep(1)
-        finally:
-            session.loop_active = False
-
-    def _run_reactor(
-        workspace_result,
-        stored_result,
-        source_image,
-        source_idx,
-        target_idx,
-        do_restore,
-        restorer_id,
-        visibility,
-        cf_weight,
-        do_blend,
-        blend_denoise,
-        prompt_text,
-        negative_text,
-        ckpt_title,
-        sampler_label,
-        step_count,
-        cfg_scale,
-        clip_skip_value,
-        seed_value,
-        vae_id,
-        style_name,
-        ckpt_map,
-        tags_text,
-        use_file,
-        prompt_file_path,
-        model_id_in,
-        gender_src_in,
-        gender_tgt_in,
-        mask_in,
-    ):
-        target = stored_result or workspace_result
-        if target is None:
-            raise gr.Error("Generate an image first, then run ReActor on the result.")
-        if source_image is None:
-            raise gr.Error("Upload a source face image.")
-
-        options = FaceSwapOptions(
-            source_face_index=max(0, int(source_idx or 0)),
-            target_face_index=int(target_idx if target_idx is not None else -1),
-            model_id=model_id_in or "inswapper_128",
-            gender_source=int(gender_src_in or 0),
-            gender_target=int(gender_tgt_in or 0),
-            mask_face=bool(mask_in),
-            restore_face=bool(do_restore),
-            restorer_id=restorer_id,
-            restore_visibility=float(visibility),
-            codeformer_weight=float(cf_weight),
-        )
-
-        restore_fn = None
-        if do_restore and restorer_id:
-            def restore_fn(image):
-                return ctx.enhance.restore(
-                    image,
-                    RestoreOptions(
-                        model_id=restorer_id,
-                        visibility=float(visibility),
-                        codeformer_weight=float(cf_weight),
-                    ),
-                )
-
-        try:
-            swapped = ctx.faceswap.swap(target, source_image, options, restore_fn=restore_fn)
-        except FaceSwapUnavailable as exc:
-            raise gr.Error(str(exc))
-
-        result_image = swapped
-        status_parts = ["**ReActor complete.**"]
-
-        if do_blend:
-            try:
-                ckpt_id = resolve_checkpoint_id(ckpt_title, ckpt_map)
-            except gr.Error as exc:
-                raise gr.Error(f"No checkpoint available for seam blend. {exc}") from exc
-            sampler_id = sampler_map.get(sampler_label, "euler_a")
-            blend_request = GenerationRequest(
-                mode=GenerationMode.IMG2IMG,
-                prompt=prompt_text,
-                negative_prompt=negative_text,
-                prompt_file=prompt_file_path,
-                use_prompt_file=bool(use_file),
-                style_name=style_name or None,
-                tags=parse_tags(tags_text or ""),
-                steps=int(step_count),
-                cfg_scale=float(cfg_scale),
-                seed=int(seed_value),
-                sampler=sampler_id,
-                scheduler=normalize_schedule_id_for_sampler(sampler_id, "automatic"),
-                denoising_strength=float(blend_denoise),
-                clip_skip=int(clip_skip_value),
-                checkpoint_id=ckpt_id,
-                vae_id=vae_id,
-            )
-            job = service.submit(blend_request, init_images=[swapped])
-            if job.result is None or not job.result.images:
-                raise gr.Error(job.error or "Seam blend img2img failed.")
-            result_image = job.result.images[0]
-            status_parts.append(f"Seam blend at **{float(blend_denoise):.2f}** denoise.")
-
-        return (
-            gr.update(value=result_image, visible=True),
-            result_image,
-            " ".join(status_parts),
-            gr.update(visible=True, value="Compare"),
-            gr.update(visible=False),
+    def run(*args):
+        post_swap = build_reactor_generation_postprocess_from_args(ctx, args[GENERATION_RUNNER_INPUT_COUNT:])
+        yield from generation_runner.run(
+            *args[:GENERATION_RUNNER_INPUT_COUNT],
+            image_postprocess=post_swap,
+            input_count=len(generate_inputs),
         )
 
     reactor_btn.click(
-        _run_reactor,
+        partial(reactor_handlers.run_reactor, ctx, service, catalogs),
         inputs=[
             workspace_image,
             last_result,
@@ -2634,75 +1908,21 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         show_progress="minimal",
     )
 
-    def toggle_compare(showing, before, after):
-        if before is None or after is None:
-            raise gr.Error("Generate an image first to compare.")
-        aligned_before, aligned_after = align_compare_pair(before, after)
-        new_show = not showing
-        if new_show:
-            return (
-                True,
-                gr.update(visible=False),
-                gr.update(visible=True, value=(aligned_before, aligned_after)),
-                gr.update(value="Hide compare"),
-            )
-        return (
-            False,
-            gr.update(visible=True, value=after),
-            gr.update(visible=False),
-            gr.update(value="Compare"),
-        )
-
     compare_btn.click(
-        toggle_compare,
+        compare_handlers.toggle_compare,
         inputs=[show_compare, last_before, last_result],
         outputs=[show_compare, workspace_image, compare_slider, compare_btn],
     )
 
-    def _save_bad_image(image, infotext):
-        if image is None:
-            raise gr.Error("Generate or select an image first.")
-        record = ctx.failure_archive.archive_bad_image(
-            image,
-            infotext=infotext or "",
-            note="Marked from Image tab",
-        )
-        if not record.ok:
-            return f"**Failure gallery** -- saved with archive warnings: {record.archive_dir}"
-        return f"**Failure gallery** -- saved bad result: {record.archive_dir}"
-
     save_bad_image.click(
-        _save_bad_image,
+        partial(result_actions.save_bad_image, ctx),
         inputs=[last_result, info],
         outputs=[status],
         show_progress=False,
     )
 
     def _on_gallery_select(evt: gr.SelectData, seeds: list, img_w: int, img_h: int):
-        """Promote selected gallery image to workspace; optionally send seed/size."""
-        selected_image = evt.value
-        if isinstance(selected_image, dict):
-            selected_image = selected_image.get("image") or selected_image.get("value")
-
-        seed_update = gr.update()
-        width_update = gr.update()
-        height_update = gr.update()
-
-        if getattr(ctx.settings, "send_seed_on_click", True) and seeds:
-            idx = evt.index if isinstance(evt.index, int) else (evt.index[0] if evt.index else 0)
-            if 0 <= idx < len(seeds):
-                seed_update = gr.update(value=seeds[idx])
-
-        if getattr(ctx.settings, "send_size_on_click", True) and selected_image is not None:
-            try:
-                from PIL import Image as _PILImage
-                if isinstance(selected_image, _PILImage.Image):
-                    width_update = gr.update(value=selected_image.width)
-                    height_update = gr.update(value=selected_image.height)
-            except Exception:
-                pass
-
-        return selected_image, seed_update, width_update, height_update
+        return result_actions.on_gallery_select(ctx.settings, evt, seeds, img_w, img_h)
 
     gallery.select(
         _on_gallery_select,

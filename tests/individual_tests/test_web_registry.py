@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from aiwf.web.app import register_default_tabs
+from aiwf.core.config.settings import UserSettings
 from aiwf.web.registry import WebRegistry
 from aiwf.web.tabs.settings import TAB_VISIBILITY_CHOICES
 
@@ -42,10 +43,20 @@ def test_default_tabs_include_shipped_workspace_tabs():
 
     names = [name for name, _builder, _order in registry.tabs]
 
-    for expected in ("Image", "Chat", "Models", "Segment", "Face Swap", "Video", "RIFE", "Training", "Settings"):
+    for expected in ("Image", "Image Lab", "Chat", "Models", "Segment", "Face Swap", "Video", "RIFE", "Training", "Settings"):
         assert expected in names
 
-    assert names[:3] == ["Image", "Video", "Chat"]
+    assert names[:3] == ["Image", "Image Lab", "Video"]
+
+
+def test_default_user_settings_show_core_navigation_only():
+    registry = WebRegistry()
+    register_default_tabs(registry)
+    ctx = SimpleNamespace(settings=UserSettings())
+
+    visible = [name for name, _builder, _order in registry.visible_tabs(ctx)]
+
+    assert visible == ["Image", "Image Lab", "Video", "Chat", "Training", "Settings"]
 
 
 def test_training_tab_is_shipped_even_with_wip_tabs(monkeypatch):
@@ -62,10 +73,10 @@ def test_training_tab_is_shipped_even_with_wip_tabs(monkeypatch):
 
 
 def test_settings_visibility_choices_include_secondary_shipped_tabs():
-    for expected in ("Models", "Chat", "Segment", "Enhance", "Face Swap", "Video", "RIFE", "Training"):
+    for expected in ("Image Lab", "Models", "Chat", "Segment", "Enhance", "Face Swap", "Video", "RIFE", "Training"):
         assert expected in TAB_VISIBILITY_CHOICES
 
-    assert TAB_VISIBILITY_CHOICES[:3] == ["Video", "Models", "Chat"]
+    assert TAB_VISIBILITY_CHOICES[:3] == ["Image Lab", "Video", "Models"]
 
 
 def test_wan_video_route_filters_keep_runtime_families_separate():
@@ -90,6 +101,32 @@ def test_wan_video_route_filters_keep_runtime_families_separate():
         ("Tested 14B FP8: streamed group offload", "streamed")
     ]
     assert _default_offload_for_runtime(WAN_RUNTIME_HIGH_LOW_FP8, "balanced") == "streamed"
+
+
+def test_wan_service_factory_passes_image_backend_unload_hook(tmp_path):
+    from aiwf.core.config.settings import RuntimeFlags
+    from aiwf.web.tabs.wan_i2v import _SERVICES, _service
+
+    calls = []
+    backend = SimpleNamespace(unload=lambda: calls.append("unload"))
+    ctx = SimpleNamespace(
+        flags=RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", output_dir=tmp_path / "out"),
+        settings=UserSettings(),
+        generation=SimpleNamespace(backend=backend),
+        supervisor=None,
+        failure_archive=None,
+        genlog=None,
+    )
+
+    try:
+        service = _service(ctx)
+        assert callable(service._unload_image_models)
+
+        service._unload_image_models()
+
+        assert calls == ["unload"]
+    finally:
+        _SERVICES.pop(id(ctx), None)
 
 
 def test_wan_video_display_path_must_exist(tmp_path):

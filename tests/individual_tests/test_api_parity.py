@@ -231,6 +231,20 @@ def test_native_controlnet_and_plugin_endpoints_are_available():
     assert client.get("/sdapi/v1/extensions").json()[0]["enabled"] is True
 
 
+def test_native_image_maturity_endpoint_lists_core_routes():
+    client, _ = make_client()
+
+    response = client.get("/api/v1/image/maturity")
+
+    assert response.status_code == 200
+    data = response.json()
+    routes = {route["route"]: route for route in data["routes"]}
+    assert data["target_score"] == 8.0
+    assert routes["txt2img"]["benchmark_kind"] == "txt2img"
+    assert routes["controlnet"]["benchmark_kind"] == "controlnet"
+    assert routes["flux-txt2img"]["status"] == "maturing"
+
+
 def test_native_xyz_plot_endpoint_returns_grid():
     client, _ = make_client()
 

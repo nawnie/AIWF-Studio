@@ -136,9 +136,24 @@ class UserSettings(BaseSettings):
     wildcards_dir: str = "wildcards"
     prompt_styles: list[PromptStyle] = Field(default_factory=list)
     accent_preset: str = "mint"
+    modern_onboarding_seen: bool = False
+    github_avatar_url: str = "https://github.com/nawnie.png?size=160"
     # Hidden tabs keep unfinished/heavy surfaces out of the default local UI
     # without deleting the underlying feature routes.
-    hidden_tabs: list[str] = Field(default_factory=lambda: ["Audio", "Chat", "RIFE", "Training", "Workflows"])
+    hidden_tabs: list[str] = Field(
+        default_factory=lambda: [
+            "Audio",
+            "Models",
+            "Enhance",
+            "Segment",
+            "Face Swap",
+            "RIFE",
+            "Library",
+            "PNG Info",
+            "History",
+            "Workflows",
+        ]
+    )
 
     # Generation defaults — applied as the Studio tab's initial values.
     default_sampler: str = "euler_a"

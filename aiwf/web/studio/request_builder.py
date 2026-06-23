@@ -96,6 +96,8 @@ def build_generation_request(
     cn3_threshold_b=200.0,
     controlnet: ControlNetService | None = None,
     checkpoint_architecture: str | None = None,
+    resolve_checkpoint_architecture=None,
+    default_hr_upscaler: str = "lanczos",
 ):
     # Raise gr.Error for user-correctable validation so Gradio renders the
     # message in the UI instead of exposing a traceback.
@@ -139,7 +141,7 @@ def build_generation_request(
             hr_scale=float(hires_scale),
             hr_steps=int(hires_steps),
             hr_denoising_strength=float(hires_denoise),
-            hr_upscaler=str(hires_upscaler or "lanczos"),
+            hr_upscaler=str(hires_upscaler or default_hr_upscaler),
             checkpoint_id=ckpt_id,
             vae_id=vae_id,
         )
@@ -223,6 +225,8 @@ def build_generation_request(
     # ControlNet validation is centralized here because route compatibility
     # depends on both the active mode and the selected checkpoint architecture.
     try:
+        if checkpoint_architecture is None and resolve_checkpoint_architecture is not None and ckpt_id:
+            checkpoint_architecture = resolve_checkpoint_architecture(ckpt_id)
         units, control_images_list = build_controlnet_stack(
             slots=[
                 StudioControlNetSlot(

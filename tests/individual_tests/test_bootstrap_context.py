@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from aiwf.core.config.settings import RuntimeFlags
@@ -47,10 +48,11 @@ class _FakeBackend:
 def test_build_context_does_not_download_optional_segment_models_at_boot(tmp_path: Path):
     ensure_default_models = MagicMock()
 
-    with patch("aiwf.bootstrap.DeviceManager", _FakeDevices), patch(
-        "aiwf.bootstrap.DiffusersBackend", _FakeBackend
+    with patch("aiwf.bootstrap._create_device_manager", lambda flags: _FakeDevices(flags)), patch(
+        "aiwf.bootstrap._create_diffusers_backend", lambda flags, devices: _FakeBackend(flags, devices)
     ), patch(
-        "aiwf.bootstrap.SegmentService.ensure_default_models", ensure_default_models
+        "aiwf.bootstrap._create_segment_service",
+        lambda flags, settings, devices, *, supervisor: SimpleNamespace(ensure_default_models=ensure_default_models),
     ), patch(
         "aiwf.dev.diagnostics.install_dev_diagnostics", lambda ctx: None
     ):

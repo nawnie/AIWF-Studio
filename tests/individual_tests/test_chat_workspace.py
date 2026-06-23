@@ -8,6 +8,7 @@ from aiwf.web.tabs.chat_workspace import (
     _atlas_context,
     _atlas_training_path,
     _build_atlas_qlora_request,
+    _format_chat_signals,
 )
 
 
@@ -19,6 +20,14 @@ def test_atlas_training_path_resolves_packet_training_data(tmp_path: Path):
 
     assert _atlas_training_path(str(packet)) == str(data)
     assert _atlas_training_path(str(data)) == str(data)
+
+
+def test_format_chat_signals_summarizes_backend_models_and_trainer():
+    summary = _format_chat_signals(alive=True, models=["qwen", "smol"], trainer_ready=False)
+
+    assert "Backend:** online" in summary
+    assert "Models:** 2" in summary
+    assert "Trainer:** not ready" in summary
 
 
 def test_build_atlas_qlora_request_is_for_qlora_messages_dataset(tmp_path: Path):

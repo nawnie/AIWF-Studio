@@ -63,6 +63,7 @@ SUITES: dict[str, tuple[str, ...]] = {
         "test_default_negative_and_clamp.py",
         "test_generate_wiring.py",
         "test_generation_prompts.py",
+        "test_image_lab.py",
         "test_mask.py",
         "test_outpaint.py",
         "test_preload_guard.py",

@@ -22,10 +22,8 @@ from aiwf.api.schemas import (
 from aiwf.core.domain.controlnet import ControlNetUnit
 from aiwf.core.domain.enhance import RestoreOptions, UpscaleOptions
 from aiwf.core.domain.generation import JobRecord, JobState
-from aiwf.infrastructure.diffusers.mask import prepare_inpaint_mask
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest
 from aiwf.core.infotext import normalize_sampler
-from aiwf.services.plot import PlotRequest
 
 if TYPE_CHECKING:
     from aiwf.bootstrap import AppContext
@@ -202,6 +200,12 @@ def build_router(ctx: AppContext) -> APIRouter:
     def health():
         return {"status": "ok", "version": "0.1.0"}
 
+    @native.get("/image/maturity")
+    def image_maturity():
+        from aiwf.services.image_lab import image_maturity_matrix
+
+        return image_maturity_matrix().model_dump(mode="json")
+
     @native.get("/models")
     def models():
         return [c.model_dump() for c in ctx.generation.list_checkpoints()]
@@ -320,6 +324,8 @@ def build_router(ctx: AppContext) -> APIRouter:
 
     @native.post("/xyz-plot")
     def xyz_plot(payload: PlotPayload):
+        from aiwf.services.plot import PlotRequest
+
         request = PlotRequest(
             base=GenerationRequest(mode=GenerationMode.TXT2IMG, **payload.base.model_dump()),
             axes=[axis.model_dump() for axis in payload.axes],
@@ -345,6 +351,8 @@ def build_router(ctx: AppContext) -> APIRouter:
         request = GenerationRequest(mode=GenerationMode.INPAINT, **data)
 
         init_image = _decode(images[0])
+        from aiwf.infrastructure.diffusers.mask import prepare_inpaint_mask
+
         mask = prepare_inpaint_mask(_decode(mask_b64), size=init_image.size)
         if mask is None or mask.getbbox() is None:
             raise HTTPException(422, "mask_image must contain painted regions")
@@ -461,6 +469,8 @@ def build_router(ctx: AppContext) -> APIRouter:
         init_image = _decode(images[0])
         mask_images = None
         if payload.get("mask"):
+            from aiwf.infrastructure.diffusers.mask import prepare_inpaint_mask
+
             mask = prepare_inpaint_mask(_decode(payload["mask"]), size=init_image.size)
             if mask is None or mask.getbbox() is None:
                 raise HTTPException(422, "mask must contain painted regions")

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+
+from PIL import Image
 
 from aiwf.workers import pipeline_benchmark
 
@@ -92,11 +95,79 @@ def test_run_with_receipt_writes_failed_receipt(tmp_path: Path, monkeypatch):
 
 def test_unknown_benchmark_kind_fails():
     try:
-        pipeline_benchmark.run_benchmark({"kind": "txt2img"})
+        pipeline_benchmark.run_benchmark({"kind": "nope"})
     except ValueError as exc:
-        assert "probe" in str(exc)
+        assert "txt2img" in str(exc)
+        assert "controlnet" in str(exc)
     else:
         raise AssertionError("unknown kind should fail")
+
+
+def test_image_benchmark_routes_wire_inputs(tmp_path: Path, monkeypatch):
+    calls = []
+
+    class FakeBackend:
+        def __init__(self, _flags, _devices):
+            pass
+
+        def generate(
+            self,
+            request,
+            init_images=None,
+            mask_images=None,
+            control_images=None,
+            preview_every_n_steps=0,
+        ):
+            calls.append(
+                {
+                    "request": request,
+                    "init_images": init_images,
+                    "mask_images": mask_images,
+                    "control_images": control_images,
+                    "preview_every_n_steps": preview_every_n_steps,
+                }
+            )
+            return SimpleNamespace(images=[Image.new("RGB", (8, 8), "blue")])
+
+    source = tmp_path / "source.png"
+    mask = tmp_path / "mask.png"
+    control = tmp_path / "control.png"
+    Image.new("RGB", (8, 8), "white").save(source)
+    Image.new("L", (8, 8), 255).save(mask)
+    Image.new("RGB", (8, 8), "black").save(control)
+
+    monkeypatch.setattr(pipeline_benchmark, "_flags_from_config", lambda _config: SimpleNamespace())
+    monkeypatch.setattr("aiwf.infrastructure.torch.devices.DeviceManager", lambda _flags: SimpleNamespace())
+    monkeypatch.setattr("aiwf.infrastructure.diffusers.backend.DiffusersBackend", FakeBackend)
+
+    inpaint = pipeline_benchmark.run_benchmark(
+        {
+            "kind": "inpaint",
+            "init_image": str(source),
+            "mask_image": str(mask),
+            "request": {"prompt": "repair", "steps": 3},
+        }
+    )
+    controlnet = pipeline_benchmark.run_benchmark(
+        {
+            "kind": "controlnet",
+            "control_image": str(control),
+            "request": {"prompt": "edge", "steps": 4},
+        }
+    )
+    hires = pipeline_benchmark.run_benchmark({"kind": "hires", "request": {"prompt": "large", "steps": 5}})
+
+    assert inpaint["kind"] == "inpaint"
+    assert inpaint["inputs"] == {"init_image": True, "mask_image": True, "control_image": False}
+    assert controlnet["kind"] == "controlnet"
+    assert controlnet["inputs"] == {"init_image": False, "mask_image": False, "control_image": True}
+    assert hires["kind"] == "hires"
+    assert hires["request"]["enable_hr"] is True
+    assert calls[0]["request"].mode == "inpaint"
+    assert calls[0]["init_images"] and calls[0]["mask_images"]
+    assert calls[1]["request"].mode == "txt2img"
+    assert calls[1]["control_images"]
+    assert calls[2]["request"].enable_hr is True
 
 
 def test_probe_benchmark_returns_capabilities(monkeypatch):

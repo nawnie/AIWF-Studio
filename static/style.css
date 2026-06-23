@@ -963,6 +963,144 @@ fieldset.aiwf-resolution-ratio-square {
     gap: 0.55rem !important;
 }
 
+.aiwf-chat-workbench {
+    align-items: stretch !important;
+    gap: 1rem !important;
+}
+
+.aiwf-chat-main,
+.aiwf-chat-control-panel {
+    gap: 0.75rem !important;
+    padding: 0.9rem 1rem !important;
+    background: var(--aiwf-surface) !important;
+    border: 1px solid var(--aiwf-border) !important;
+    border-radius: var(--aiwf-radius-lg) !important;
+    box-shadow: var(--aiwf-shadow-inset);
+}
+
+.aiwf-chat-main > .block,
+.aiwf-chat-control-panel > .block,
+.aiwf-chat-tab-panel > .block {
+    margin: 0 !important;
+}
+
+.aiwf-chatbot {
+    min-height: 620px;
+}
+
+.aiwf-chatbot .bubble-wrap {
+    padding-bottom: 0.5rem !important;
+}
+
+.aiwf-chat-composer {
+    align-items: stretch !important;
+    gap: 0.55rem !important;
+}
+
+.aiwf-chat-composer textarea {
+    min-height: 3rem !important;
+    max-height: 9rem !important;
+    resize: vertical !important;
+}
+
+.aiwf-chat-composer button,
+.aiwf-chat-actions button {
+    min-height: 3rem !important;
+}
+
+.aiwf-chat-actions {
+    justify-content: flex-start !important;
+    gap: 0.55rem !important;
+}
+
+.aiwf-chat-actions > * {
+    flex: 0 1 10rem !important;
+}
+
+.aiwf-chat-status,
+.aiwf-chat-signals {
+    margin: 0 !important;
+    padding: 0.6rem 0.7rem !important;
+    background: var(--aiwf-bg) !important;
+    border: 1px solid var(--aiwf-border) !important;
+    border-radius: var(--aiwf-radius) !important;
+    box-shadow: var(--aiwf-shadow-inset);
+}
+
+.aiwf-chat-status p,
+.aiwf-chat-signals p {
+    margin: 0 !important;
+    font-size: 0.78rem !important;
+    line-height: 1.5 !important;
+    color: var(--aiwf-text-muted) !important;
+}
+
+.aiwf-chat-signals strong {
+    color: var(--aiwf-text) !important;
+}
+
+.aiwf-chat-tool-tabs {
+    margin-top: 0.1rem;
+}
+
+.aiwf-chat-tool-tabs > .tab-nav {
+    gap: 0.15rem !important;
+    padding: 0.25rem !important;
+    background: var(--aiwf-bg) !important;
+    border: 1px solid var(--aiwf-border) !important;
+    border-radius: var(--aiwf-radius) !important;
+    margin-bottom: 0.65rem !important;
+}
+
+.aiwf-chat-tool-tabs .tab-nav button {
+    font-family: var(--aiwf-font) !important;
+    font-size: 0.78rem !important;
+    font-weight: 600 !important;
+    border-radius: 7px !important;
+    color: var(--aiwf-text-muted) !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+}
+
+.aiwf-chat-tool-tabs .tab-nav button:hover {
+    color: var(--aiwf-text) !important;
+    background: var(--aiwf-surface-hover) !important;
+}
+
+.aiwf-chat-tool-tabs .tab-nav button.selected {
+    color: var(--aiwf-accent-bright) !important;
+    background: var(--aiwf-accent-soft) !important;
+    border-color: color-mix(in srgb, var(--aiwf-accent) 35%, transparent) !important;
+}
+
+.aiwf-chat-tab-panel {
+    gap: 0.65rem !important;
+    padding: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+.aiwf-chat-tab-panel textarea {
+    font-family: var(--aiwf-mono) !important;
+    font-size: 0.78rem !important;
+}
+
+@media (max-width: 1180px) {
+    .aiwf-chat-workbench {
+        flex-direction: column !important;
+    }
+
+    .aiwf-chat-main,
+    .aiwf-chat-control-panel {
+        min-width: 0 !important;
+    }
+
+    .aiwf-chatbot {
+        min-height: min(62vh, 560px);
+    }
+}
+
 .aiwf-panel-divider {
     height: 1px;
     margin: 0.15rem 0;

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gc
 import logging
 import math
 from pathlib import Path
@@ -18,15 +17,12 @@ from aiwf.core.domain.wan import (
     WAN_RUNTIME_FAST_5B,
     WAN_RUNTIME_HIGH_LOW,
     WAN_RUNTIME_HIGH_LOW_FP8,
-    WAN_TI2V_5B,
-    WanI2VRequest,
     duration_seconds_for_frames,
     frames_for_duration_seconds,
 )
 from aiwf.infrastructure.faceswap import FaceSwapUnavailable
 from aiwf.infrastructure.rife import RifeUnavailable
 from aiwf.infrastructure.video import VideoError, extract_first_frame
-from aiwf.infrastructure.wan import WanUnavailable
 from aiwf.services.rife import RifeService
 from aiwf.services.audio import AudioGenerationService, AudioUnavailable
 from aiwf.services.ltx import LtxService, LtxUnavailable
@@ -49,6 +45,7 @@ from aiwf.web.studio.resolution import (
     NON_SQUARE_ASPECT_RATIO_PRESETS,
     dimensions_from_generation_preset,
 )
+from aiwf.web.video.wan_controller import WanVideoController
 
 _SERVICES: dict[int, WanService] = {}
 _RIFE_SERVICES: dict[int, RifeService] = {}
@@ -114,6 +111,7 @@ def _service(ctx: AppContext) -> WanService:
         svc = WanService(
             ctx.flags,
             ctx.settings,
+            unload_image_models=ctx.generation.backend.unload,
             supervisor=ctx.supervisor,
             failure_archive=ctx.failure_archive,
             genlog=ctx.genlog,
@@ -257,6 +255,12 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         vsr_service = _vsr_service(ctx)
         audio_service = _audio_service(ctx)
         ltx_service = _ltx_service(ctx)
+        wan_controller = WanVideoController(
+            ctx,
+            service,
+            step_summary_for_runtime=_step_summary_for_runtime,
+            format_rate=_format_it_s,
+        )
         rife_ckpts = rife_service.list_checkpoints()
         default_rife_ckpt = rife_service.default_checkpoint()
         vsr_help = vsr_service.folder_help()
@@ -1726,35 +1730,6 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             show_progress=False,
         )
 
-        def _release_memory_before_postprocess(label: str):
-            try:
-                service.unload_models()
-            except Exception:
-                logger.exception("Failed to unload Wan models before %s post-processing.", label)
-            try:
-                ctx.generation.backend.unload()
-            except Exception:
-                logger.debug("Image backend unload before %s failed.", label, exc_info=True)
-            gc.collect()
-            try:
-                ctx.generation.backend.devices.empty_cache()
-            except Exception:
-                logger.debug("Device cache cleanup before %s failed.", label, exc_info=True)
-
-        def _release_memory_before_reactor():
-            _release_memory_before_postprocess("ReActor")
-            try:
-                ctx.faceswap.unload()
-            except Exception:
-                logger.debug("Face swap unload before ReActor failed.", exc_info=True)
-
-        def _uploaded_file_path(value) -> str | None:
-            if value is None:
-                return None
-            if isinstance(value, str):
-                return value
-            return getattr(value, "name", None) or getattr(value, "path", None)
-
         def _run(
             image,
             prompt_v,
@@ -1884,69 +1859,37 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     "Select 'Default' or a UMT5-XXL file (umt5-xxl-*.gguf or umt5/nsfw_wan_*.safetensors)."
                 )
 
-            step_count, _step_ratio = _step_summary_for_runtime(selected_runtime, high_steps_v, low_steps_v)
-            high_stage_steps = max(1, int(high_steps_v or 0))
-            low_stage_steps = max(1, int(low_steps_v or 0))
-
-            request = WanI2VRequest(
-                prompt=prompt_v or "",
-                negative_prompt=negative_v or "",
-                width=int(width_v),
-                height=int(height_v),
-                num_frames=int(frames_v),
-                fps=int(fps_v),
-                steps=step_count,
-                high_noise_steps=high_stage_steps,
-                low_noise_steps=low_stage_steps,
-                guidance_scale=float(guidance_v),
-                sampler=str(sampler_v or "euler"),
-                sigma_type=str(sigma_type_v or "simple"),
-                flow_shift=float(flow_v),
-                seed=int(seed_v),
+            request = wan_controller.build_request(
+                prompt=prompt_v,
+                negative=negative_v,
+                width=width_v,
+                height=height_v,
+                frames=frames_v,
+                fps=fps_v,
+                high_steps=high_steps_v,
+                low_steps=low_steps_v,
+                guidance=guidance_v,
+                sampler=sampler_v,
+                sigma_type=sigma_type_v,
+                flow=flow_v,
+                seed=seed_v,
                 runtime_mode=selected_runtime,
-                model_id=high_v if selected_runtime == WAN_RUNTIME_FAST_5B else WAN_TI2V_5B,
+                high=high_v,
+                low=low_v,
+                vae=vae_v,
+                text_encoder=_te_path,
+                high_lora=high_lora_v,
+                high_lora_scale=high_lora_scale_v,
+                low_lora=low_lora_v,
+                low_lora_scale=low_lora_scale_v,
                 offload=offload_v,
-                vram_reserve_enabled=bool(vram_reserve_enabled_v),
-                vram_reserve_mb=int(vram_reserve_mb_v or 0),
-                high_noise_model_id=high_v if requires_dual_runtime else None,
-                low_noise_model_id=low_v if requires_dual_runtime else None,
-                high_noise_lora_id=high_lora_v if (requires_dual_runtime or selected_runtime == WAN_RUNTIME_FAST_5B) else None,
-                high_noise_lora_scale=float(high_lora_scale_v),
-                low_noise_lora_id=low_lora_v if requires_dual_runtime else None,
-                low_noise_lora_scale=float(low_lora_scale_v),
-                boundary_ratio=0.5,
-                vae_id=vae_v or None,
-                text_encoder_path=_te_path,
-                temporal_chunks=bool(temporal_chunks_v),
-                chunk_size=int(chunk_size_v or 24),
-                chunk_overlap=int(chunk_overlap_v or 0),
-                image_guidance_scale=float(image_guidance_scale_v or 1.0),
+                vram_reserve_enabled=vram_reserve_enabled_v,
+                vram_reserve_mb=vram_reserve_mb_v,
+                temporal_chunks=temporal_chunks_v,
+                chunk_size=chunk_size_v,
+                chunk_overlap=chunk_overlap_v,
+                image_guidance_scale=image_guidance_scale_v,
             )
-
-            def on_progress(step, tot, steps_per_second=None, message=None):
-                rate_text = _format_it_s(steps_per_second)
-                message_text = str(message or "").strip()
-                if message_text:
-                    desc = message_text
-                    if rate_text:
-                        desc = f"{desc} - {rate_text}"
-                    lower = message_text.lower()
-                    if "writing" in lower:
-                        ratio = 0.97
-                    elif "saved" in lower or "complete" in lower:
-                        ratio = 0.99
-                    elif "decoding" in lower or "post-processing" in lower:
-                        ratio = 0.93
-                    elif "denoise" in lower:
-                        ratio = 0.08
-                    else:
-                        ratio = 0.03
-                    progress(ratio, desc=desc)
-                    return
-                desc = f"Video denoise {step}/{tot}"
-                if rate_text:
-                    desc = f"{desc} - {rate_text}"
-                progress(min(0.90, step / max(1, tot)), desc=desc)
 
             if selected_runtime == WAN_RUNTIME_FAST_5B:
                 runtime_label = "Wan 5B safetensors"
@@ -1955,32 +1898,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             else:
                 runtime_label = "Wan GGUF high/low"
             progress(0.02, desc=f"Preparing {runtime_label}: loading models and encoding inputs")
-            try:
-                result = service.generate(request, image, on_progress=on_progress)
-            except WanUnavailable as exc:
-                raise gr.Error(str(exc))
-            except Exception as exc:
-                logger.exception("Video generation failed")
-                raise gr.Error(f"Video generation failed: {exc}") from exc
-
-            # Persist last-used model/encoder selections so they restore on next launch
-            s = ctx.settings
-            changed = False
-            for attr, val in [
-                ("last_wan_high", str(high_v or "")),
-                ("last_wan_low", str(low_v or "")),
-                ("last_wan_vae", str(vae_v or "")),
-                ("last_wan_text_encoder", str(text_encoder_v or "")),
-                ("last_wan_offload", str(offload_v or "balanced")),
-            ]:
-                if getattr(s, attr, None) != val:
-                    setattr(s, attr, val)
-                    changed = True
-            if changed:
-                try:
-                    ctx.save_settings()
-                except Exception:
-                    pass
+            result = wan_controller.generate(request, image, progress)
+            wan_controller.persist_last_used(
+                high=high_v,
+                low=low_v,
+                vae=vae_v,
+                text_encoder=text_encoder_v,
+                offload=offload_v,
+            )
 
             final_video_path = _existing_video_output_path(result.output_path, "Wan")
             status_parts = [f"**Done** -- {result.message}"]
@@ -1989,7 +1914,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 input_fps = int(getattr(result, "fps", None) or fps_v or 16)
                 multiplier = _rife_multiplier_for_target(input_fps, target_fps)
                 progress(0.0, desc="Unloading Wan VRAM before RIFE")
-                _release_memory_before_postprocess("RIFE")
+                wan_controller.release_memory_before_postprocess("RIFE")
                 rife_options = RifeOptions(
                     ckpt_name=str(rife_ckpt_v or rife_service.default_checkpoint()),
                     multiplier=multiplier,
@@ -2057,7 +1982,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
                 try:
                     progress(0.0, desc="Unloading VRAM before ReActor")
-                    _release_memory_before_reactor()
+                    wan_controller.release_memory_before_reactor()
                     mode = str(reactor_source_mode_v or "first_frame")
                     if mode == "face_model":
                         if not reactor_face_model_v:
@@ -2098,7 +2023,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             if bool(videofx_denoise_enabled_v):
                 try:
                     progress(0.0, desc="Unloading VRAM before NVIDIA VideoFX Denoise")
-                    _release_memory_before_postprocess("NVIDIA VideoFX Denoise")
+                    wan_controller.release_memory_before_postprocess("NVIDIA VideoFX Denoise")
                     denoise_options = VideoFxDenoiseOptions(
                         strength=float(videofx_denoise_strength_v or 0.8),
                     )
@@ -2116,9 +2041,9 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             if bool(videofx_aigs_enabled_v):
                 try:
                     progress(0.0, desc="Unloading VRAM before NVIDIA AI Green Screen")
-                    _release_memory_before_postprocess("NVIDIA AI Green Screen")
+                    wan_controller.release_memory_before_postprocess("NVIDIA AI Green Screen")
                     comp_mode = int(videofx_aigs_comp_v or 6)
-                    bg_path = _uploaded_file_path(videofx_aigs_bg_v)
+                    bg_path = wan_controller.uploaded_file_path(videofx_aigs_bg_v)
                     if comp_mode == 5 and not bg_path:
                         raise VsrUnavailable("Upload a background image or choose a different AI Green Screen output.")
                     aigs_options = VideoFxAigsOptions(
@@ -2141,9 +2066,9 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             if bool(videofx_relight_enabled_v):
                 try:
                     progress(0.0, desc="Unloading VRAM before NVIDIA Relighting")
-                    _release_memory_before_postprocess("NVIDIA Relighting")
+                    wan_controller.release_memory_before_postprocess("NVIDIA Relighting")
                     bg_mode = int(videofx_relight_bg_mode_v or 0)
-                    bg_path = _uploaded_file_path(videofx_relight_bg_v)
+                    bg_path = wan_controller.uploaded_file_path(videofx_relight_bg_v)
                     bg_value = bg_path or str(videofx_relight_bg_text_v or "").strip() or None
                     if bg_mode in {3, 4} and not bg_value:
                         raise VsrUnavailable("Upload a background image or enter a background color for relighting.")
@@ -2169,7 +2094,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             if bool(vsr_enabled_v):
                 try:
                     progress(0.0, desc="Unloading VRAM before NVIDIA VideoFX upscale/cleanup")
-                    _release_memory_before_postprocess("NVIDIA VideoFX")
+                    wan_controller.release_memory_before_postprocess("NVIDIA VideoFX")
                     vsr_options = VsrOptions(
                         effect=str(vsr_effect_v or "SuperRes"),
                         scale=float(vsr_scale_v or 2.0),
@@ -2190,7 +2115,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             if bool(audio_enabled_v):
                 try:
                     progress(0.0, desc="Unloading VRAM before audio generation")
-                    _release_memory_before_postprocess("Audio")
+                    wan_controller.release_memory_before_postprocess("Audio")
                     audio_text = str(audio_prompt_v or prompt_v or "").strip()
                     if not audio_text:
                         audio_text = "cinematic ambient soundtrack matching the video"
@@ -2232,18 +2157,6 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
         def _clear_previous_video():
             return gr.update(value=None), "**Generating** -- preparing Wan video..."
-
-        def _save_bad_video(video_value):
-            if not video_value:
-                raise gr.Error("Generate a video first.")
-            record = ctx.failure_archive.archive_bad_video(
-                video_value,
-                note="Marked from Video tab",
-                extra={"source": "wan_i2v_tab"},
-            )
-            if not record.ok:
-                return f"**Failure gallery** -- saved with archive warnings: {record.archive_dir}"
-            return f"**Failure gallery** -- saved bad result: {record.archive_dir}"
 
         def _clear_previous_ltx_video():
             return gr.update(value=None), "**Generating** -- preparing LTX 2.3 video..."
@@ -2393,7 +2306,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             show_progress_on=[status],
         )
         save_bad_video.click(
-            _save_bad_video,
+            wan_controller.archive_bad_video,
             inputs=[video_out],
             outputs=[status],
             show_progress=False,
@@ -2429,7 +2342,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             show_progress_on=[ltx_status],
         )
         ltx_save_bad_video.click(
-            _save_bad_video,
+            wan_controller.archive_bad_video,
             inputs=[ltx_video_out],
             outputs=[ltx_status],
             show_progress=False,
