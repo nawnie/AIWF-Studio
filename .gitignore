@@ -96,3 +96,46 @@ fundings/private/
 Thumbs.db
 .idea/
 .vscode/
+.codex-remote-attachments/
+cache/
+*.lnk
+prompt_image.txt
+prompt_video.txt
+
+# Local AI/model artifacts - do not commit the VRAM goblins
+models/
+model/
+checkpoints/
+loras/
+vae/
+embeddings/
+outputs/
+output/
+cache/
+tmp/
+temp/
+.codex-remote-attachments/
+
+# Python environments
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Large model/checkpoint formats
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+*.onnx
+*.engine
+*.h5
+*.npz
+
+# Local junk
+*.lnk
+prompt_image.txt
+prompt_video.txt

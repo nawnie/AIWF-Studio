@@ -116,7 +116,7 @@ def test_request_defaults_and_helpers():
     assert r.vram_reserve_mb == 1536
     assert r.guidance_scale == 5.0
     assert r.sigma_type == "simple"
-    assert r.flow_shift == 8.0
+    assert r.flow_shift == 5.0
     assert r.normalized_frames() == 81
     assert r.effective_steps() == 20
     assert r.effective_boundary_ratio() == 1.0

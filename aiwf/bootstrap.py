@@ -184,9 +184,25 @@ def build_context(flags: RuntimeFlags | None = None) -> AppContext:
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
+    # Sort any models the user dropped into "models to sort" into their correct
+    # folders by reading file headers, before the model library is indexed.
+    try:
+        from aiwf.infrastructure.model_sorter import sort_inbox_on_startup
+        from aiwf.infrastructure.model_inventory import invalidate_model_inventory_cache
+
+        sort_actions = sort_inbox_on_startup(flags)
+        if any(action.moved for action in sort_actions):
+            invalidate_model_inventory_cache()
+    except Exception:
+        logger.warning("Startup model sort failed; continuing without it.", exc_info=True)
+
     events = EventBus()
     devices = _create_device_manager(flags)
     devices.log_status()
+    from aiwf.infrastructure.torch.attention import _ensure_cuda_attention_bootstrapped, describe_best_attention_stack
+
+    _ensure_cuda_attention_bootstrapped()
+    logger.info("Attention stack: %s", describe_best_attention_stack(flags))
     settings_path = flags.data_dir / "config.json"
     settings = UserSettings()
     _load_user_settings(settings, settings_path)

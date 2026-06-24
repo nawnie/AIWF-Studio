@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ModelProfile:
-    family: str            # lightning | hyper | turbo | lcm | tcd | flux2_klein | z_image | standard
+    family: str            # lightning | hyper | turbo | lcm | tcd | flux_fusion | flux2_klein | z_image | standard
     is_distilled: bool
     recommended_cfg: float
     cfg_max: float         # above this, a distilled model overexposes
@@ -32,6 +32,7 @@ class ModelProfile:
             "turbo": "Turbo model",
             "lcm": "LCM model",
             "tcd": "TCD model",
+            "flux_fusion": "Flux Fusion model",
             "flux2_klein": "Flux.2 Klein model",
             "z_image": "Z-Image model",
             "standard": "Standard model",
@@ -51,6 +52,8 @@ _PROFILES = {
             "Use CFG 1.0-2.0 and 4-8 steps with the LCM sampler."),
     "tcd": (1.5, 2.0, 8, "tcd", "automatic",
             "Use CFG 1.0-2.0 and 4-8 steps with the TCD sampler."),
+    "flux_fusion": (1.0, 1.5, 4, "euler", "automatic",
+                    "Use Euler, CFG 1, and 4 steps for Flux Fusion / 4-step distilled Flux variants."),
     "flux2_klein": (1.0, 1.5, 12, "euler", "automatic",
                     "Use Euler, CFG 1, and 10-15 steps for Fluxtrait Flux.2 Klein variants."),
     "z_image": (1.0, 1.5, 8, "euler", "automatic",
@@ -64,6 +67,7 @@ _MARKERS = [
     ("lcm", [r"lcm"]),
     ("tcd", [r"tcd"]),
     ("z_image", [r"z[\s_-]?image", r"zimage"]),
+    ("flux_fusion", [r"flux[\s_-]?fusion", r"fusion[\s_-]?v\d"]),
     ("flux2_klein", [r"flux[\s._-]?2", r"klein"]),
     # Hyper-SD only -- must NOT match a baked "HyperVAE" on a normal checkpoint.
     ("hyper", [r"hyper[\s_-]?sd", r"hyper[\s_-]?sdxl"]),

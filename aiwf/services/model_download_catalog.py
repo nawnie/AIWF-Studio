@@ -26,7 +26,7 @@ QUICK_START_BUNDLES: dict[str, list[str]] = {
     "sd": ["hf-sd15-pruned", "hf-vae-mse"],
     "sdxl": ["hf-sdxl-base", "hf-vae-sdxl", "hf-sdxl-refiner"],
     "sd35": ["hf-sd35-medium"],
-    "flux": ["flux-fusion-v2-q4km", "flux-t5-fp16", "flux-clip-l", "flux-ae-vae"],
+    "flux": ["flux-fusion-v2-q4km", "flux-t5-fp8", "flux-clip-l", "flux-ae-vae"],
     "flux2": ["fluxtrait-klein9b-v2-q4km", "flux2-klein-9b-components"],
     "zimage": ["fluxtrait-zimage-v2-q4", "z-image-turbo-components"],
     "ltx23": ["ltx23-distilled", "ltx23-upscaler-x2", "ltx23-gemma-q4"],
@@ -247,6 +247,19 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         ),
     ),
     CatalogEntry(
+        key="flux-t5-fp8",
+        title="Flux T5-XXL text encoder fp8 (recommended)",
+        category="flux_text_encoder",
+        source="huggingface",
+        repo_id="comfyanonymous/flux_text_encoders",
+        filename="t5xxl_fp8_e4m3fn.safetensors",
+        size_mb=4890,
+        notes=(
+            "Preferred T5-XXL for Flux on 16 GB cards. AIWF loads it once, keeps a warm fp16 "
+            "copy in system RAM, and leaves GPU VRAM for the Flux transformer."
+        ),
+    ),
+    CatalogEntry(
         key="flux-t5-fp16",
         title="Flux T5-XXL text encoder safetensors fp16",
         category="flux_text_encoder",
@@ -255,8 +268,8 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         filename="t5xxl_fp16.safetensors",
         size_mb=9334,
         notes=(
-            "Backend-supported T5-XXL encoder for the current Diffusers Flux route. "
-            "Use this with CLIP-L, ae.safetensors, and a Flux transformer."
+            "Fallback T5-XXL encoder for the Diffusers Flux route. Use fp8 instead on 16 GB GPUs "
+            "unless you have spare VRAM."
         ),
     ),
     CatalogEntry(
@@ -339,6 +352,47 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         filename="fluxFusionV24StepsGGUFNF4_V2GGUFQ5KM.gguf",
         size_mb=8020,
         notes="CivitAI Flux.1 dev derivative. Q5_K_M quality target after Q4_K_M benchmarks cleanly.",
+    ),
+    CatalogEntry(
+        key="flux-fusion-v2-nf4",
+        title="Flux Fusion V2 4-step NF4 transformer",
+        category="flux_unet_safetensor",
+        source="civitai",
+        civitai_model_id=630820,
+        civitai_version_id=983597,
+        filename="fluxFusionV24StepsGGUFNF4_V2NF4.safetensors",
+        size_mb=6500,
+        notes=(
+            "CivitAI Flux Fusion V2 bitsandbytes NF4 safetensors (~6.5 GB). Saves to models/flux/UNet/. "
+            "Use with Flux CLIP-L, T5-XXL fp8, and ae.safetensors. CUDA + bitsandbytes required."
+        ),
+    ),
+    CatalogEntry(
+        key="flux-fusion-v2-fp8",
+        title="Flux Fusion V2 4-step FP8 transformer",
+        category="flux_unet_safetensor",
+        source="civitai",
+        civitai_model_id=630820,
+        civitai_version_id=936565,
+        filename="fluxFusionV24StepsGGUFNF4_V2Fp8.safetensors",
+        size_mb=11340,
+        notes=(
+            "CivitAI Flux Fusion V2 FP8 safetensors variant. Saves to models/flux/UNet/. "
+            "Standard diffusers safetensors load (not NF4)."
+        ),
+    ),
+    CatalogEntry(
+        key="flux-fusion-v2-fp16",
+        title="Flux Fusion V2 4-step FP16 transformer",
+        category="flux_unet_safetensor",
+        source="civitai",
+        civitai_model_id=630820,
+        civitai_version_id=936309,
+        filename="fluxFusionV24StepsGGUFNF4_V2Fp16.safetensors",
+        size_mb=22681,
+        notes=(
+            "CivitAI Flux Fusion V2 full FP16 safetensors. High VRAM; prefer NF4 or GGUF on 16 GB cards."
+        ),
     ),
     # Flux.2 Klein and Z-Image runtime assets.
     CatalogEntry(

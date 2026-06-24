@@ -16,7 +16,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
     is_inpaint_architecture,
     looks_like_lora_weights,
 )
-from aiwf.infrastructure.model_inventory import ModelInventoryRecord, scan_and_write_model_inventory
+from aiwf.infrastructure.model_inventory import ModelInventoryRecord, get_model_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +196,7 @@ def scan_checkpoints(roots: list[Path]) -> list[Checkpoint]:
 def scan_from_flags(flags: RuntimeFlags) -> list[Checkpoint]:
     roots = resolve_search_roots(flags)
     logger.info("Scanning for checkpoints in: %s", ", ".join(str(r) for r in roots))
-    inventory = scan_and_write_model_inventory(flags)
+    inventory = get_model_inventory(flags)
     selectable_runtime_arches = {ARCH_FLUX, ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}
     checkpoints = [
         _checkpoint_from_inventory(record)

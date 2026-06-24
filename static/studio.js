@@ -495,6 +495,7 @@
 
         const root = document.querySelector(APP) || document.body;
         let pendingSync = false;
+        let lastTopbarSyncAt = 0;
         const observer = new MutationObserver(() => {
             if (pendingSync) {
                 return;
@@ -503,6 +504,17 @@
             requestAnimationFrame(() => {
                 pendingSync = false;
                 bindPromptHotkey();
+                // Gradio mutates the DOM many times per second during a job.
+                // Skip work while the tab is hidden and coalesce bursts so the
+                // DOM-heavy topbar sync doesn't run on every animation frame.
+                if (document.hidden) {
+                    return;
+                }
+                const now = Date.now();
+                if (now - lastTopbarSyncAt < 250) {
+                    return;
+                }
+                lastTopbarSyncAt = now;
                 syncTopbarFromContext();
             });
         });
@@ -758,9 +770,13 @@
                         source: url,
                         context: { method, body_snippet: bodySnippet },
                     });
-                } else if (/\/queue\/join|\/queue\/data|\/call\//i.test(url)) {
-                    reportClientEvent("gradio_queue", `${response.status} ${url}`, { method });
                 }
+                // NOTE: successful /queue/ and /call/ requests are intentionally
+                // NOT reported as telemetry. Gradio polls these many times per job,
+                // and reporting each one ran DOM queries + a sessionStorage
+                // re-serialize + an extra POST (server disk write) per request —
+                // the bulk of client-event traffic for zero user value. Errors
+                // above are still captured.
             }
             return response;
         };
@@ -864,11 +880,21 @@
         }, 15000);
 
         const root = document.querySelector(APP) || document.body;
+        let pendingGenCheck = false;
         const observer = new MutationObserver(() => {
-            const genBtn = generateButton();
-            if (genBtn && genBtn.disabled) {
-                lastGenerateAt = Date.now();
+            // class/disabled flip constantly across the Gradio tree; coalesce to
+            // one check per frame instead of a querySelector per mutation.
+            if (pendingGenCheck) {
+                return;
             }
+            pendingGenCheck = true;
+            requestAnimationFrame(() => {
+                pendingGenCheck = false;
+                const genBtn = generateButton();
+                if (genBtn && genBtn.disabled) {
+                    lastGenerateAt = Date.now();
+                }
+            });
         });
         observer.observe(root, { subtree: true, attributes: true, attributeFilter: ["disabled", "class"] });
     }
@@ -881,7 +907,13 @@
         initGenerateWatchdog();
         reportClientEvent("studio_boot", "Studio JS initialized", studioContext());
         syncTopbarFromContext();
-        setInterval(syncTopbarFromContext, 800);
+        // Pause the periodic topbar sync while the tab is hidden — no point doing
+        // DOM work the user can't see, and it lets a backgrounded tab idle.
+        setInterval(() => {
+            if (!document.hidden) {
+                syncTopbarFromContext();
+            }
+        }, 1000);
     }
 
     if (document.readyState === "loading") {

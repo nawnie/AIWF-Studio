@@ -28,6 +28,15 @@ def test_turbo_and_lcm_and_tcd():
     assert detect_model_profile("somemodel-TCD").family == "tcd"
 
 
+def test_flux_fusion_profile_uses_four_steps():
+    p = detect_model_profile("fluxFusionV24StepsGGUFNF4_V2NF4.safetensors")
+    assert p.family == "flux_fusion"
+    assert p.is_distilled
+    assert p.recommended_cfg == 1.0
+    assert p.recommended_steps == 4
+    assert p.recommended_sampler == "euler"
+
+
 def test_flux2_klein_profile_uses_model_page_defaults():
     p = detect_model_profile("fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf")
     assert p.family == "flux2_klein"

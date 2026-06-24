@@ -256,20 +256,33 @@ function normalizeGenerateResult(
   request: ProGenerateRequest,
 ): ProGenerateResult {
   const record = asRecord(value)
-  const recent = readArray(record, ['recent_outputs', 'recentOutputs', 'outputs', 'images'])
+  const encodedImages = readArray(record, ['images'])
+    .map((item, index) => normalizeRecentOutput(item, index, request))
+    .filter(isPresent)
+  const recent = readArray(record, ['recent_outputs', 'recentOutputs', 'outputs'])
     .map((item, index) => normalizeRecentOutput(item, index, request))
     .filter(isPresent)
   const directOutput =
     normalizeRecentOutput(readUnknown(record, ['output', 'image', 'result']), 0, request) ??
+    encodedImages[encodedImages.length - 1] ??
     recent[0] ??
     null
+  const sessionOutputs = encodedImages.length > 0 ? encodedImages : recent
 
   return {
     jobId: readString(record, ['job_id', 'jobId', 'id'], directOutput?.id ?? 'local-job'),
     status: readString(record, ['status', 'state'], directOutput?.status ?? 'completed'),
-    message: readString(record, ['message', 'detail'], directOutput ? 'Generation complete.' : 'Generation submitted.'),
+    message: readString(
+      record,
+      ['message', 'detail'],
+      sessionOutputs.length > 1
+        ? `Generated ${sessionOutputs.length} images.`
+        : directOutput
+          ? 'Generation complete.'
+          : 'Generation submitted.',
+    ),
     output: directOutput,
-    recentOutputs: recent,
+    recentOutputs: sessionOutputs,
   }
 }
 

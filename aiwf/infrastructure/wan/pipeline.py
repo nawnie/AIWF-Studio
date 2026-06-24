@@ -178,9 +178,49 @@ def _new_wan_euler_simple_scheduler(base_scheduler: Any, *, flow_shift: float):
     return _new_wan_euler_scheduler(base_scheduler, flow_shift=flow_shift, sigma_type="simple")
 
 
+def _new_wan_unipc_scheduler(base_scheduler: Any, *, flow_shift: float):
+    """Build a UniPCMultistepScheduler matching the checkpoint's own calibration.
+
+    Wan2.2-TI2V-5B ships scheduler/scheduler_config.json with
+    ``_class_name: UniPCMultistepScheduler``, ``flow_shift: 5.0``,
+    ``solver_order: 2``, ``solver_type: "bh2"``, ``predict_x0: true``,
+    ``use_flow_sigmas: true``, ``prediction_type: "flow_prediction"``. Building
+    a FlowMatchEulerDiscreteScheduler instead (as AIWF previously always did)
+    swaps in a different ODE solver family the model was never tuned against --
+    a known source of unstable motion/structure ("warping"), especially at low
+    step counts. This reconstructs the model's actual recommended sampler.
+    """
+    from diffusers import UniPCMultistepScheduler
+
+    config = getattr(base_scheduler, "config", base_scheduler)
+    shift = float(flow_shift or getattr(config, "flow_shift", 5.0) or 5.0)
+    scheduler = UniPCMultistepScheduler(
+        num_train_timesteps=int(getattr(config, "num_train_timesteps", 1000) or 1000),
+        flow_shift=shift,
+        use_dynamic_shifting=bool(getattr(config, "use_dynamic_shifting", False)),
+        time_shift_type=str(getattr(config, "time_shift_type", "exponential") or "exponential"),
+        prediction_type=str(getattr(config, "prediction_type", "flow_prediction") or "flow_prediction"),
+        use_flow_sigmas=bool(getattr(config, "use_flow_sigmas", True)),
+        predict_x0=bool(getattr(config, "predict_x0", True)),
+        solver_order=int(getattr(config, "solver_order", 2) or 2),
+        solver_type=str(getattr(config, "solver_type", "bh2") or "bh2"),
+        lower_order_final=bool(getattr(config, "lower_order_final", True)),
+        disable_corrector=list(getattr(config, "disable_corrector", []) or []),
+        sample_max_value=float(getattr(config, "sample_max_value", 1.0) or 1.0),
+        final_sigmas_type=str(getattr(config, "final_sigmas_type", "zero") or "zero"),
+    )
+    logger.info("Wan scheduler: UniPC (model-calibrated) | shift=%s", shift)
+    return scheduler
+
+
 def _configure_wan_scheduler(pipe: Any, *, sampler: str, sigma_type: str, flow_shift: float) -> None:
-    _sampler = str(sampler or "euler")
+    _sampler = str(sampler or "unipc")
     _sigma = str(sigma_type or "beta")
+    if _sampler == "unipc":
+        pipe.scheduler = _new_wan_unipc_scheduler(pipe.scheduler, flow_shift=float(flow_shift))
+        _video_status(f"Using Wan sampler: UniPC (model-calibrated) | shift={float(flow_shift):g}")
+        return
+
     if _sampler == "heun":
         from diffusers import FlowMatchHeunDiscreteScheduler
 
@@ -1184,7 +1224,26 @@ def _load_wan_vae(vae_or_base: str, torch_dtype) -> "AutoencoderKLWan":
                 from safetensors.torch import load_file as _load_st
 
                 sd = _load_st(str(p), device="cpu")
-                z_dim = int(getattr(sd.get("conv2.weight"), "shape", [0])[0] or 0)
+                # The raw Comfy key is "conv2.weight", but some exports prefix it
+                # (e.g. "vae.conv2.weight") or have already been partially renamed
+                # to the diffusers name ("post_quant_conv.weight"). Search for any
+                # matching key instead of requiring an exact match, otherwise a
+                # naming mismatch silently looks like z_dim=0 and we fall through
+                # to a misleading "generic SD VAE" error below.
+                z_dim = 0
+                for candidate_key in (
+                    "conv2.weight",
+                    "post_quant_conv.weight",
+                ):
+                    tensor = sd.get(candidate_key)
+                    if tensor is not None:
+                        z_dim = int(tensor.shape[0])
+                        break
+                if not z_dim:
+                    for key, tensor in sd.items():
+                        if key.endswith("conv2.weight") or key.endswith("post_quant_conv.weight"):
+                            z_dim = int(tensor.shape[0])
+                            break
                 if z_dim == 48:
                     _video_status(f"Loading Wan 2.2 TI2V VAE file with local 48-channel config: {p.name}")
                     vae = AutoencoderKLWan.from_config(dict(WAN_TI2V_5B_VAE_CONFIG), torch_dtype=torch_dtype)
@@ -1196,11 +1255,18 @@ def _load_wan_vae(vae_or_base: str, torch_dtype) -> "AutoencoderKLWan":
                         logger.debug("Wan 2.2 TI2V VAE ignored unexpected keys: %s", unexpected[:20])
                     vae.eval()
                     return vae
+                logger.debug(
+                    "Wan VAE fallback could not determine channel count for %s (detected z_dim=%s).",
+                    p,
+                    z_dim,
+                )
             except Exception:
                 logger.debug("Could not load %s with Wan 2.2 TI2V VAE fallback.", p, exc_info=True)
             raise WanUnavailable(
-                f"Selected VAE '{p.name}' could not be loaded as a Wan VAE. "
-                "Choose a Wan VAE file such as 'wan2.1_vae.safetensors' instead of a generic SD VAE."
+                f"Selected VAE '{p.name}' could not be loaded as a Wan VAE "
+                f"(diffusers single-file loader failed: {exc}). If this is a Wan 2.2 (48-channel) "
+                "VAE, check the log for the detected channel count — the loader may not "
+                "recognize this file's key naming."
             ) from exc
 
     # If it's a dir that looks like a vae folder itself (has config.json + weights)
@@ -1309,7 +1375,7 @@ def _load_umt5_text_encoder(text_encoder_dir: Path, torch_dtype):
         return model
 
     return UMT5EncoderModel.from_pretrained(
-        str(text_encoder_dir), torch_dtype=torch_dtype, local_files_only=text_encoder_dir.is_dir()
+        str(text_encoder_dir), dtype=torch_dtype, local_files_only=text_encoder_dir.is_dir()
     )
 
 
@@ -2428,7 +2494,7 @@ class WanI2VBackend:
         offload: str,
         flow_shift: float,
         sigma_type: str = "beta",
-        sampler: str = "euler",
+        sampler: str = "unipc",
         text_encoder_path: str = "",
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
@@ -2689,7 +2755,7 @@ class WanI2VBackend:
         offload: str,
         flow_shift: float,
         sigma_type: str = "beta",
-        sampler: str = "euler",
+        sampler: str = "unipc",
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
         temporal_chunks: bool | None = None,
@@ -2785,7 +2851,7 @@ class WanI2VBackend:
                     "Select the standalone Wan TI2V 5B transformer file instead."
                 )
             _video_status(f"Loading standalone Wan 5B Diffusers pipeline: {model_id}")
-            load_kwargs: dict[str, Any] = {"torch_dtype": torch.bfloat16}
+            load_kwargs: dict[str, Any] = {"dtype": torch.bfloat16}
             if model_path.exists():
                 load_kwargs["local_files_only"] = True
             pipe = WanImageToVideoPipeline.from_pretrained(str(model_id), **load_kwargs)
@@ -3228,7 +3294,7 @@ class WanI2VBackend:
             )
 
         _sigma_type = str(getattr(request, "sigma_type", "beta") or "beta")
-        _sampler = str(getattr(request, "sampler", "euler") or "euler")
+        _sampler = str(getattr(request, "sampler", "unipc") or "unipc")
         _flow_shift = float(getattr(request, "flow_shift", 5.0) or 5.0)
         _te_path = str(getattr(request, "text_encoder_path", "") or "")
 

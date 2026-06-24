@@ -31,7 +31,7 @@ def apply_runtime_env(*, cuda_malloc: bool = True) -> list[str]:
     if cuda_malloc:
         os.environ.setdefault(
             "PYTORCH_CUDA_ALLOC_CONF",
-            "backend:cudaMallocAsync,max_split_size_mb:128",
+            "backend:cudaMallocAsync",
         )
         applied.append("cudaMallocAsync")
 
@@ -40,6 +40,10 @@ def apply_runtime_env(*, cuda_malloc: bool = True) -> list[str]:
 
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     applied.append("TOKENIZERS_PARALLELISM=false")
+
+    # The optional `kernels` package pins huggingface-hub>=1.0 and breaks transformers.
+    # Keep GGUF CUDA kernels opt-in only; never auto-enable from a detected install.
+    os.environ.setdefault("DIFFUSERS_GGUF_CUDA_KERNELS", "false")
 
     return applied
 

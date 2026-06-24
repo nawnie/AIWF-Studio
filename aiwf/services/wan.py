@@ -23,6 +23,7 @@ from aiwf.core.domain.wan import (
     WanI2VRequest,
     WanI2VResult,
 )
+from aiwf.infrastructure.wan.sampler_policy import audit_wan_sampler_settings
 from aiwf.dev.diagnostics import trace_exception_safe, trace_model_throughput
 from aiwf.infrastructure.video import VideoError, write_frames
 from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
@@ -183,6 +184,7 @@ class WanPreflightResult:
     text_encoder: str | None = None
     high_noise_lora: str | None = None
     low_noise_lora: str | None = None
+    audited_request: WanI2VRequest | None = None
 
     def message(self) -> str:
         parts: list[str] = []
@@ -826,6 +828,13 @@ class WanService:
                 expected = "14B high/low" if runtime_size == "14b" else "5B TI2V"
                 errors.append(f"{label} does not match the {expected} runtime: {Path(lora).name}")
 
+        sampler_audit = audit_wan_sampler_settings(request)
+        errors.extend(sampler_audit.errors)
+        warnings.extend(sampler_audit.warnings)
+        if sampler_audit.corrections:
+            warnings.extend(f"Auto-fix: {note}" for note in sampler_audit.corrections)
+        audited_request = sampler_audit.request if sampler_audit.corrections and not sampler_audit.errors else None
+
         return WanPreflightResult(
             ok=not errors,
             errors=tuple(errors),
@@ -838,6 +847,7 @@ class WanService:
             text_encoder=text_encoder_res,
             high_noise_lora=high_lora_res,
             low_noise_lora=low_lora_res,
+            audited_request=audited_request,
         )
 
     def _wan_file_candidates(self) -> list[Path]:
@@ -1400,16 +1410,17 @@ class WanService:
             exc = WanUnavailable(preflight.message())
             self._archive_failed_generation(request, exc, image=image, stage="wan_preflight")
             raise exc
-        request = request.model_copy(
+        base_request = preflight.audited_request or request
+        request = base_request.model_copy(
             update={
-                "model_id": preflight.model_id or request.model_id,
-                "high_noise_model_id": preflight.high_noise_model or request.high_noise_model_id,
-                "low_noise_model_id": preflight.low_noise_model or request.low_noise_model_id,
-                "vae_id": preflight.vae or request.vae_id,
-                "text_encoder_path": preflight.text_encoder or request.text_encoder_path,
-                "high_noise_lora_id": preflight.high_noise_lora or request.high_noise_lora_id,
-                "low_noise_lora_id": preflight.low_noise_lora or request.low_noise_lora_id,
-                "components_base": preflight.components_base or request.components_base,
+                "model_id": preflight.model_id or base_request.model_id,
+                "high_noise_model_id": preflight.high_noise_model or base_request.high_noise_model_id,
+                "low_noise_model_id": preflight.low_noise_model or base_request.low_noise_model_id,
+                "vae_id": preflight.vae or base_request.vae_id,
+                "text_encoder_path": preflight.text_encoder or base_request.text_encoder_path,
+                "high_noise_lora_id": preflight.high_noise_lora or base_request.high_noise_lora_id,
+                "low_noise_lora_id": preflight.low_noise_lora or base_request.low_noise_lora_id,
+                "components_base": preflight.components_base or base_request.components_base,
             }
         )
 

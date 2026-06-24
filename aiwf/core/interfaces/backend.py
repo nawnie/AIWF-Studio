@@ -8,7 +8,10 @@ from aiwf.core.domain.generation import GenerationRequest, GenerationResult
 from aiwf.core.domain.models import Checkpoint, EmbeddingInfo, LoraInfo, SamplerInfo, VaeInfo
 
 
-ProgressCallback = Callable[[int, int, str, Image.Image | None], None]
+ProgressCallback = Callable[
+    [int, int, str, Image.Image | None, list[Image.Image] | None, list[int] | None],
+    None,
+]
 
 
 class InferenceBackend(Protocol):

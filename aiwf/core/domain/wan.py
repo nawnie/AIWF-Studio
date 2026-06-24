@@ -24,9 +24,16 @@ OFFLOAD_MODES = ("sequential", "group", "streamed", "model", "balanced", "reside
 SIGMA_TYPES = ("simple", "beta", "exponential", "karras")
 
 # Sampler (solver algorithm) types.
-#   euler -- FlowMatchEulerDiscreteScheduler (standard, fast, 1 NFE per step)
-#   heun  -- FlowMatchHeunDiscreteScheduler (2nd-order, higher quality, ~2x NFE per step)
-SAMPLER_TYPES = ("euler", "heun")
+#   unipc -- UniPCMultistepScheduler (2nd-order predictor-corrector). This is the
+#            sampler the Wan2.2-TI2V-5B checkpoint actually ships calibrated for
+#            (see its scheduler/scheduler_config.json: solver_order=2,
+#            solver_type="bh2", predict_x0=True, flow_shift=5.0). Default for the
+#            5B route; switching away from it onto a 1st/2nd-order Euler/Heun ODE
+#            solver the model was never tuned against is a known source of
+#            unstable motion ("warped" video), especially at low step counts.
+#   euler -- FlowMatchEulerDiscreteScheduler (fast, 1 NFE per step)
+#   heun  -- FlowMatchHeunDiscreteScheduler (2nd-order ODE, ~2x NFE per step)
+SAMPLER_TYPES = ("unipc", "euler", "heun")
 
 # Wan video routes:
 # - fast_5b: single 5B safetensors route for the default fast path.
@@ -76,9 +83,12 @@ class WanI2VRequest(BaseModel):
     width: int = Field(default=512, ge=128, le=1280)
     height: int = Field(default=512, ge=128, le=1280)
     fps: int = Field(default=16, ge=1, le=60)
-    flow_shift: float = Field(default=8.0, ge=0.5, le=25.0)
+    # 5.0 matches the Wan2.2-TI2V-5B model's own shipped scheduler_config.json.
+    # The previous default of 8.0 paired with the FlowMatch Euler substitution
+    # (instead of the model's native UniPC) was a likely cause of warped video.
+    flow_shift: float = Field(default=5.0, ge=0.5, le=25.0)
     sigma_type: str = Field(default="simple")  # simple | beta | exponential | karras
-    sampler: str = Field(default="euler")  # euler | heun
+    sampler: str = Field(default="unipc")  # unipc | euler | heun
     # Temporal chunk denoise settings. This slices latent frames, not output
     # frames. It is opt-in because every chunk reruns the full transformer.
     temporal_chunks: bool = False

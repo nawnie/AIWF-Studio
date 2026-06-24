@@ -308,7 +308,7 @@ def register_chat_workspace(registry: WebRegistry) -> None:
 
                     with gr.Tab("System"):
                         with gr.Group(elem_classes=["aiwf-chat-tab-panel"]):
-                            system_prompt = gr.Textbox(placeholder="Optional system prompt", lines=6, show_label=False)
+                            system_prompt = gr.Textbox(placeholder="Optional system prompt", lines=6, show_label=False, value="")
 
                     with gr.Tab("Trace"):
                         with gr.Group(elem_classes=["aiwf-chat-tab-panel"]):
@@ -572,7 +572,7 @@ def register_chat_workspace(registry: WebRegistry) -> None:
                     return
 
             system_parts: list[str] = []
-            if sys_prompt.strip():
+            if sys_prompt and sys_prompt.strip():
                 system_parts.append(sys_prompt.strip())
             agent_tools: ChatAgentToolService | None = None
             if agent_mode:

@@ -1,5 +1,9 @@
 import os
 import sys
+import warnings
+
+warnings.filterwarnings("ignore", message=".*HTTP_422_UNPROCESSABLE.*")
+warnings.filterwarnings("ignore", message=".*cudaMallocAsync ignores max_split_size_mb.*")
 
 from aiwf.runtime.bootstrap_env import apply_from_argv
 

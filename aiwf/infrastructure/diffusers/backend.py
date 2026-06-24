@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import copy
+import gc
 import json
 import logging
 import random
-import tempfile
+import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
@@ -77,6 +78,7 @@ from aiwf.infrastructure.controlnet.preprocess import PreprocessParams, preproce
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
     ARCH_FLUX2_KLEIN,
+    ARCH_SD35,
     ARCH_SDXL,
     ARCH_SDXL_INPAINT,
     ARCH_Z_IMAGE,
@@ -103,6 +105,11 @@ except ImportError:
     def attention_call_context(_flags):
         yield "none"
 from aiwf.infrastructure.torch.devices import DeviceManager
+from aiwf.infrastructure.quant.bnb_nf4_format import (
+    build_bnb_4bit_quantization_config,
+    inspect_bnb_4bit_safetensors,
+    resolve_transformer_load_format,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +322,105 @@ class DiffusersBackend:
         self._flux_tokenizer = None
         self._flux_tokenizer_2 = None
         self._flux_component_paths: dict[str, str] = {}
+        # User-selected Flux T5 text encoder path (None = auto-pick best available).
+        self._flux_text_encoder_override: str | None = None
+        self._flux_clip_device: torch.device | None = None
+        self._flux_t5_device: torch.device | None = None
+        self._flux_prompt_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._flux2_prompt_cache: dict[str, torch.Tensor] = {}
+        self._z_image_prompt_cache: dict[tuple[str, str], tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
+
+    def _flux_config_cache_root(self) -> Path:
+        root = self.flags.data_dir / "cache" / "flux_configs"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _cached_transformer_config_dir(self, family: str, checkpoint_path: Path, config: dict) -> str:
+        """Persist derived GGUF transformer configs so checkpoint switches skip re-derivation."""
+        cache_root = self._flux_config_cache_root() / family / checkpoint_path.stem
+        return self._write_temp_config(cache_root, "transformer", config)
+
+    def is_checkpoint_warm(self, checkpoint_id: str | None = None) -> bool:
+        return self.is_checkpoint_loaded(checkpoint_id)
+
+    def _flux_encoder_device(self, t5_path: Path | None = None) -> torch.device:
+        if self.devices.device().type != "cuda":
+            return torch.device("cpu")
+        try:
+            free_bytes, _total = torch.cuda.mem_get_info(self.devices.device())
+            reserve_bytes = 1024**3
+            if t5_path is not None:
+                t5_name = t5_path.name.lower()
+                t5_bytes = int(5.5 * 1024**3) if "fp8" in t5_name else int(10.5 * 1024**3)
+                if free_bytes < t5_bytes + reserve_bytes:
+                    return torch.device("cpu")
+            elif free_bytes < 6 * 1024**3:
+                return torch.device("cpu")
+            return self.devices.device()
+        except Exception:
+            logger.debug("Could not query CUDA free memory for Flux encoders", exc_info=True)
+        return torch.device("cpu")
+
+    @staticmethod
+    def _load_encoder_state_dict(model, state_dict, *, assign: bool = False) -> None:
+        first_param = next(model.parameters(), None)
+        if first_param is not None and first_param.is_meta:
+            model.load_state_dict(state_dict, strict=True, assign=True)
+            return
+        model.load_state_dict(state_dict, strict=True, assign=assign)
+
+    @staticmethod
+    def _flux_t5_weights_are_fp8(state_dict) -> bool:
+        for tensor in state_dict.values():
+            if getattr(tensor, "dtype", None) == torch.float8_e4m3fn:
+                return True
+        return False
+
+    def _load_flux_t5_encoder(self, t5_path: Path, t5_config) -> tuple["T5EncoderModel", torch.device]:
+        from transformers import T5EncoderModel
+
+        state = load_file(str(t5_path), device="cpu")
+        is_fp8_source = "fp8" in t5_path.name.lower() or self._flux_t5_weights_are_fp8(state)
+        if is_fp8_source:
+            with torch.device("meta"):
+                t5 = T5EncoderModel(t5_config)
+            self._load_encoder_state_dict(t5, state)
+            del state
+            # Transformers T5 cannot execute float8 weights; keep a warm fp16 copy in RAM
+            # so the GPU stays reserved for the Flux transformer.
+            t5_device = torch.device("cpu")
+            t5 = t5.to(dtype=torch.float16, device=t5_device)
+            t5.eval()
+            logger.info(
+                "Flux T5-XXL: %s -> fp16 CPU resident (cached in RAM; GPU left for transformer)",
+                t5_path.name,
+            )
+            return t5, t5_device
+
+        t5 = T5EncoderModel(t5_config)
+        self._load_encoder_state_dict(t5, state)
+        del state
+        t5_device = self._flux_encoder_device(t5_path)
+        t5 = t5.to(dtype=torch.float16, device=t5_device)
+        t5.eval()
+        logger.info("Flux T5-XXL: %s on %s", t5_path.name, t5_device)
+        return t5, t5_device
+
+    def is_checkpoint_loaded(self, checkpoint_id: str | None = None) -> bool:
+        try:
+            checkpoint = self._resolve_checkpoint(checkpoint_id)
+        except ModelNotFoundError:
+            return False
+        if self._txt2img is None or self._active is None:
+            return False
+        if self._active.path != checkpoint.path:
+            return False
+        if is_flux_architecture(checkpoint.architecture):
+            return (
+                self._flux_text_encoder is not None
+                and self._flux_text_encoder_2 is not None
+            )
+        return True
 
     @staticmethod
     def _snapshot_scheduler_config(scheduler) -> dict:
@@ -394,7 +500,7 @@ class DiffusersBackend:
 
     _AUTO_OFFLOAD_VRAM_GB = 10.0
 
-    def _place_pipeline(self, pipe, *, prefer_offload: bool = False):
+    def _place_pipeline(self, pipe, *, prefer_offload: bool = False, architecture: str | None = None):
         if self.devices.device().type not in ("cuda",) and (self.flags.lowvram or self.flags.medvram or prefer_offload):
             logger.warning("CPU offload modes need a CUDA device; loading fully on %s.", self.devices.device())
             pipe = pipe.to(self.devices.device())
@@ -407,9 +513,17 @@ class DiffusersBackend:
             pipe.enable_model_cpu_offload()
             self._offload_active = True
         elif prefer_offload:
+            arch_label = {
+                ARCH_FLUX2_KLEIN: "Flux.2 Klein",
+                ARCH_Z_IMAGE: "Z-Image",
+                ARCH_SD35: "SD3.5",
+                ARCH_SDXL: "SDXL",
+                ARCH_SDXL_INPAINT: "SDXL",
+            }.get(architecture or "", "Large model")
             logger.info(
-                "SDXL on a <%.0f GB GPU — enabling model CPU offload automatically "
+                "%s on a <%.0f GB GPU — enabling model CPU offload automatically "
                 "(use Low VRAM mode in Settings if you still hit out-of-memory).",
+                arch_label,
                 self._AUTO_OFFLOAD_VRAM_GB,
             )
             pipe.enable_model_cpu_offload()
@@ -493,6 +607,58 @@ class DiffusersBackend:
                 pass
         return self.devices.dtype(self.flags.no_half)
 
+    def _load_dit_transformer_single_file(
+        self,
+        model_cls,
+        path: Path,
+        *,
+        config_dir: str,
+        dtype: torch.dtype,
+        family: str,
+    ):
+        load_kwargs = {
+            "config": config_dir,
+            "torch_dtype": dtype,
+            "local_files_only": True,
+        }
+        load_format = resolve_transformer_load_format(path)
+        if path.suffix.lower() == ".gguf":
+            load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
+        elif path.suffix.lower() == ".safetensors":
+            bnb_report = inspect_bnb_4bit_safetensors(path)
+            if bnb_report.is_bnb_4bit:
+                if self.devices.device().type != "cuda":
+                    raise ModelNotFoundError(
+                        f"{path.name} is a bitsandbytes {bnb_report.quant_type.upper()} checkpoint; "
+                        "CUDA is required for NF4/FP4 inference."
+                    )
+                load_kwargs["quantization_config"] = build_bnb_4bit_quantization_config(
+                    bnb_report,
+                    compute_dtype=dtype,
+                )
+                load_kwargs["torch_dtype"] = torch.float16
+                load_format = bnb_report.load_format_label
+                logger.info(
+                    "Loading %s transformer (%s, %d quantized layers) from %s",
+                    family,
+                    load_format,
+                    bnb_report.quantized_linear_layers,
+                    path.name,
+                )
+
+        transformer_t0 = time.perf_counter()
+        transformer = model_cls.from_single_file(str(path), **load_kwargs)
+        if load_format in {"nf4", "fp4"}:
+            transformer = transformer.to(self.devices.device())
+        logger.info(
+            "%s transformer loaded in %.1fs (format=%s) from %s",
+            family,
+            time.perf_counter() - transformer_t0,
+            load_format,
+            path.name,
+        )
+        return transformer
+
     @staticmethod
     def _flux_transformer_has_guidance(path: Path) -> bool:
         suffix = path.suffix.lower()
@@ -527,10 +693,11 @@ class DiffusersBackend:
         return roots
 
     def _find_flux_component(self, filenames: tuple[str, ...], subdirs: tuple[str, ...]) -> Path | None:
-        for root in self._flux_search_roots():
-            for subdir in subdirs:
-                base = root / subdir if subdir else root
-                for filename in filenames:
+        # Prefer the first filename (e.g. fp8 T5) across all search roots before any fallback.
+        for filename in filenames:
+            for root in self._flux_search_roots():
+                for subdir in subdirs:
+                    base = root / subdir if subdir else root
                     candidate = base / filename
                     if candidate.is_file():
                         return candidate.resolve()
@@ -636,8 +803,11 @@ class DiffusersBackend:
             raise ModelNotFoundError(
                 f"Flux.2 Klein needs the matching Diffusers component folder for {repo_name}: "
                 "text_encoder, tokenizer, scheduler, and VAE. "
-                f"Download `{key}` from Models, or place a full `{repo_name}` snapshot under "
-                f"`models/flux2/Components/{repo_name}`. Searched: {searched}"
+                f"In the Models tab, use the 'Text-to-image Flux.2 Klein' quick-start button "
+                f"(downloads the GGUF + `{key}` components), or manually download `{key}` from the Curated catalog. "
+                f"9B components are HF-gated: accept the license and set your Hugging Face token in Settings first. "
+                f"Alternative: place full `{repo_name}` snapshot under `models/flux2/Components/{repo_name}`. "
+                f"Searched: {searched}"
             )
         raise ModelNotFoundError(
             "Z-Image needs the Z-Image-Turbo Diffusers component folder: text_encoder, tokenizer, "
@@ -849,10 +1019,23 @@ class DiffusersBackend:
             ("clip_l.safetensors",),
             ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders", "Clip", "clip"),
         )
-        t5 = self._find_flux_component(
-            ("t5xxl_fp16.safetensors", "t5xxl_fp8_e4m3fn.safetensors"),
-            ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders"),
-        )
+        override = self._flux_text_encoder_override
+        if override and Path(override).is_file():
+            t5: Path | None = Path(override).resolve()
+        else:
+            if override:
+                logger.warning(
+                    "Selected Flux text encoder %s no longer exists; falling back to auto-pick.",
+                    override,
+                )
+            t5 = self._find_flux_component(
+                (
+                    "t5xxl_fp8_e4m3fn.safetensors",
+                    "t5xxl_fp8_e4m3fn_scaled.safetensors",
+                    "t5xxl_fp16.safetensors",
+                ),
+                ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders"),
+            )
         vae = self._find_flux_component(
             ("ae.safetensors",),
             ("flux/VAE", "VAE", "vae"),
@@ -870,6 +1053,67 @@ class DiffusersBackend:
                 f"models/flux/VAE, or add a shared model root in Settings. Searched: {roots}"
             )
         return {"clip_l": clip, "t5xxl": t5, "vae": vae}  # type: ignore[dict-item]
+
+    def list_flux_text_encoders(self) -> list[tuple[str, str]]:
+        """Return (label, path) for Flux-compatible T5-XXL text encoders found locally.
+
+        UMT5 encoders (Wan video only) are excluded — they are not compatible
+        with Flux and would produce broken output if selected.
+        """
+        from aiwf.infrastructure.model_header import read_model_info
+
+        subdirs = ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders")
+        seen: set[str] = set()
+        out: list[tuple[str, str]] = []
+        for root in self._flux_search_roots():
+            for sub in subdirs:
+                directory = root / sub
+                if not directory.is_dir():
+                    continue
+                for path in sorted(directory.glob("*"), key=lambda p: p.name.lower()):
+                    if path.suffix.lower() not in (".safetensors", ".gguf"):
+                        continue
+                    key = str(path.resolve()).lower()
+                    if key in seen:
+                        continue
+                    try:
+                        info = read_model_info(path)
+                    except Exception:
+                        continue
+                    if not info.is_t5xxl():
+                        continue
+                    seen.add(key)
+                    out.append((f"{path.stem}  [{info.size_label()}]", str(path.resolve())))
+        return out
+
+    def set_flux_text_encoder(self, path: str | None) -> None:
+        """Choose which T5-XXL text encoder Flux uses (None = automatic best).
+
+        Switching drops the resident encoders so the next generation reloads the
+        chosen T5, and clears warm pipes' cached component map so they re-resolve
+        the new path without needing a checkpoint switch.
+        """
+        new = path or None
+        if new == self._flux_text_encoder_override:
+            return
+        self._flux_text_encoder_override = new
+        self._flux_text_encoder = None
+        self._flux_text_encoder_2 = None
+        self._flux_tokenizer = None
+        self._flux_tokenizer_2 = None
+        self._flux_component_paths = {}
+        self._flux_clip_device = None
+        self._flux_t5_device = None
+        self._flux_prompt_cache.clear()
+        for pipe in (self._txt2img, self._img2img):
+            if pipe is not None and hasattr(pipe, "_aiwf_flux_components"):
+                try:
+                    delattr(pipe, "_aiwf_flux_components")
+                except Exception:
+                    logger.debug("Could not clear cached Flux components on pipe", exc_info=True)
+        gc.collect()
+        self.devices.empty_cache()
+        logger.info("Flux text encoder set to: %s", new or "automatic")
 
     @staticmethod
     def _write_temp_config(root: Path, name: str, config: dict) -> str:
@@ -904,9 +1148,13 @@ class DiffusersBackend:
             pad_token_id=1,
             projection_dim=768,
         )
-        clip = CLIPTextModel(clip_config).to(dtype=torch.float16)
-        clip.load_state_dict(load_file(str(component_paths["clip_l"]), device="cpu"), strict=True)
+        t5_path = component_paths["t5xxl"]
+        clip_device = self.devices.device() if self.devices.device().type == "cuda" else torch.device("cpu")
+
+        clip = CLIPTextModel(clip_config)
+        self._load_encoder_state_dict(clip, load_file(str(component_paths["clip_l"]), device="cpu"))
         clip.eval()
+        clip = clip.to(dtype=torch.float16, device=clip_device)
 
         t5_config = T5Config(
             vocab_size=32128,
@@ -926,17 +1174,17 @@ class DiffusersBackend:
             pad_token_id=0,
             eos_token_id=1,
         )
-        t5 = T5EncoderModel(t5_config).to(dtype=torch.float16)
-        state = load_file(str(component_paths["t5xxl"]), device="cpu")
-        t5.load_state_dict(state, strict=True)
-        del state
-        t5.eval()
+        t5, t5_device = self._load_flux_t5_encoder(t5_path, t5_config)
 
         self._flux_text_encoder = clip
         self._flux_text_encoder_2 = t5
+        self._flux_clip_device = clip_device
+        self._flux_t5_device = t5_device
         self._flux_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
         self._flux_tokenizer_2 = T5TokenizerFast.from_pretrained("google/t5-v1_1-xxl", legacy=True)
         self._flux_component_paths = {key: str(value) for key, value in component_paths.items()}
+        self._flux_prompt_cache.clear()
+        logger.info("Flux text encoders warm: CLIP-L on %s, T5 on %s", clip_device, t5_device)
 
     def _encode_flux_prompt(
         self,
@@ -950,6 +1198,18 @@ class DiffusersBackend:
         assert self._flux_text_encoder_2 is not None
         assert self._flux_tokenizer is not None
         assert self._flux_tokenizer_2 is not None
+
+        cache_key = f"{prompt}|{batch_size}|{max_sequence_length}"
+        cached = self._flux_prompt_cache.get(cache_key)
+        if cached is not None:
+            prompt_embeds, pooled = cached
+            return (
+                prompt_embeds.to(dtype=torch.bfloat16, device=device),
+                pooled.to(dtype=torch.bfloat16, device=device),
+            )
+
+        clip_device = self._flux_clip_device or device
+        t5_device = self._flux_t5_device or device
         clip_inputs = self._flux_tokenizer(
             [prompt],
             padding="max_length",
@@ -964,18 +1224,155 @@ class DiffusersBackend:
             truncation=True,
             return_tensors="pt",
         )
+        clip_inputs = clip_inputs.to(clip_device)
+        t5_inputs = t5_inputs.to(t5_device)
+        encode_t0 = time.perf_counter()
         with torch.no_grad():
             pooled = self._flux_text_encoder(clip_inputs.input_ids, output_hidden_states=False).pooler_output
             prompt_embeds = self._flux_text_encoder_2(
                 t5_inputs.input_ids,
                 output_hidden_states=False,
             )[0]
+        logger.info(
+            "Flux prompt encoded in %.2fs (CLIP %s, T5 %s)",
+            time.perf_counter() - encode_t0,
+            clip_device,
+            t5_device,
+        )
         prompt_embeds = prompt_embeds.to(dtype=torch.bfloat16, device=device)
         pooled = pooled.to(dtype=torch.bfloat16, device=device)
+        self._flux_prompt_cache[cache_key] = (
+            prompt_embeds.detach().cpu(),
+            pooled.detach().cpu(),
+        )
         if batch_size > 1:
             prompt_embeds = prompt_embeds.repeat(batch_size, 1, 1)
             pooled = pooled.repeat(batch_size, 1)
         return prompt_embeds, pooled
+
+    def _encode_flux_prompt_fast(
+        self,
+        pipe,
+        prompt: str,
+        *,
+        device: torch.device,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode the Flux prompt on the GPU when the T5 encoder is pinned to CPU.
+
+        Loading the transformer first leaves no room for the ~9.5 GB T5-XXL, so
+        it falls back to CPU and a single prompt takes ~2 minutes. Here we briefly
+        evict the transformer to system RAM, run CLIP + T5 on the GPU (where T5
+        fp16 has native fast kernels), then restore the transformer for denoising.
+
+        Anything unexpected falls back to the original CPU encode, so this is
+        never slower-than-broken: the worst case is today's behaviour.
+        """
+        cuda = self.devices.device()
+        t5_on_cpu = self._flux_t5_device is not None and self._flux_t5_device.type == "cpu"
+
+        # Cached prompts and offloaded pipelines don't benefit from the swap.
+        cache_key = f"{prompt}|{batch_size}|256"
+        already_cached = self._flux_prompt_cache.get(cache_key) is not None
+        if (
+            cuda.type != "cuda"
+            or not t5_on_cpu
+            or already_cached
+            or self._offload_active
+            or self._flux_text_encoder_2 is None
+        ):
+            return self._encode_flux_prompt(prompt, device=device, batch_size=batch_size)
+
+        transformer = getattr(pipe, "transformer", None)
+        swap_t0 = time.perf_counter()
+        moved_transformer = False
+        try:
+            if transformer is not None:
+                transformer.to("cpu")
+                moved_transformer = True
+                self.devices.empty_cache()
+            self._flux_text_encoder_2.to(cuda)
+            self._flux_t5_device = cuda
+            if self._flux_text_encoder is not None:
+                self._flux_text_encoder.to(cuda)
+                self._flux_clip_device = cuda
+            logger.info("Flux fast encode: T5 moved to %s for prompt encoding", cuda)
+            return self._encode_flux_prompt(prompt, device=device, batch_size=batch_size)
+        except Exception:
+            logger.warning(
+                "Flux GPU prompt-encode swap failed; falling back to CPU encode.", exc_info=True
+            )
+            try:
+                self._flux_text_encoder_2.to("cpu")
+                self._flux_t5_device = torch.device("cpu")
+            except Exception:
+                logger.debug("Could not park T5 back on CPU after failed swap", exc_info=True)
+            return self._encode_flux_prompt(prompt, device=device, batch_size=batch_size)
+        finally:
+            # Always return T5 to CPU and the transformer to the GPU so the
+            # denoise loop and the warm-pipeline cache keep working.
+            try:
+                self._flux_text_encoder_2.to("cpu")
+                self._flux_t5_device = torch.device("cpu")
+                self.devices.empty_cache()
+            except Exception:
+                logger.debug("Could not park T5 back on CPU", exc_info=True)
+            if moved_transformer and transformer is not None:
+                try:
+                    transformer.to(cuda)
+                except Exception:
+                    logger.warning("Failed to restore Flux transformer to GPU after encode", exc_info=True)
+            logger.info("Flux fast encode: transformer restored in %.2fs", time.perf_counter() - swap_t0)
+
+    def _encode_flux2_prompt(self, pipe, prompt: str, device: torch.device) -> torch.Tensor:
+        """Cache Qwen3 prompt embeddings — Flux.2 Klein re-encodes every call otherwise."""
+        cache_key = prompt
+        cached = self._flux2_prompt_cache.get(cache_key)
+        if cached is not None:
+            return cached.to(device=device)
+        try:
+            from diffusers.pipelines.flux2.pipeline_flux2_klein import Flux2KleinPipeline
+        except ImportError as exc:
+            raise ModelNotFoundError("Flux.2 Klein prompt encoding is unavailable.") from exc
+        encode_t0 = time.perf_counter()
+        prompt_embeds = Flux2KleinPipeline._get_qwen3_prompt_embeds(
+            text_encoder=pipe.text_encoder,
+            tokenizer=pipe.tokenizer,
+            prompt=prompt,
+            device=device,
+        )
+        logger.info("Flux.2 Klein prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+        self._flux2_prompt_cache[cache_key] = prompt_embeds.detach().cpu()
+        return prompt_embeds
+
+    def _encode_z_image_prompts(
+        self,
+        pipe,
+        prompt: str,
+        negative_prompt: str | None,
+        device: torch.device,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        cache_key = (prompt, negative_prompt or "")
+        cached = self._z_image_prompt_cache.get(cache_key)
+        if cached is not None:
+            prompt_embeds, negative_embeds = cached
+            return (
+                [tensor.to(device=device) for tensor in prompt_embeds],
+                [tensor.to(device=device) for tensor in negative_embeds],
+            )
+        encode_t0 = time.perf_counter()
+        prompt_embeds, negative_embeds = pipe.encode_prompt(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            device=device,
+            do_classifier_free_guidance=pipe.do_classifier_free_guidance,
+        )
+        logger.info("Z-Image prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+        self._z_image_prompt_cache[cache_key] = (
+            [tensor.detach().cpu() for tensor in prompt_embeds],
+            [tensor.detach().cpu() for tensor in negative_embeds],
+        )
+        return prompt_embeds, negative_embeds
 
     @staticmethod
     def _txt2img_pipeline_cls_for_architecture(architecture: str):
@@ -1004,14 +1401,17 @@ class DiffusersBackend:
         return pipe.__class__.__name__ == "ZImagePipeline"
 
     def _apply_fp8_storage(self, pipe) -> None:
-        """Store denoiser weights in FP8, compute in fp16 (diffusers layerwise casting)."""
+        """Store classic UNet weights in FP8 (SD/SDXL VRAM saver — not for GGUF/DiT transformers)."""
         if not self.flags.fp8:
             return
         if self.flags.lowvram:
             logger.warning("FP8 weight storage is skipped in Low VRAM mode (conflicting offload hooks).")
             return
-        denoiser = getattr(pipe, "unet", None) or getattr(pipe, "transformer", None)
-        if denoiser is None or not hasattr(denoiser, "enable_layerwise_casting"):
+        denoiser = getattr(pipe, "unet", None)
+        if denoiser is None:
+            # Flux / Flux2 / Z-Image / SD3 use transformers or GGUF quants — FP8 storage is not applicable.
+            return
+        if not hasattr(denoiser, "enable_layerwise_casting"):
             logger.warning("FP8 weight storage not supported by this diffusers version; continuing at fp16.")
             return
         try:
@@ -1038,11 +1438,15 @@ class DiffusersBackend:
         return dev
 
     def _wants_offload(self, architecture: str) -> bool:
-        if is_flux_architecture(architecture):
+        # DiT image families (Flux / Flux.2 / Z-Image) stay GPU-resident for warm reuse.
+        # CPU offload shuffles weights every generation and feels like a full reload.
+        if (
+            is_flux_architecture(architecture)
+            or is_flux2_klein_architecture(architecture)
+            or is_z_image_architecture(architecture)
+        ):
             return False
         vram = self.devices.total_vram_gb()
-        if is_flux2_klein_architecture(architecture) or is_z_image_architecture(architecture):
-            return 0.0 < vram < 24.0
         if is_sd3_architecture(architecture):
             return 0.0 < vram < 24.0
         if not is_sdxl_architecture(architecture) or vram <= 0.0:
@@ -1175,10 +1579,13 @@ class DiffusersBackend:
 
     def _load_flux_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            logger.debug("Flux checkpoint already warm: %s", checkpoint.title)
             return checkpoint
 
         if self._active and self._active.path != checkpoint.path:
-            self.unload()
+            # Switching to another Flux transformer: keep the (identical, ~9.8 GB)
+            # CLIP-L + T5 text encoders resident so we skip the disk reload.
+            self.unload(keep_flux_encoders=True)
         elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
             self._inpaint = None
             self._inpaint_active = None
@@ -1194,24 +1601,22 @@ class DiffusersBackend:
         transformer_config = dict(_FLUX_TRANSFORMER_CONFIG_BASE)
         transformer_config["guidance_embeds"] = guidance_embeds
 
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_root = Path(tmp)
-            transformer_config_dir = self._write_temp_config(tmp_root, "transformer", transformer_config)
-            vae_config_dir = self._write_temp_config(tmp_root, "vae", _FLUX_VAE_CONFIG)
-            load_kwargs = {
-                "config": transformer_config_dir,
-                "torch_dtype": dtype,
-                "local_files_only": True,
-            }
-            if path.suffix.lower() == ".gguf":
-                load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
-            transformer = FluxTransformer2DModel.from_single_file(str(path), **load_kwargs)
-            vae = AutoencoderKL.from_single_file(
-                str(component_paths["vae"]),
-                config=vae_config_dir,
-                torch_dtype=dtype,
-                local_files_only=True,
-            )
+        config_root = self._flux_config_cache_root()
+        transformer_config_dir = self._write_temp_config(config_root, "transformer", transformer_config)
+        vae_config_dir = self._write_temp_config(config_root, "vae", _FLUX_VAE_CONFIG)
+        transformer = self._load_dit_transformer_single_file(
+            FluxTransformer2DModel,
+            path,
+            config_dir=transformer_config_dir,
+            dtype=dtype,
+            family="Flux",
+        )
+        vae = AutoencoderKL.from_single_file(
+            str(component_paths["vae"]),
+            config=vae_config_dir,
+            torch_dtype=dtype,
+            local_files_only=True,
+        )
 
         pipe = FluxPipeline(
             scheduler=FlowMatchEulerDiscreteScheduler(shift=3.0),
@@ -1227,7 +1632,14 @@ class DiffusersBackend:
         pipe = pipe.to(self.devices.device())
         pipe.set_progress_bar_config(disable=True)
         self._remember_base_scheduler_config(pipe)
+        apply_attention_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=self._compile_allowed_for_architecture(ARCH_FLUX),
+        )
         self._tune_vae_memory(pipe, ARCH_FLUX)
+
+        self._load_flux_prompt_models(component_paths)
 
         self._active = checkpoint
         self._txt2img = pipe
@@ -1236,6 +1648,7 @@ class DiffusersBackend:
 
     def _load_flux2_klein_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            logger.debug("Flux.2 Klein checkpoint already warm: %s", checkpoint.title)
             return checkpoint
 
         if self._active and self._active.path != checkpoint.path:
@@ -1257,7 +1670,7 @@ class DiffusersBackend:
         dtype = self._dtype_for_architecture(ARCH_FLUX2_KLEIN)
         path = Path(checkpoint.path)
         if path.is_dir():
-            pipe = Flux2KleinPipeline.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+            pipe = Flux2KleinPipeline.from_pretrained(str(path), dtype=dtype, local_files_only=True)
         else:
             if path.suffix.lower() not in {".gguf", ".safetensors"}:
                 raise ModelNotFoundError("Flux.2 Klein expects a .gguf or .safetensors transformer file.")
@@ -1269,25 +1682,22 @@ class DiffusersBackend:
                 else _FLUX2_KLEIN_9B_TRANSFORMER_CONFIG
             )
             fallback_config = self._flux2_config_from_gguf(path, fallback_config)
-            with tempfile.TemporaryDirectory() as tmp:
-                tmp_root = Path(tmp)
-                transformer_config_dir = (
-                    (
-                        self._local_config_dir(component_dir, "transformer")
-                        if path.suffix.lower() != ".gguf"
-                        and self._component_dir_matches_repo(component_dir, repo_name)
-                        else None
-                    )
-                    or self._write_temp_config(tmp_root, "transformer", fallback_config)
+            transformer_config_dir = (
+                (
+                    self._local_config_dir(component_dir, "transformer")
+                    if path.suffix.lower() != ".gguf"
+                    and self._component_dir_matches_repo(component_dir, repo_name)
+                    else None
                 )
-                load_kwargs = {
-                    "config": transformer_config_dir,
-                    "torch_dtype": dtype,
-                    "local_files_only": True,
-                }
-                if path.suffix.lower() == ".gguf":
-                    load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
-                transformer = Flux2Transformer2DModel.from_single_file(str(path), **load_kwargs)
+                or self._cached_transformer_config_dir("flux2", path, fallback_config)
+            )
+            transformer = self._load_dit_transformer_single_file(
+                Flux2Transformer2DModel,
+                path,
+                config_dir=transformer_config_dir,
+                dtype=dtype,
+                family="Flux.2 Klein",
+            )
 
             vae = AutoencoderKLFlux2.from_pretrained(
                 str(component_dir / "vae"),
@@ -1296,7 +1706,7 @@ class DiffusersBackend:
             )
             text_encoder = Qwen3ForCausalLM.from_pretrained(
                 str(component_dir / "text_encoder"),
-                torch_dtype=dtype,
+                dtype=dtype,
                 local_files_only=True,
             )
             tokenizer = Qwen2TokenizerFast.from_pretrained(str(component_dir / "tokenizer"), local_files_only=True)
@@ -1319,10 +1729,16 @@ class DiffusersBackend:
             self.flags,
             compile_allowed=self._compile_allowed_for_architecture(ARCH_FLUX2_KLEIN),
         )
-        pipe = self._place_pipeline(pipe, prefer_offload=self._wants_offload(ARCH_FLUX2_KLEIN))
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(ARCH_FLUX2_KLEIN),
+            architecture=ARCH_FLUX2_KLEIN,
+        )
         pipe.set_progress_bar_config(disable=True)
         self._tune_vae_memory(pipe, ARCH_FLUX2_KLEIN)
 
+        self._flux2_prompt_cache.clear()
+        self._z_image_prompt_cache.clear()
         self._active = checkpoint
         self._txt2img = pipe
         self._img2img = None
@@ -1330,6 +1746,7 @@ class DiffusersBackend:
 
     def _load_z_image_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            logger.debug("Z-Image checkpoint already warm: %s", checkpoint.title)
             return checkpoint
 
         if self._active and self._active.path != checkpoint.path:
@@ -1351,29 +1768,34 @@ class DiffusersBackend:
         dtype = self._dtype_for_architecture(ARCH_Z_IMAGE)
         path = Path(checkpoint.path)
         if path.is_dir():
-            pipe = ZImagePipeline.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+            pipe = ZImagePipeline.from_pretrained(str(path), dtype=dtype, local_files_only=True)
         else:
             if path.suffix.lower() not in {".gguf", ".safetensors"}:
                 raise ModelNotFoundError("Z-Image expects a .gguf or .safetensors transformer file.")
             component_dir = self._resolve_component_dir(ARCH_Z_IMAGE, checkpoint)
-            with tempfile.TemporaryDirectory() as tmp:
-                tmp_root = Path(tmp)
-                transformer_config_dir = (
-                    self._local_config_dir(component_dir, "transformer")
-                    or self._write_temp_config(tmp_root, "transformer", _Z_IMAGE_TRANSFORMER_CONFIG)
-                )
-                load_kwargs = {
-                    "config": transformer_config_dir,
-                    "torch_dtype": dtype,
-                    "local_files_only": True,
-                }
-                if path.suffix.lower() == ".gguf":
-                    load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
-                    self._patch_gguf_linear_input_dtype()
-                    with self._gguf_singleton_shape_compat():
-                        transformer = ZImageTransformer2DModel.from_single_file(str(path), **load_kwargs)
-                else:
+            transformer_config_dir = (
+                self._local_config_dir(component_dir, "transformer")
+                or self._cached_transformer_config_dir("z_image", path, _Z_IMAGE_TRANSFORMER_CONFIG)
+            )
+            load_kwargs = {
+                "config": transformer_config_dir,
+                "torch_dtype": dtype,
+                "local_files_only": True,
+            }
+            if path.suffix.lower() == ".gguf":
+                load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
+                self._patch_gguf_linear_input_dtype()
+                with self._gguf_singleton_shape_compat():
+                    transformer_t0 = time.perf_counter()
                     transformer = ZImageTransformer2DModel.from_single_file(str(path), **load_kwargs)
+            else:
+                transformer_t0 = time.perf_counter()
+                transformer = ZImageTransformer2DModel.from_single_file(str(path), **load_kwargs)
+            logger.info(
+                "Z-Image transformer loaded in %.1fs from %s",
+                time.perf_counter() - transformer_t0,
+                path.name,
+            )
 
             vae = AutoencoderKL.from_pretrained(
                 str(component_dir / "vae"),
@@ -1382,7 +1804,7 @@ class DiffusersBackend:
             )
             text_encoder = AutoModel.from_pretrained(
                 str(component_dir / "text_encoder"),
-                torch_dtype=dtype,
+                dtype=dtype,
                 local_files_only=True,
             )
             tokenizer = AutoTokenizer.from_pretrained(str(component_dir / "tokenizer"), local_files_only=True)
@@ -1404,10 +1826,15 @@ class DiffusersBackend:
             self.flags,
             compile_allowed=self._compile_allowed_for_architecture(ARCH_Z_IMAGE),
         )
-        pipe = self._place_pipeline(pipe, prefer_offload=self._wants_offload(ARCH_Z_IMAGE))
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(ARCH_Z_IMAGE),
+            architecture=ARCH_Z_IMAGE,
+        )
         pipe.set_progress_bar_config(disable=True)
         self._tune_vae_memory(pipe, ARCH_Z_IMAGE)
 
+        self._z_image_prompt_cache.clear()
         self._active = checkpoint
         self._txt2img = pipe
         self._img2img = None
@@ -1422,6 +1849,7 @@ class DiffusersBackend:
         if is_z_image_architecture(checkpoint.architecture):
             return self._load_z_image_checkpoint(checkpoint)
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            logger.debug("Checkpoint already warm: %s", checkpoint.title)
             return checkpoint
 
         if self._active and self._active.path != checkpoint.path:
@@ -1433,6 +1861,7 @@ class DiffusersBackend:
 
         if self._txt2img is not None:
             self._active = checkpoint
+            logger.debug("Reusing warm pipeline for checkpoint alias: %s", checkpoint.title)
             return checkpoint
 
         logger.info("Loading checkpoint %s (%s)", checkpoint.title, checkpoint.architecture)
@@ -1473,7 +1902,11 @@ class DiffusersBackend:
 
         compile_allowed = self._compile_allowed_for_architecture(checkpoint.architecture)
         apply_attention_optimizations(pipe, self.flags, compile_allowed=compile_allowed)
-        pipe = self._place_pipeline(pipe, prefer_offload=self._wants_offload(checkpoint.architecture))
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(checkpoint.architecture),
+            architecture=checkpoint.architecture,
+        )
         self._tune_vae_memory(pipe, checkpoint.architecture)
         # Embeddings are now loaded on-demand in generate() only for those referenced
         # by the actual prompt (see _ensure_embeddings_for_prompt). Unused ones are
@@ -1545,7 +1978,11 @@ class DiffusersBackend:
 
         compile_allowed = self._compile_allowed_for_architecture(checkpoint.architecture)
         apply_attention_optimizations(pipe, self.flags, compile_allowed=compile_allowed)
-        pipe = self._place_pipeline(pipe, prefer_offload=self._wants_offload(checkpoint.architecture))
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(checkpoint.architecture),
+            architecture=checkpoint.architecture,
+        )
         self._tune_vae_memory(pipe, checkpoint.architecture)
         # Embeddings are now loaded on-demand in generate() only for those referenced
         # by the actual prompt (see _ensure_embeddings_for_prompt). Unused ones are
@@ -1579,7 +2016,11 @@ class DiffusersBackend:
         self._apply_fp8_storage(pipe)
         compile_allowed = self._compile_allowed_for_architecture(checkpoint.architecture)
         apply_attention_optimizations(pipe, self.flags, compile_allowed=compile_allowed)
-        pipe = self._place_pipeline(pipe, prefer_offload=self._wants_offload(checkpoint.architecture))
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(checkpoint.architecture),
+            architecture=checkpoint.architecture,
+        )
         self._tune_vae_memory(pipe, checkpoint.architecture)
         self._refiner = pipe
         self._refiner_active = checkpoint
@@ -1598,7 +2039,7 @@ class DiffusersBackend:
             return Image.Resampling.NEAREST
         return Image.Resampling.LANCZOS
 
-    def unload(self) -> None:
+    def unload(self, *, keep_flux_encoders: bool = False) -> None:
         self._txt2img = None
         self._img2img = None
         self._inpaint = None
@@ -1608,12 +2049,30 @@ class DiffusersBackend:
         self._refiner_active = None
         self._active_vae_id = None
         self._controlnet_cache.clear()
-        self._flux_text_encoder = None
-        self._flux_text_encoder_2 = None
-        self._flux_tokenizer = None
-        self._flux_tokenizer_2 = None
-        self._flux_component_paths = {}
+        # The Flux CLIP-L + T5-XXL text encoders are identical across every Flux
+        # checkpoint, and T5 is ~9.8 GB to read from disk. When switching between
+        # two Flux transformers we keep them resident (T5 lives on CPU, CLIP is
+        # tiny) so the next generation skips a multi-second disk reload.
+        if not keep_flux_encoders:
+            self._flux_text_encoder = None
+            self._flux_text_encoder_2 = None
+            self._flux_tokenizer = None
+            self._flux_tokenizer_2 = None
+            self._flux_component_paths = {}
+            self._flux_clip_device = None
+            self._flux_t5_device = None
+            self._flux_prompt_cache.clear()
+        self._flux2_prompt_cache.clear()
+        self._z_image_prompt_cache.clear()
+        gc.collect()
         self.devices.empty_cache()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+        except Exception:
+            logger.debug("CUDA cache cleanup after image unload failed", exc_info=True)
 
     _SAMPLER_EXTRA_KWARGS = {
         "dpmpp_2m_sde": {"algorithm_type": "sde-dpmsolver++"},
@@ -1622,17 +2081,24 @@ class DiffusersBackend:
     }
 
     def _apply_sampler(self, pipe, sampler_id: str, schedule_type: str = "automatic") -> None:
+        scheduler_signature = f"{sampler_id}|{schedule_type}"
+        if getattr(pipe, "_aiwf_scheduler_signature", None) == scheduler_signature:
+            return
         if self._is_flux_pipe(pipe):
             logger.info("Flux uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
             return
         if self._is_flux2_pipe(pipe):
             logger.info("Flux.2 Klein uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
             return
         if self._is_z_image_pipe(pipe):
             logger.info("Z-Image uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
             return
         if self._is_sd3_pipe(pipe):
             logger.info("SD3.5 uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
             return
         cls = SAMPLER_CLASSES.get(sampler_id, EulerAncestralDiscreteScheduler)
         base_config = self._base_scheduler_config_for_pipe(pipe)
@@ -1684,6 +2150,7 @@ class DiffusersBackend:
                 )
                 return
         pipe.scheduler = scheduler
+        pipe._aiwf_scheduler_signature = scheduler_signature
 
     def _decode_latent_preview(self, pipe, latents) -> Image.Image:
         latents = latents.to(dtype=pipe.vae.dtype, device=pipe.vae.device)
@@ -1773,11 +2240,15 @@ class DiffusersBackend:
         width: int,
         height: int,
         steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
     ):
         component_paths = getattr(pipe, "_aiwf_flux_components", None) or self._resolve_flux_component_paths()
         self._load_flux_prompt_models({key: Path(value) for key, value in component_paths.items()})
         device = self._execution_device(pipe)
-        prompt_embeds, pooled_prompt_embeds = self._encode_flux_prompt(
+        if on_progress is not None:
+            on_progress(0, max(1, int(steps)), "Encoding prompt", None)
+        prompt_embeds, pooled_prompt_embeds = self._encode_flux_prompt_fast(
+            pipe,
             parsed_prompt,
             device=device,
             batch_size=request.batch_size,
@@ -1813,10 +2284,15 @@ class DiffusersBackend:
         width: int,
         height: int,
         steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
     ):
+        device = self._execution_device(pipe)
+        if on_progress is not None:
+            on_progress(0, max(1, int(steps)), "Encoding prompt", None)
+        prompt_embeds = self._encode_flux2_prompt(pipe, parsed_prompt, device)
         return self._call_pipe(
             pipe,
-            prompt=parsed_prompt,
+            prompt_embeds=prompt_embeds,
             num_inference_steps=steps,
             guidance_scale=float(request.cfg_scale),
             num_images_per_prompt=request.batch_size,
@@ -1839,11 +2315,21 @@ class DiffusersBackend:
         width: int,
         height: int,
         steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
     ):
+        device = self._execution_device(pipe)
+        if on_progress is not None:
+            on_progress(0, max(1, int(steps)), "Encoding prompt", None)
+        prompt_embeds, negative_prompt_embeds = self._encode_z_image_prompts(
+            pipe,
+            parsed_prompt,
+            request.negative_prompt or None,
+            device,
+        )
         return self._call_pipe(
             pipe,
-            prompt=parsed_prompt,
-            negative_prompt=request.negative_prompt or None,
+            prompt_embeds=prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
             num_inference_steps=steps,
             guidance_scale=float(request.cfg_scale),
             num_images_per_prompt=request.batch_size,
@@ -2223,7 +2709,11 @@ class DiffusersBackend:
                 cn_model_arg,
                 mode=request.mode.value,
             )
-            cn_pipe = self._place_pipeline(cn_pipe, prefer_offload=self._wants_offload(checkpoint.architecture))
+            cn_pipe = self._place_pipeline(
+                cn_pipe,
+                prefer_offload=self._wants_offload(checkpoint.architecture),
+                architecture=checkpoint.architecture,
+            )
 
         # Load textual inversions referenced by the (processed) prompt/negative.
         # Only embeddings the user actually uses in the prompt text are loaded here;
@@ -2276,6 +2766,7 @@ class DiffusersBackend:
                         width=request.width,
                         height=request.height,
                         steps=request.steps,
+                        on_progress=on_progress,
                     )
                     batch_images = output.images
 
@@ -2297,6 +2788,7 @@ class DiffusersBackend:
                         width=request.width,
                         height=request.height,
                         steps=request.steps,
+                        on_progress=on_progress,
                     )
                     batch_images = output.images
 
@@ -2318,6 +2810,7 @@ class DiffusersBackend:
                         width=request.width,
                         height=request.height,
                         steps=request.steps,
+                        on_progress=on_progress,
                     )
                     batch_images = output.images
 
@@ -2596,7 +3089,8 @@ class DiffusersBackend:
                     batch_images = refined_images
 
                 images.extend(batch_images)
-                seeds.extend([seed] * len(batch_images))
+                batch_seeds = [seed] * len(batch_images)
+                seeds.extend(batch_seeds)
                 for img in batch_images:
                     infotexts.append(
                         format_infotext(
@@ -2606,6 +3100,15 @@ class DiffusersBackend:
                             output_width=width,
                             output_height=height,
                         )
+                    )
+                if on_progress and batch_images:
+                    on_progress(
+                        batch_index + 1,
+                        max(1, int(request.batch_count)),
+                        f"Batch {batch_index + 1}/{request.batch_count} complete",
+                        batch_images[-1],
+                        batch_images,
+                        batch_seeds,
                     )
 
         except (KeyboardInterrupt, StopIteration):

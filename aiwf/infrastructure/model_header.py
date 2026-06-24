@@ -470,6 +470,9 @@ def _looks_like_flux_lora_keys(keys: Iterable[str]) -> bool:
             "lora_transformer" in lowered
             or "double_blocks" in lowered
             or "single_blocks" in lowered
+            # diffusers-format Flux LoRAs name the blocks transformer.single_transformer_blocks.*
+            # (single_transformer_blocks is Flux-specific; SD3 only has joint transformer_blocks).
+            or "single_transformer_blocks" in lowered
             or "transformer_blocks" in lowered and "flux" in lowered
         ):
             return True
@@ -585,6 +588,10 @@ def _quant_from_filename(filename: str) -> str:
               "q6_k","q8_0","q4_0","q2_k","iq2_xs","iq3_xxs"):
         if q in name:
             return q.upper()
+    if "nf4" in name:
+        return "NF4"
+    if "fp4" in name:
+        return "FP4"
     if "fp8" in name or "_f8" in name:
         return "FP8"
     if "fp16" in name or "_f16" in name:

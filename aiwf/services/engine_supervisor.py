@@ -152,7 +152,10 @@ class EngineSupervisor:
             )
 
         if request.target.is_gpu_heavy():
-            self._flush_cuda()
+            with self._lock:
+                prior = self._engine_status.active
+            if prior.is_gpu_heavy() and prior != request.target:
+                self._flush_cuda()
 
         with self._lock:
             current = self._engine_status.active

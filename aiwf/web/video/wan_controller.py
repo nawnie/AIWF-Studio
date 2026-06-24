@@ -71,6 +71,9 @@ class WanVideoController:
         vae: str | None,
         text_encoder: str | None,
         offload: str | None,
+        sampler: str | None = None,
+        flow_shift: float | None = None,
+        runtime_mode: str | None = None,
     ) -> None:
         settings = self._ctx.settings
         changed = False
@@ -80,6 +83,9 @@ class WanVideoController:
             ("last_wan_vae", str(vae or "")),
             ("last_wan_text_encoder", str(text_encoder or "")),
             ("last_wan_offload", str(offload or "balanced")),
+            ("last_wan_sampler", str(sampler or "unipc")),
+            ("last_wan_flow_shift", float(flow_shift if flow_shift is not None else 5.0)),
+            ("last_wan_runtime_mode", str(runtime_mode or WAN_RUNTIME_FAST_5B)),
         ]:
             if getattr(settings, attr, None) != value:
                 setattr(settings, attr, value)
@@ -137,7 +143,7 @@ class WanVideoController:
             high_noise_steps=max(1, int(high_steps or 0)),
             low_noise_steps=max(1, int(low_steps or 0)),
             guidance_scale=float(guidance),
-            sampler=str(sampler or "euler"),
+            sampler=str(sampler or "unipc"),
             sigma_type=str(sigma_type or "simple"),
             flow_shift=float(flow),
             seed=int(seed),
@@ -161,7 +167,7 @@ class WanVideoController:
             image_guidance_scale=float(image_guidance_scale or 1.0),
         )
 
-    def generate(self, request: WanI2VRequest, image, progress) -> object:
+    def generate(self, request: WanI2VRequest, image, progress, should_cancel=None) -> object:
         def on_progress(step, total, steps_per_second=None, message=None):
             rate_text = self._format_rate(steps_per_second)
             message_text = str(message or "").strip()
@@ -188,7 +194,7 @@ class WanVideoController:
             progress(min(0.90, step / max(1, total)), desc=desc)
 
         try:
-            return self._service.generate(request, image, on_progress=on_progress)
+            return self._service.generate(request, image, on_progress=on_progress, should_cancel=should_cancel)
         except WanUnavailable as exc:
             raise gr.Error(str(exc)) from exc
         except Exception as exc:

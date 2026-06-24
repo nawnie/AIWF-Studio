@@ -176,6 +176,9 @@ class UserSettings(BaseSettings):
     last_wan_vae: str = ""
     last_wan_text_encoder: str = ""
     last_wan_offload: str = "balanced"
+    last_wan_sampler: str = "unipc"
+    last_wan_flow_shift: float = 5.0
+    last_wan_runtime_mode: str = "fast_5b"
 
     # Saved image format — "png" keeps infotext metadata; jpg/webp are smaller files.
     image_format: str = "png"

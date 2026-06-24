@@ -237,6 +237,17 @@ def _run_txt2img(
         clip_skip=int(getattr(ctx.settings, "default_clip_skip", 1)),
     )
     last_preview = None
+    session_images: list = []
+    session_seeds: list[int] = []
+    gallery_columns = min(max(1, int(getattr(ctx.settings, "gallery_columns", 2) or 2)), 4)
+
+    def _gallery_update(images: list) -> gr.Update:
+        return gr.update(
+            value=list(images),
+            visible=len(images) > 1,
+            columns=min(gallery_columns, max(1, len(images))),
+        )
+
     for event in ctx.generation.submit_streaming(request):
         if event[0] == "progress":
             _kind, step, total, message, preview = event
@@ -244,21 +255,35 @@ def _run_txt2img(
                 last_preview = preview
             yield (
                 gr.update(value=last_preview, visible=last_preview is not None),
-                gr.update(),
+                _gallery_update(session_images) if session_images else gr.update(),
                 f"**Running** - step {step}/{total}: {message}",
+            )
+        elif event[0] == "batch_images":
+            _kind, batch_images, batch_seeds = event
+            session_images.extend(batch_images)
+            session_seeds.extend(batch_seeds)
+            primary = session_images[-1] if session_images else None
+            seeds = ", ".join(str(seed) for seed in session_seeds[:8])
+            yield (
+                gr.update(value=primary, visible=primary is not None),
+                _gallery_update(session_images),
+                f"**Batch complete** - {len(session_images)} image(s), seed {seeds or 'recorded in metadata'}",
             )
         else:
             _kind, job = event
             if job.result is None:
                 yield gr.update(), gr.update(), f"**Error** - {job.error or job.state.value}"
                 return
-            images = job.result.images
-            primary = images[0] if images else None
-            seeds = ", ".join(str(seed) for seed in job.result.seeds[:4])
+            if not session_images and job.result.images:
+                session_images.extend(job.result.images)
+                session_seeds.extend(job.result.seeds)
+            images = session_images or job.result.images
+            primary = images[-1] if images else None
+            seeds = ", ".join(str(seed) for seed in (session_seeds or job.result.seeds)[:8])
             yield (
                 gr.update(value=primary, visible=primary is not None),
-                gr.update(value=images, visible=len(images) > 1),
-                f"**Done** - seed {seeds or 'recorded in metadata'}",
+                _gallery_update(images),
+                f"**Done** - {len(images)} image(s), seed {seeds or 'recorded in metadata'}",
             )
 
 

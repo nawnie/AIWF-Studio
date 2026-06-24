@@ -5,7 +5,7 @@ from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.models import LoraInfo
-from aiwf.infrastructure.model_inventory import scan_and_write_model_inventory
+from aiwf.infrastructure.model_inventory import get_model_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def resolve_lora_roots(flags: RuntimeFlags) -> list[Path]:
 def scan_loras(flags: RuntimeFlags) -> list[LoraInfo]:
     seen: set[str] = set()
     results: list[LoraInfo] = []
-    inventory = scan_and_write_model_inventory(flags)
+    inventory = get_model_inventory(flags)
 
     for record in inventory:
         if record.family != "lora":

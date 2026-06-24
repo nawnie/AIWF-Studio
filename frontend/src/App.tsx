@@ -194,10 +194,15 @@ function App() {
     setStatusMessage('Submitting to /api/pro/generate...')
     try {
       const result = await generateProOutput(settings, controller.signal)
-      const nextOutput = result.output
-      if (nextOutput) {
-        setPreview(nextOutput)
-        setRecentOutputs((current) => dedupeOutputs([nextOutput, ...result.recentOutputs, ...current]))
+      const sessionOutputs =
+        result.recentOutputs.length > 0
+          ? result.recentOutputs
+          : result.output
+            ? [result.output]
+            : []
+      if (sessionOutputs.length > 0) {
+        setPreview(sessionOutputs[sessionOutputs.length - 1])
+        setRecentOutputs((current) => dedupeOutputs([...sessionOutputs, ...current]))
       }
       setStatusMessage(result.message || `Generation ${result.status}.`)
     } catch (error: unknown) {

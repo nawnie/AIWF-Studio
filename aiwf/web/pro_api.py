@@ -393,13 +393,17 @@ def _generate_response(job: Any) -> dict[str, Any]:
     if result is None:
         raise HTTPException(status_code=500, detail=getattr(job, "error", None) or "Generation failed")
     images = getattr(result, "images", []) or []
+    encoded_images = [_image_to_data_url(image) for image in images]
+    encoded_images = [url for url in encoded_images if url]
     return {
         "jobId": str(getattr(job, "id", getattr(result, "job_id", ""))),
         "status": _job_status(job),
-        "image": _image_to_data_url(images[0]) if images else None,
+        "image": encoded_images[0] if encoded_images else None,
+        "images": encoded_images,
         "seeds": list(getattr(result, "seeds", []) or []),
         "infotexts": list(getattr(result, "infotexts", []) or []),
         "artifacts": [_artifact_payload(item) for item in (getattr(result, "artifacts", []) or [])],
+        "message": f"Generated {len(images)} image(s).",
     }
 
 

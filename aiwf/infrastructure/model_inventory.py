@@ -63,7 +63,12 @@ class ModelInventoryRecord:
 
 
 def inventory_path(flags: RuntimeFlags) -> Path:
-    return flags.resolved_models_dir() / "model_inventory.json"
+    # Keep the cache file OUT of the scanned models dir: writing it there bumps
+    # the models-dir mtime, which changes the roots signature and self-
+    # invalidates the very cache we just wrote, forcing a full rescan on the
+    # next call (the cause of repeated multi-second "Indexed N assets" stalls
+    # before each generation).
+    return flags.data_dir / "cache" / "model_inventory.json"
 
 
 def model_inventory_roots(flags: RuntimeFlags) -> list[Path]:
@@ -546,8 +551,72 @@ def write_model_inventory(flags: RuntimeFlags, records: list[ModelInventoryRecor
         return None
 
 
-def scan_and_write_model_inventory(flags: RuntimeFlags) -> list[ModelInventoryRecord]:
+_SESSION_INVENTORY: dict[str, list[ModelInventoryRecord]] = {}
+
+
+def _fast_roots_signature(flags: RuntimeFlags) -> str:
+    parts: list[str] = []
+    for root in model_inventory_roots(flags):
+        try:
+            stat = root.stat()
+            parts.append(f"{os.path.normcase(str(root))}:{stat.st_mtime_ns}")
+        except OSError:
+            parts.append(os.path.normcase(str(root)))
+    return "|".join(sorted(parts))
+
+
+def _records_from_payload(payload: dict) -> list[ModelInventoryRecord]:
+    records: list[ModelInventoryRecord] = []
+    for item in payload.get("assets") or []:
+        if not isinstance(item, dict):
+            continue
+        records.append(ModelInventoryRecord(**item))
+    return records
+
+
+def load_model_inventory(flags: RuntimeFlags) -> list[ModelInventoryRecord] | None:
+    path = inventory_path(flags)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("schema_version") != MODEL_INVENTORY_VERSION:
+        return None
+    stored_roots = [str(root) for root in payload.get("roots") or []]
+    current_roots = [str(root) for root in model_inventory_roots(flags)]
+    if sorted(stored_roots) != sorted(current_roots):
+        return None
+    return _records_from_payload(payload)
+
+
+def invalidate_model_inventory_cache() -> None:
+    _SESSION_INVENTORY.clear()
+
+
+def get_model_inventory(flags: RuntimeFlags, *, force_rescan: bool = False) -> list[ModelInventoryRecord]:
+    signature = _fast_roots_signature(flags)
+    if not force_rescan:
+        session_cached = _SESSION_INVENTORY.get(signature)
+        if session_cached is not None:
+            return session_cached
+        disk_cached = load_model_inventory(flags)
+        if disk_cached is not None:
+            _SESSION_INVENTORY[signature] = disk_cached
+            return disk_cached
+
     records = scan_model_inventory(flags)
     write_model_inventory(flags, records)
+    # Writing model_inventory.json lives inside the models dir, which bumps that
+    # dir's mtime and would change the roots signature — instantly invalidating
+    # the entry we just made and forcing a full rescan on the next call. Cache
+    # the result under the post-write signature too so subsequent calls hit.
+    _SESSION_INVENTORY[signature] = records
+    _SESSION_INVENTORY[_fast_roots_signature(flags)] = records
     logger.info("Indexed %d local model asset(s)", len(records))
     return records
+
+
+def scan_and_write_model_inventory(flags: RuntimeFlags) -> list[ModelInventoryRecord]:
+    return get_model_inventory(flags, force_rescan=True)

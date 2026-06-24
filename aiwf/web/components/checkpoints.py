@@ -60,11 +60,16 @@ def checkpoint_dropdown(
     checkpoints = ctx.generation.list_checkpoints()
     id_map = {c.title: c.id for c in checkpoints}
     choices = _checkpoint_choices(checkpoints)
+    default_title = default_checkpoint_title(checkpoints, ctx.settings.last_checkpoint_id)
+    # Ensure the value is actually present in choices to avoid Gradio warnings
+    choice_ids = {c[1] for c in choices}
+    if default_title and default_title not in choice_ids:
+        default_title = choices[0][1] if choices else None
 
     dropdown = gr.Dropdown(
         label=label,
         choices=choices,
-        value=default_checkpoint_title(checkpoints, ctx.settings.last_checkpoint_id),
+        value=default_title,
         allow_custom_value=False,
     )
     return dropdown, id_map

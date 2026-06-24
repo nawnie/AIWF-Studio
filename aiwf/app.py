@@ -4,6 +4,11 @@ import argparse
 import logging
 import os
 import sys
+import threading
+import warnings
+
+warnings.filterwarnings("ignore", message=".*HTTP_422_UNPROCESSABLE.*")
+warnings.filterwarnings("ignore", message=".*cudaMallocAsync ignores max_split_size_mb.*")
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -71,6 +76,28 @@ def _friendly_device_name(description: str) -> str:
     if description.startswith("CPU"):
         return "CPU mode"
     return description
+
+
+def _background_model_warmup(ctx) -> None:
+    if os.environ.get("AIWF_BACKGROUND_WARMUP", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+    checkpoint_id = (ctx.settings.last_checkpoint_id or "").strip()
+    if not checkpoint_id:
+        return
+    try:
+        if not ctx.generation.backend.can_preload_checkpoint_locally(checkpoint_id):
+            return
+        logger.info("Background warmup: preloading checkpoint %s", checkpoint_id)
+        ctx.generation.load_checkpoint(checkpoint_id)
+        backend = ctx.generation.backend
+        if getattr(backend, "_flux_t5_device", None) is not None:
+            logger.info(
+                "Background warmup: Flux text encoders resident (T5 on %s)",
+                backend._flux_t5_device,
+            )
+        logger.info("Background warmup: checkpoint %s is ready", checkpoint_id)
+    except Exception:
+        logger.exception("Background model warmup failed for %s", checkpoint_id)
 
 
 def _friendly_library_message(checkpoint_count: int, lora_count: int) -> str:
@@ -379,12 +406,18 @@ def run() -> None:
     from aiwf.web.app import create_web_ui
 
     _startup_message(f"Using {_friendly_device_name(ctx.generation.backend.devices.describe())}.")
-    _startup_message("Scanning your model library...")
+    _startup_message("Loading model library...")
     checkpoint_count = len(ctx.generation.list_checkpoints())
     lora_count = len(ctx.generation.list_loras())
     _startup_message(_friendly_library_message(checkpoint_count, lora_count))
     _startup_message("Building the workspace...")
     demo, theme, css, js = create_web_ui(ctx)
+    threading.Thread(
+        target=_background_model_warmup,
+        args=(ctx,),
+        name="aiwf-model-warmup",
+        daemon=True,
+    ).start()
 
     launch_kwargs = dict(
         server_name=server_name,

@@ -468,16 +468,14 @@ class GenerationService:
         default_upscaler = getattr(self.settings, "default_hr_upscaler", "")
         if default_upscaler and request.hr_upscaler in {"", "lanczos"}:
             updates["hr_upscaler"] = default_upscaler
-        if getattr(self.settings, "sdxl_refiner_enabled", False) and not request.sdxl_refiner_enabled:
-            updates.update(
-                {
-                    "sdxl_refiner_enabled": True,
-                    "sdxl_refiner_checkpoint_id": getattr(self.settings, "sdxl_refiner_checkpoint_id", None),
-                    "sdxl_refiner_steps": getattr(self.settings, "sdxl_refiner_steps", 10),
-                    "sdxl_refiner_strength": getattr(self.settings, "sdxl_refiner_strength", 0.25),
-                }
-            )
-        elif request.sdxl_refiner_enabled and not request.sdxl_refiner_checkpoint_id:
+        # NOTE: the SDXL refiner toggle in Settings must never silently force
+        # the refiner pass onto a request that didn't explicitly ask for it.
+        # Doing so loads a second full SDXL pipeline (its own UNet/VAE/2 text
+        # encoders) into VRAM on top of the already-cached base pipe -- which
+        # is what was doubling VRAM use even at low resolutions. Only fill in
+        # a missing refiner checkpoint id when the request itself already
+        # opted in.
+        if request.sdxl_refiner_enabled and not request.sdxl_refiner_checkpoint_id:
             refiner_id = getattr(self.settings, "sdxl_refiner_checkpoint_id", None)
             if refiner_id:
                 updates["sdxl_refiner_checkpoint_id"] = refiner_id
@@ -603,10 +601,25 @@ class GenerationService:
         return self.backend.list_checkpoints()
 
     def refresh_checkpoint_catalog(self):
-        invalidate = getattr(self.backend, "invalidate_checkpoints", None)
-        if callable(invalidate):
-            invalidate()
+        self.refresh_model_library()
         return self.backend.list_checkpoints()
+
+    def refresh_model_library(self) -> tuple[int, int]:
+        from aiwf.infrastructure.model_inventory import invalidate_model_inventory_cache
+
+        invalidate_model_inventory_cache()
+        for invalidate_name in (
+            "invalidate_checkpoints",
+            "invalidate_loras",
+            "invalidate_embeddings",
+            "invalidate_vaes",
+        ):
+            invalidate = getattr(self.backend, invalidate_name, None)
+            if callable(invalidate):
+                invalidate()
+        checkpoints = self.backend.list_checkpoints()
+        loras = self.backend.list_loras()
+        return len(checkpoints), len(loras)
 
     def list_embeddings(self):
         return self.backend.list_embeddings()
@@ -631,6 +644,15 @@ class GenerationService:
 
     def list_vaes(self):
         return self.backend.list_vaes()
+
+    def list_flux_text_encoders(self):
+        lister = getattr(self.backend, "list_flux_text_encoders", None)
+        return lister() if callable(lister) else []
+
+    def set_flux_text_encoder(self, path: str | None) -> None:
+        setter = getattr(self.backend, "set_flux_text_encoder", None)
+        if callable(setter):
+            setter(path)
 
     def resolve_checkpoint(self, checkpoint_id: str | None = None):
         return self.backend.resolve_checkpoint(checkpoint_id)
@@ -666,9 +688,11 @@ class GenerationService:
                     )
                 )
 
-    @staticmethod
-    def _loading_model_message(checkpoint) -> str:
+    def _loading_model_message(self, checkpoint) -> str:
         title = getattr(checkpoint, "title", None) or getattr(checkpoint, "id", None) or "selected model"
+        warm = getattr(self.backend, "is_checkpoint_warm", None)
+        if callable(warm) and warm(getattr(checkpoint, "id", None)):
+            return f"Using warm model: {title}"
         return f"Loading image model: {title}"
 
     def submit(
@@ -861,13 +885,18 @@ class GenerationService:
                     total: int,
                     message: str,
                     preview: Image.Image | None = None,
+                    completed_batch: list[Image.Image] | None = None,
+                    batch_seeds: list[int] | None = None,
                 ) -> None:
                     nonlocal latest_preview
                     if preview is not None:
                         latest_preview = preview
                     self.queue.update_progress(job.id, step, total, message, preview)
                     self.events.publish(JobProgressed(job.id, step, total, message))
-                    progress_q.put(("progress", step, total, message, preview))
+                    if completed_batch:
+                        progress_q.put(("batch_images", list(completed_batch), list(batch_seeds or [])))
+                    else:
+                        progress_q.put(("progress", step, total, message, preview))
 
                 on_progress(0, max(1, int(job.request.steps)), self._loading_model_message(active))
                 _gen_t0 = time.perf_counter()

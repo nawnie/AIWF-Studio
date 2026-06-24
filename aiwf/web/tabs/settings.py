@@ -440,6 +440,26 @@ def register_settings(registry: WebRegistry) -> None:
                 "",
                 elem_classes=["aiwf-status-bar", "aiwf-backend-restart-status"],
             )
+            with gr.Row(equal_height=False, elem_classes=["aiwf-settings-grid"]):
+                with gr.Column(scale=3, min_width=280):
+                    gr.Markdown("GPU memory", elem_classes=["aiwf-section-label"])
+                    gr.Markdown(
+                        "Free VRAM before switching image and video models, or rescan after adding files.",
+                        elem_classes=["aiwf-settings-hint"],
+                    )
+                with gr.Column(scale=1, min_width=190):
+                    unload_gpu_btn = gr.Button(
+                        "Unload GPU models",
+                        elem_classes=["aiwf-btn-ghost"],
+                    )
+                    rescan_library_btn = gr.Button(
+                        "Rescan model library",
+                        elem_classes=["aiwf-btn-ghost"],
+                    )
+            gpu_mgmt_status = gr.Markdown(
+                "",
+                elem_classes=["aiwf-status-bar"],
+            )
 
             with gr.Tabs(elem_classes=["aiwf-settings-tabs"]):
                 with gr.Tab("Workspace"):
@@ -1298,6 +1318,21 @@ def register_settings(registry: WebRegistry) -> None:
             outputs=[backend_restart_status],
             show_progress=False,
         )
+
+        def _unload_gpu_models() -> str:
+            from aiwf.services.gpu_memory import unload_all_gpu_models
+
+            return unload_all_gpu_models(ctx)
+
+        def _rescan_model_library() -> str:
+            checkpoint_count, lora_count = ctx.generation.refresh_model_library()
+            return (
+                f"**Model library rescan complete.** "
+                f"Found {checkpoint_count} checkpoint(s) and {lora_count} LoRA(s)."
+            )
+
+        unload_gpu_btn.click(_unload_gpu_models, outputs=[gpu_mgmt_status], show_progress=True)
+        rescan_library_btn.click(_rescan_model_library, outputs=[gpu_mgmt_status], show_progress=True)
 
 
         # ── Engine tab ──────────────────────────────────────────────────────

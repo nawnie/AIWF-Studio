@@ -121,6 +121,10 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
     samplers = service.list_samplers()
     vaes = service.list_vaes()
     vae_choices = [("Automatic", None)] + [(v.title, v.id) for v in vaes]
+    text_encoders = service.list_flux_text_encoders()
+    text_encoder_choices = [("Automatic (best available)", None)] + [
+        (label, path) for label, path in text_encoders
+    ]
     default_sampler_label = catalogs.default_sampler_label
     default_schedule_label = catalogs.default_schedule_label
     sampler_id_to_label = catalogs.sampler_id_to_label
@@ -614,6 +618,17 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                     with gr.Row():
                         vae = gr.Dropdown(label="VAE", choices=vae_choices, value=None, scale=4)
                         vae_refresh = gr.Button("Refresh VAEs", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"], scale=1)
+                    with gr.Row():
+                        text_encoder = gr.Dropdown(
+                            label="Flux text encoder",
+                            choices=text_encoder_choices,
+                            value=None,
+                            scale=4,
+                            info="Switch the T5 encoder (e.g. fp16 for quality vs fp8 for speed). Flux only.",
+                        )
+                        text_encoder_refresh = gr.Button(
+                            "Refresh", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"], scale=1
+                        )
 
                     img2img_advanced = gr.Column(visible=False, elem_classes=["aiwf-advanced-mode"])
                     with img2img_advanced:
@@ -1095,6 +1110,27 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         return gr.update(choices=choices, value=value)
 
     vae_refresh.click(_refresh_vaes, inputs=[vae], outputs=[vae], show_progress=False)
+
+    def _set_text_encoder(path=None):
+        ctx.generation.set_flux_text_encoder(path)
+        return gr.update()
+
+    text_encoder.change(
+        _set_text_encoder, inputs=[text_encoder], outputs=[text_encoder], show_progress=False
+    )
+
+    def _refresh_text_encoders(current=None):
+        encoders = ctx.generation.list_flux_text_encoders()
+        choices = [("Automatic (best available)", None)] + [
+            (label, path) for label, path in encoders
+        ]
+        paths = {path for _, path in encoders}
+        value = current if current in paths else None
+        return gr.update(choices=choices, value=value)
+
+    text_encoder_refresh.click(
+        _refresh_text_encoders, inputs=[text_encoder], outputs=[text_encoder], show_progress=False
+    )
 
     def _refresh_sam_models(current=None):
         models = ctx.segment.refresh_models()

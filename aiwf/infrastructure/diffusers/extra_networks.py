@@ -32,6 +32,22 @@ def lora_compatible_with_base(base_architecture: str | None, lora_architecture: 
     return lora_arch == base_arch
 
 
+def _lora_signature(
+    loras: list[LoraRef],
+    catalog: list[LoraInfo],
+    *,
+    base_architecture: str | None = None,
+) -> str:
+    parts: list[str] = [base_architecture or ""]
+    for ref in loras:
+        match = resolve_lora(catalog, ref.name)
+        if match is None:
+            parts.append(f"missing:{ref.name}:{ref.weight}")
+            continue
+        parts.append(f"{match.path}:{ref.weight}")
+    return "|".join(parts)
+
+
 def apply_loras(
     pipe,
     loras: list[LoraRef],
@@ -42,7 +58,14 @@ def apply_loras(
     """Load LoRA adapters onto an active diffusers pipeline. Returns adapter names."""
     if not loras:
         clear_loras(pipe)
+        pipe._aiwf_lora_signature = ""
+        pipe._aiwf_lora_adapters = []
         return []
+
+    signature = _lora_signature(loras, catalog, base_architecture=base_architecture)
+    cached_signature = getattr(pipe, "_aiwf_lora_signature", None)
+    if cached_signature == signature:
+        return list(getattr(pipe, "_aiwf_lora_adapters", []))
 
     resolved: list[tuple[LoraRef, LoraInfo]] = []
     for ref in loras:
@@ -81,6 +104,8 @@ def apply_loras(
     if adapter_names:
         pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
 
+    pipe._aiwf_lora_signature = signature
+    pipe._aiwf_lora_adapters = list(adapter_names)
     return adapter_names
 
 

@@ -17,9 +17,11 @@ from aiwf.core.domain.wan import (
     WAN_RUNTIME_FAST_5B,
     WAN_RUNTIME_HIGH_LOW,
     WAN_RUNTIME_HIGH_LOW_FP8,
+    WanI2VRequest,
     duration_seconds_for_frames,
     frames_for_duration_seconds,
 )
+from aiwf.infrastructure.wan.sampler_policy import audit_wan_sampler_settings
 from aiwf.infrastructure.faceswap import FaceSwapUnavailable
 from aiwf.infrastructure.rife import RifeUnavailable
 from aiwf.infrastructure.video import VideoError, extract_first_frame
@@ -52,6 +54,7 @@ _RIFE_SERVICES: dict[int, RifeService] = {}
 _VSR_SERVICES: dict[int, VsrService] = {}
 _AUDIO_SERVICES: dict[int, AudioGenerationService] = {}
 _LTX_SERVICES: dict[int, LtxService] = {}
+_wan_cancel_flag: list[bool] = [False]
 VIDEO_SIZE_PRESETS: tuple[int, ...] = (480, 512, 568, 640, 768, 896, 1024)
 _WAN_FAST_OFFLOAD_CHOICES = [
     ("Balanced: model offload", "balanced"),
@@ -103,6 +106,18 @@ RELIGHT_BG_MODE_CHOICES = [
     ("Blur background image", 4),
 ]
 logger = logging.getLogger(__name__)
+
+
+def unload_wan_for_context(ctx: AppContext) -> bool:
+    svc = _SERVICES.get(id(ctx))
+    if svc is None:
+        return False
+    try:
+        svc.unload_models()
+        return True
+    except Exception:
+        logger.exception("Failed to unload Wan video pipeline")
+        return False
 
 
 def _service(ctx: AppContext) -> WanService:
@@ -377,6 +392,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_size_value: int | float | str | None = None,
             chunk_overlap_value: int | float | str | None = None,
             low_guidance_value: int | float | str | None = None,
+            sampler_value: str | None = None,
+            flow_shift_value: int | float | str | None = None,
         ) -> str:
             selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
             selected_vae = str(vae_value or "").strip()
@@ -449,6 +466,24 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             )
             if selected_runtime != WAN_RUNTIME_FAST_5B:
                 lines.append(f"**Low-noise guidance:** `{selected_low_guidance:g}`")
+            try:
+                selected_flow_shift = float(flow_shift_value if flow_shift_value is not None else 5.0)
+            except (TypeError, ValueError):
+                selected_flow_shift = 5.0
+            selected_sampler = str(sampler_value or "unipc").strip().lower() or "unipc"
+            lines.append(f"**Sampler:** `{selected_sampler}` | **Flow shift:** `{selected_flow_shift:g}`")
+            sampler_audit = audit_wan_sampler_settings(
+                WanI2VRequest(
+                    runtime_mode=selected_runtime,
+                    sampler=selected_sampler,
+                    flow_shift=selected_flow_shift,
+                ),
+                enforce_5b_calibration=False,
+            )
+            if sampler_audit.errors:
+                warnings.extend(sampler_audit.errors)
+            if sampler_audit.warnings:
+                warnings.extend(sampler_audit.warnings)
             if warnings:
                 lines.extend(f"**Blocked:** {warning}" for warning in warnings)
             return "\n\n".join(lines)
@@ -460,7 +495,17 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         _last_vae  = getattr(_s, "last_wan_vae", "")
         _last_te   = getattr(_s, "last_wan_text_encoder", "")
         _last_offload = getattr(_s, "last_wan_offload", "balanced")
-        _offload_default = _default_offload_for_runtime(WAN_RUNTIME_FAST_5B, _last_offload)
+        _last_sampler = str(getattr(_s, "last_wan_sampler", "") or "unipc").strip().lower() or "unipc"
+        if _last_sampler not in {"unipc", "euler", "heun"}:
+            _last_sampler = "unipc"
+        try:
+            _last_flow_shift = float(getattr(_s, "last_wan_flow_shift", 5.0) or 5.0)
+        except (TypeError, ValueError):
+            _last_flow_shift = 5.0
+        _last_runtime = str(getattr(_s, "last_wan_runtime_mode", "") or WAN_RUNTIME_FAST_5B)
+        if _last_runtime not in {WAN_RUNTIME_FAST_5B, WAN_RUNTIME_HIGH_LOW, WAN_RUNTIME_HIGH_LOW_FP8}:
+            _last_runtime = WAN_RUNTIME_FAST_5B
+        _offload_default = _default_offload_for_runtime(_last_runtime, _last_offload)
 
         def _best_default(labeled: list[tuple[str, str]], persisted: str) -> str | None:
             ids = [v for _, v in labeled]
@@ -494,22 +539,46 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 None,
             ) or next((v for v in ids if "wan" in v.lower() and "vae" in v.lower()), None) or (ids[0] if ids else None)
 
-        preferred_vae_id = _preferred_vae_for_runtime(WAN_RUNTIME_FAST_5B, _last_vae)
+        preferred_vae_id = _preferred_vae_for_runtime(_last_runtime, _last_vae)
 
         te_labeled = service.list_local_text_encoders_labeled() if hasattr(service, "list_local_text_encoders_labeled") else []
         default_te_labeled = [("Default (full precision bundled encoder)", "")] + te_labeled
         default_te = _last_te if _last_te else (service.default_text_encoder() if hasattr(service, "default_text_encoder") else "")
 
-        initial_lora_choices = _filter_lora_choices(WAN_RUNTIME_FAST_5B)
-        initial_high_choices = _filter_stage_choices(
-            all_labeled,
-            runtime_value=WAN_RUNTIME_FAST_5B,
-            stage=None,
-            peer_value=None,
+        initial_lora_choices = _filter_lora_choices(_last_runtime)
+        if _last_runtime == WAN_RUNTIME_FAST_5B:
+            initial_high_choices = _filter_stage_choices(
+                all_labeled,
+                runtime_value=_last_runtime,
+                stage=None,
+                peer_value=None,
+            )
+            initial_low_choices: list[tuple[str, str]] = []
+            initial_high = _valid_or_first(_last_high, initial_high_choices)
+            initial_low = None
+        else:
+            initial_high_choices = _filter_stage_choices(
+                high_labeled,
+                runtime_value=_last_runtime,
+                stage="high",
+                peer_value=None,
+            )
+            initial_high = _valid_or_first(_last_high, initial_high_choices)
+            initial_low_choices = _filter_stage_choices(
+                low_labeled,
+                runtime_value=_last_runtime,
+                stage="low",
+                peer_value=initial_high,
+            )
+            initial_low = _valid_or_first(_last_low, initial_low_choices)
+
+        _initial_high_label = (
+            "5B transformer" if _last_runtime == WAN_RUNTIME_FAST_5B else "High noise transformer"
         )
-        initial_low_choices: list[tuple[str, str]] = []
-        initial_high = _valid_or_first(_last_high, initial_high_choices)
-        initial_low = None
+        _initial_low_interactive = _last_runtime != WAN_RUNTIME_FAST_5B
+        _initial_pair_status = (
+            "" if _last_runtime == WAN_RUNTIME_FAST_5B else _pair_status(initial_high, initial_low)
+        )
 
         default_video_size = 512
         default_video_ratio = "1:1"
@@ -543,17 +612,17 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             ("Full: 14B FP8 high/low", WAN_RUNTIME_HIGH_LOW_FP8),
                             ("GGUF: high/low pair", WAN_RUNTIME_HIGH_LOW),
                         ],
-                        value=WAN_RUNTIME_FAST_5B,
+                        value=_last_runtime,
                         info="Routes are separated so FP8 safetensors and GGUF pairs cannot be mixed.",
                     )
-                    runtime_previous = gr.State(WAN_RUNTIME_FAST_5B)
+                    runtime_previous = gr.State(_last_runtime)
 
                     gr.Markdown("Models", elem_classes=["aiwf-section-label"])
                     high_noise = gr.Dropdown(
-                        label="5B transformer",
+                        label=_initial_high_label,
                         choices=initial_high_choices,
                         value=initial_high,
-                        allow_custom_value=False,
+                        allow_custom_value=True,
                         interactive=True,
                         info="Selected route controls which files appear here.",
                     )
@@ -561,36 +630,38 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         label="Low noise transformer",
                         choices=initial_low_choices,
                         value=initial_low,
-                        allow_custom_value=False,
-                        interactive=False,
+                        allow_custom_value=True,
+                        interactive=_initial_low_interactive,
                         info="Late denoising stage. Must match the selected high-noise file.",
                     )
                     model_pair_status = gr.Markdown(
-                        "",
+                        _initial_pair_status,
                         elem_classes=["aiwf-settings-paths"],
                     )
                     text_encoder = gr.Dropdown(
                         label="Text encoder (UMT5-XXL)",
                         choices=default_te_labeled,
                         value=default_te if default_te else "",
-                        allow_custom_value=False,
+                        allow_custom_value=True,
                         info="UMT5-XXL only. Use GGUF/FP8 text encoders only if already tested locally.",
                     )
                     vae_id = gr.Dropdown(
                         label="VAE",
                         choices=vae_labeled,
                         value=preferred_vae_id,
-                        allow_custom_value=False,
+                        allow_custom_value=True,
                         info="5B TI2V uses Wan 2.2 VAE. 14B high/low usually uses Wan 2.1 VAE.",
                     )
                     route_status = gr.Markdown(
                         _runtime_trace_status(
-                            WAN_RUNTIME_FAST_5B,
+                            _last_runtime,
                             initial_high,
                             None,
                             preferred_vae_id,
                             default_te,
                             _offload_default,
+                            sampler_value=_last_sampler,
+                            flow_shift_value=_last_flow_shift,
                         ),
                         elem_classes=["aiwf-settings-paths"],
                     )
@@ -712,11 +783,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     sampler = gr.Dropdown(
                         label="Sampler",
                         choices=[
-                            ("FlowMatch Euler (recommended - fast, 1 NFE/step)", "euler"),
+                            ("UniPC (recommended - the model's native, calibrated solver)", "unipc"),
+                            ("FlowMatch Euler (fast, 1 NFE/step)", "euler"),
                             ("FlowMatch Heun (2nd-order, higher quality, ~2x slower)", "heun"),
                         ],
-                        value="euler",
-                        info="Heun can improve motion but roughly doubles step time.",
+                        value=_last_sampler,
+                        info="UniPC matches Wan2.2-TI2V-5B's shipped scheduler config and is the most "
+                             "stable choice. Euler/Heun swap in a different solver family the checkpoint "
+                             "wasn't tuned against; if motion looks warped, switch back to UniPC.",
                     )
                     sigma_type = gr.Dropdown(
                         label="Scheduler",
@@ -731,8 +805,10 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     )
                     with gr.Row():
                         flow_shift = gr.Slider(
-                            0.5, 25.0, value=8.0, step=0.5, label="Flow shift",
-                            info="Tested 5B default is 8.0. Higher shifts more work to high-noise.",
+                            0.5, 25.0, value=_last_flow_shift, step=0.5, label="Flow shift",
+                            info="5.0 matches the 5B checkpoint's own scheduler config (paired with "
+                                 "UniPC). Higher shifts more work to high-noise; only raise this if "
+                                 "you've also switched the sampler away from UniPC.",
                         )
                         seed = gr.Number(value=-1, precision=0, label="Seed (-1 = random)")
 
@@ -1054,7 +1130,9 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                                 audio_temperature = gr.Slider(0.1, 2.0, value=1.0, step=0.05, label="Temperature")
                                 audio_cfg = gr.Slider(0.1, 10.0, value=4.5, step=0.1, label="Guidance")
 
-                    run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
+                    with gr.Row():
+                        run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
+                        stop_btn = gr.Button("Stop", variant="stop", elem_classes=["aiwf-btn-stop"])
                     video_out = gr.Video(label="Result", interactive=False)
                     save_bad_video = gr.Button("Save bad result", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
                     status = gr.Markdown("**Ready** - upload an image and generate.", elem_classes=["aiwf-status-bar"])
@@ -1230,6 +1308,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_size_value,
             chunk_overlap_value,
             low_guidance_value,
+            sampler_value="unipc",
+            flow_shift_value=5.0,
         ):
             return _runtime_trace_status(
                 runtime_value,
@@ -1247,6 +1327,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 chunk_size_value,
                 chunk_overlap_value,
                 low_guidance_value,
+                sampler_value,
+                flow_shift_value,
             )
 
         def _sync_runtime_choices(
@@ -1266,6 +1348,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_size_value,
             chunk_overlap_value,
             low_guidance_value,
+            sampler_value,
+            flow_shift_value,
         ):
             selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
             previous_runtime = str(previous_runtime_value or WAN_RUNTIME_FAST_5B)
@@ -1302,6 +1386,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     chunk_size_value,
                     chunk_overlap_value,
                     1.0,
+                    sampler_value,
+                    flow_shift_value,
                 )
                 return (
                     gr.update(label="5B transformer", choices=model_choices, value=next_model, interactive=True),
@@ -1358,6 +1444,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 chunk_size_value,
                 chunk_overlap_value,
                 low_guidance_value,
+                sampler_value,
+                flow_shift_value,
             )
             return (
                 gr.update(label="High noise transformer", choices=high_choices, value=next_high, interactive=True),
@@ -1394,6 +1482,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_size_value,
             chunk_overlap_value,
             low_guidance_value,
+            sampler_value,
+            flow_shift_value,
         ):
             selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
@@ -1413,6 +1503,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     chunk_size_value,
                     chunk_overlap_value,
                     low_guidance_value,
+                    sampler_value,
+                    flow_shift_value,
                 )
                 return gr.update(choices=[], value=None, interactive=False), "", status_text
             choices = _filter_stage_choices(
@@ -1438,6 +1530,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 chunk_size_value,
                 chunk_overlap_value,
                 low_guidance_value,
+                sampler_value,
+                flow_shift_value,
             )
             return gr.update(choices=choices, value=next_low, interactive=True), _pair_status(high_value, next_low), status_text
 
@@ -1457,6 +1551,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_size_value,
             chunk_overlap_value,
             low_guidance_value,
+            sampler_value,
+            flow_shift_value,
         ):
             selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
@@ -1476,6 +1572,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     chunk_size_value,
                     chunk_overlap_value,
                     low_guidance_value,
+                    sampler_value,
+                    flow_shift_value,
                 )
                 return gr.update(choices=[], value=None, interactive=False), "", status_text
             choices = _filter_stage_choices(
@@ -1501,6 +1599,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 chunk_size_value,
                 chunk_overlap_value,
                 low_guidance_value,
+                sampler_value,
+                flow_shift_value,
             )
             return gr.update(choices=choices, value=next_high, interactive=True), _pair_status(next_high, low_value), status_text
 
@@ -1523,6 +1623,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 chunk_size,
                 chunk_overlap,
                 image_guidance_scale,
+                sampler,
+                flow_shift,
             ],
             outputs=[
                 high_noise,
@@ -1562,6 +1664,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 chunk_size,
                 chunk_overlap,
                 image_guidance_scale,
+                sampler,
+                flow_shift,
             ],
             outputs=[low_noise, model_pair_status, route_status],
             show_progress=False,
@@ -1584,6 +1688,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 chunk_size,
                 chunk_overlap,
                 image_guidance_scale,
+                sampler,
+                flow_shift,
             ],
             outputs=[high_noise, model_pair_status, route_status],
             show_progress=False,
@@ -1605,6 +1711,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_size_value,
             chunk_overlap_value,
             low_guidance_value,
+            sampler_value,
+            flow_shift_value,
         ):
             return _route_status_from_values(
                 runtime_value,
@@ -1622,6 +1730,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 chunk_size_value,
                 chunk_overlap_value,
                 low_guidance_value,
+                sampler_value,
+                flow_shift_value,
             )
 
         route_trace_inputs = [
@@ -1640,6 +1750,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_size,
             chunk_overlap,
             image_guidance_scale,
+            sampler,
+            flow_shift,
         ]
         for route_input in [
             vae_id,
@@ -1654,6 +1766,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             chunk_size,
             chunk_overlap,
             image_guidance_scale,
+            sampler,
+            flow_shift,
         ]:
             route_input.change(
                 _sync_route_status,
@@ -1810,6 +1924,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             audio_cfg_v,
             progress=gr.Progress(),
         ):
+            _wan_cancel_flag[0] = False
             if image is None:
                 raise gr.Error("Upload a source image first.")
             if not service.available():
@@ -1891,6 +2006,12 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 image_guidance_scale=image_guidance_scale_v,
             )
 
+            sampler_audit = audit_wan_sampler_settings(request)
+            if sampler_audit.errors:
+                raise gr.Error("\n".join(sampler_audit.errors))
+            if sampler_audit.corrections:
+                request = sampler_audit.request
+
             if selected_runtime == WAN_RUNTIME_FAST_5B:
                 runtime_label = "Wan 5B safetensors"
             elif selected_runtime == WAN_RUNTIME_HIGH_LOW_FP8:
@@ -1898,13 +2019,20 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             else:
                 runtime_label = "Wan GGUF high/low"
             progress(0.02, desc=f"Preparing {runtime_label}: loading models and encoding inputs")
-            result = wan_controller.generate(request, image, progress)
+
+            def _should_cancel() -> bool:
+                return _wan_cancel_flag[0]
+
+            result = wan_controller.generate(request, image, progress, should_cancel=_should_cancel)
             wan_controller.persist_last_used(
                 high=high_v,
                 low=low_v,
                 vae=vae_v,
                 text_encoder=text_encoder_v,
                 offload=offload_v,
+                sampler=str(request.sampler or "unipc"),
+                flow_shift=float(request.flow_shift),
+                runtime_mode=selected_runtime,
             )
 
             final_video_path = _existing_video_output_path(result.output_path, "Wan")
@@ -2153,6 +2281,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     logger.exception("Audio post-processing failed")
                     status_parts.append(f"**Audio failed** -- {exc}")
 
+            _wan_cancel_flag[0] = False
             return final_video_path, "\n\n".join(status_parts)
 
         def _clear_previous_video():
@@ -2160,6 +2289,14 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
         def _clear_previous_ltx_video():
             return gr.update(value=None), "**Generating** -- preparing LTX 2.3 video..."
+
+        def _stop_video():
+            _wan_cancel_flag[0] = True
+            try:
+                ctx.generation.interrupt()
+            except Exception:
+                pass
+            return "**Stopping** — interrupt requested for video"
 
         def _run_ltx(
             source_path,
@@ -2308,6 +2445,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         save_bad_video.click(
             wan_controller.archive_bad_video,
             inputs=[video_out],
+            outputs=[status],
+            show_progress=False,
+        )
+        stop_btn.click(
+            _stop_video,
             outputs=[status],
             show_progress=False,
         )

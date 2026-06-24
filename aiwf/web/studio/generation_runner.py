@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import gradio as gr
+from PIL import Image
 
 from aiwf.bootstrap import AppContext
 from aiwf.core.domain.generation import JobState
@@ -36,36 +37,115 @@ class GenerationRunner:
         self._service = service
         self._catalogs = catalogs
         self._session = session
+        self._session_images: list[Image.Image] = []
+        self._session_seeds: list[int] = []
+        self._last_primary_image: Image.Image | None = None
 
     def _checkpoint_architecture(self, checkpoint_id: str) -> str:
         return self._service.resolve_checkpoint(checkpoint_id).architecture
 
-    def progress_outputs(self, mode_label: str, message: str, preview_image=None, hold_image=None) -> tuple:
+    def _reset_session_outputs(self) -> None:
+        self._session_images = []
+        self._session_seeds = []
+        self._last_primary_image = None
+
+    def _gallery_columns(self, image_count: int) -> int:
+        configured = max(1, int(getattr(self._ctx.settings, "gallery_columns", 2) or 2))
+        return min(configured, max(1, image_count))
+
+    def _gallery_update(self, images: list[Image.Image]) -> gr.Update:
+        return gr.update(
+            value=list(images),
+            visible=len(images) > 1,
+            columns=self._gallery_columns(len(images)),
+        )
+
+    def _extend_session_outputs(self, images: list[Image.Image], seeds: list[int]) -> None:
+        if not images:
+            return
+        self._session_images.extend(images)
+        if seeds:
+            self._session_seeds.extend(seeds[: len(images)])
+        else:
+            self._session_seeds.extend([-1] * len(images))
+        self._last_primary_image = images[-1]
+
+    def _resolved_output_images(self, job) -> list[Image.Image]:
+        if self._session_images:
+            return list(self._session_images)
+        if job.result is not None and job.result.images:
+            return list(job.result.images)
+        return []
+
+    def _resolved_output_seeds(self, job) -> list[int]:
+        if self._session_seeds:
+            return list(self._session_seeds)
+        if job.result is not None and job.result.seeds:
+            return list(job.result.seeds)
+        return []
+
+    def progress_outputs(
+        self,
+        mode_label: str,
+        message: str,
+        *,
+        preview_image=None,
+        hold_image=None,
+        keep_workspace: bool = False,
+        gallery_images: list[Image.Image] | None = None,
+        gallery_seeds: list[int] | None = None,
+        primary_image=None,
+    ) -> tuple:
         mode_ui = apply_mode_ui(self._ctx, mode_label, False, hide_empty=True)
         if preview_image is not None:
             workspace_update = gr.update(value=preview_image, visible=True)
-        elif hold_image is not None:
+        elif primary_image is not None:
+            workspace_update = gr.update(value=primary_image, visible=True)
+        elif hold_image is not None and not keep_workspace:
             workspace_update = gr.update(value=hold_image, visible=True)
         else:
             workspace_update = gr.update()
         status_text = message if message.startswith("**") else f"**{message}**"
+        gallery_update = (
+            self._gallery_update(gallery_images)
+            if gallery_images
+            else gr.update()
+        )
+        seed_update = gr.update()
+        gallery_seeds_update = gr.update()
+        last_result_update = gr.update()
+        if gallery_images:
+            last_result_update = gr.update(value=gallery_images[-1])
+            if gallery_seeds:
+                gallery_seeds_update = list(gallery_seeds)
+                seed_update = gr.update(value=gallery_seeds[-1])
         return (
             workspace_update,
             gr.update(visible=False),
             gr.update(visible=False),
-            gr.update(),
+            gallery_update,
             gr.update(visible=False, value=""),
             "",
             status_text,
-            gr.update(),
-            gr.update(),
-            gr.update(),
+            seed_update,
+            gallery_seeds_update,
+            last_result_update,
             gr.update(),
             gr.update(),
             gr.update(),
             False,
             False,
             *mode_ui,
+        )
+
+    def batch_outputs(self, mode_label: str, message: str, images: list[Image.Image], seeds: list[int]) -> tuple:
+        self._extend_session_outputs(images, seeds)
+        return self.progress_outputs(
+            mode_label,
+            message,
+            primary_image=self._last_primary_image,
+            gallery_images=self._session_images,
+            gallery_seeds=self._session_seeds,
         )
 
     def finished_outputs(self, mode_label: str, job, before_image, *, continuous_on: bool) -> tuple:
@@ -79,17 +159,18 @@ class GenerationRunner:
             else:
                 err = job.error or job.state.value
                 status_text = f"**Error** -- {err}"
+            gallery_value = self._session_images or []
             return (
-                gr.update(visible=True),
+                gr.update(value=self._last_primary_image, visible=self._last_primary_image is not None),
                 gr.update(visible=False),
                 gr.update(visible=False),
-                gr.update(visible=False, value=[]),
+                gr.update(value=gallery_value, visible=len(gallery_value) > 1),
                 gr.update(visible=False, value=""),
                 "",
                 status_text,
-                -1,
-                [],
-                None,
+                self._session_seeds[-1] if self._session_seeds else -1,
+                list(self._session_seeds),
+                self._last_primary_image,
                 before_image,
                 gr.update(),
                 gr.update(value=False),
@@ -98,20 +179,28 @@ class GenerationRunner:
                 *apply_mode_ui(self._ctx, mode_label, False),
             )
 
+        images = self._resolved_output_images(job)
+        seeds = self._resolved_output_seeds(job)
+        if images:
+            self._last_primary_image = images[-1]
+
         infotext = job.result.infotexts[0] if job.result.infotexts else ""
-        primary, images, infotext, job_status = format_generation_outputs(
-            job.result.images,
+        primary, _, infotext, job_status = format_generation_outputs(
+            images,
             infotext,
             job.state.value,
         )
-        gallery_update = gr.update(value=images, visible=len(images) > 1, columns=min(2, len(images)))
-        new_seed = job.result.seeds[0] if job.result.seeds else -1
+        gallery_update = self._gallery_update(images)
+        new_seed = seeds[-1] if seeds else -1
         applied_tags = job.request.tags
         if applied_tags:
             self._ctx.tags.remember_tags(applied_tags, save=self._ctx.save_settings)
         tag_line = format_tag_summary(applied_tags)
         quick_tag_update = gr.update(choices=self._ctx.tags.recent_tag_choices())
         toggle_update = gr.update(value=continuous_on) if continuous_on else gr.update()
+        status = result_summary_markdown(job, new_seed, job_status)
+        if continuous_on and len(images) > 1:
+            status = f"{status}\n\n**Session gallery:** {len(images)} image(s) so far."
         return (
             gr.update(value=primary, visible=True),
             gr.update(visible=False),
@@ -119,9 +208,9 @@ class GenerationRunner:
             gallery_update,
             gr.update(value=tag_line, visible=bool(tag_line)),
             infotext,
-            result_summary_markdown(job, new_seed, job_status),
+            status,
             new_seed,
-            list(job.result.seeds),
+            list(seeds),
             primary,
             before_image,
             quick_tag_update,
@@ -223,6 +312,7 @@ class GenerationRunner:
         *,
         keep_continuous_toggle: bool,
         image_postprocess: ImagePostprocess | None = None,
+        keep_workspace: bool = False,
     ) -> Iterator[tuple]:
         try:
             request, init_images, mask_images, before_image, mode, control_images = self.build_request(inputs)
@@ -231,7 +321,15 @@ class GenerationRunner:
             raise
 
         hold_image = before_image or (init_images[0] if init_images else None)
-        yield self.progress_outputs(mode_label, "Queued", hold_image=hold_image)
+        yield self.progress_outputs(
+            mode_label,
+            "Queued",
+            hold_image=hold_image,
+            keep_workspace=keep_workspace,
+            gallery_images=self._session_images or None,
+            gallery_seeds=self._session_seeds or None,
+            primary_image=self._last_primary_image if keep_workspace else None,
+        )
         try:
             for event in self._service.submit_streaming(
                 request,
@@ -246,11 +344,25 @@ class GenerationRunner:
                         mode_label,
                         message,
                         preview_image=preview,
-                        hold_image=hold_image if preview is None else None,
+                        keep_workspace=keep_workspace and preview is None,
+                        hold_image=hold_image if preview is None and not keep_workspace else None,
+                        gallery_images=self._session_images or None,
+                        gallery_seeds=self._session_seeds or None,
+                        primary_image=self._last_primary_image if keep_workspace and preview is None else None,
+                    )
+                elif event[0] == "batch_images":
+                    _, batch_images, batch_seeds = event
+                    yield self.batch_outputs(
+                        mode_label,
+                        f"Batch complete ({len(self._session_images)} image(s) in session)",
+                        list(batch_images),
+                        list(batch_seeds),
                     )
                 else:
                     _, job = event
                     trace_job_record_state(job.id, job.state, job.error)
+                    if job.result is not None and job.result.images and not self._session_images:
+                        self._extend_session_outputs(list(job.result.images), list(job.result.seeds))
                     yield self.finished_outputs(
                         mode_label,
                         job,
@@ -283,6 +395,7 @@ class GenerationRunner:
         cooldown_wait = args[66]
 
         self._session.loop_active = True
+        self._reset_session_outputs()
         self._ctx.settings.generation_cooldown_seconds = float(cooldown_wait or 0)
         self._ctx.save_settings()
 
@@ -301,7 +414,14 @@ class GenerationRunner:
                     input_count=input_count or len(args),
                 )
                 if continuous_enabled and run_number > 1:
-                    yield self.progress_outputs(mode_label, f"Run {run_number}", hold_image=source_image)
+                    yield self.progress_outputs(
+                        mode_label,
+                        f"Starting run {run_number}",
+                        keep_workspace=True,
+                        gallery_images=self._session_images or None,
+                        gallery_seeds=self._session_seeds or None,
+                        primary_image=self._last_primary_image,
+                    )
 
                 base_seed = int(seed_value)
                 if base_seed < 0:
@@ -317,6 +437,7 @@ class GenerationRunner:
                     request_inputs,
                     keep_continuous_toggle=continuous_enabled and self._session.loop_active,
                     image_postprocess=image_postprocess,
+                    keep_workspace=continuous_enabled and run_number > 1,
                 ):
                     yield update
 
@@ -329,7 +450,14 @@ class GenerationRunner:
                 for remaining in range(wait_s, 0, -1):
                     if not self._session.loop_active:
                         break
-                    yield self.progress_outputs(mode_label, f"Cooling -- next run in {remaining}s")
+                    yield self.progress_outputs(
+                        mode_label,
+                        f"Cooling -- next run in {remaining}s",
+                        keep_workspace=True,
+                        gallery_images=self._session_images or None,
+                        gallery_seeds=self._session_seeds or None,
+                        primary_image=self._last_primary_image,
+                    )
                     time.sleep(1)
         finally:
             self._session.loop_active = False
