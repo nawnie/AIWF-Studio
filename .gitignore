@@ -129,6 +129,52 @@ __pycache__/
 *.pt
 *.pth
 *.bin
+convert_wan_to_diffusers.py
+copy_pipeline_for_debug.bat
+read_pipeline.py
+icon_file.png
+
+# Private funding/application drafts
+fundings/private/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.codex-remote-attachments/
+cache/
+*.lnk
+prompt_image.txt
+prompt_video.txt
+
+# Local AI/model artifacts - do not commit the VRAM goblins
+models/
+model/
+checkpoints/
+loras/
+vae/
+embeddings/
+outputs/
+output/
+cache/
+tmp/
+temp/
+.codex-remote-attachments/
+
+# Python environments
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Large model/checkpoint formats
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
 *.gguf
 *.onnx
 *.engine
@@ -139,3 +185,17 @@ __pycache__/
 *.lnk
 prompt_image.txt
 prompt_video.txt
+
+# Local non-runtime / backup / agent files
+.hermes.md
+.hermes/
+AIWF_Studio/
+AIWF_UPDATE_BACKUP/
+C*UsersShawnDesktopshared
+temp.txt
+opencode.json
+aiwf_update_bbb1cae_studio_v4.py
+*.patched.txt
+*.fixed.txt
+*fixed.py.txt
+*-fixed.py.txt

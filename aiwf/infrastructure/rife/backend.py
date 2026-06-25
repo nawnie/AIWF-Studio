@@ -146,6 +146,63 @@ def _load_rife_model(ckpt_name: str, *, device, vfi_root: Path):
     return model.to(device), preprocess_frames
 
 
+def _interpolate_with_loaded_model(
+    frames_nhwc: "torch.Tensor",
+    *,
+    model,
+    preprocess,
+    multiplier: int,
+    scale_factor: float,
+    fast_mode: bool,
+    ensemble: bool,
+    clear_cache_every_n_frames: int,
+    on_synth_progress: Callable[[int, int], None] | None = None,
+) -> "torch.Tensor":
+    """Interpolate one in-memory chunk while reusing an already loaded model."""
+    import torch
+
+    from vfi_utils import generic_frame_loop, postprocess_frames
+
+    frames = preprocess(frames_nhwc)
+
+    def return_middle_frame(frame_0, frame_1, timestep, mdl, scale_list, in_fast_mode, in_ensemble):
+        return mdl(frame_0, frame_1, timestep, scale_list, in_fast_mode, in_ensemble)
+
+    scale_list = [8 / scale_factor, 4 / scale_factor, 2 / scale_factor, 1 / scale_factor]
+    synth_total = max(0, (frames.shape[0] - 1) * max(1, int(multiplier) - 1))
+    ticks = {"n": 0}
+
+    def _counting_cb(frame_0, frame_1, timestep, mdl, scales, in_fast_mode, in_ensemble):
+        out = return_middle_frame(
+            frame_0,
+            frame_1,
+            timestep,
+            mdl,
+            scales,
+            in_fast_mode,
+            in_ensemble,
+        )
+        ticks["n"] += 1
+        if on_synth_progress and synth_total:
+            on_synth_progress(min(ticks["n"], synth_total), synth_total)
+        return out
+
+    with torch.inference_mode():
+        out = generic_frame_loop(
+            "RIFE_VFI",
+            frames,
+            clear_cache_every_n_frames,
+            int(multiplier),
+            _counting_cb,
+            model,
+            scale_list,
+            fast_mode,
+            ensemble,
+            dtype=torch.float32,
+        )
+    return postprocess_frames(out)
+
+
 def interpolate_tensor_frames(
     frames_nhwc: "torch.Tensor",
     *,
@@ -159,43 +216,26 @@ def interpolate_tensor_frames(
     vfi_root: Path,
     on_synth_progress: Callable[[int, int], None] | None = None,
 ) -> "torch.Tensor":
+    """Compatibility helper for callers that already hold all frames in memory."""
     import torch
 
-    from vfi_utils import generic_frame_loop, postprocess_frames
-
     model, preprocess = _load_rife_model(ckpt_name, device=device, vfi_root=vfi_root)
-    frames = preprocess(frames_nhwc)
-
-    def return_middle_frame(frame_0, frame_1, timestep, mdl, scale_list, in_fast_mode, in_ensemble):
-        return mdl(frame_0, frame_1, timestep, scale_list, in_fast_mode, in_ensemble)
-
-    scale_list = [8 / scale_factor, 4 / scale_factor, 2 / scale_factor, 1 / scale_factor]
-    synth_total = max(0, (frames.shape[0] - 1) * int(multiplier))
-    ticks = {"n": 0}
-
-    def _counting_cb(frame_0, frame_1, timestep, mdl, scale_list, in_fast_mode, in_ensemble):
-        out = return_middle_frame(frame_0, frame_1, timestep, mdl, scale_list, in_fast_mode, in_ensemble)
-        ticks["n"] += 1
-        if on_synth_progress and synth_total:
-            on_synth_progress(min(ticks["n"], synth_total), synth_total)
-        return out
-
-    out = generic_frame_loop(
-        "RIFE_VFI",
-        frames,
-        clear_cache_every_n_frames,
-        int(multiplier),
-        _counting_cb,
-        model,
-        scale_list,
-        fast_mode,
-        ensemble,
-        dtype=torch.float32,
-    )
-    del model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    return postprocess_frames(out)
+    try:
+        return _interpolate_with_loaded_model(
+            frames_nhwc,
+            model=model,
+            preprocess=preprocess,
+            multiplier=multiplier,
+            scale_factor=scale_factor,
+            fast_mode=fast_mode,
+            ensemble=ensemble,
+            clear_cache_every_n_frames=clear_cache_every_n_frames,
+            on_synth_progress=on_synth_progress,
+        )
+    finally:
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def _resample_interpolated_frames(
@@ -206,6 +246,7 @@ def _resample_interpolated_frames(
     virtual_output_fps: float,
     target_fps: float | None,
 ):
+    """Legacy in-memory resampler retained for API/test compatibility."""
     if target_fps is None:
         return frames, virtual_output_fps
     safe_target = max(1.0, float(target_fps))
@@ -238,21 +279,36 @@ def interpolate_video_file(
     fast_mode: bool = True,
     ensemble: bool = True,
     clear_cache_every_n_frames: int = 10,
+    chunk_input_frames: int = 16,
     max_input_frames: int | None = None,
     target_fps: float | None = None,
     device=None,
     vfi_root: Path | None = None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[Path, int, int, float, float, int, int]:
-    """Interpolate a video file; returns (out_path, in_frames, out_frames, in_fps, out_fps, w, h)."""
+    """Interpolate and stream a video in overlapping chunks.
+
+    Only ``chunk_input_frames`` source frames and one interpolated chunk are held
+    at a time. The RIFE model is loaded once and reused for every chunk. Adjacent
+    chunks overlap by one source frame; the duplicate boundary frame is dropped
+    before it reaches the encoder.
+    """
+    import numpy as np
     import torch
 
-    from aiwf.infrastructure.video.processing import write_frames
+    from aiwf.infrastructure.video.processing import VideoProcessor
+    from aiwf.infrastructure.video.stream_writer import StreamingVideoWriter
 
-    src = Path(input_path)
+    src = Path(input_path).expanduser().resolve()
     if not src.is_file():
         raise RifeUnavailable(f"Video not found: {src}")
 
+    dest = Path(output_path).expanduser().resolve()
+    if dest == src:
+        raise RifeUnavailable("RIFE output must be different from the input video.")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    chunk_size = max(2, int(chunk_input_frames))
     vfi_root = vfi_root or resolve_vfi_root()
     if vfi_root is None:
         raise RifeUnavailable(
@@ -265,42 +321,117 @@ def interpolate_video_file(
     _install_comfy_shim(device)
     _ensure_vfi_paths(vfi_root)
 
-    frames_nhwc, in_fps, width, height = _load_frames_from_video(
-        src, max_frames=max_input_frames, on_progress=on_progress
-    )
-    in_count = int(frames_nhwc.shape[0])
+    info = VideoProcessor().probe(src)
+    in_fps = float(info.fps or 24.0)
+    width = int(info.width)
+    height = int(info.height)
+    if width <= 0 or height <= 0:
+        raise RifeUnavailable(f"Could not determine input dimensions for {src}.")
 
-    out_tensor = interpolate_tensor_frames(
-        frames_nhwc,
-        ckpt_name=ckpt_name,
-        multiplier=multiplier,
-        scale_factor=scale_factor,
-        fast_mode=fast_mode,
-        ensemble=ensemble,
-        clear_cache_every_n_frames=clear_cache_every_n_frames,
-        device=device,
-        vfi_root=vfi_root,
-        on_synth_progress=on_progress,
-    )
+    reported_frames = max(0, int(info.frame_count))
+    if max_input_frames is not None:
+        expected_input = min(reported_frames, max_input_frames) if reported_frames else max_input_frames
+    else:
+        expected_input = reported_frames
+    total_pairs = max(1, expected_input - 1) if expected_input else 1
+
+    try:
+        import cv2
+    except Exception as exc:
+        raise RifeUnavailable("RIFE video streaming needs OpenCV.") from exc
+
+    cap = cv2.VideoCapture(str(src))
+    if not cap.isOpened():
+        raise RifeUnavailable(f"Could not open video: {src}")
+
+    model = None
+    writer: StreamingVideoWriter | None = None
+    buffer: list[torch.Tensor] = []
+    in_count = 0
+    streamed_count = 0
+    processed_pairs = 0
+    first_chunk = True
     virtual_out_fps = in_fps * float(multiplier)
-    out_tensor, out_fps = _resample_interpolated_frames(
-        out_tensor,
-        input_frame_count=in_count,
-        input_fps=in_fps,
-        virtual_output_fps=virtual_out_fps,
-        target_fps=target_fps,
-    )
-    out_count = int(out_tensor.shape[0])
 
-    dest = Path(output_path)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    pil_frames = []
-    import numpy as np
-    from PIL import Image
+    def emit_chunk(chunk: list[torch.Tensor]) -> None:
+        nonlocal writer, streamed_count, processed_pairs, first_chunk
+        if len(chunk) < 2:
+            return
+        stacked = torch.stack(chunk, dim=0)
+        out_tensor = _interpolate_with_loaded_model(
+            stacked,
+            model=model,
+            preprocess=preprocess,
+            multiplier=multiplier,
+            scale_factor=scale_factor,
+            fast_mode=fast_mode,
+            ensemble=ensemble,
+            clear_cache_every_n_frames=clear_cache_every_n_frames,
+        )
+        if not first_chunk:
+            out_tensor = out_tensor[1:]
+        if writer is None:
+            writer = StreamingVideoWriter(
+                dest,
+                width=width,
+                height=height,
+                input_fps=virtual_out_fps,
+                target_fps=target_fps,
+                audio_source=src,
+            )
+        for frame in out_tensor:
+            writer.write(frame)
+            streamed_count += 1
+        processed_pairs += len(chunk) - 1
+        if on_progress:
+            on_progress(min(processed_pairs, total_pairs), total_pairs)
+        first_chunk = False
+        del out_tensor, stacked
 
-    for frame in out_tensor:
-        arr = (frame.numpy() * 255.0).clip(0, 255).astype(np.uint8)
-        pil_frames.append(Image.fromarray(arr))
+    try:
+        model, preprocess = _load_rife_model(ckpt_name, device=device, vfi_root=vfi_root)
+        while True:
+            if max_input_frames is not None and in_count >= max_input_frames:
+                break
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            frame = torch.from_numpy(np.asarray(rgb, dtype=np.float32) / 255.0)
+            buffer.append(frame)
+            in_count += 1
+            if len(buffer) >= chunk_size:
+                emit_chunk(buffer)
+                buffer = [buffer[-1]]
 
-    write_frames(pil_frames, dest, fps=out_fps)
+        if len(buffer) >= 2:
+            emit_chunk(buffer)
+        if in_count < 2 or writer is None:
+            raise RifeUnavailable("RIFE needs at least 2 readable frames in the input video.")
+        writer.close()
+        writer = None
+    except Exception:
+        if writer is not None:
+            writer.abort()
+        raise
+    finally:
+        cap.release()
+        if model is not None:
+            del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    out_fps = float(target_fps or virtual_out_fps)
+    out_count = streamed_count
+    try:
+        output_info = VideoProcessor().probe(dest)
+        if output_info.fps > 0:
+            out_fps = float(output_info.fps)
+        if output_info.frame_count > 0:
+            out_count = int(output_info.frame_count)
+    except Exception:
+        if target_fps is not None:
+            duration = max(0.0, (in_count - 1) / max(1.0, in_fps))
+            out_count = max(2, int(round(duration * out_fps)) + 1)
+
     return dest, in_count, out_count, in_fps, out_fps, width, height

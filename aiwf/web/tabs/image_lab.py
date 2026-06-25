@@ -11,6 +11,7 @@ from aiwf.core.domain.generation import GenerationMode, GenerationRequest
 from aiwf.services.image_lab import ImageLabService, build_plot_axes, maturity_matrix_markdown
 from aiwf.services.plot import PlotRequest
 from aiwf.web.registry import WebRegistry
+from aiwf.web.tabs.image_workflow import build_image_workflow_panel
 
 
 def _checkpoint_choices(ctx: AppContext) -> list[tuple[str, str]]:
@@ -81,13 +82,16 @@ def register_image_lab(registry: WebRegistry) -> None:
             with gr.Column(elem_classes=["aiwf-page-header"]):
                 gr.Markdown("Image Lab", elem_classes=["aiwf-section-label"])
                 gr.Markdown(
-                    "Maturity matrix, XYZ plots, batch image-to-image, inpaint batches, and loopback runs.",
+                    "Choose a custom processing chain, then use XYZ, batch, inpaint-batch, or loopback tools when needed.",
                     elem_classes=["aiwf-page-intro"],
                 )
 
             gr.Markdown(maturity_matrix_markdown(), elem_classes=["aiwf-panel"])
 
             with gr.Tabs(elem_classes=["aiwf-enhance-tabs"]):
+                with gr.Tab("Workflow"):
+                    build_image_workflow_panel(ctx)
+
                 with gr.Tab("XYZ"):
                     with gr.Row(equal_height=False):
                         with gr.Column(scale=1, min_width=300, elem_classes=["aiwf-panel"]):

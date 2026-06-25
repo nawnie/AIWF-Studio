@@ -23,9 +23,22 @@ def flush_vram() -> None:
         logger.debug("VRAM flush failed", exc_info=True)
 
 
+def _vram_free_gb() -> float | None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            free, _total = torch.cuda.mem_get_info()
+            return free / (1024**3)
+    except Exception:
+        logger.debug("Could not read free VRAM", exc_info=True)
+    return None
+
+
 def unload_all_gpu_models(ctx: AppContext) -> str:
     unloaded: list[str] = []
     errors: list[str] = []
+    before = _vram_free_gb()
 
     try:
         ctx.generation.backend.unload()
@@ -68,12 +81,21 @@ def unload_all_gpu_models(ctx: AppContext) -> str:
         logger.debug("Could not release GPU tenant after manual unload", exc_info=True)
 
     if not unloaded and errors:
-        return f"**Model unload failed:** {'; '.join(errors)}"
-    if errors:
-        return (
+        status = f"**Model unload failed:** {'; '.join(errors)}"
+    elif errors:
+        status = (
             f"**Partially unloaded GPU models:** {', '.join(unloaded)}. "
             f"Some engines reported errors: {'; '.join(errors)}"
         )
-    if not unloaded:
-        return "**No GPU models were loaded.** VRAM cache was cleared anyway."
-    return f"**Unloaded GPU models:** {', '.join(unloaded)}."
+    elif not unloaded:
+        status = "**No GPU models were loaded.** VRAM cache was cleared anyway."
+    else:
+        status = f"**Unloaded GPU models:** {', '.join(unloaded)}."
+
+    after = _vram_free_gb()
+    if before is not None and after is not None:
+        status += (
+            f" GPU memory free: {before:.1f} → {after:.1f} GB "
+            f"(reclaimed {max(0.0, after - before):.1f} GB)."
+        )
+    return status

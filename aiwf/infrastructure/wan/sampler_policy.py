@@ -52,7 +52,7 @@ def audit_wan_sampler_settings(
     sigma_type = str(getattr(request, "sigma_type", WAN_5B_NATIVE_SIGMA) or WAN_5B_NATIVE_SIGMA).lower()
 
     if mode == WAN_RUNTIME_FAST_5B:
-        if flow_shift >= 7.0:
+        if flow_shift >= 7.0 and not (enforce_5b_calibration and sampler == WAN_5B_NATIVE_SAMPLER):
             errors.append(
                 f"5B flow shift {flow_shift:g} is outside the calibrated range. "
                 "Wan2.2-TI2V-5B ships with flow_shift=5.0; values around 8.0 commonly "

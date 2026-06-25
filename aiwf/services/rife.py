@@ -99,6 +99,7 @@ class RifeService:
                     fast_mode=options.fast_mode,
                     ensemble=options.ensemble,
                     clear_cache_every_n_frames=options.clear_cache_every_n_frames,
+                    chunk_input_frames=options.chunk_input_frames,
                     max_input_frames=options.max_input_frames,
                     target_fps=options.target_fps,
                     device=self.devices.device(),
@@ -121,7 +122,7 @@ class RifeService:
                 )
 
         infotext = (
-            f"RIFE {options.ckpt_name} x{options.multiplier} "
+            f"RIFE {options.ckpt_name} x{options.multiplier}, chunk={options.chunk_input_frames} "
             f"({in_frames}→{out_frames} frames, {in_fps:.1f}→{out_fps:.1f} fps)"
         )
         return RifeResult(

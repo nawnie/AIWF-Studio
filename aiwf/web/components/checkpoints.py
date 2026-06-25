@@ -7,6 +7,23 @@ from aiwf.core.domain.models import Checkpoint
 from aiwf.infrastructure.diffusers.model_arch import is_inpaint_architecture
 
 
+ENGINE_MAPPING = {
+    "Flux": {"flux"},
+    "Flux 2": {"flux2_klein"},
+    "Stable Diffusion 1.5": {"sd15", "inpaint"},
+    "Stable Diffusion XL": {"sdxl", "sdxl_inpaint"},
+    "Stable Diffusion 3.5": {"sd35"},
+    "Z-Image": {"z_image"},
+}
+
+
+def _filter_checkpoints(checkpoints: list[Checkpoint], engine_filter: str) -> list[Checkpoint]:
+    if not engine_filter or engine_filter == "All":
+        return checkpoints
+    allowed = ENGINE_MAPPING.get(engine_filter, set())
+    return [c for c in checkpoints if c.architecture in allowed]
+
+
 def _checkpoint_choices(checkpoints: list[Checkpoint]) -> list[tuple[str, str]]:
     """List checkpoints with optional [inpaint] suffix for display.
     No auto-sorting or preferring — user choice in the dropdown is authoritative.
@@ -56,11 +73,13 @@ def default_checkpoint_title(
 def checkpoint_dropdown(
     ctx: AppContext,
     label: str = "Checkpoint",
+    engine_filter: str = "All",
 ) -> tuple[gr.Dropdown, dict[str, str]]:
     checkpoints = ctx.generation.list_checkpoints()
-    id_map = {c.title: c.id for c in checkpoints}
-    choices = _checkpoint_choices(checkpoints)
-    default_title = default_checkpoint_title(checkpoints, ctx.settings.last_checkpoint_id)
+    filtered = _filter_checkpoints(checkpoints, engine_filter)
+    id_map = {c.title: c.id for c in filtered}
+    choices = _checkpoint_choices(filtered)
+    default_title = default_checkpoint_title(filtered, ctx.settings.last_checkpoint_id)
     # Ensure the value is actually present in choices to avoid Gradio warnings
     choice_ids = {c[1] for c in choices}
     if default_title and default_title not in choice_ids:
@@ -80,6 +99,7 @@ def refresh_checkpoints(
     *,
     rescan: bool = False,
     current_value: str | None = None,
+    engine_filter: str = "All",
 ) -> tuple[gr.Dropdown, dict[str, str]]:
     """Refresh the checkpoint list.
 
@@ -94,30 +114,34 @@ def refresh_checkpoints(
         if rescan
         else ctx.generation.list_checkpoints()
     )
-    id_map = {c.title: c.id for c in checkpoints}
-    choices = _checkpoint_choices(checkpoints)
+    filtered = _filter_checkpoints(checkpoints, engine_filter)
+    id_map = {c.title: c.id for c in filtered}
+    choices = _checkpoint_choices(filtered)
     valid = {label for (label, _id) in choices} | { _id for (_label, _id) in choices }
     if current_value and current_value in valid:
         update = gr.update(choices=choices, value=current_value)
     else:
-        # Do not set value= at all. This prevents any UI refresh/mode/side-effect
-        # logic from swapping the user's selected model in the dropdown back to
-        # a default (e.g. the first scanned checkpoint). The selected value stays
-        # whatever the user clicked, as requested.
-        update = gr.update(choices=choices)
+        default_title = default_checkpoint_title(filtered, ctx.settings.last_checkpoint_id)
+        # Ensure the value is actually present in choices to avoid Gradio warnings
+        choice_ids = {c[1] for c in choices}
+        if default_title and default_title not in choice_ids:
+            default_title = choices[0][1] if choices else None
+        update = gr.update(choices=choices, value=default_title)
     return update, id_map
 
 
-def format_model_status(ctx: AppContext) -> str:
+def format_model_status(ctx: AppContext, engine_filter: str = "All") -> str:
     checkpoints = ctx.generation.list_checkpoints()
+    filtered = _filter_checkpoints(checkpoints, engine_filter)
     ckpt_dir = ctx.flags.resolved_ckpt_dir()
     models_dir = ctx.flags.resolved_models_dir()
-    if checkpoints:
-        names = ", ".join(c.filename for c in checkpoints[:5])
-        extra = f" (+{len(checkpoints) - 5} more)" if len(checkpoints) > 5 else ""
-        return f"**{len(checkpoints)}** checkpoints · `{ckpt_dir.name}` — {names}{extra}"
+    engine_desc = f"{engine_filter} " if engine_filter != "All" else ""
+    if filtered:
+        names = ", ".join(c.filename for c in filtered[:5])
+        extra = f" (+{len(filtered) - 5} more)" if len(filtered) > 5 else ""
+        return f"**{len(filtered)}** {engine_desc}checkpoints · `{ckpt_dir.name}` — {names}{extra}"
     return (
-        f"No models found.\n\n"
+        f"No {engine_desc}models found.\n\n"
         f"Place `.safetensors` or `.ckpt` files in:\n"
         f"- `{ckpt_dir}`\n"
         f"- or directly in `{models_dir}`\n\n"

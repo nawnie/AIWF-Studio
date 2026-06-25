@@ -154,6 +154,20 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
             with gr.Column(scale=4, min_width=340, elem_classes=["aiwf-sidebar"]):
                 with gr.Column(elem_classes=["aiwf-panel"]):
                     gr.Markdown("Model", elem_classes=["aiwf-section-label"])
+                    engine_selector = gr.Dropdown(
+                        label="Engine Filter",
+                        choices=[
+                            "All",
+                            "Flux",
+                            "Flux 2",
+                            "Stable Diffusion 1.5",
+                            "Stable Diffusion XL",
+                            "Stable Diffusion 3.5",
+                            "Z-Image",
+                        ],
+                        value="All",
+                        allow_custom_value=False,
+                    )
                     checkpoint, checkpoint_map = checkpoint_dropdown(ctx)
                     model_status = gr.Markdown(format_model_status(ctx), elem_classes=["aiwf-model-status"])
                     model_help = gr.Markdown(
@@ -181,6 +195,38 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                     gr.Markdown(
                         '<kbd>Shift</kbd> + <kbd>Enter</kbd> in the prompt runs Generate.',
                         elem_classes=["aiwf-hotkey-hint"],
+                    )
+                    vsr_enabled = gr.Checkbox(
+                        label="Post-upscale with NVIDIA RTX VSR",
+                        value=False,
+                        elem_classes=["aiwf-vsr-toggle"],
+                    )
+                    with gr.Row(visible=False, elem_classes=["aiwf-vsr-settings"]) as vsr_settings_row:
+                        vsr_scale = gr.Dropdown(
+                            label="VSR Scale",
+                            choices=[("1.5x", 1.5), ("2x", 2.0), ("3x", 3.0), ("4x", 4.0)],
+                            value=2.0,
+                        )
+                        vsr_mode = gr.Dropdown(
+                            label="VSR Quality Mode",
+                            choices=[
+                                ("Mode 1 (Standard)", 1),
+                                ("Mode 2 (Improved)", 2),
+                                ("Mode 3 (High quality)", 3),
+                                ("Mode 4 (Highest quality)", 4)
+                            ],
+                            value=3,
+                        )
+                        vsr_strength = gr.Slider(0.0, 1.0, value=0.6, step=0.05, label="Sharpness", visible=False)
+
+                    def _update_vsr_visibility(enabled):
+                        return gr.update(visible=enabled)
+
+                    vsr_enabled.change(
+                        _update_vsr_visibility,
+                        inputs=[vsr_enabled],
+                        outputs=[vsr_settings_row],
+                        show_progress=False,
                     )
 
                 with gr.Column(elem_classes=["aiwf-panel", "aiwf-prompt-panel"]):
@@ -1009,16 +1055,16 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         show_progress=False,
     )
 
-    def do_refresh(mode_label, current_ckpt):
+    def do_refresh(mode_label, current_ckpt, engine_val):
         mode = mode_from_label(mode_label)
         update, new_map = refresh_checkpoints(
-            ctx, rescan=True, current_value=current_ckpt
+            ctx, rescan=True, current_value=current_ckpt, engine_filter=engine_val
         )
-        return update, format_model_status(ctx), new_map
+        return update, format_model_status(ctx, engine_val), new_map
 
     refresh.click(
         do_refresh,
-        inputs=[mode_toggle, checkpoint],
+        inputs=[mode_toggle, checkpoint, engine_selector],
         outputs=[checkpoint, model_status, state],
         show_progress=False,
     )
@@ -1027,7 +1073,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         choices = ctx.models.lora_choices(ckpt_id)
         return [gr.update(choices=choices, value=None) for _ in range(1 + len(lora_stack_components[0::2]))]
 
-    def _on_checkpoint_change(ckpt_title, ckpt_map):
+    def _on_checkpoint_change(ckpt_title, ckpt_map, engine_val):
         """Remember the selected checkpoint without loading model weights."""
         help_md = _model_help_md(ckpt_title)
         ckpt_id = ckpt_map.get(ckpt_title) if ckpt_title and ckpt_map else None
@@ -1038,15 +1084,28 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
             return (gr.update(value=f"**Error:** unknown checkpoint {ckpt_title}"), help_md, *lora_updates)
         try:
             ctx.generation.remember_checkpoint_selection(ckpt_id)
-            base_status = format_model_status(ctx)
+            base_status = format_model_status(ctx, engine_val)
             return (gr.update(value=f"**Selected:** {ckpt_title}\n\n{base_status}"), help_md, *lora_updates)
         except Exception as exc:
             return (gr.update(value=f"**Selection failed:** {ckpt_title}: {exc}"), help_md, *lora_updates)
 
     checkpoint.change(
         _on_checkpoint_change,
-        inputs=[checkpoint, state],
+        inputs=[checkpoint, state, engine_selector],
         outputs=[model_status, model_help, lora_pick, *lora_stack_components[0::2]],
+        show_progress=False,
+    )
+
+    def _on_engine_filter_change(engine_val, current_ckpt):
+        update, new_map = refresh_checkpoints(
+            ctx, rescan=False, current_value=current_ckpt, engine_filter=engine_val
+        )
+        return update, new_map
+
+    engine_selector.change(
+        _on_engine_filter_change,
+        inputs=[engine_selector, checkpoint],
+        outputs=[checkpoint, state],
         show_progress=False,
     )
 
@@ -1900,10 +1959,41 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
     generation_runner = GenerationRunner(ctx, service, catalogs, session)
 
     def run(*args):
-        post_swap = build_reactor_generation_postprocess_from_args(ctx, args[GENERATION_RUNNER_INPUT_COUNT:])
+        reactor_end = GENERATION_RUNNER_INPUT_COUNT + 12
+        post_swap = build_reactor_generation_postprocess_from_args(ctx, args[GENERATION_RUNNER_INPUT_COUNT:reactor_end])
+        
+        vsr_enabled_val = args[reactor_end]
+        vsr_scale_val = args[reactor_end + 1]
+        vsr_mode_val = args[reactor_end + 2]
+        vsr_strength_val = args[reactor_end + 3]
+
+        def combined_postprocess(image):
+            res_image = image
+            if post_swap is not None:
+                res_image = post_swap(res_image)
+            if vsr_enabled_val:
+                try:
+                    from aiwf.services.vsr import VsrService
+                    from aiwf.core.domain.vsr import VsrOptions
+                    import logging
+                    logger = logging.getLogger(__name__)
+
+                    vsr_service = VsrService(ctx.flags, ctx.settings, supervisor=None)
+                    vsr_opts = VsrOptions(
+                        effect="SuperRes",
+                        scale=float(vsr_scale_val or 2.0),
+                        mode=int(vsr_mode_val or 3),
+                        strength=float(vsr_strength_val or 0.6),
+                    )
+                    res_image = vsr_service.upscale_image(res_image, vsr_opts)
+                except Exception as exc:
+                    logger.exception("NVIDIA RTX VSR Image Upscale failed")
+                    raise gr.Error(f"NVIDIA VSR upscale failed: {exc}") from exc
+            return res_image
+
         yield from generation_runner.run(
             *args[:GENERATION_RUNNER_INPUT_COUNT],
-            image_postprocess=post_swap,
+            image_postprocess=combined_postprocess,
             input_count=len(generate_inputs),
         )
 
@@ -2066,6 +2156,10 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         reactor_gender_source,
         reactor_gender_target,
         reactor_mask,
+        vsr_enabled,
+        vsr_scale,
+        vsr_mode,
+        vsr_strength,
     ]
 
     generate.click(
@@ -2081,16 +2175,16 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         show_progress="minimal",
     )
 
-    def _on_studio_tab_select(mode_label, cn_current, cn2_current, cn3_current, current_ckpt):
+    def _on_studio_tab_select(mode_label, cn_current, cn2_current, cn3_current, current_ckpt, engine_val):
         mode = mode_from_label(mode_label)
         # Tab activation is the cheap sync point for disk-visible model changes;
         # avoid rescanning on every control edit.
         ckpt_update, new_map = refresh_checkpoints(
-            ctx, rescan=True, current_value=current_ckpt
+            ctx, rescan=True, current_value=current_ckpt, engine_filter=engine_val
         )
         return (
             ckpt_update,
-            format_model_status(ctx),
+            format_model_status(ctx, engine_val),
             new_map,
             _cn_models_update(cn_current),
             _cn_models_update(cn2_current),
@@ -2101,7 +2195,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
     if tab is not None:
         tab.select(
             _on_studio_tab_select,
-            inputs=[mode_toggle, cn_model, cn2_model, cn3_model, checkpoint],
+            inputs=[mode_toggle, cn_model, cn2_model, cn3_model, checkpoint, engine_selector],
             outputs=[checkpoint, model_status, state, cn_model, cn2_model, cn3_model, pnginfo_hint],
             show_progress=False,
         )

@@ -12,6 +12,7 @@ class RifeOptions(BaseModel):
     fast_mode: bool = True
     ensemble: bool = True
     clear_cache_every_n_frames: int = Field(default=10, ge=1, le=1000)
+    chunk_input_frames: int = Field(default=16, ge=2, le=128)
     max_input_frames: int | None = Field(default=None, ge=2)
     target_fps: float | None = Field(default=None, ge=1.0, le=240.0)
 

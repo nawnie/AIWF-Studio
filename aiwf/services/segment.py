@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageFilter
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.engine import EngineTenant
@@ -16,6 +16,23 @@ from aiwf.infrastructure.segment.text_boxes import ensure_grounding_dino_model
 from aiwf.infrastructure.torch.devices import DeviceManager
 
 logger = logging.getLogger(__name__)
+
+
+def _feather_mask(mask: Image.Image, radius: int) -> Image.Image:
+    """Add a soft outer transition while preserving an opaque mask core.
+
+    A second whole-mask Gaussian blur would merely duplicate ``mask_blur`` and
+    could make narrow selections translucent. Feathering instead derives a
+    hard core, softens its boundary, and keeps the stronger value from the
+    incoming mask at every pixel. Dilation still controls coverage; feather
+    controls only the blend ramp around that coverage.
+    """
+    base = mask.convert("L")
+    if radius <= 0:
+        return base
+    core = base.point(lambda value: 255 if value >= 128 else 0)
+    edge = core.filter(ImageFilter.GaussianBlur(radius=max(0.5, radius / 2.0)))
+    return ImageChops.lighter(base, edge)
 
 
 class SegmentService:
@@ -126,6 +143,9 @@ class SegmentService:
         if request.mask_blur > 0:
             mask = blur_mask(mask, request.mask_blur)
             status += f", blur={request.mask_blur}"
+        if request.feather > 0:
+            mask = _feather_mask(mask, request.feather)
+            status += f", feather={request.feather}"
 
         preview = overlay_masks(image, mask)
         return mask, preview, candidates, status
@@ -157,6 +177,8 @@ class SegmentService:
             box=box,
             mask_index=int(params.get("mask_index", 0)),
             dilation=int(params.get("dilation", 0)),
+            mask_blur=int(params.get("mask_blur", 4)),
+            feather=int(params.get("feather", 6)),
         )
         mask, _preview, _candidates, status = self.segment(
             image,

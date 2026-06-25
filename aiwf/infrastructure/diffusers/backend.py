@@ -47,6 +47,27 @@ from diffusers.utils import logging as diffusers_logging
 from PIL import Image
 from safetensors.torch import load_file
 
+# Patch diffusers conversion logic to support custom Flux FP8 weights that use .weight instead of .scale for query/key norms
+try:
+    import diffusers.loaders.single_file_utils
+    _orig_convert_flux = diffusers.loaders.single_file_utils.convert_flux_transformer_checkpoint_to_diffusers
+
+    def _patched_convert_flux(checkpoint, *args, **kwargs):
+        for key in list(checkpoint.keys()):
+            if "query_norm.weight" in key:
+                scale_key = key.replace("query_norm.weight", "query_norm.scale")
+                if scale_key not in checkpoint:
+                    checkpoint[scale_key] = checkpoint[key]
+            elif "key_norm.weight" in key:
+                scale_key = key.replace("key_norm.weight", "key_norm.scale")
+                if scale_key not in checkpoint:
+                    checkpoint[scale_key] = checkpoint[key]
+        return _orig_convert_flux(checkpoint, *args, **kwargs)
+
+    diffusers.loaders.single_file_utils.convert_flux_transformer_checkpoint_to_diffusers = _patched_convert_flux
+except Exception:
+    pass
+
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.errors import GenerationCancelledError, ModelNotFoundError
 from aiwf.core.domain.extra_networks import parse_extra_networks
@@ -1271,17 +1292,43 @@ class DiffusersBackend:
         cuda = self.devices.device()
         t5_on_cpu = self._flux_t5_device is not None and self._flux_t5_device.type == "cpu"
 
-        # Cached prompts and offloaded pipelines don't benefit from the swap.
+        # Cached prompts don't benefit from the swap.
         cache_key = f"{prompt}|{batch_size}|256"
         already_cached = self._flux_prompt_cache.get(cache_key) is not None
         if (
             cuda.type != "cuda"
             or not t5_on_cpu
             or already_cached
-            or self._offload_active
             or self._flux_text_encoder_2 is None
         ):
             return self._encode_flux_prompt(prompt, device=device, batch_size=batch_size)
+
+        if self._offload_active:
+            # Under model offload, the transformer is already managed by accelerate.
+            # We only need to swap T5 (and CLIP) to GPU for encoding, then park them back on CPU.
+            try:
+                self._flux_text_encoder_2.to(cuda)
+                self._flux_t5_device = cuda
+                if self._flux_text_encoder is not None:
+                    self._flux_text_encoder.to(cuda)
+                    self._flux_clip_device = cuda
+                logger.info("Flux offloaded encode: T5/CLIP moved to GPU for encoding")
+                return self._encode_flux_prompt(prompt, device=cuda, batch_size=batch_size)
+            except Exception:
+                logger.warning(
+                    "Flux offloaded GPU prompt-encode swap failed; falling back to CPU encode.", exc_info=True
+                )
+                return self._encode_flux_prompt(prompt, device=device, batch_size=batch_size)
+            finally:
+                try:
+                    self._flux_text_encoder_2.to("cpu")
+                    self._flux_t5_device = torch.device("cpu")
+                    if self._flux_text_encoder is not None:
+                        self._flux_text_encoder.to("cpu")
+                        self._flux_clip_device = torch.device("cpu")
+                    self.devices.empty_cache()
+                except Exception:
+                    logger.debug("Could not park T5/CLIP back on CPU under offload", exc_info=True)
 
         transformer = getattr(pipe, "transformer", None)
         swap_t0 = time.perf_counter()
@@ -1297,7 +1344,7 @@ class DiffusersBackend:
                 self._flux_text_encoder.to(cuda)
                 self._flux_clip_device = cuda
             logger.info("Flux fast encode: T5 moved to %s for prompt encoding", cuda)
-            return self._encode_flux_prompt(prompt, device=device, batch_size=batch_size)
+            return self._encode_flux_prompt(prompt, device=cuda, batch_size=batch_size)
         except Exception:
             logger.warning(
                 "Flux GPU prompt-encode swap failed; falling back to CPU encode.", exc_info=True
@@ -1334,16 +1381,18 @@ class DiffusersBackend:
             from diffusers.pipelines.flux2.pipeline_flux2_klein import Flux2KleinPipeline
         except ImportError as exc:
             raise ModelNotFoundError("Flux.2 Klein prompt encoding is unavailable.") from exc
+        cuda = self.devices.device()
+        target_device = cuda if cuda.type == "cuda" else device
         encode_t0 = time.perf_counter()
         prompt_embeds = Flux2KleinPipeline._get_qwen3_prompt_embeds(
             text_encoder=pipe.text_encoder,
             tokenizer=pipe.tokenizer,
             prompt=prompt,
-            device=device,
+            device=target_device,
         )
         logger.info("Flux.2 Klein prompt encoded in %.2fs", time.perf_counter() - encode_t0)
         self._flux2_prompt_cache[cache_key] = prompt_embeds.detach().cpu()
-        return prompt_embeds
+        return prompt_embeds.to(device=device)
 
     def _encode_z_image_prompts(
         self,
@@ -1360,19 +1409,24 @@ class DiffusersBackend:
                 [tensor.to(device=device) for tensor in prompt_embeds],
                 [tensor.to(device=device) for tensor in negative_embeds],
             )
+        cuda = self.devices.device()
+        target_device = cuda if cuda.type == "cuda" else device
         encode_t0 = time.perf_counter()
         prompt_embeds, negative_embeds = pipe.encode_prompt(
             prompt=prompt,
             negative_prompt=negative_prompt,
-            device=device,
-            do_classifier_free_guidance=pipe.do_classifier_free_guidance,
+            device=target_device,
+            do_classifier_free_guidance=getattr(pipe, "do_classifier_free_guidance", True),
         )
         logger.info("Z-Image prompt encoded in %.2fs", time.perf_counter() - encode_t0)
         self._z_image_prompt_cache[cache_key] = (
             [tensor.detach().cpu() for tensor in prompt_embeds],
             [tensor.detach().cpu() for tensor in negative_embeds],
         )
-        return prompt_embeds, negative_embeds
+        return (
+            [tensor.to(device=device) for tensor in prompt_embeds],
+            [tensor.to(device=device) for tensor in negative_embeds],
+        )
 
     @staticmethod
     def _txt2img_pipeline_cls_for_architecture(architecture: str):
@@ -1440,13 +1494,16 @@ class DiffusersBackend:
     def _wants_offload(self, architecture: str) -> bool:
         # DiT image families (Flux / Flux.2 / Z-Image) stay GPU-resident for warm reuse.
         # CPU offload shuffles weights every generation and feels like a full reload.
+        vram = self.devices.total_vram_gb()
         if (
             is_flux_architecture(architecture)
             or is_flux2_klein_architecture(architecture)
             or is_z_image_architecture(architecture)
         ):
-            return False
-        vram = self.devices.total_vram_gb()
+            # On cards with less than 20 GB (e.g. 16 GB, 12 GB, 8 GB), we must offload large DiT models
+            # to avoid VRAM exhaustion / driver-level system memory paging.
+            # We lower this threshold to 15.0 GB to keep 16 GB GPUs GPU-resident.
+            return vram < 15.0
         if is_sd3_architecture(architecture):
             return 0.0 < vram < 24.0
         if not is_sdxl_architecture(architecture) or vram <= 0.0:

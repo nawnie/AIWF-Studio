@@ -52,6 +52,10 @@ def register_rife(registry: WebRegistry) -> None:
                     with gr.Row():
                         fast_mode = gr.Checkbox(label="Fast mode", value=True)
                         ensemble = gr.Checkbox(label="Ensemble (quality)", value=True)
+                    chunk_frames = gr.Slider(
+                        2, 64, value=16, step=1, label="Input frames per chunk",
+                        info="Lower values reduce RAM/VRAM. The model remains loaded between chunks.",
+                    )
                     clear_cache = gr.Slider(1, 50, value=10, step=1, label="Clear CUDA cache every N frame pairs")
                     max_frames = gr.Number(
                         label="Max input frames (0 = all)",
@@ -72,7 +76,7 @@ def register_rife(registry: WebRegistry) -> None:
             default = service.default_checkpoint()
             return gr.update(choices=choices, value=default if default in choices else (choices[0] if choices else None))
 
-        def _run(video, ckpt_name, mult, scale, fast, ens, cache_n, cap):
+        def _run(video, ckpt_name, mult, scale, fast, ens, chunk_n, cache_n, cap):
             if video is None:
                 raise gr.Error("Upload an input video first.")
             path = video if isinstance(video, str) else getattr(video, "name", None) or getattr(video, "path", None)
@@ -86,6 +90,7 @@ def register_rife(registry: WebRegistry) -> None:
                 fast_mode=bool(fast),
                 ensemble=bool(ens),
                 clear_cache_every_n_frames=int(cache_n),
+                chunk_input_frames=int(chunk_n),
                 max_input_frames=None if cap_i <= 0 else cap_i,
             )
             progress_state = {"step": 0, "total": 1}
@@ -105,6 +110,6 @@ def register_rife(registry: WebRegistry) -> None:
         refresh.click(_refresh, outputs=[ckpt])
         run.click(
             _run,
-            inputs=[source, ckpt, multiplier, scale_factor, fast_mode, ensemble, clear_cache, max_frames],
+            inputs=[source, ckpt, multiplier, scale_factor, fast_mode, ensemble, chunk_frames, clear_cache, max_frames],
             outputs=[output, status, details],
         )

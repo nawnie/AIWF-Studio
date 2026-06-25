@@ -69,7 +69,7 @@ def attention_call_context(flags):
                 **kwargs,
             )
         try:
-            return sageattn(query, key, value, is_causal=is_causal, tensor_layout="HND")
+            return sageattn(query, key, value, is_causal=is_causal, tensor_layout="NHD")
         except Exception:
             logger.debug("SageAttention image call failed; falling back to torch SDPA.", exc_info=True)
             return original(

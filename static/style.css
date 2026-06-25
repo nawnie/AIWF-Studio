@@ -2663,3 +2663,118 @@ ul.options::-webkit-scrollbar-track {
 .aiwf-prompt-tools > .label-wrap::-webkit-scrollbar {
     display: none;
 }
+
+/* ── Video Lab ───────────────────────────────────────────────────── */
+.aiwf-video-lab {
+    width: min(1500px, 100%);
+    margin: 0 auto;
+}
+
+.aiwf-vlab-flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.65rem 0.8rem;
+    border: 1px solid var(--aiwf-border, rgba(255,255,255,0.10));
+    border-radius: var(--aiwf-radius-md, 10px);
+    background: color-mix(in srgb, var(--aiwf-accent, #68c3aa) 7%, transparent);
+    font-size: 0.78rem;
+}
+
+.aiwf-vlab-flow span {
+    padding: 0.28rem 0.55rem;
+    border-radius: 999px;
+    background: var(--aiwf-surface-raised, rgba(255,255,255,0.05));
+    border: 1px solid var(--aiwf-border, rgba(255,255,255,0.10));
+    white-space: nowrap;
+}
+
+.aiwf-vlab-flow b {
+    color: var(--aiwf-accent, #68c3aa);
+    font-weight: 600;
+}
+
+.aiwf-vlab-controls,
+.aiwf-vlab-output {
+    align-self: flex-start;
+}
+
+.aiwf-vlab-source video,
+.aiwf-vlab-output video {
+    max-height: 520px;
+    background: #05070a;
+}
+
+.aiwf-vlab-output .code_wrap,
+.aiwf-vlab-output pre {
+    max-height: 440px;
+    overflow: auto;
+}
+
+@media (max-width: 760px) {
+    .aiwf-vlab-flow {
+        gap: 0.35rem;
+    }
+
+    .aiwf-vlab-flow b {
+        display: none;
+    }
+
+    .aiwf-vlab-flow span {
+        flex: 1 1 45%;
+        text-align: center;
+    }
+}
+
+/* Studio v5 unified Image / Video / Audio Lab workflow controls */
+.aiwf-lab-workspace {
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.aiwf-lab-controls,
+.aiwf-lab-output {
+  border-radius: 16px;
+}
+
+.aiwf-stage-picker {
+  padding: 10px 12px;
+  border: 1px solid var(--border-color-primary, rgba(148, 163, 184, 0.25));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--background-fill-secondary, #111827) 88%, transparent);
+}
+
+.aiwf-stage-order {
+  padding: 10px 12px;
+  border-left: 3px solid var(--primary-500, #6366f1);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--primary-500, #6366f1) 10%, transparent);
+  line-height: 1.55;
+}
+
+.aiwf-stage-card {
+  margin-top: 10px;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--border-color-primary, rgba(148, 163, 184, 0.22));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--background-fill-secondary, #111827) 92%, transparent);
+}
+
+.aiwf-stage-card h4 {
+  margin-top: 0 !important;
+  margin-bottom: 8px !important;
+}
+
+.aiwf-stage-note {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--neutral-700, #334155) 28%, transparent);
+  font-size: 0.92rem;
+}
+
+@media (max-width: 900px) {
+  .aiwf-lab-workspace {
+    display: block !important;
+  }
+}

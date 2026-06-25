@@ -1,0 +1,274 @@
+{
+  "schema": 1,
+  "archive_id": "bbb1cae-studio-v5-root",
+  "base_commit": "bbb1cae619ba592e3d7c94ae7bb933206dd0f2ae",
+  "root_extractable": true,
+  "primary_ui": "original Gradio Studio",
+  "generated_at_utc": "2026-06-24T17:19:07.811048+00:00",
+  "files": {
+    "AIWF_UPDATE_BACKUP/aiwf/core/domain/rife.py": {
+      "size": 841,
+      "sha256": "7984fb61cbc00285fd8fd6bd183f09162596c2ff47b133b57f2b69d39c504787"
+    },
+    "AIWF_UPDATE_BACKUP/aiwf/core/domain/segment.py": {
+      "size": 819,
+      "sha256": "a5f61c5cf6b0dd6b4c309e7c7d70597ac9357ee065535b424a20b21acc21e695"
+    },
+    "AIWF_UPDATE_BACKUP/aiwf/core/domain/segment_presets.py": {
+      "size": 2529,
+      "sha256": "56a6fae13588ffd7ca14285ab61d3e6f1794a7140989dadab29fcb4d25c33655"
+    },
+    "AIWF_UPDATE_BACKUP/aiwf/infrastructure/rife/backend.py": {
+      "size": 10041,
+      "sha256": "14be449bef44b171ce707f662577104df30208da59264f765b697f0dfe449e21"
+    },
+    "AIWF_UPDATE_BACKUP/aiwf/services/rife.py": {
+      "size": 5646,
+      "sha256": "7e9c9ab5fdc85c913907f538733072b4d3754c8ca4a5c22a2938ba763d66de37"
+    },
+    "AIWF_UPDATE_BACKUP/aiwf/services/segment.py": {
+      "size": 6112,
+      "sha256": "776d81a9e52a379c04662db7677dc592bf5d31140cad5649cf9a86c6f483709e"
+    },
+    "AIWF_UPDATE_BACKUP/aiwf/web/app.py": {
+      "size": 7507,
+      "sha256": "1fa8e5a4d20091c7efd8be8f0eb6a84d2bbed19861aace05144a564dc808157f"
+    },
+    "AIWF_UPDATE_BACKUP/aiwf/web/tabs/audio.py": {
+      "size": 6381,
+      "sha256": "91d1efa79a3e907855a2bfd23d3fd567856975d48a0d73674563aafe864b6bdb"
+    },
+    "AIWF_UPDATE_BACKUP/aiwf/web/tabs/image_lab.py": {
+      "size": 19346,
+      "sha256": "6a76fba051685d2fdf2f76240678a54290da43c2ab8ef079a64a2792ad16ba14"
+    },
+    "AIWF_UPDATE_BACKUP/aiwf/web/tabs/rife.py": {
+      "size": 5281,
+      "sha256": "c634cf6c5c0ae56b1ecbb0ca8ab005f577f38dc4675914d3c0d241f509814659"
+    },
+    "AIWF_UPDATE_BACKUP/aiwf/web/tabs/segment.py": {
+      "size": 6132,
+      "sha256": "add3c36301edb3f92803daa9a3196229c15b7adb723437accef1aef4cf5daad0"
+    },
+    "AIWF_UPDATE_BACKUP/pyproject.toml": {
+      "size": 1762,
+      "sha256": "37e27c144913979da9eb59eb5c6075123bb0e1fb378d0d811c461bfab19e699d"
+    },
+    "AIWF_UPDATE_BACKUP/static/style.css": {
+      "size": 75068,
+      "sha256": "0647d6a6b699a59e3b6a6682fc7c67637797d22b68c2326eda5d507371ca108c"
+    },
+    "AIWF_UPDATE_BACKUP/tests/individual_tests/test_rife.py": {
+      "size": 1425,
+      "sha256": "93661212ca349bea2519a9e311eab44107b0dc9de3ab91964588b65ac0bd05a3"
+    },
+    "AIWF_UPDATE_BACKUP/webui.bat": {
+      "size": 885,
+      "sha256": "aba3bcacad84d2b371f38c9e6188928c05347749d7f636eb51170b32447abc6a"
+    },
+    "STUDIO-V5-CHANGELOG.md": {
+      "size": 2006,
+      "sha256": "40656e661613f5689e0cdac67400672b8b36b6014e58ede9f8b7873d3add6472"
+    },
+    "STUDIO-V5-OVERLAY.json": {
+      "size": 6795,
+      "sha256": "195b329aca54d88ef3c6ac2d65f6e399f7dd81944ea771f8b5dacc68da8ca947"
+    },
+    "STUDIO-V5-QA.bat": {
+      "size": 993,
+      "sha256": "897faf892d22b98ea18cce2bed52acfe915bb4d64019f06d2f7081a2ac76fcc1"
+    },
+    "STUDIO-V5-README.txt": {
+      "size": 3441,
+      "sha256": "ee4935fc66debad8d212379754a1000005e0ed7d0f4c8b072134270b577c0d2c"
+    },
+    "STUDIO-V5-ROLLBACK.bat": {
+      "size": 1018,
+      "sha256": "a291c599edfb9f2be636cabf851ed64e485bfd31e248b330da3d464a20592318"
+    },
+    "STUDIO-V5-VERIFY.bat": {
+      "size": 1481,
+      "sha256": "7e010c7ddbe0fe16e25cdfb6ce3304745137f0a54fee7c2bf2730a4d91d35ae7"
+    },
+    "aiwf/core/domain/audio_lab.py": {
+      "size": 4496,
+      "sha256": "6dfa7452e15e6694a6e28d3e7236e535c42bbb39b8b478bbc2d6ca308d6ab1b0"
+    },
+    "aiwf/core/domain/image_workflow.py": {
+      "size": 3969,
+      "sha256": "cc7f05cb0b8cab09a8fbafc7bb795e90fe0d4475460257ac7277e69f9a1afff4"
+    },
+    "aiwf/core/domain/rife.py": {
+      "size": 875,
+      "sha256": "6d6da5c4c1ae49d8539c02b05bc7cee7d1a04de4d28de05851834af7389908a9"
+    },
+    "aiwf/core/domain/segment.py": {
+      "size": 868,
+      "sha256": "9813729f9fa9fec26ae3ff1f9a88930ff82d75ade4c8c018795f3ff072630910"
+    },
+    "aiwf/core/domain/segment_presets.py": {
+      "size": 4608,
+      "sha256": "755b17ffd78f0838b44b8e07b96a815981c35c1d1ddc5b051c975153b4ea46ea"
+    },
+    "aiwf/core/domain/video_lab.py": {
+      "size": 6326,
+      "sha256": "356ab7d95a8ad3c33f9e89c6cd0ab3d11fd00bcf692ba635347f861bff70da1e"
+    },
+    "aiwf/infrastructure/rife/backend.py": {
+      "size": 14258,
+      "sha256": "fb9ebba3b75e90f54d9fb6db5b7d7810c25e8474dbc208aed6f0116c59792b51"
+    },
+    "aiwf/infrastructure/video/ffmpeg_core.py": {
+      "size": 15251,
+      "sha256": "80f06e707ab063c6dbd6da61e19a5ff3ec4d880abb9731b0bf618be2610c8e78"
+    },
+    "aiwf/infrastructure/video/stream_writer.py": {
+      "size": 7037,
+      "sha256": "22dc71c3380c7318c3b54e726d896b14a1586717ac1c7a627117528a216cf9c9"
+    },
+    "aiwf/services/audio_lab.py": {
+      "size": 12184,
+      "sha256": "2b3d8e4ac6784acc63b54fea3cca97f119676b44017c6da928e1886877a4a7a2"
+    },
+    "aiwf/services/image_workflow.py": {
+      "size": 12559,
+      "sha256": "f48f5cd04b5c92030d2aa5f598a473f13571324f046a2626ac4f01b329205a00"
+    },
+    "aiwf/services/rife.py": {
+      "size": 5623,
+      "sha256": "f2959f1dda5c54445211abbf721661fce684440d42e966d2d60deca6ce650860"
+    },
+    "aiwf/services/segment.py": {
+      "size": 6979,
+      "sha256": "a4ba94b5c6b27cb44243ca0380459e781c78e78c583c0e8dc0ab3e580b02296d"
+    },
+    "aiwf/services/video_lab.py": {
+      "size": 15195,
+      "sha256": "bac1a3e8e7354c5743b379eb096b2e9e159a4c12dc29e9062d7454d42cfd7905"
+    },
+    "aiwf/web/app.py": {
+      "size": 7418,
+      "sha256": "c5f550de032cd742df9a56b9d07ee2d6f7ba828ca6d438d81cc5084a8a1f9398"
+    },
+    "aiwf/web/tabs/audio.py": {
+      "size": 28494,
+      "sha256": "1b17fb9731e0e2b631489ddf646e6b52680667551e10eb39ddb9e91f7af47823"
+    },
+    "aiwf/web/tabs/image_lab.py": {
+      "size": 19523,
+      "sha256": "0a47ed30f0fe5bc5ccf2884cffc62ba69eb298dc8c307655b8469e2fc638362b"
+    },
+    "aiwf/web/tabs/image_workflow.py": {
+      "size": 18939,
+      "sha256": "c459ca4c85c2b6464e904a926e1b0e37c006ce887832f0e772a71b88012c92a1"
+    },
+    "aiwf/web/tabs/rife.py": {
+      "size": 5495,
+      "sha256": "730790992df89caa29fa75adfc3daed574ab1d66865c436d44418f2e4ea19572"
+    },
+    "aiwf/web/tabs/segment.py": {
+      "size": 7607,
+      "sha256": "91bbacef0e3e84c2cc7eb22155722362a04b87fef0092794b2adff1fda56eb41"
+    },
+    "aiwf/web/tabs/video_lab.py": {
+      "size": 31261,
+      "sha256": "8dc53fc91d2ddc99e80d2a6214f8d83ea5ab0e18b596e4f4ff82c557bfab6c1d"
+    },
+    "aiwf_update_bbb1cae_studio_v4.py": {
+      "size": 57058,
+      "sha256": "71131b104a79daae6c7efb1f4a1da1ad96c81e79fd90e7679762bc156cbfea3b"
+    },
+    "docs/AUDIO_LAB_ARCHITECTURE.md": {
+      "size": 2254,
+      "sha256": "30b6e641af7626e8ee99ebd12529c495056f2c7f3bb61625fc4b08e59852a898"
+    },
+    "docs/GUI_READINESS.md": {
+      "size": 2708,
+      "sha256": "2ca70bb3af0210b90f83d1b729ebd595e8fc7e4a83c7381035bb9d767327dfde"
+    },
+    "docs/STARTUP_BENCHMARKS.md": {
+      "size": 2176,
+      "sha256": "ea08af16493174159bf4b7db5dbf534b7052f1d169fc4d960f9eccb7d93e05c7"
+    },
+    "docs/STUDIO_ROADMAP.md": {
+      "size": 1496,
+      "sha256": "aa08b7a4abc1f51fa00394fb79f9da91f92c7869d6ae9f4e0b95bb1175aff084"
+    },
+    "docs/STUDIO_V5_QA.md": {
+      "size": 2188,
+      "sha256": "0b60415dfb4737ee2280e8ff0d60d797d8583584c366270d0ed6d73e9c67a8b9"
+    },
+    "docs/UNIFIED_LAB_WORKFLOWS.md": {
+      "size": 1719,
+      "sha256": "24e455bbefdc1832c278d95350de8eb2841f9ebc7904a87da825ee79c8717d9d"
+    },
+    "docs/VIDEO_LAB_ARCHITECTURE.md": {
+      "size": 4001,
+      "sha256": "78954b00624346b4e352af38def96f5efcaea9ace816c9a5e09f70d3a5d568fd"
+    },
+    "docs/assets/studio-v5-unified-labs-preview.png": {
+      "size": 123799,
+      "sha256": "76330020ffb52a851a4afc1ae764630d6a2db358f143aa0eeadee6098b709a90"
+    },
+    "engines/audio_lab/requirements.txt": {
+      "size": 164,
+      "sha256": "a831ef0a2d37d37bb45d28edf89a3a5f05c67a39a3fed0019022513859ff86fa"
+    },
+    "engines/audio_lab/runner.py": {
+      "size": 16049,
+      "sha256": "b183773542ee08299c0bc18a69fc576f4b654b42f0c4c57cee6fa5d22dd36bbf"
+    },
+    "install_audio_lab.bat": {
+      "size": 408,
+      "sha256": "6228404700edbb54a6cde7c01b6713e49867d81def786f58e12ef5bd99ce506b"
+    },
+    "pyproject.toml": {
+      "size": 1708,
+      "sha256": "0c9c58cda2015524aa83d3a68ae206a8f25c715f8ff5ea2e3c582eac6a0c56dc"
+    },
+    "scripts/bootstrap_audio_lab.py": {
+      "size": 2217,
+      "sha256": "2661d482c00dd7801bde58c5d678da0b26b4a69e7b3d108d08c96e19c6aa3d13"
+    },
+    "static/style.css": {
+      "size": 77758,
+      "sha256": "81c25ff8f696dc007f4f8e2202225ca2aaa19d4920279b76871e63253d6e324e"
+    },
+    "studio_v5_overlay_tools.py": {
+      "size": 6610,
+      "sha256": "8deb4976ab22dd77bfcb32345b1be8129b17ab65ad7ff1ff9702cb085016db55"
+    },
+    "tests/individual_tests/test_audio_lab_runner.py": {
+      "size": 3807,
+      "sha256": "87ae2eb73ed2f5cd07b4036a88b39ba9bd52d1ffff6534a4f5c65b066c9a7dc1"
+    },
+    "tests/individual_tests/test_image_workflow_service.py": {
+      "size": 1094,
+      "sha256": "2a8474b36095a0d148a344c18e68932f76b5e9659ce2aacbbb2b79353c975bd2"
+    },
+    "tests/individual_tests/test_rife.py": {
+      "size": 1425,
+      "sha256": "93661212ca349bea2519a9e311eab44107b0dc9de3ab91964588b65ac0bd05a3"
+    },
+    "tests/individual_tests/test_studio_v4_update.py": {
+      "size": 1583,
+      "sha256": "7f948314e1bf20fbc9d9accc71e870f5d7e5f2a0b853b850506d2e6e5bfa4053"
+    },
+    "tests/individual_tests/test_studio_v5_labs.py": {
+      "size": 4139,
+      "sha256": "45879a33114e276128198a6c05b4debf48fdb0241d55f5b70c8fd78c2f38c6f6"
+    },
+    "tests/individual_tests/test_studio_v5_ui_contracts.py": {
+      "size": 3630,
+      "sha256": "237e6cb2874b78583c1a30fb4d5c1df9835c84dd373d2768531c1d1b5b9b048a"
+    },
+    "tests/individual_tests/test_video_lab.py": {
+      "size": 8546,
+      "sha256": "f51b028096a203f2c5470831297060838c7e969e39f6e372339379092905522d"
+    },
+    "webui.bat": {
+      "size": 1461,
+      "sha256": "195f373a867ee45c3ac67d051217a6a5d06cd34a8660fd1ffa939d6928e76984"
+    }
+  }
+}

@@ -41,7 +41,7 @@ markers = [
     "dev: development-only diagnostics and client logging tests",
 ]
 filterwarnings = [
-    'ignore:Using `httpx` with `starlette\.testclient` is deprecated.*:starlette.exceptions.StarletteDeprecationWarning',
+    'ignore:Using `httpx` with `starlette\.testclient` is deprecated.*:DeprecationWarning',
     'ignore:builtin type .* has no __module__ attribute:DeprecationWarning',
     "ignore:The module 'mediapipe' is not installed.*:UserWarning",
     'ignore:Please import `gaussian_filter` from the `scipy\.ndimage` namespace.*:DeprecationWarning',

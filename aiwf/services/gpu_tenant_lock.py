@@ -138,10 +138,11 @@ class GpuTenantLock:
                 return True
 
             if self._state.tenant == tenant:
-                self._state = TenantState(tenant=tenant, job_id=job_id)
-                logger.info("[GPU] %s re-acquired lock for job %s (same tenant)", tenant, job_id)
-                self._condition.notify_all()
-                return True
+                logger.warning(
+                    "[GPU] %s (job %s) blocked: GPU owned by same tenant for different job %s",
+                    tenant, job_id, self._state.job_id,
+                )
+                return False
 
             current = self._state
             # Allow chat/Ollama to be pre-empted by higher-priority tenants.

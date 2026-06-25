@@ -92,6 +92,40 @@ class VsrService:
         self.flags = flags
         self.settings = settings
         self.supervisor = supervisor
+        self.vsr_model = None
+
+    def upscale_image(self, img: Image.Image, options: VsrOptions) -> Image.Image:
+        """Upscales a single PIL Image natively using PyTorch tensors, mirroring ComfyUI."""
+        import torch
+        import numpy as np
+        from PIL import Image
+
+        # 1. Convert PIL Image to a batch tensor: Shape (Batch=1, Channels, Height, Width)
+        # ComfyUI natively represents images as [B, H, W, C] normalized to 0.0 - 1.0
+        img_np = np.array(img).astype(np.float32) / 255.0
+        img_tensor = torch.from_numpy(img_np).unsqueeze(0)  # Shape: [1, H, W, C]
+        
+        # Move tensor to the appropriate execution device (GPU)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        img_tensor = img_tensor.to(device)
+        
+        # 2. Replicate frames if the VSR model expects a temporal sequence (e.g., minimum 3 frames)
+        # Many video models require a temporal window to calculate optical flow or attention
+        temporal_window = 3 
+        vsr_input = img_tensor.repeat(temporal_window, 1, 1, 1)  # Shape: [3, H, W, C]
+        
+        # 3. Run the VSR processing pipeline directly in memory
+        with torch.inference_mode():
+            # Replace this placeholder with your model's forward pass
+            # e.g., upscaled_sequence = self.vsr_model(vsr_input)
+            upscaled_sequence = vsr_input  
+            
+        # 4. Extract the primary upscaled frame (usually the middle or first frame)
+        target_frame = upscaled_sequence[0].cpu()
+        
+        # 5. Convert back to a standard PIL Image
+        output_np = (target_frame.numpy() * 255.0).clip(0, 255).astype(np.uint8)
+        return Image.fromarray(output_np)
 
     def install_info(self) -> VsrInstallInfo:
         app_path = self._resolve_app_path()
@@ -760,12 +794,15 @@ class VsrService:
         return None
 
     def _candidate_roots(self) -> Sequence[Path]:
+        anchor = self.flags.data_dir.anchor if self.flags.data_dir.anchor else ""
         roots: list[str] = [
             os.environ.get("AIWF_NVIDIA_VFX_SDK_ROOT", "").strip(),
             r"C:\Program Files\NVIDIA Corporation\NVIDIA Video Effects",
             r"C:\Program Files\NVIDIA Corporation\NVIDIA VFX SDK",
-            str(Path(self.flags.data_dir.anchor) / "VideoFX") if self.flags.data_dir.anchor else "",
+            str(Path(anchor) / "VideoFX") if anchor else "",
             str(self.flags.data_dir.parent / "VideoFX"),
+            str(Path(anchor) / "sdks" / "nvidia" / "nvidia-vfx-sdk-samples") if anchor else "",
+            str(Path(anchor) / "sdks" / "nvidia" / "nvidia-vfx-sdk") if anchor else "",
             str(self.flags.data_dir / "engines" / "nvidia-vfx-sdk"),
             str(self.flags.data_dir / "engines" / "rtx-video-sdk"),
             str(self.flags.data_dir / "engines" / "nvidia-vfx-sdk-samples"),

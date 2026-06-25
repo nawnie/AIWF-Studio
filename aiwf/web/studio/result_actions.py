@@ -18,9 +18,17 @@ def save_bad_image(ctx, image, infotext: str | None) -> str:
 
 
 def on_gallery_select(settings, evt: gr.SelectData, seeds: list, _img_w: int | None = None, _img_h: int | None = None):
+    # Gradio gallery-select payloads vary across versions:
+    #   {'image': {'path':.., 'url':..}, 'caption':..}  /  {'path':.., 'url':..}  /  a PIL image.
+    # The image output component needs a PIL/ndarray/path/None — returning a raw
+    # dict raises ComponentProcessingError, so normalise to a path string here.
     selected_image = evt.value
     if isinstance(selected_image, dict):
-        selected_image = selected_image.get("image") or selected_image.get("value")
+        inner = selected_image.get("image", selected_image)
+        if isinstance(inner, dict):
+            selected_image = inner.get("path") or inner.get("url")
+        else:
+            selected_image = inner
 
     seed_update = gr.update()
     width_update = gr.update()
@@ -31,8 +39,18 @@ def on_gallery_select(settings, evt: gr.SelectData, seeds: list, _img_w: int | N
         if 0 <= idx < len(seeds):
             seed_update = gr.update(value=seeds[idx])
 
-    if getattr(settings, "send_size_on_click", True) and isinstance(selected_image, PILImage.Image):
-        width_update = gr.update(value=selected_image.width)
-        height_update = gr.update(value=selected_image.height)
+    if getattr(settings, "send_size_on_click", True):
+        size: tuple[int, int] | None = None
+        if isinstance(selected_image, PILImage.Image):
+            size = (selected_image.width, selected_image.height)
+        elif isinstance(selected_image, str) and selected_image and not selected_image.startswith("http"):
+            try:
+                with PILImage.open(selected_image) as opened:
+                    size = opened.size
+            except Exception:
+                size = None
+        if size:
+            width_update = gr.update(value=size[0])
+            height_update = gr.update(value=size[1])
 
     return selected_image, seed_update, width_update, height_update
