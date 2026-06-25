@@ -231,6 +231,100 @@ class ModelInfo:
 
 
 # ---------------------------------------------------------------------------
+# Persistent Header Cache
+# ---------------------------------------------------------------------------
+
+
+import atexit
+
+class ModelHeaderCache:
+    def __init__(self):
+        self.cache_file = Path(__file__).resolve().parents[2] / "cache" / "model_header_cache.json"
+        self.data = {}
+        self.loaded = False
+        self.dirty = False
+
+    def load(self):
+        if self.loaded:
+            return
+        if self.cache_file.exists():
+            try:
+                self.data = json.loads(self.cache_file.read_text(encoding="utf-8"))
+            except Exception:
+                logger.debug("Failed to load model header cache, initializing empty", exc_info=True)
+                self.data = {}
+        self.loaded = True
+
+    def save(self):
+        if not self.dirty:
+            return
+        try:
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            self.cache_file.write_text(json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8")
+            self.dirty = False
+        except Exception:
+            logger.warning("Failed to save model header cache", exc_info=True)
+
+    def get(self, path: Path) -> ModelInfo | None:
+        self.load()
+        key = str(path.resolve())
+        if key not in self.data:
+            return None
+        entry = self.data[key]
+        try:
+            stat = path.stat()
+            if entry.get("mtime") != stat.st_mtime or entry.get("size") != stat.st_size:
+                return None
+            
+            # Reconstruct ModelInfo
+            return ModelInfo(
+                path=entry["path"],
+                filename=entry["filename"],
+                arch=entry["arch"],
+                role=entry["role"],
+                precision=entry["precision"],
+                size_mb=entry["size_mb"],
+                display_name=entry["display_name"],
+                raw_meta=entry.get("raw_meta", {}),
+                tensor_count=entry.get("tensor_count", 0),
+            )
+        except Exception:
+            return None
+
+    def set(self, path: Path, info: ModelInfo):
+        self.load()
+        try:
+            stat = path.stat()
+            key = str(path.resolve())
+            
+            # Check if it's already cached with correct mtime/size to avoid writing
+            existing = self.data.get(key)
+            if existing and existing.get("mtime") == stat.st_mtime and existing.get("size") == stat.st_size:
+                return
+                
+            self.data[key] = {
+                "path": info.path,
+                "filename": info.filename,
+                "arch": info.arch,
+                "role": info.role,
+                "precision": info.precision,
+                "size_mb": info.size_mb,
+                "display_name": info.display_name,
+                "raw_meta": info.raw_meta,
+                "tensor_count": info.tensor_count,
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+            }
+            self.dirty = True
+            self.save()
+        except Exception:
+            pass
+
+_HEADER_CACHE = ModelHeaderCache()
+atexit.register(_HEADER_CACHE.save)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -238,19 +332,27 @@ class ModelInfo:
 def read_model_info(path) -> ModelInfo:
     """Read header metadata from a model file without loading weights."""
     p = Path(path).resolve()
+    
+    cached_info = _HEADER_CACHE.get(p)
+    if cached_info is not None:
+        return cached_info
+
     size_mb = _file_size_mb(p)
     suffix = p.suffix.lower()
     if suffix == ".gguf":
-        return _read_gguf(p, size_mb)
+        info = _read_gguf(p, size_mb)
     elif suffix == ".safetensors":
-        return _read_safetensors(p, size_mb)
+        info = _read_safetensors(p, size_mb)
     else:
         arch, role = _arch_from_folder_and_filename(p)
-        return ModelInfo(
+        info = ModelInfo(
             path=str(p), filename=p.name, arch=arch, role=role,
             precision="", size_mb=size_mb,
             display_name=_make_display_name(_clean_stem(p.stem), arch, role, "", size_mb),
         )
+        
+    _HEADER_CACHE.set(p, info)
+    return info
 
 
 def read_model_info_batch(paths: Iterable) -> list:

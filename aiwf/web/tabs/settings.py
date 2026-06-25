@@ -709,7 +709,7 @@ def register_settings(registry: WebRegistry) -> None:
                                 )
                             with gr.Row():
                                 default_steps = gr.Slider(1, 150, value=ctx.settings.default_steps, step=1, label="Steps")
-                                default_cfg = gr.Slider(0, 30, value=ctx.settings.default_cfg_scale, step=0.5, label="CFG scale")
+                                default_cfg = gr.Slider(1.0, 20.0, value=ctx.settings.default_cfg_scale, step=0.5, label="CFG scale")
                             with gr.Row():
                                 default_width = gr.Slider(64, 2048, value=ctx.settings.default_width, step=8, label="Width")
                                 default_height = gr.Slider(64, 2048, value=ctx.settings.default_height, step=8, label="Height")

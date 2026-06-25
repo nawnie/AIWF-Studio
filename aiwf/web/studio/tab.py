@@ -414,7 +414,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                             choices=[s.label for s in SCHEDULE_TYPES],
                             value=default_schedule_label,
                         )
-                        cfg = gr.Slider(0, 30, value=ctx.settings.default_cfg_scale, step=0.5, label="CFG scale")
+                        cfg = gr.Slider(1.0, 20.0, value=ctx.settings.default_cfg_scale, step=0.5, label="CFG scale")
                         seed = gr.Number(value=-1, precision=0, label="Seed (-1 = random)")
                     with gr.Row():
                         reuse_seed = gr.Button(
