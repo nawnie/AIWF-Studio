@@ -199,3 +199,6 @@ aiwf_update_bbb1cae_studio_v4.py
 *.fixed.txt
 *fixed.py.txt
 *-fixed.py.txt
+
+# Staged duplicate-model cleanup, awaiting manual delete (see model dedup sweep)
+_trash/
