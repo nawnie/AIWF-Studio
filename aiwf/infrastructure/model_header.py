@@ -16,6 +16,7 @@ in every file.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import re
@@ -235,7 +236,6 @@ class ModelInfo:
 # ---------------------------------------------------------------------------
 
 
-import atexit
 
 class ModelHeaderCache:
     def __init__(self):

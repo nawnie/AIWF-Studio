@@ -159,11 +159,16 @@ class UserSettings(BaseSettings):
     default_sampler: str = "euler_a"
     default_scheduler: str = "automatic"
     default_steps: int = Field(default=20, ge=1, le=150)
-    default_cfg_scale: float = Field(default=7.0, ge=1.0, le=20.0)
+    default_cfg_scale: float = Field(default=7.0, ge=0.0, le=30.0)
     default_width: int = Field(default=512, ge=64, le=2048)
     default_height: int = Field(default=512, ge=64, le=2048)
     default_clip_skip: int = Field(default=1, ge=1, le=12)
     default_hr_upscaler: str = "lanczos"
+
+    @field_validator("default_cfg_scale")
+    @classmethod
+    def clamp_cfg_scale(cls, v: float) -> float:
+        return max(1.0, min(20.0, float(v)))
 
     # Last checkpoint the user loaded in Studio — restored on next launch.
     last_checkpoint_id: str | None = None
