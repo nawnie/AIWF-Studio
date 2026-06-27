@@ -3,25 +3,25 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![NVIDIA RTX / VFX SDK](https://img.shields.io/badge/NVIDIA%20RTX-VFX%20SDK-76B900?logo=nvidia&logoColor=white)](https://docs.nvidia.com/maxine/vfx/index.html)
 
-**Local-first AI image, inpainting, video, and video-audio tooling for Windows, NVIDIA GPUs, Stable Diffusion, ControlNet, enhancement, and Wan.**
+Local-first image, inpainting, video, and video-audio tooling for Windows and NVIDIA GPUs.
 
-AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. It is designed as a serious local creative workspace: explicit wiring, typed requests, predictable model folders, and no legacy global `shared` state.
+AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. The goal is a local creative workstation with explicit wiring, typed requests, predictable model folders, and no legacy global `shared` state.
 
-This `main` branch is the stable sharing branch. It only advertises features that are intended to work for normal local use. Experimental work lives on `dev`.
+This `main` branch is the stable sharing branch. It only advertises features intended for normal local use. Experimental work lives on `dev`.
 
 ## UI Rebuild
 
-AIWF Studio now ships three interchangeable web UIs on top of the same backend, instead of a single Gradio surface:
+AIWF Studio ships three interchangeable web UIs on top of the same backend:
 
 - **Studio** (`webui.bat` / `python launch.py`, `aiwf/app.py`) - the original Gradio-based tabbed workspace. Still the default and most complete surface for image, inpaint, ControlNet, enhance, segment, and video.
 - **Modern** (`webui_modern.py`, `aiwf/app_modern.py`) - a restyled Gradio shell (`aiwf/web/modern/`) with the same backend, aimed at a cleaner layout pass.
-- **Pro** (`webui_pro.py`, `aiwf/app_pro.py`) - a from-scratch FastAPI + React/TypeScript/Vite frontend (`frontend/`) talking to a dedicated `aiwf/web/pro_api.py` API. This is the active UI rebuild track and the long-term direction for the project; it currently covers image, video, inpaint, and model browsing, and needs a frontend build (`cd frontend && npm install && npm run build`) before `webui_pro.py` will serve it.
+- **Pro** (`webui_pro.py`, `aiwf/app_pro.py`) - a FastAPI + React/TypeScript/Vite frontend (`frontend/`) talking to `aiwf/web/pro_api.py`. This is the active UI rebuild track and the long-term direction for the project. It currently covers image, video, inpaint, and model browsing, and needs a frontend build (`cd frontend && npm install && npm run build`) before `webui_pro.py` will serve it.
 
 All three read and write the same model folders, history, and settings, so switching between them is safe. Studio remains the one to recommend for new users until Pro reaches parity.
 
 ## Release Gate
 
-Current focus: make image generation, inpainting, video generation, and video-audio post-processing boringly reliable before adding more features.
+Current focus: image generation, inpainting, video generation, and video-audio post-processing must be reliable before the project takes on more feature work.
 
 - New user-facing features are paused until those paths pass local smoke tests.
 - Optimization work is allowed when it improves an existing path and has a fallback.
@@ -65,7 +65,7 @@ Current focus: make image generation, inpainting, video generation, and video-au
 ### Enhance
 
 - image upscale
-- GFPGAN / CodeFormer style restoration when models are installed
+- GFPGAN / CodeFormer-style restoration when models are installed
 - old-photo restore pipeline
 - tiled upscale controls for local VRAM limits
 
@@ -294,7 +294,7 @@ Keep optional restricted components clearly marked as local/user-installed.
 
 ## SageAttention And SDK Cache
 
-SageAttention is a promising Wan/video optimization, and the upstream project is Apache-2.0. It belongs in a shared local SDK/cache folder as a future accelerator reference and disposable test lane, not as a required runtime dependency yet.
+SageAttention is a candidate Wan/video optimization, and the upstream project is Apache-2.0. It belongs in a shared local SDK/cache folder as a future accelerator reference and disposable test lane, not as a required runtime dependency yet.
 
 Current rule for `main`: do not wire SageAttention as a required path until a copied-venv test proves installability, output quality, and speed on this Windows/NVIDIA setup. Wan should keep working through the existing torch SDPA fallback when SageAttention is missing.
 
@@ -310,17 +310,17 @@ These areas exist as work-in-progress or need more hardware coverage before they
 - Face Swap tab
 - workflow authoring
 - model conversion and quantization tools
-- plugin ecosystem
+- plugin system
 - richer generated-audio controls and model installers
 - AMD, Intel, Linux, and lower-VRAM validation
 - installer polish and first-run onboarding
 
 ## Credits
 
-AIWF Studio is clean-room code, but it is built in conversation with the local AI community: Stable Diffusion, Diffusers, ControlNet, Segment Anything, GroundingDINO, Real-ESRGAN, GFPGAN, CodeFormer, Wan, ComfyUI-GGUF, and the AUTOMATIC1111 web UI ecosystem.
+AIWF Studio is clean-room code. It draws from established local AI tooling around Stable Diffusion, Diffusers, ControlNet, Segment Anything, GroundingDINO, Real-ESRGAN, GFPGAN, CodeFormer, Wan, ComfyUI-GGUF, and the AUTOMATIC1111 web UI.
 
 Optional video post-processing can use NVIDIA Video Effects / VFX SDK components for RTX VSR-style upscale, cleanup, AI green screen, and relighting when the user installs the NVIDIA SDK locally. See `docs/ATTRIBUTION.md` for third-party credits and source links.
 
-## Come Build This
+## Contributing
 
-This project is now bigger than one person, even with AI help. If you care about local-first creative AI, consumer GPU workflows, open tooling, clean Python architecture, or making powerful generation tools easier for regular people to run, help create this with us ✨
+AIWF Studio needs focused help from people who work on local creative AI, Windows/NVIDIA workflows, Python services, frontend rebuilds, model runtime tooling, and install flows for normal PC users. Open an issue with a narrow repro or send a PR that includes the check you ran.
