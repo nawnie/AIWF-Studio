@@ -31,6 +31,7 @@ class PipelineRegistry:
         self.settings = settings
 
     def image_pipelines(self) -> list[PipelineInfo]:
+        qwen_nunchaku = self._qwen_nunchaku_pipeline()
         return [
             PipelineInfo(
                 id="diffusers",
@@ -41,11 +42,31 @@ class PipelineRegistry:
                 ready=True,
                 launch_backend="diffusers",
             ),
+            PipelineInfo(
+                id="qwen-image",
+                label="Qwen Image Diffusers pipeline",
+                kind="image",
+                engine="Studio Image Engine",
+                summary="Full-folder Qwen Image 2512/2.x text-to-image route.",
+                ready=True,
+                message="available when a Qwen Image Diffusers snapshot is installed",
+            ),
+            qwen_nunchaku,
+            PipelineInfo(
+                id="sana",
+                label="Sana Diffusers pipeline",
+                kind="image",
+                engine="Studio Image Engine",
+                summary="Full-folder Sana and Sana Sprint 1024px text-to-image route.",
+                ready=True,
+                message="available when a Sana Diffusers snapshot is installed",
+            ),
             self._onnx_pipeline(),
         ]
 
     def video_pipelines(self) -> list[PipelineInfo]:
         ltx = self._ltx_pipeline()
+        sana_video = self._sana_video_pipeline()
         return [
             PipelineInfo(
                 id="wan-diffusers",
@@ -65,6 +86,7 @@ class PipelineRegistry:
                 ready=True,
                 message="available when GGUF high/low transformer files are configured",
             ),
+            sana_video,
             ltx,
         ]
 
@@ -107,16 +129,60 @@ class PipelineRegistry:
         return (self.flags.resolved_models_dir() / "onnx").resolve()
 
     def _ltx_pipeline(self) -> PipelineInfo:
-        from aiwf.services.worker_tenant import WorkerTenantRegistry
+        from aiwf.services.pipeline_preflight import preflight_ltx_pipeline
 
-        status = WorkerTenantRegistry(self.flags.data_dir).status("ltx")
-        message = "ready via isolated LTX worker" if status.ready else "; ".join(status.messages)
+        preflight = preflight_ltx_pipeline(self.flags, self.settings)
+        if preflight.ok:
+            selected = preflight.metadata.get("selected_pipeline", "default")
+            message = f"ready via isolated LTX worker ({selected})"
+            if preflight.warnings:
+                message = f"{message}; {preflight.warnings[0]}"
+        else:
+            blocking = [item.message for item in preflight.items if not item.ok]
+            message = "; ".join(blocking)
         return PipelineInfo(
             id="ltx-2.3",
             label="LTX 2.3 worker pipeline",
             kind="video",
             engine="LTX 2.3 Video Engine",
             summary="Optional Lightricks LTX 2.3 text/image-to-video path in engines/ltx/.venv.",
-            ready=status.ready,
+            ready=preflight.ok,
             message=message or "enable/install the LTX worker in Settings",
+        )
+
+    def _sana_video_pipeline(self) -> PipelineInfo:
+        from aiwf.services.pipeline_preflight import preflight_sana_video_pipeline
+
+        preflight = preflight_sana_video_pipeline(self.flags, self.settings)
+        installed = preflight.metadata.get("model_installed") == "true"
+        if not preflight.ok:
+            blocking = [item.message for item in preflight.items if not item.ok]
+            message = "; ".join(blocking)
+        elif installed:
+            message = f"ready with model at {preflight.metadata.get('model_path', '')}"
+        else:
+            message = f"available when the SANA-Video snapshot is installed at {preflight.metadata.get('model_path', '')}"
+        return PipelineInfo(
+            id="sana-video",
+            label="Sana Video Diffusers pipeline",
+            kind="video",
+            engine="Studio Video Engine",
+            summary="Diffusers SANA-Video text/image-to-video route. Audio is a post-process path.",
+            ready=preflight.ok and installed,
+            message=message,
+        )
+
+    def _qwen_nunchaku_pipeline(self) -> PipelineInfo:
+        from aiwf.services.qwen_nunchaku import QwenNunchakuService
+
+        status = QwenNunchakuService(self.flags).status()
+        message = "ready via isolated Qwen Nunchaku runtime" if status.ready else "; ".join(status.messages)
+        return PipelineInfo(
+            id="qwen-nunchaku",
+            label="Qwen Image Nunchaku pipeline",
+            kind="image",
+            engine="Qwen Nunchaku Engine",
+            summary="Single-transformer safetensors Qwen Image Lightning route with shared base components.",
+            ready=status.ready,
+            message=message or "install/download the Nunchaku runtime and transformer",
         )

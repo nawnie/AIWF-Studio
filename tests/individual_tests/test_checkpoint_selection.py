@@ -1,13 +1,17 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from aiwf.core.config.settings import UserSettings
 from aiwf.core.domain.models import Checkpoint
 from aiwf.infrastructure.diffusers import backend as diffusers_backend
 from aiwf.services.generation import GenerationService
+from aiwf.infrastructure.diffusers.backend import DiffusersBackend
 from aiwf.web.components.checkpoints import (
+    _filter_checkpoints,
     default_checkpoint_title,
+    format_model_status,
     resolve_default_checkpoint,
 )
 
@@ -69,6 +73,71 @@ def test_resolve_default_checkpoint_skips_saved_inpaint_checkpoint():
 
     assert selected is not None
     assert selected.id == "base"
+
+
+def test_engine_filter_keeps_only_compatible_models():
+    checkpoints = [
+        _checkpoint("flux", architecture="flux"),
+        _checkpoint("flux2", architecture="flux2_klein"),
+        _checkpoint("sdxl", architecture="sdxl"),
+        _checkpoint("z", architecture="z_image"),
+    ]
+
+    assert [c.id for c in _filter_checkpoints(checkpoints, "Flux")] == ["flux"]
+    assert [c.id for c in _filter_checkpoints(checkpoints, "Flux 2")] == ["flux2"]
+    assert [c.id for c in _filter_checkpoints(checkpoints, "Stable Diffusion XL")] == ["sdxl"]
+    assert [c.id for c in _filter_checkpoints(checkpoints, "Z-Image")] == ["z"]
+
+
+def test_engine_status_uses_model_language(tmp_path: Path):
+    checkpoints = [
+        _checkpoint("flux", architecture="flux"),
+        _checkpoint("sdxl", architecture="sdxl"),
+    ]
+    ctx = SimpleNamespace(
+        generation=SimpleNamespace(list_checkpoints=lambda: checkpoints),
+        flags=SimpleNamespace(
+            resolved_ckpt_dir=lambda: tmp_path / "base_models",
+            resolved_models_dir=lambda: tmp_path / "models",
+        ),
+    )
+
+    status = format_model_status(ctx, "Flux")
+
+    assert "**1** models for Flux" in status
+    assert "checkpoints" not in status
+    assert "flux.safetensors" in status
+
+
+def test_common_prompt_prewarm_populates_flux2_cache(monkeypatch):
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend._txt2img = object()
+    backend._active = _checkpoint("flux2", architecture="flux2_klein")
+    backend._common_prompt_cache_warmed_for = set()
+    backend._flux2_prompt_cache = {}
+
+    monkeypatch.setattr(backend, "_execution_device", lambda _pipe: "cuda")
+
+    def fake_encode(_pipe, prompt, _device):
+        backend._flux2_prompt_cache[prompt] = f"encoded:{prompt}"
+        return backend._flux2_prompt_cache[prompt]
+
+    monkeypatch.setattr(backend, "_encode_flux2_prompt", fake_encode)
+
+    warmed = backend.prewarm_common_prompt_embeddings(limit=16, budget_seconds=999)
+
+    assert warmed == 16
+    assert {
+        "woman",
+        "portrait",
+        "person",
+        "body",
+        "full body",
+        "close up portrait",
+        "portrait of a woman",
+        "beautiful woman",
+    } <= set(backend._flux2_prompt_cache)
+    assert backend.prewarm_common_prompt_embeddings(limit=16, budget_seconds=999) == 0
 
 
 def test_load_checkpoint_persists_last_model_to_config(tmp_path: Path):

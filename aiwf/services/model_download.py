@@ -52,13 +52,23 @@ CATEGORY_LABELS: dict[ModelCategory, str] = {
     "flux2_unet_safetensor": "Flux.2 Klein transformer (.safetensors)",
     "flux2_unet_gguf": "Flux.2 Klein transformer (.gguf)",
     "flux2_components": "Flux.2 Klein components",
+    "flux2_diffusers": "Flux.2 Klein Diffusers pipeline",
     "z_image_unet_safetensor": "Z-Image transformer (.safetensors)",
     "z_image_unet_gguf": "Z-Image transformer (.gguf)",
     "z_image_components": "Z-Image components",
+    "qwen_image_diffusers": "Qwen Image Diffusers pipeline",
+    "qwen_image_nunchaku": "Qwen Image Nunchaku transformer",
+    "sana_diffusers": "Sana Diffusers pipeline",
+    "sana_video_diffusers": "Sana Video Diffusers pipeline",
     "ltx_checkpoint": "LTX 2.3 checkpoint",
+    "ltx_gguf": "LTX 2.3 GGUF support asset",
     "ltx_upscaler": "LTX 2.3 upscaler",
     "ltx_lora": "LTX 2.3 LoRA",
+    "ltx_vae": "LTX 2.3 video VAE",
+    "ltx_audio_vae": "LTX 2.3 audio VAE",
     "ltx_text_encoder": "LTX 2.3 Gemma text encoder",
+    "llm_gguf": "LLM GGUF",
+    "llm_safetensor": "LLM safetensors",
     "rife": "RIFE (frame interpolation)",
     "sam": "SAM (segmentation)",
     "other": "Other (models root)",
@@ -90,13 +100,23 @@ CATEGORY_FOLDERS: dict[ModelCategory, tuple[str, ...]] = {
     "flux2_unet_safetensor": ("flux2", "UNet"),
     "flux2_unet_gguf": ("flux2", "GGUF"),
     "flux2_components": ("flux2", "Components"),
+    "flux2_diffusers": ("flux2", "Diffusers"),
     "z_image_unet_safetensor": ("z-image", "UNet"),
     "z_image_unet_gguf": ("z-image", "GGUF"),
     "z_image_components": ("z-image", "Components"),
+    "qwen_image_diffusers": ("qwen-image", "Diffusers"),
+    "qwen_image_nunchaku": ("qwen-image", "Nunchaku"),
+    "sana_diffusers": ("sana", "Diffusers"),
+    "sana_video_diffusers": ("sana-video", "Diffusers"),
     "ltx_checkpoint": ("ltx", "checkpoints"),
+    "ltx_gguf": ("ltx", "GGUF"),
     "ltx_upscaler": ("ltx", "upscalers"),
     "ltx_lora": ("ltx", "loras"),
+    "ltx_vae": ("ltx", "vae"),
+    "ltx_audio_vae": ("ltx", "audio_vae"),
     "ltx_text_encoder": ("ltx", "text_encoder"),
+    "llm_gguf": ("LLM", "GGUF"),
+    "llm_safetensor": ("LLM",),
     "rife": ("rife",),
     "sam": ("sam",),
     "other": (),
@@ -127,13 +147,23 @@ CATEGORY_EXTENSION_RULES: dict[ModelCategory, tuple[str, ...]] = {
     "flux2_unet_safetensor": (".safetensors",),
     "flux2_unet_gguf": (".gguf",),
     "flux2_components": (".safetensors", ".json", ".txt"),
+    "flux2_diffusers": (".safetensors", ".json", ".txt", ".model"),
     "z_image_unet_safetensor": (".safetensors",),
     "z_image_unet_gguf": (".gguf",),
     "z_image_components": (".safetensors", ".json", ".txt"),
+    "qwen_image_diffusers": (".safetensors", ".json", ".txt", ".model"),
+    "qwen_image_nunchaku": (".safetensors",),
+    "sana_diffusers": (".safetensors", ".json", ".txt", ".model"),
+    "sana_video_diffusers": (".safetensors", ".json", ".txt", ".model"),
     "ltx_checkpoint": (".safetensors",),
+    "ltx_gguf": (".gguf",),
     "ltx_upscaler": (".safetensors",),
     "ltx_lora": (".safetensors",),
+    "ltx_vae": (".safetensors",),
+    "ltx_audio_vae": (".safetensors",),
     "ltx_text_encoder": (".safetensors", ".json", ".model", ".txt"),
+    "llm_gguf": (".gguf",),
+    "llm_safetensor": (".safetensors",),
     "rife": (".pth",),
     "sam": (".pth",),
 }
@@ -625,7 +655,14 @@ class ModelDownloadService:
     def _snapshot_target_ready(self, category: ModelCategory, target: Path) -> bool:
         if not target.is_dir():
             return False
-        if category in {"checkpoint", "wan_diffusers"}:
+        if category in {
+            "checkpoint",
+            "wan_diffusers",
+            "flux2_diffusers",
+            "qwen_image_diffusers",
+            "sana_diffusers",
+            "sana_video_diffusers",
+        }:
             return (target / "model_index.json").is_file()
         allowed = CATEGORY_EXTENSION_RULES.get(category, ())
         if allowed:
@@ -669,7 +706,11 @@ class ModelDownloadService:
                     "wan_diffusers",
                     "ltx_text_encoder",
                     "flux2_components",
+                    "flux2_diffusers",
                     "z_image_components",
+                    "qwen_image_diffusers",
+                    "sana_diffusers",
+                    "sana_video_diffusers",
                 },
             )
         if source == "civitai":
@@ -695,6 +736,17 @@ class ModelDownloadService:
                 remote = replace(remote, local_filename=local_filename)
         return remote
 
+    def _invalidate_model_inventory(self) -> None:
+        try:
+            from aiwf.infrastructure.model_inventory import invalidate_model_inventory_cache, inventory_path
+
+            invalidate_model_inventory_cache()
+            cache_path = inventory_path(self.flags)
+            if cache_path.is_file():
+                cache_path.unlink()
+        except Exception:
+            logger.debug("Could not invalidate model inventory cache after download", exc_info=True)
+
     def download_parsed(
         self,
         remote: ParsedRemote,
@@ -715,13 +767,20 @@ class ModelDownloadService:
                 "wan_diffusers",
                 "ltx_text_encoder",
                 "flux2_components",
+                "flux2_diffusers",
                 "z_image_components",
+                "qwen_image_diffusers",
+                "sana_diffusers",
+                "sana_video_diffusers",
             }:
                 raise ValueError(
                     "Full repository downloads are only supported for checkpoint Diffusers folders, "
-                    "Wan Diffusers folders, LTX/Flux2/Z-Image component folders, ControlNet, and preprocessor categories."
+                    "Wan Diffusers folders, LTX/Flux2/Z-Image/Qwen/Sana Diffusers/component folders, "
+                    "ControlNet, and preprocessor categories."
                 )
-            return self._download_hf_snapshot(remote, category, on_progress=on_progress)
+            path = self._download_hf_snapshot(remote, category, on_progress=on_progress)
+            self._invalidate_model_inventory()
+            return path
         target_filename = remote.local_filename or remote.filename
         self._validate_destination_filename(category, target_filename)
         dest = self.destination_for(category, target_filename)
@@ -738,11 +797,13 @@ class ModelDownloadService:
         try:
             result = stream_download(remote.url, dest, on_progress=on_progress, headers=headers)
             write_download_receipt(result, url=remote.url, source=remote.source)
+            self._invalidate_model_inventory()
             return result
         except Exception as exc:
             if remote.source == "huggingface" and remote.repo_id and remote.filename:
                 path = self._download_hf_hub(remote, dest, on_progress=on_progress)
                 write_download_receipt(path, url=remote.url, source=remote.source)
+                self._invalidate_model_inventory()
                 return path
             raise ValueError(f"Download failed: {exc}") from exc
 

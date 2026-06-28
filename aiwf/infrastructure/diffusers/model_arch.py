@@ -20,17 +20,39 @@ ARCH_SDXL = "sdxl"
 ARCH_SDXL_INPAINT = "sdxl_inpaint"
 ARCH_SD35 = "sd35"
 ARCH_FLUX = "flux"
+ARCH_FLUX_KONTEXT = "flux_kontext"
 ARCH_FLUX2_KLEIN = "flux2_klein"
 ARCH_Z_IMAGE = "z_image"
+ARCH_QWEN_IMAGE = "qwen_image"
+ARCH_QWEN_IMAGE_NUNCHAKU = "qwen_image_nunchaku"
+ARCH_SANA = "sana"
+ARCH_SANA_VIDEO = "sana_video"
+
+_QWEN_NUNCHAKU_MARKERS = ("nunchaku", "svdq-int4", "lightningv", "4steps")
+
+
+def _is_qwen_nunchaku_name(text: str) -> bool:
+    lowered = text.lower().replace("_", "-")
+    return any(marker in lowered for marker in _QWEN_NUNCHAKU_MARKERS)
 
 
 def _architecture_from_name(filename: str) -> str | None:
     lower = filename.lower().replace("_", "-")
     compact = lower.replace("-", "")
+    if ("qwen-image" in lower or "qwenimage" in compact or "qwen2.0" in lower) and _is_qwen_nunchaku_name(lower):
+        return ARCH_QWEN_IMAGE_NUNCHAKU
+    if "qwen-image" in lower or "qwenimage" in compact or "qwen2.0" in lower:
+        return ARCH_QWEN_IMAGE
+    if "sana-video" in lower or "sanavideo" in compact or "sanaimagetovideo" in compact:
+        return ARCH_SANA_VIDEO
+    if "sana" in lower:
+        return ARCH_SANA
     if "z-image" in lower or "zimage" in compact:
         return ARCH_Z_IMAGE
     if "flux.2" in lower or "flux2" in compact or "klein" in lower:
         return ARCH_FLUX2_KLEIN
+    if "kontext" in lower:
+        return ARCH_FLUX_KONTEXT
     if "flux" in lower:
         return ARCH_FLUX
     return None
@@ -94,11 +116,11 @@ def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: st
     )
 
     name_arch = _architecture_from_name(filename)
+    if name_arch:
+        return name_arch
 
     if has_sd3 or "sd3.5" in lower or "sd35" in lower or "stable-diffusion-3.5" in lower:
         return ARCH_SD35
-    if name_arch:
-        return name_arch
 
     if unet_in and len(unet_in) >= 2 and unet_in[1] == 9:
         if has_sdxl:
@@ -121,7 +143,15 @@ def looks_like_lora_weights(path: Path | str) -> bool:
         return False
     if UNET_INPUT_KEY in shapes:
         return False
-    return any("lora_down" in key or "lora_up" in key for key in shapes)
+    return any(
+        "lora_down" in key
+        or "lora_up" in key
+        or ".lora_A." in key
+        or ".lora_B." in key
+        or ".lora_a." in key
+        or ".lora_b." in key
+        for key in shapes
+    )
 
 
 def detect_checkpoint_architecture(path: Path | str) -> str:
@@ -155,8 +185,13 @@ def architecture_label(architecture: str) -> str:
         ARCH_SDXL_INPAINT: "SDXL inpaint",
         ARCH_SD35: "SD3.5",
         ARCH_FLUX: "Flux",
+        ARCH_FLUX_KONTEXT: "Flux Kontext",
         ARCH_FLUX2_KLEIN: "Flux.2 Klein",
         ARCH_Z_IMAGE: "Z-Image",
+        ARCH_QWEN_IMAGE: "Qwen Image",
+        ARCH_QWEN_IMAGE_NUNCHAKU: "Qwen Image Nunchaku",
+        ARCH_SANA: "Sana",
+        ARCH_SANA_VIDEO: "Sana Video",
         ARCH_INPAINT: "inpaint",
         ARCH_SD15: "SD1.5",
     }.get(architecture, architecture)
@@ -178,6 +213,10 @@ def is_flux_architecture(architecture: str) -> bool:
     return (architecture or "").lower() == ARCH_FLUX
 
 
+def is_flux_kontext_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() == ARCH_FLUX_KONTEXT
+
+
 def is_flux2_klein_architecture(architecture: str) -> bool:
     return (architecture or "").lower() == ARCH_FLUX2_KLEIN
 
@@ -186,5 +225,29 @@ def is_z_image_architecture(architecture: str) -> bool:
     return (architecture or "").lower() == ARCH_Z_IMAGE
 
 
+def is_qwen_image_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() in {ARCH_QWEN_IMAGE, ARCH_QWEN_IMAGE_NUNCHAKU}
+
+
+def is_qwen_nunchaku_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() == ARCH_QWEN_IMAGE_NUNCHAKU
+
+
+def is_sana_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() == ARCH_SANA
+
+
+def is_sana_video_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() == ARCH_SANA_VIDEO
+
+
 def is_transformer_image_architecture(architecture: str) -> bool:
-    return (architecture or "").lower() in {ARCH_FLUX, ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}
+    return (architecture or "").lower() in {
+        ARCH_FLUX,
+        ARCH_FLUX_KONTEXT,
+        ARCH_FLUX2_KLEIN,
+        ARCH_Z_IMAGE,
+        ARCH_QWEN_IMAGE,
+        ARCH_QWEN_IMAGE_NUNCHAKU,
+        ARCH_SANA,
+    }

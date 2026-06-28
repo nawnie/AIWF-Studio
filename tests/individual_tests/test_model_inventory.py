@@ -11,10 +11,15 @@ from aiwf.infrastructure.model_header import (
     ARCH_FLUX2_KLEIN_TRANSFORMER,
     ARCH_FLUX_LORA,
     ARCH_FLUX_VAE,
+    ARCH_LTX_AUDIO_VAE,
+    ARCH_LTX_LORA,
+    ARCH_LTX_TRANSFORMER,
+    ARCH_LTX_VAE,
     ARCH_SD35_CHECKPOINT,
     ARCH_T5XXL_ENCODER,
     ARCH_UMT5_ENCODER,
     ARCH_Z_IMAGE_TRANSFORMER,
+    ROLE_TEXT_ENCODER,
     read_model_info,
 )
 from aiwf.infrastructure.model_inventory import inventory_path, scan_and_write_model_inventory
@@ -256,6 +261,88 @@ def test_z_image_gguf_is_runtime_asset_and_selectable_z_image_checkpoint(tmp_pat
     assert checkpoints[0].kind == "z-image"
 
 
+def test_qwen_and_sana_diffusers_dirs_are_selectable_runtime_assets(tmp_path: Path):
+    models = tmp_path / "models"
+    specs = [
+        (
+            models / "qwen-image" / "Diffusers" / "Qwen-Image-2512",
+            "QwenImagePipeline",
+            "qwen_image",
+            "qwen-image/Diffusers",
+            "qwen-image",
+        ),
+        (
+            models / "sana" / "Diffusers" / "Sana_Sprint_1.6B_1024px_diffusers",
+            "SanaSprintPipeline",
+            "sana",
+            "sana/Diffusers",
+            "sana",
+        ),
+    ]
+    for root, class_name, _, _, _ in specs:
+        root.mkdir(parents=True)
+        (root / "model_index.json").write_text(json.dumps({"_class_name": class_name}), encoding="utf-8")
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+    by_path = {Path(record.path): record for record in records}
+    by_kind = {checkpoint.kind: checkpoint for checkpoint in checkpoints}
+
+    for root, _, architecture, recommended_subdir, kind in specs:
+        record = by_path[root.resolve()]
+        assert record.family == "runtime_asset"
+        assert record.architecture == architecture
+        assert record.recommended_subdir == recommended_subdir
+        assert by_kind[kind].architecture == architecture
+
+
+def test_sana_video_diffusers_dir_is_video_runtime_asset_not_image_checkpoint(tmp_path: Path):
+    models = tmp_path / "models"
+    root = models / "sana-video" / "Diffusers" / "SANA-Video_2B_480p_diffusers"
+    root.mkdir(parents=True)
+    (root / "model_index.json").write_text(json.dumps({"_class_name": "SanaVideoPipeline"}), encoding="utf-8")
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+    record = next(item for item in records if Path(item.path) == root.resolve())
+
+    assert record.family == "runtime_asset"
+    assert record.architecture == "sana_video"
+    assert record.recommended_subdir == "sana-video/Diffusers"
+    assert record.should_move is False
+    assert all(checkpoint.id != "SANA-Video_2B_480p_diffusers" for checkpoint in checkpoints)
+
+
+def test_qwen_nunchaku_transformer_is_selectable_runtime_asset(tmp_path: Path):
+    models = tmp_path / "models"
+    transformer = models / "qwen-image" / "Nunchaku" / "svdq-int4_r32-qwen-image-lightningv1.0-4steps.safetensors"
+    transformer.parent.mkdir(parents=True)
+    _write_safetensors_header(
+        transformer,
+        {
+            "transformer_blocks.0.attn.to_q.weight": {
+                "dtype": "F16",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+    )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+
+    record = next(item for item in records if item.filename == transformer.name)
+    assert record.family == "runtime_asset"
+    assert record.architecture == "qwen_image_nunchaku"
+    assert record.current_subdir == "qwen-image/Nunchaku"
+    assert record.recommended_subdir == "qwen-image/Nunchaku"
+    assert [checkpoint.id for checkpoint in checkpoints] == ["svdq-int4_r32-qwen-image-lightningv1.0-4steps"]
+    assert checkpoints[0].kind == "qwen-nunchaku"
+
+
 def test_flux2_and_z_image_component_dirs_are_support_assets_not_checkpoints(tmp_path: Path):
     models = tmp_path / "models"
     component_specs = [
@@ -324,6 +411,105 @@ def test_flux_lora_header_overrides_wrong_folder(tmp_path: Path):
     assert record.recommended_subdir == "Loras/Flux"
     assert [item.filename for item in image_loras] == [flux_lora.name]
     assert image_loras[0].architecture == "flux"
+
+
+def test_flux2_klein_lora_metadata_routes_to_flux2_lora_folder(tmp_path: Path):
+    models = tmp_path / "models"
+    klein_lora = models / "Loras" / "party_time_v2.0_klein9b.safetensors"
+    _write_safetensors_header(
+        klein_lora,
+        {
+            "lora_transformer_double_blocks_0_img_attn_qkv.lora_A.weight": {
+                "dtype": "BF16",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+        {"modelspec.architecture": "flux2-klein-9b/lora"},
+    )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    info = read_model_info(klein_lora)
+    record = next(item for item in scan_and_write_model_inventory(flags) if item.filename == klein_lora.name)
+
+    assert info.arch == ARCH_FLUX_LORA
+    assert record.family == "lora"
+    assert record.architecture == "flux2_klein"
+    assert record.recommended_subdir == "Loras/Flux2"
+
+
+def test_ltx_headers_route_gguf_lora_and_vaes_to_ltx_folders(tmp_path: Path):
+    models = tmp_path / "models"
+    gguf = models / "ltx" / "GGUF" / "ltx23DISTILLEDGGUF_q2k.gguf"
+    lora = models / "Stable-diffusion" / "ltx23_ltx2322bDistilled.safetensors"
+    video_vae = models / "Stable-diffusion" / "ltx23FP4_ltx23VideoVae.safetensors"
+    audio_vae = models / "Stable-diffusion" / "ltx23FP4_ltx23AudioVae.safetensors"
+    text_encoder = models / "ltx" / "text_encoder" / "gemma_3_12B_it_fp4_mixed.safetensors"
+    gguf.parent.mkdir(parents=True)
+    gguf.write_bytes(b"GGUF")
+    _write_safetensors_header(
+        lora,
+        {
+            "diffusion_model.transformer_blocks.0.attn.q_proj.lora_A.weight": {
+                "dtype": "BF16",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+        {"modelspec.title": "LTX 2.3 Distilled LoRA"},
+    )
+    _write_safetensors_header(
+        video_vae,
+        {
+            "encoder.conv_in.weight": {
+                "dtype": "BF16",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+        {"config": '{"class_name":"CausalVideoAutoencoder"}', "modelspec.title": "LTX Video VAE"},
+    )
+    _write_safetensors_header(
+        audio_vae,
+        {
+            "audio_vae.encoder.conv_in.weight": {
+                "dtype": "BF16",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+        {"modelspec.title": "LTX Audio VAE"},
+    )
+    _write_safetensors_header(
+        text_encoder,
+        {
+            "model.layers.0.self_attn.q_proj.weight": {
+                "dtype": "BF16",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+    )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    by_name = {item.filename: item for item in scan_and_write_model_inventory(flags)}
+    info_by_name = {path.name: read_model_info(path) for path in (gguf, lora, video_vae, audio_vae, text_encoder)}
+
+    assert info_by_name[gguf.name].arch == ARCH_LTX_TRANSFORMER
+    assert by_name[gguf.name].family == "runtime_asset"
+    assert by_name[gguf.name].recommended_subdir == "ltx/GGUF"
+    assert info_by_name[lora.name].arch == ARCH_LTX_LORA
+    assert by_name[lora.name].family == "lora"
+    assert by_name[lora.name].recommended_subdir == "ltx/loras"
+    assert info_by_name[video_vae.name].arch == ARCH_LTX_VAE
+    assert by_name[video_vae.name].family == "vae"
+    assert by_name[video_vae.name].recommended_subdir == "ltx/vae"
+    assert info_by_name[audio_vae.name].arch == ARCH_LTX_AUDIO_VAE
+    assert by_name[audio_vae.name].family == "vae"
+    assert by_name[audio_vae.name].recommended_subdir == "ltx/audio_vae"
+    assert info_by_name[text_encoder.name].role == ROLE_TEXT_ENCODER
+    assert by_name[text_encoder.name].family == "text_encoder"
+    assert by_name[text_encoder.name].recommended_subdir == "ltx/text_encoder"
 
 
 def test_wan_lora_header_overrides_wrong_flux_folder_and_stays_out_of_image_loras(tmp_path: Path):
@@ -430,6 +616,22 @@ def test_embeddings_folder_does_not_enter_checkpoint_catalog(tmp_path: Path):
     assert checkpoints == []
 
 
+def test_llm_folder_weights_do_not_enter_checkpoint_catalog(tmp_path: Path):
+    models = tmp_path / "models"
+    gguf = models / "LLM" / "GGUF" / "gemma-3-12b-it-heretic" / "gemma-3-12b-it-heretic-Q4_K_M.gguf"
+    gguf.parent.mkdir(parents=True)
+    gguf.write_bytes(b"GGUF")
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+    by_name = {record.filename: record for record in records}
+
+    assert by_name[gguf.name].family == "llm"
+    assert by_name[gguf.name].recommended_subdir == "LLM/GGUF"
+    assert checkpoints == []
+
+
 def test_lora_architecture_can_come_from_parent_folder(tmp_path: Path):
     models = tmp_path / "models"
     lora = models / "Loras" / "SDXL" / "folder_tagged_style.safetensors"
@@ -475,7 +677,7 @@ def test_ltx_assets_are_recommended_to_ltx_folders(tmp_path: Path):
 
     records = {item.filename: item for item in scan_and_write_model_inventory(flags)}
 
-    assert records[checkpoint.name].family == "ltx"
+    assert records[checkpoint.name].family == "runtime_asset"
     assert records[checkpoint.name].architecture == "ltx"
     assert records[checkpoint.name].recommended_subdir == "ltx/checkpoints"
     assert records[upscaler.name].recommended_subdir == "ltx/upscalers"

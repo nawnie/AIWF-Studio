@@ -9,7 +9,12 @@ from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.models import Checkpoint
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
+    ARCH_FLUX_KONTEXT,
     ARCH_FLUX2_KLEIN,
+    ARCH_QWEN_IMAGE,
+    ARCH_QWEN_IMAGE_NUNCHAKU,
+    ARCH_SANA,
+    ARCH_SANA_VIDEO,
     ARCH_Z_IMAGE,
     architecture_label,
     detect_checkpoint_architecture,
@@ -197,11 +202,20 @@ def scan_from_flags(flags: RuntimeFlags) -> list[Checkpoint]:
     roots = resolve_search_roots(flags)
     logger.info("Scanning for checkpoints in: %s", ", ".join(str(r) for r in roots))
     inventory = get_model_inventory(flags)
-    selectable_runtime_arches = {ARCH_FLUX, ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}
+    selectable_runtime_arches = {
+        ARCH_FLUX,
+        ARCH_FLUX_KONTEXT,
+        ARCH_FLUX2_KLEIN,
+        ARCH_Z_IMAGE,
+        ARCH_QWEN_IMAGE,
+        ARCH_QWEN_IMAGE_NUNCHAKU,
+        ARCH_SANA,
+    }
+    non_image_runtime_arches = {ARCH_SANA_VIDEO}
     checkpoints = [
         _checkpoint_from_inventory(record)
         for record in inventory
-        if record.family == "checkpoint"
+        if (record.family == "checkpoint" and record.architecture not in non_image_runtime_arches)
         or (record.family == "runtime_asset" and record.architecture in selectable_runtime_arches)
     ]
     checkpoints.sort(key=lambda item: (1 if item.kind == "inpaint" else 0, item.title.lower()))
@@ -226,10 +240,18 @@ def _checkpoint_from_inventory(record: ModelInventoryRecord) -> Checkpoint:
     is_runtime_asset = record.family == "runtime_asset"
     if is_runtime_asset and architecture == ARCH_FLUX:
         kind = "flux"
+    elif is_runtime_asset and architecture == ARCH_FLUX_KONTEXT:
+        kind = "flux-kontext"
     elif is_runtime_asset and architecture == ARCH_FLUX2_KLEIN:
         kind = "flux2"
     elif is_runtime_asset and architecture == ARCH_Z_IMAGE:
         kind = "z-image"
+    elif is_runtime_asset and architecture == ARCH_QWEN_IMAGE_NUNCHAKU:
+        kind = "qwen-nunchaku"
+    elif is_runtime_asset and architecture == ARCH_QWEN_IMAGE:
+        kind = "qwen-image"
+    elif is_runtime_asset and architecture == ARCH_SANA:
+        kind = "sana"
     else:
         kind = "inpaint" if is_inpaint_architecture(architecture) else "checkpoint"
     return Checkpoint(

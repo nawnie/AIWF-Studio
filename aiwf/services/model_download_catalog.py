@@ -27,8 +27,12 @@ QUICK_START_BUNDLES: dict[str, list[str]] = {
     "sdxl": ["hf-sdxl-base", "hf-vae-sdxl", "hf-sdxl-refiner"],
     "sd35": ["hf-sd35-medium"],
     "flux": ["flux-fusion-v2-q4km", "flux-t5-fp8", "flux-clip-l", "flux-ae-vae"],
-    "flux2": ["fluxtrait-klein9b-v2-q4km", "flux2-klein-9b-components"],
+    "flux2": ["flux2-klein-4b-diffusers"],
     "zimage": ["fluxtrait-zimage-v2-q4", "z-image-turbo-components"],
+    "qwen-image": ["qwen-image-2512-diffusers"],
+    "qwen-nunchaku": ["qwen-nunchaku-image-lightning-int4-r32"],
+    "sana": ["sana-sprint-06b-diffusers"],
+    "sana-video": ["sana-video-2b-480p-diffusers"],
     "ltx23": ["ltx23-distilled", "ltx23-upscaler-x2", "ltx23-gemma-q4"],
     "controlnet-sd15": [
         "cn15-canny", "cn15-depth", "cn15-openpose",
@@ -123,6 +127,24 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         source="huggingface",
         repo_id="google/gemma-3-12b-it-qat-q4_0-unquantized",
         notes="Repository-shaped Gemma text encoder required by LTX 2.3. May require accepted HF access.",
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="sana-video-2b-480p-diffusers",
+        title="SANA-Video 2B 480p Diffusers",
+        category="sana_video_diffusers",
+        source="huggingface",
+        repo_id="Efficient-Large-Model/SANA-Video_2B_480p_diffusers",
+        notes="Full-folder SANA-Video text/image-to-video route. Video only; use MMAudio post-process for generated audio.",
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="sana-video-2b-720p-diffusers",
+        title="SANA-Video 2B 720p Diffusers",
+        category="sana_video_diffusers",
+        source="huggingface",
+        repo_id="Efficient-Large-Model/SANA-Video_2B_720p_diffusers",
+        notes="Higher-resolution SANA-Video full-folder route. Heavier than 480p; start with 480p on consumer GPUs.",
         snapshot=True,
     ),
 
@@ -396,6 +418,19 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
     ),
     # Flux.2 Klein and Z-Image runtime assets.
     CatalogEntry(
+        key="flux2-klein-4b-diffusers",
+        title="Flux.2 Klein 4B full Diffusers pipeline",
+        category="flux2_diffusers",
+        source="huggingface",
+        repo_id="black-forest-labs/FLUX.2-klein-4B",
+        size_mb=13000,
+        notes=(
+            "Recommended first Flux.2 Klein route for consumer GPUs. Full Apache-2.0 Diffusers "
+            "folder with transformer, Qwen text encoder, tokenizer, scheduler, and VAE."
+        ),
+        snapshot=True,
+    ),
+    CatalogEntry(
         key="flux2-klein-4b-components",
         title="Flux.2 Klein 4B components (Diffusers folder)",
         category="flux2_components",
@@ -475,6 +510,72 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         filename="fluxtraitFLUX2KleinFLUXZ_klein9bV3.safetensors",
         size_mb=17316,
         notes="Full BF16 Fluxtrait Klein 9B transformer. Needs matching 9B components and significant RAM/offload.",
+    ),
+    CatalogEntry(
+        key="qwen-image-2512-diffusers",
+        title="Qwen Image 2512 full Diffusers pipeline",
+        category="qwen_image_diffusers",
+        source="huggingface",
+        repo_id="Qwen/Qwen-Image-2512",
+        size_mb=20000,
+        notes=(
+            "Apache-2.0 Qwen Image text-to-image pipeline. AIWF uses true CFG around 4 and "
+            "about 30 steps as the first-run default."
+        ),
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="qwen-image-diffusers",
+        title="Qwen Image full Diffusers pipeline",
+        category="qwen_image_diffusers",
+        source="huggingface",
+        repo_id="Qwen/Qwen-Image",
+        size_mb=20000,
+        notes="Original Qwen Image Diffusers pipeline. Kept as a stable fallback to the 2512 route.",
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="qwen-nunchaku-image-lightning-int4-r32",
+        title="Qwen Image Nunchaku Lightning 4-step INT4 r32 transformer",
+        category="qwen_image_nunchaku",
+        source="huggingface",
+        repo_id="nunchaku-ai/nunchaku-qwen-image",
+        filename="svdq-int4_r32-qwen-image-lightningv1.0-4steps.safetensors",
+        size_mb=11000,
+        notes=(
+            "Recommended first Qwen Nunchaku image route for RTX 30/40 cards. "
+            "Requires Qwen Image base components and the isolated engines/qwen_nunchaku runtime."
+        ),
+    ),
+    CatalogEntry(
+        key="sana-sprint-06b-diffusers",
+        title="Sana Sprint 0.6B 1024px full Diffusers pipeline",
+        category="sana_diffusers",
+        source="huggingface",
+        repo_id="Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers",
+        size_mb=7350,
+        notes="Recommended Sana Sprint route for 8-12 GB cards. AIWF defaults it to 2 steps and CFG 4.5.",
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="sana-sprint-16b-diffusers",
+        title="Sana Sprint 1.6B 1024px full Diffusers pipeline",
+        category="sana_diffusers",
+        source="huggingface",
+        repo_id="Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+        size_mb=6500,
+        notes="Fast Sana Sprint route. AIWF defaults it to 2 steps and CFG 4.5.",
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="sana-16b-bf16-diffusers",
+        title="Sana 1.6B 1024px BF16 full Diffusers pipeline",
+        category="sana_diffusers",
+        source="huggingface",
+        repo_id="Efficient-Large-Model/Sana_1600M_1024px_BF16_diffusers",
+        size_mb=6500,
+        notes="Standard Sana 1024px Diffusers route. AIWF defaults it to 20 steps and CFG 4.5.",
+        snapshot=True,
     ),
     CatalogEntry(
         key="z-image-turbo-components",

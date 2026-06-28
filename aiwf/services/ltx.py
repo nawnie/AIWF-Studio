@@ -15,11 +15,13 @@ from aiwf.core.domain.ltx import (
     LTX_FULL_CHECKPOINT,
     LTX_GEMMA_REPO,
     LTX_PIPELINE_DISTILLED,
+    LTX_PIPELINE_ONE_STAGE,
     LTX_SPATIAL_UPSCALER_X2,
     LtxVideoRequest,
     LtxVideoResult,
 )
 from aiwf.services.engine_supervisor import EngineSupervisor
+from aiwf.infrastructure.video.processing import VideoProcessor
 from aiwf.services.process_supervisor import ProcessSupervisor, get_process_supervisor
 from aiwf.services.worker_tenant import WorkerTenantRegistry
 
@@ -53,6 +55,16 @@ class LtxService:
         name = LTX_DISTILLED_CHECKPOINT if pipeline == LTX_PIPELINE_DISTILLED else LTX_FULL_CHECKPOINT
         return self.models_root() / "checkpoints" / name
 
+    def default_launch_pipeline(self) -> str:
+        if self.default_checkpoint_path(LTX_PIPELINE_DISTILLED).is_file():
+            return LTX_PIPELINE_DISTILLED
+        if self.default_checkpoint_path(LTX_PIPELINE_ONE_STAGE).is_file():
+            return LTX_PIPELINE_ONE_STAGE
+        return LTX_PIPELINE_DISTILLED
+
+    def default_launch_request(self) -> LtxVideoRequest:
+        return LtxVideoRequest(pipeline=self.default_launch_pipeline())
+
     def default_spatial_upsampler_path(self) -> Path:
         return self.models_root() / "upscalers" / LTX_SPATIAL_UPSCALER_X2
 
@@ -68,8 +80,10 @@ class LtxService:
         except KeyError:
             return "**LTX 2.3:** not registered."
 
+        launch_pipeline = self.default_launch_pipeline()
         lines = [status.markdown_line()]
-        lines.append(f"- Default checkpoint: `{self.default_checkpoint_path()}`")
+        lines.append(f"- Default launch pipeline: `{launch_pipeline}`")
+        lines.append(f"- Default checkpoint: `{self.default_checkpoint_path(launch_pipeline)}`")
         lines.append(f"- Default upscaler: `{self.default_spatial_upsampler_path()}`")
         lines.append(f"- Default Gemma root: `{self.default_gemma_root()}`")
         return "\n".join(lines)
@@ -125,15 +139,26 @@ class LtxService:
             raise LtxUnavailable(terminal_error or error_message)
         if not output_path.is_file():
             raise LtxUnavailable(f"LTX worker finished but did not create output: {output_path}")
+        has_audio = False
+        try:
+            has_audio = VideoProcessor().probe(output_path).has_audio
+        except Exception:
+            logger.debug("Could not probe LTX output audio stream", exc_info=True)
 
         return LtxVideoResult(
             output_path=str(output_path),
-            message=f"LTX 2.3 video saved to {output_path.name}",
+            message=f"LTX 2.3 video saved to {output_path.name}" + (" with native audio" if has_audio else ""),
             events=events,
+            has_audio=has_audio,
+            audio_mode="native",
         )
 
     def _resolve_request(self, request: LtxVideoRequest) -> dict:
         pipeline = request.pipeline
+        if not str(request.checkpoint_path or "").strip() and pipeline == LTX_PIPELINE_DISTILLED:
+            fallback_pipeline = self.default_launch_pipeline()
+            if fallback_pipeline != pipeline:
+                pipeline = fallback_pipeline
         checkpoint = _resolve_path(
             request.checkpoint_path,
             self.default_checkpoint_path(pipeline),
@@ -161,6 +186,7 @@ class LtxService:
         payload = request.model_dump()
         payload.update(
             {
+                "pipeline": pipeline,
                 "checkpoint_path": str(checkpoint),
                 "spatial_upsampler_path": str(spatial_upsampler),
                 "gemma_root": str(gemma_root),

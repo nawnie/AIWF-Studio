@@ -15,7 +15,8 @@ LTX_OFFLOAD_MODES = ("none", "cpu", "disk")
 LTX_QUANTIZATION_MODES = ("", "fp8-cast", "fp8-scaled-mm")
 
 LTX_DISTILLED_CHECKPOINT = "ltx-2.3-22b-distilled-1.1.safetensors"
-LTX_FULL_CHECKPOINT = "ltx-2.3-22b-dev.safetensors"
+LTX_FULL_CHECKPOINT = "ltx-2.3-22b-dev-bf16.safetensors"
+LTX_FULL_CHECKPOINT_NVFP4 = "ltx-2.3-22b-dev-nvfp4.safetensors"
 LTX_SPATIAL_UPSCALER_X2 = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
 
 
@@ -102,3 +103,5 @@ class LtxVideoResult(BaseModel):
     output_path: str
     message: str = "LTX 2.3 video complete"
     events: list[dict] = Field(default_factory=list)
+    has_audio: bool = False
+    audio_mode: str = "native"

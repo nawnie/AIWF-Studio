@@ -55,6 +55,31 @@ def test_z_image_profile_wins_over_flux2_name_prefix():
     assert p.recommended_sampler == "euler"
 
 
+def test_qwen_nunchaku_profile_wins_over_generic_lightning():
+    p = detect_model_profile("svdq-int4_r32-qwen-image-lightningv1.0-4steps.safetensors")
+    assert p.family == "qwen_image_nunchaku"
+    assert p.recommended_cfg == 1.0
+    assert p.cfg_max == 1.5
+    assert p.recommended_steps == 4
+    assert p.recommended_sampler == "euler"
+
+
+def test_sana_sprint_profile_uses_two_step_default():
+    p = detect_model_profile("Sana_Sprint_0.6B_1024px_diffusers")
+    assert p.family == "sana_sprint"
+    assert p.recommended_cfg == 4.5
+    assert p.recommended_steps == 2
+    assert p.recommended_sampler == "euler"
+
+
+def test_sana_video_profile_uses_video_defaults():
+    p = detect_model_profile("SANA-Video_2B_480p_diffusers")
+    assert p.family == "sana_video"
+    assert p.recommended_cfg == 6.0
+    assert p.recommended_steps == 50
+    assert p.recommended_sampler == "euler"
+
+
 def test_standard_model():
     p = detect_model_profile("dreamshaper_8", "dreamshaper.safetensors")
     assert p.family == "standard" and not p.is_distilled

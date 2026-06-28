@@ -10,8 +10,13 @@ from pathlib import Path
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
+    ARCH_FLUX_KONTEXT,
     ARCH_FLUX2_KLEIN,
     ARCH_INPAINT,
+    ARCH_QWEN_IMAGE,
+    ARCH_QWEN_IMAGE_NUNCHAKU,
+    ARCH_SANA,
+    ARCH_SANA_VIDEO,
     ARCH_SD15,
     ARCH_SD35,
     ARCH_SDXL,
@@ -26,6 +31,10 @@ from aiwf.infrastructure.diffusers.model_arch import (
 from aiwf.infrastructure.model_header import (
     ARCH_CLIP,
     ARCH_FLUX2_KLEIN_TRANSFORMER,
+    ARCH_LTX_AUDIO_VAE,
+    ARCH_LTX_LORA,
+    ARCH_LTX_TRANSFORMER,
+    ARCH_LTX_VAE,
     ARCH_FLUX_LORA,
     ARCH_FLUX_TRANSFORMER,
     ARCH_FLUX_VAE,
@@ -129,6 +138,22 @@ def _architecture_from_text(text: str) -> str:
     normalized = text.lower().replace("_", " ").replace("-", " ")
     compact = normalized.replace(" ", "")
     lowered = text.lower().replace("_", "-")
+    if (
+        ("qwenimagepipeline" in compact or "qwen image" in normalized or "qwen-image" in lowered or "qwen2.0" in lowered)
+        and any(marker in lowered for marker in ("nunchaku", "svdq-int4", "lightningv", "4steps"))
+    ):
+        return ARCH_QWEN_IMAGE_NUNCHAKU
+    if "qwenimagepipeline" in compact or "qwen image" in normalized or "qwen-image" in lowered or "qwen2.0" in lowered:
+        return ARCH_QWEN_IMAGE
+    if (
+        "sanavideopipeline" in compact
+        or "sanaimagetovideopipeline" in compact
+        or "sana-video" in lowered
+        or "sana video" in normalized
+    ):
+        return ARCH_SANA_VIDEO
+    if "sanapipeline" in compact or "sanasprintpipeline" in compact or "sana" in normalized:
+        return ARCH_SANA
     if "z-image" in lowered or "zimage" in compact:
         return ARCH_Z_IMAGE
     if "flux.2" in lowered or "flux2" in compact or "klein" in normalized:
@@ -144,10 +169,14 @@ def _architecture_from_text(text: str) -> str:
         return ARCH_SD35
     if "sdxl" in normalized or "sd xl" in normalized or "xl base" in normalized:
         return ARCH_SDXL
+    if "fluxkontextpipeline" in compact or "kontext" in normalized:
+        return ARCH_FLUX_KONTEXT
     if "flux" in normalized:
         return ARCH_FLUX
     if "ltx" in normalized or "lightricks" in normalized:
         return "ltx"
+    if "gemma" in normalized or "llm" in normalized:
+        return "llm"
     if "wan" in normalized:
         return "wan"
     if "sd 1" in normalized or "sd1" in normalized or "1.5" in normalized or "v1 5" in normalized:
@@ -178,6 +207,10 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
             return "Loras/SDXL"
         if architecture == ARCH_FLUX:
             return "Loras/Flux"
+        if architecture == ARCH_FLUX2_KLEIN:
+            return "Loras/Flux2"
+        if architecture == ARCH_Z_IMAGE:
+            return "Loras/Z-Image"
         if architecture == "ltx":
             return "ltx/loras"
         if architecture == "wan":
@@ -195,8 +228,18 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
         if architecture == ARCH_Z_IMAGE:
             suffix = Path(filename).suffix.lower()
             return "z-image/GGUF" if suffix == ".gguf" else "z-image/UNet"
+        if architecture == ARCH_QWEN_IMAGE_NUNCHAKU:
+            return "qwen-image/Nunchaku"
+        if architecture == ARCH_QWEN_IMAGE:
+            return "qwen-image/Diffusers"
+        if architecture == ARCH_SANA:
+            return "sana/Diffusers"
+        if architecture == ARCH_SANA_VIDEO:
+            return "sana-video/Diffusers"
         if architecture == "ltx":
             lowered = filename.lower()
+            if Path(filename).suffix.lower() == ".gguf":
+                return "ltx/GGUF"
             if "upscaler" in lowered:
                 return "ltx/upscalers"
             return "ltx/checkpoints"
@@ -206,6 +249,8 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
     if family == "vae":
         if architecture == ARCH_FLUX:
             return "flux/VAE"
+        if architecture == "ltx":
+            return "ltx/audio_vae" if "audio" in filename.lower() else "ltx/vae"
         return "VAE"
     if family == "embedding":
         return "embeddings"
@@ -229,11 +274,19 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
         return "wan/Safetensor"
     if family == "ltx":
         lowered = filename.lower()
+        if Path(filename).suffix.lower() == ".gguf":
+            return "ltx/GGUF"
         if "upscaler" in lowered:
             return "ltx/upscalers"
         if "lora" in lowered:
             return "ltx/loras"
+        if "audio" in lowered and "vae" in lowered:
+            return "ltx/audio_vae"
+        if "vae" in lowered:
+            return "ltx/vae"
         return "ltx/checkpoints"
+    if family == "llm":
+        return "LLM/GGUF" if Path(filename).suffix.lower() == ".gguf" else "LLM"
     return "misc"
 
 
@@ -261,9 +314,16 @@ def _header_family_architecture(path: Path) -> tuple[str, str, dict[str, str]] |
     if info.arch == ARCH_Z_IMAGE_TRANSFORMER:
         return "runtime_asset", ARCH_Z_IMAGE, identifiers
     if info.arch in {ARCH_FLUX_LORA}:
-        return "lora", ARCH_FLUX, identifiers
+        architecture = _architecture_from_text(f"{path.as_posix()} {info.display_name} {' '.join(info.raw_meta.values())}")
+        return "lora", architecture if architecture != "unknown" else ARCH_FLUX, identifiers
     if info.arch in {ARCH_FLUX_VAE}:
         return "vae", ARCH_FLUX, identifiers
+    if info.arch == ARCH_LTX_TRANSFORMER:
+        return "runtime_asset", "ltx", identifiers
+    if info.arch == ARCH_LTX_LORA:
+        return "lora", "ltx", identifiers
+    if info.arch in {ARCH_LTX_VAE, ARCH_LTX_AUDIO_VAE}:
+        return "vae", "ltx", identifiers
     if info.arch == ARCH_T5XXL_ENCODER:
         return "text_encoder", ARCH_FLUX, identifiers
     if info.arch == ARCH_CLIP and _architecture_from_text(path.as_posix()) == ARCH_FLUX:
@@ -317,6 +377,8 @@ def _matching_path_family(path: Path) -> str | None:
         return "runtime_asset"
     if any(part in {"vae", "vae-approx"} for part in parent_parts) or name.endswith((".vae.safetensors", ".vae.ckpt", ".vae.pt")):
         return "vae"
+    if any(part in {"llm", "llms"} for part in parent_parts):
+        return "llm"
     if any(part == "wan" or part.startswith("wan_") or part.startswith("wan-") for part in parent_parts) or "wan" in name:
         return "wan"
     if any(part == "ltx" or part.startswith("ltx_") or part.startswith("ltx-") for part in parent_parts) or "ltx" in name:
@@ -346,6 +408,28 @@ def classify_model_dir(path: Path, roots: list[Path]) -> ModelInventoryRecord | 
     path_parts = {part.lower() for part in path.parts}
     identifiers = {"model_index": class_name or "model_index.json"}
 
+    # A full pipeline export can still be a ControlNet/adapter pipeline (e.g.
+    # "StableDiffusionXLControlNetPipeline") rather than a plain txt2img checkpoint.
+    # These have model_index.json but the wrong shape for the generic checkpoint
+    # loader, so they must be tagged "controlnet" here - not just caught later as
+    # a load-time crash. See aiwf/infrastructure/diffusers/backend.py load guard.
+    if "controlnet" in class_name.lower() or any(
+        part in {"controlnet", "controlnets", "control_net", "control-net", "sd_control_collection"}
+        or part.startswith("controlnet-")
+        for part in path_parts
+    ):
+        return ModelInventoryRecord(
+            path=str(path.resolve()),
+            filename=path.name,
+            family="controlnet",
+            architecture=architecture,
+            current_subdir=_relative_subdir(path, roots),
+            recommended_subdir=_recommended_subdir("controlnet", architecture, path.name),
+            should_move=False,
+            header_identifiers={**identifiers, "pipeline_marker": "controlnet pipeline"},
+            metadata={},
+        )
+
     if "wan" in lowered:
         family = "wan"
         architecture = "wan"
@@ -354,7 +438,15 @@ def classify_model_dir(path: Path, roots: list[Path]) -> ModelInventoryRecord | 
         architecture = "ltx"
     elif "components" in path_parts and architecture in {ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}:
         family = "text_encoder"
-    elif architecture in {ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}:
+    elif architecture in {
+        ARCH_FLUX2_KLEIN,
+        ARCH_Z_IMAGE,
+        ARCH_FLUX_KONTEXT,
+        ARCH_QWEN_IMAGE,
+        ARCH_QWEN_IMAGE_NUNCHAKU,
+        ARCH_SANA,
+        ARCH_SANA_VIDEO,
+    }:
         family = "runtime_asset"
     elif "flux" in lowered:
         family = "runtime_asset"
@@ -453,6 +545,9 @@ def classify_model_file(path: Path, roots: list[Path]) -> ModelInventoryRecord |
         elif "vae" in metadata_text:
             family = "vae"
             identifiers["metadata_marker"] = "vae"
+        elif architecture == ARCH_QWEN_IMAGE_NUNCHAKU and path.suffix.lower() == ".safetensors":
+            family = "runtime_asset"
+            identifiers["filename_marker"] = "qwen nunchaku transformer"
         elif path.suffix.lower() == ".gguf" and "wan" in path.name.lower():
             family = "wan"
             architecture = "wan"

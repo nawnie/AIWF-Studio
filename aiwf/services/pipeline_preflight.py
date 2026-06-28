@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from aiwf.core.config.settings import RuntimeFlags, UserSettings
+
 
 @dataclass(frozen=True)
 class PipelineCheckItem:
@@ -150,12 +152,314 @@ def preflight_diffusers_pipeline() -> PipelinePreflightResult:
     )
 
 
+def preflight_image_runtime_pipelines() -> PipelinePreflightResult:
+    """Check optional image pipeline classes without loading model weights."""
+    items = [
+        _diffusers_attr_check("Flux2KleinPipeline", "Required for Flux.2 Klein full-folder/single-transformer routes."),
+        _diffusers_attr_check("ZImagePipeline", "Required for Z-Image full-folder/single-transformer routes."),
+        _diffusers_attr_check("QwenImagePipeline", "Required for Qwen Image full-folder routes."),
+        _diffusers_attr_check("SanaPipeline", "Required for standard Sana full-folder routes."),
+        _diffusers_attr_check("SanaSprintPipeline", "Required for Sana Sprint full-folder routes."),
+    ]
+    return PipelinePreflightResult(
+        pipeline="Image Runtime Families",
+        ok=all(item.ok for item in items),
+        items=tuple(items),
+    )
+
+
+def preflight_sana_video_pipeline(
+    flags: RuntimeFlags | str | Path,
+    settings: UserSettings | None = None,
+    request=None,  # noqa: ANN001
+) -> PipelinePreflightResult:
+    from aiwf.core.domain.sana_video import SanaVideoRequest
+    from aiwf.services.sana_video import SanaVideoService
+
+    runtime_flags = flags if isinstance(flags, RuntimeFlags) else RuntimeFlags(data_dir=Path(flags))
+    service = SanaVideoService(runtime_flags, settings or UserSettings())
+    base_request = request or SanaVideoRequest()
+    if not isinstance(base_request, SanaVideoRequest):
+        base_request = SanaVideoRequest.model_validate(base_request)
+    model_path = service.default_model_path()
+    if base_request.model_path:
+        model_path = Path(base_request.model_path)
+        if not model_path.is_absolute():
+            model_path = (runtime_flags.data_dir / model_path).resolve()
+
+    items = [
+        _diffusers_attr_check("SanaVideoPipeline", "Required for Sana text-to-video routes."),
+        _diffusers_attr_check("SanaImageToVideoPipeline", "Required for Sana image-to-video routes."),
+    ]
+    model_index = model_path / "model_index.json"
+    warnings = []
+    if not model_index.is_file():
+        warnings.append(
+            f"Sana video model snapshot is not installed at {model_path}; runtime is available once the folder is downloaded."
+        )
+    warnings.append("Sana video exports silent MP4s; use the MMAudio post-process route when generated audio is requested.")
+    return PipelinePreflightResult(
+        pipeline="Sana Video",
+        ok=all(item.ok for item in items),
+        items=tuple(items),
+        warnings=tuple(warnings),
+        metadata={
+            "model_path": str(model_path),
+            "model_installed": str(model_index.is_file()).lower(),
+            "default_repo": "Efficient-Large-Model/SANA-Video_2B_480p_diffusers",
+        },
+    )
+
+
+def preflight_wan_pipeline(
+    flags: RuntimeFlags | str | Path,
+    settings: UserSettings | None = None,
+    request=None,  # noqa: ANN001
+) -> PipelinePreflightResult:
+    from aiwf.core.domain.wan import WAN_RUNTIME_FAST_5B, WanI2VRequest
+    from aiwf.services.wan import WanService
+
+    runtime_flags = flags if isinstance(flags, RuntimeFlags) else RuntimeFlags(data_dir=Path(flags))
+    base_request = request or WanI2VRequest(runtime_mode=WAN_RUNTIME_FAST_5B)
+    service = WanService(runtime_flags, settings or UserSettings())
+    backend_ok = service.available()
+    result = service.preflight(base_request, image_present=True)
+
+    items: list[PipelineCheckItem] = [
+        PipelineCheckItem(
+            "Wan backend",
+            backend_ok,
+            "diffusers Wan runtime is importable"
+            if backend_ok
+            else "update diffusers (>=0.35) and install ftfy, then restart",
+        )
+    ]
+    model_path = Path(result.model_id) if result.model_id else None
+    items.append(
+        PipelineCheckItem(
+            "fast 5B transformer",
+            bool(model_path and model_path.exists()),
+            str(model_path) if model_path and model_path.exists() else "local Wan TI2V 5B model did not resolve",
+            model_path,
+        )
+    )
+    components_path = Path(result.components_base) if result.components_base else None
+    items.append(
+        PipelineCheckItem(
+            "shared components",
+            bool(components_path and components_path.is_dir()),
+            str(components_path)
+            if components_path and components_path.is_dir()
+            else "missing local text_encoder/tokenizer/scheduler component base",
+            components_path,
+        )
+    )
+    vae_path = Path(result.vae) if result.vae else None
+    items.append(
+        PipelineCheckItem(
+            "Wan VAE",
+            bool(vae_path and vae_path.exists()),
+            str(vae_path) if vae_path and vae_path.exists() else "missing Wan 2.2 VAE for fast 5B",
+            vae_path,
+        )
+    )
+    if result.text_encoder:
+        text_encoder_path = Path(result.text_encoder)
+        items.append(
+            PipelineCheckItem(
+                "text encoder override",
+                text_encoder_path.exists(),
+                str(text_encoder_path)
+                if text_encoder_path.exists()
+                else f"selected text encoder is not local: {text_encoder_path}",
+                text_encoder_path,
+            )
+        )
+    else:
+        explicit_text_encoder = bool(str(getattr(base_request, "text_encoder_path", "") or "").strip())
+        items.append(
+            PipelineCheckItem(
+                "text encoder",
+                not explicit_text_encoder,
+                "using component base text_encoder"
+                if not explicit_text_encoder
+                else "explicit text encoder did not resolve",
+            )
+        )
+
+    for index, error in enumerate(result.errors[:8], start=1):
+        items.append(PipelineCheckItem(f"preflight error {index}", False, error))
+
+    metadata = {
+        "runtime_mode": str(base_request.runtime_mode),
+        "model_id": str(result.model_id or ""),
+        "components_base": str(result.components_base or ""),
+        "vae": str(result.vae or ""),
+        "text_encoder": str(result.text_encoder or ""),
+        "steps": str(base_request.steps),
+        "cfg_scale": str(base_request.guidance_scale),
+        "sampler": str(base_request.sampler),
+        "scheduler": str(base_request.sigma_type),
+        "offload": str(base_request.offload),
+    }
+    return PipelinePreflightResult(
+        pipeline="Wan fast 5B",
+        ok=not result.errors and all(item.ok for item in items),
+        items=tuple(items),
+        warnings=tuple(result.warnings),
+        metadata=metadata,
+    )
+
+
+def preflight_qwen_nunchaku_pipeline(flags: RuntimeFlags | str | Path) -> PipelinePreflightResult:
+    from aiwf.services.qwen_nunchaku import QwenNunchakuService
+
+    runtime_flags = flags if isinstance(flags, RuntimeFlags) else RuntimeFlags(data_dir=Path(flags))
+    service = QwenNunchakuService(runtime_flags)
+    status = service.status()
+    items = [
+        PipelineCheckItem(
+            "engine python",
+            status.python_exe.is_file(),
+            str(status.python_exe) if status.python_exe.is_file() else f"Missing engine runtime: {status.python_exe}",
+            status.python_exe,
+        ),
+        PipelineCheckItem(
+            "runner script",
+            status.runner_script.is_file(),
+            str(status.runner_script) if status.runner_script.is_file() else f"Missing runner: {status.runner_script}",
+            status.runner_script,
+        ),
+        PipelineCheckItem(
+            "base components",
+            status.base_dir.is_dir(),
+            str(status.base_dir) if status.base_dir.is_dir() else f"Missing Qwen Image base folder: {status.base_dir}",
+            status.base_dir,
+        ),
+        PipelineCheckItem(
+            "transformer",
+            status.transformer_path.is_file(),
+            str(status.transformer_path)
+            if status.transformer_path.is_file()
+            else f"Missing Nunchaku transformer: {status.transformer_path}",
+            status.transformer_path,
+        ),
+    ]
+    return PipelinePreflightResult(
+        pipeline="Qwen Nunchaku",
+        ok=all(item.ok for item in items),
+        items=tuple(items),
+        metadata={
+            "python_exe": str(status.python_exe),
+            "runner_script": str(status.runner_script),
+            "base_dir": str(status.base_dir),
+            "transformer_path": str(status.transformer_path),
+            "storage_mode": "single_transformer_safetensors_plus_base_components",
+        },
+    )
+
+
+def preflight_ltx_pipeline(
+    flags: RuntimeFlags | str | Path,
+    settings: UserSettings | None = None,
+    request=None,  # noqa: ANN001
+) -> PipelinePreflightResult:
+    from aiwf.core.domain.ltx import LTX_PIPELINE_DISTILLED, LTX_PIPELINE_ONE_STAGE, LtxVideoRequest
+    from aiwf.services.ltx import LtxService
+
+    runtime_flags = flags if isinstance(flags, RuntimeFlags) else RuntimeFlags(data_dir=Path(flags))
+    service = LtxService(runtime_flags, settings or UserSettings())
+    base_request = request or service.default_launch_request()
+    if not isinstance(base_request, LtxVideoRequest):
+        base_request = LtxVideoRequest.model_validate(base_request)
+
+    status = service.registry.status("ltx")
+    payload = service._resolve_request(base_request)
+    selected_pipeline = str(payload.get("pipeline") or base_request.pipeline)
+    checkpoint = Path(str(payload.get("checkpoint_path") or ""))
+    gemma_root = Path(str(payload.get("gemma_root") or ""))
+    upsampler = Path(str(payload.get("spatial_upsampler_path") or ""))
+
+    items: list[PipelineCheckItem] = [
+        PipelineCheckItem(
+            "engine worker",
+            status.ready,
+            "ready via isolated worker" if status.ready else "; ".join(status.messages),
+            status.worker_script,
+        ),
+        PipelineCheckItem(
+            "checkpoint",
+            checkpoint.is_file(),
+            str(checkpoint) if checkpoint.is_file() else f"missing LTX checkpoint: {checkpoint}",
+            checkpoint,
+        ),
+        PipelineCheckItem(
+            "Gemma text encoder",
+            gemma_root.exists(),
+            str(gemma_root) if gemma_root.exists() else f"missing Gemma root: {gemma_root}",
+            gemma_root,
+        ),
+    ]
+    if selected_pipeline == LTX_PIPELINE_DISTILLED:
+        items.append(
+            PipelineCheckItem(
+                "spatial upscaler",
+                upsampler.is_file(),
+                str(upsampler) if upsampler.is_file() else f"missing LTX spatial upscaler: {upsampler}",
+                upsampler,
+            )
+        )
+
+    warnings: list[str] = []
+    distilled_missing = not service.default_checkpoint_path(LTX_PIPELINE_DISTILLED).is_file()
+    if base_request.pipeline != selected_pipeline or (selected_pipeline == LTX_PIPELINE_ONE_STAGE and distilled_missing):
+        warnings.append(
+            "Distilled checkpoint is missing, so the launch default falls back to the installed one-stage checkpoint."
+        )
+    if selected_pipeline == LTX_PIPELINE_ONE_STAGE and checkpoint.is_file():
+        size_gib = checkpoint.stat().st_size / (1024**3)
+        if size_gib > 12:
+            warnings.append(
+                f"Selected LTX checkpoint is {size_gib:.1f} GiB; keep CPU offload enabled on 8-12 GB cards."
+            )
+    if str(payload.get("offload") or "").lower() == "none":
+        warnings.append("LTX offload is disabled; use CPU offload for consumer GPUs.")
+
+    metadata = {
+        "requested_pipeline": str(base_request.pipeline),
+        "selected_pipeline": selected_pipeline,
+        "checkpoint_path": str(checkpoint),
+        "gemma_root": str(gemma_root),
+        "spatial_upsampler_path": str(upsampler),
+        "offload": str(payload.get("offload") or ""),
+        "quantization": str(payload.get("quantization") or ""),
+        "steps": str(payload.get("steps") or ""),
+    }
+    return PipelinePreflightResult(
+        pipeline="LTX 2.3",
+        ok=all(item.ok for item in items),
+        items=tuple(items),
+        warnings=tuple(warnings),
+        metadata=metadata,
+    )
+
+
 def _import_check(module_name: str, message: str) -> PipelineCheckItem:
     try:
         __import__(module_name)
         return PipelineCheckItem(module_name, True, message)
     except Exception as exc:
         return PipelineCheckItem(module_name, False, f"{message} Import failed: {exc}")
+
+
+def _diffusers_attr_check(attr_name: str, message: str) -> PipelineCheckItem:
+    try:
+        import diffusers
+
+        ok = hasattr(diffusers, attr_name)
+        return PipelineCheckItem(attr_name, ok, message if ok else f"{message} Missing in installed diffusers.")
+    except Exception as exc:
+        return PipelineCheckItem(attr_name, False, f"{message} Import failed: {exc}")
 
 
 def _load_available_onnx_providers(warnings: list[str]) -> list[str]:

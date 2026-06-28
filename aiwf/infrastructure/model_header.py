@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
+MODEL_HEADER_CACHE_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Architecture / role constants
@@ -44,6 +45,11 @@ ARCH_FLUX2_KLEIN_TRANSFORMER = "flux2-klein-transformer"
 ARCH_Z_IMAGE_TRANSFORMER = "z-image-transformer"
 ARCH_FLUX_LORA           = "flux-lora"
 ARCH_FLUX_VAE            = "flux-vae"
+ARCH_LTX_TRANSFORMER     = "ltx-transformer"
+ARCH_LTX_LORA            = "ltx-lora"
+ARCH_LTX_VAE             = "ltx-vae"
+ARCH_LTX_AUDIO_VAE       = "ltx-audio-vae"
+ARCH_GEMMA_LLM           = "gemma-llm"
 ARCH_SDXL_CHECKPOINT     = "sdxl-checkpoint"
 ARCH_SD35_CHECKPOINT     = "sd3.5-checkpoint"
 ARCH_SD_CHECKPOINT       = "sd-checkpoint"
@@ -95,6 +101,8 @@ _GGUF_ARCH_MAP: dict[str, str] = {
     "clip":      ARCH_CLIP,
     "flux":      ARCH_FLUX_TRANSFORMER,
     "lumina2":   ARCH_Z_IMAGE_TRANSFORMER,
+    "ltxv":      ARCH_LTX_TRANSFORMER,
+    "gemma3":    ARCH_GEMMA_LLM,
 }
 
 _ST_DTYPE_DISPLAY: dict[str, str] = {
@@ -118,6 +126,12 @@ _FOLDER_CLUES: list[tuple[str, str, str]] = [
     ("z-image/Components", ARCH_Z_IMAGE_TRANSFORMER, ""),
     ("Loras/Flux",      ARCH_FLUX_LORA,        ROLE_LORA),
     ("Lora/Flux",       ARCH_FLUX_LORA,        ROLE_LORA),
+    ("ltx/GGUF",        ARCH_LTX_TRANSFORMER,  ""),
+    ("ltx/checkpoints", ARCH_LTX_TRANSFORMER,  ""),
+    ("ltx/loras",       ARCH_LTX_LORA,         ROLE_LORA),
+    ("ltx/vae",         ARCH_LTX_VAE,          ROLE_VAE),
+    ("ltx/audio_vae",   ARCH_LTX_AUDIO_VAE,    ROLE_VAE),
+    ("LLM/GGUF",        ARCH_GEMMA_LLM,        ROLE_UNKNOWN),
     ("wan/GGUF",       ARCH_WAN_TRANSFORMER,     ""),
     ("wan/Safetensor", ARCH_WAN_TRANSFORMER_FP8, ""),
     ("wan/lora",       ARCH_WAN_LORA,            ROLE_LORA),
@@ -166,6 +180,11 @@ _ARCH_PREFIX: dict[str, str] = {
     ARCH_Z_IMAGE_TRANSFORMER: "Z-Image",
     ARCH_FLUX_LORA:           "Flux LoRA",
     ARCH_FLUX_VAE:            "Flux VAE",
+    ARCH_LTX_TRANSFORMER:     "LTX",
+    ARCH_LTX_LORA:            "LTX LoRA",
+    ARCH_LTX_VAE:             "LTX VAE",
+    ARCH_LTX_AUDIO_VAE:       "LTX Audio VAE",
+    ARCH_GEMMA_LLM:           "Gemma",
     ARCH_SDXL_CHECKPOINT:     "SDXL",
     ARCH_SD35_CHECKPOINT:     "SD3.5",
     ARCH_SD_CHECKPOINT:       "SD",
@@ -273,6 +292,8 @@ class ModelHeaderCache:
         entry = self.data[key]
         try:
             stat = path.stat()
+            if entry.get("version") != MODEL_HEADER_CACHE_VERSION:
+                return None
             if entry.get("mtime") != stat.st_mtime or entry.get("size") != stat.st_size:
                 return None
             
@@ -314,6 +335,7 @@ class ModelHeaderCache:
                 "tensor_count": info.tensor_count,
                 "mtime": stat.st_mtime,
                 "size": stat.st_size,
+                "version": MODEL_HEADER_CACHE_VERSION,
             }
             self.dirty = True
             self.save()
@@ -588,11 +610,41 @@ def _looks_like_t5xxl_file(p: Path, text: str) -> bool:
     return any(token in combined for token in ("t5xxl", "t5_xxl", "t5_v1_1_xxl", "t5-v1_1-xxl"))
 
 
+def _in_flux_folder(p: Path) -> bool:
+    """True if any path segment is exactly 'flux' (case-insensitive).
+
+    T5-XXL (Flux/SD3) and UMT5 (Wan) encoders share identical tensor key
+    names, so content sniffing alone can't tell them apart — folder
+    placement is the only reliable signal once the filename doesn't say
+    "t5xxl" (e.g. a renamed/finetuned encoder). Drop a Flux-compatible T5
+    encoder under a 'flux' folder (any subfolder name underneath) to have
+    it picked up as Flux-compatible instead of defaulting to Wan/UMT5.
+    """
+    return "flux" in {part.lower() for part in p.as_posix().split("/")}
+
+
 def _looks_like_vae_file(p: Path, tensor_keys: Iterable[str], text: str) -> bool:
     combined = f"{p.name} {p.as_posix()} {text}".lower()
     if "/vae/" in combined.replace("\\", "/") or " ae.safetensors" in f" {p.name.lower()}":
         return True
     return any(key.startswith(("encoder.", "decoder.", "quant_conv.", "post_quant_conv.")) for key in tensor_keys)
+
+
+def _looks_like_ltx_audio_vae_file(p: Path, tensor_keys: Iterable[str], text: str) -> bool:
+    combined = f"{p.name} {p.as_posix()} {text}".lower()
+    return "audio" in combined and any(key.startswith("audio_vae.") for key in tensor_keys)
+
+
+def _looks_like_ltx_video_vae_file(p: Path, tensor_keys: Iterable[str], text: str) -> bool:
+    combined = f"{p.name} {p.as_posix()} {text}".lower()
+    if "causalvideoautoencoder" in combined or ("video" in combined and "vae" in combined):
+        return True
+    return _looks_like_vae_file(p, tensor_keys, text)
+
+
+def _looks_like_gemma_transformer_file(p: Path, tensor_keys: Iterable[str], text: str) -> bool:
+    combined = f"{p.name} {p.as_posix()} {text}".lower()
+    return "gemma" in combined and any(key.startswith("model.layers.") for key in tensor_keys[:80])
 
 
 def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple:
@@ -601,6 +653,16 @@ def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple
     combined_meta = " ".join(str(v) for v in meta.values()).lower()
     if "wan" in spec_arch:
         return ARCH_WAN_TRANSFORMER_FP8, _role_from_meta_and_filename(meta, p.name)
+    if "ltx" in spec_arch or "ltx" in combined_meta or "lightricks" in combined_meta or "ltx" in p.name.lower():
+        if _looks_like_gemma_transformer_file(p, tensor_keys, combined_meta):
+            return ARCH_GEMMA_LLM, ROLE_TEXT_ENCODER
+        if _looks_like_lora_keys(tensor_keys):
+            return ARCH_LTX_LORA, ROLE_LORA
+        if _looks_like_ltx_audio_vae_file(p, tensor_keys, combined_meta):
+            return ARCH_LTX_AUDIO_VAE, ROLE_VAE
+        if _looks_like_ltx_video_vae_file(p, tensor_keys, combined_meta):
+            return ARCH_LTX_VAE, ROLE_VAE
+        return ARCH_LTX_TRANSFORMER, _role_from_meta_and_filename(meta, p.name)
     if "flux" in spec_arch or "flux" in combined_meta:
         if _looks_like_lora_keys(tensor_keys):
             return ARCH_FLUX_LORA, ROLE_LORA
@@ -609,6 +671,9 @@ def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple
         return ARCH_FLUX_TRANSFORMER, _role_from_meta_and_filename(meta, p.name)
     if _looks_like_t5xxl_file(p, combined_meta):
         return ARCH_T5XXL_ENCODER, ROLE_TEXT_ENCODER
+    if _looks_like_gemma_transformer_file(p, tensor_keys, combined_meta):
+        role = ROLE_TEXT_ENCODER if "text_encoder" in p.as_posix().lower() or "textencoder" in p.as_posix().lower() else ROLE_UNKNOWN
+        return ARCH_GEMMA_LLM, role
     if p.name.lower() == "ae.safetensors":
         return ARCH_FLUX_VAE, ROLE_VAE
 
@@ -620,6 +685,11 @@ def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple
         for key in sample:
             if key.startswith(pattern) or key == pattern:
                 role = role_hint or _role_from_meta_and_filename(meta, p.name)
+                # T5-XXL and UMT5 share the same SelfAttention.* key prefixes —
+                # content alone can't disambiguate. Trust folder placement:
+                # anything dropped under a "flux" folder is Flux-compatible T5.
+                if arch == ARCH_UMT5_ENCODER and _in_flux_folder(p):
+                    arch = ARCH_T5XXL_ENCODER
                 return arch, role
 
     # 3. Folder / filename
@@ -642,6 +712,22 @@ def _arch_from_folder_and_filename(p: Path) -> tuple:
         return ARCH_T5XXL_ENCODER, ROLE_TEXT_ENCODER
     if "umt5" in p.name.lower():
         return ARCH_UMT5_ENCODER, ROLE_TEXT_ENCODER
+    if (
+        ("text_encoder" in path_str.lower() or "textencoder" in path_str.lower())
+        and ("gemma" in p.name.lower() or "/ltx/" in path_str.lower())
+    ):
+        return ARCH_GEMMA_LLM, ROLE_TEXT_ENCODER
+    if "ltx" in p.name.lower() or "/ltx/" in path_str.lower():
+        lowered = p.name.lower()
+        if "lora" in lowered:
+            return ARCH_LTX_LORA, ROLE_LORA
+        if "audio" in lowered and "vae" in lowered:
+            return ARCH_LTX_AUDIO_VAE, ROLE_VAE
+        if "vae" in lowered:
+            return ARCH_LTX_VAE, ROLE_VAE
+        return ARCH_LTX_TRANSFORMER, _role_from_filename(p.name)
+    if "gemma" in p.name.lower() or "/llm/" in path_str.lower():
+        return ARCH_GEMMA_LLM, ROLE_UNKNOWN
     if "flux" in p.name.lower():
         if p.suffix.lower() == ".gguf":
             return ARCH_FLUX_TRANSFORMER, _role_from_filename(p.name)
@@ -692,6 +778,8 @@ def _quant_from_filename(filename: str) -> str:
             return q.upper()
     if "nf4" in name:
         return "NF4"
+    if "nvfp4" in name:
+        return "NVFP4"
     if "fp4" in name:
         return "FP4"
     if "fp8" in name or "_f8" in name:

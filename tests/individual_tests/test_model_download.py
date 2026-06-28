@@ -107,13 +107,23 @@ def test_destination_dirs(tmp_path: Path):
     assert service.destination_dir("flux2_unet_safetensor") == tmp_path / "models" / "flux2" / "UNet"
     assert service.destination_dir("flux2_unet_gguf") == tmp_path / "models" / "flux2" / "GGUF"
     assert service.destination_dir("flux2_components") == tmp_path / "models" / "flux2" / "Components"
+    assert service.destination_dir("flux2_diffusers") == tmp_path / "models" / "flux2" / "Diffusers"
     assert service.destination_dir("z_image_unet_safetensor") == tmp_path / "models" / "z-image" / "UNet"
     assert service.destination_dir("z_image_unet_gguf") == tmp_path / "models" / "z-image" / "GGUF"
     assert service.destination_dir("z_image_components") == tmp_path / "models" / "z-image" / "Components"
+    assert service.destination_dir("qwen_image_diffusers") == tmp_path / "models" / "qwen-image" / "Diffusers"
+    assert service.destination_dir("qwen_image_nunchaku") == tmp_path / "models" / "qwen-image" / "Nunchaku"
+    assert service.destination_dir("sana_diffusers") == tmp_path / "models" / "sana" / "Diffusers"
+    assert service.destination_dir("sana_video_diffusers") == tmp_path / "models" / "sana-video" / "Diffusers"
     assert service.destination_dir("ltx_checkpoint") == tmp_path / "models" / "ltx" / "checkpoints"
+    assert service.destination_dir("ltx_gguf") == tmp_path / "models" / "ltx" / "GGUF"
     assert service.destination_dir("ltx_upscaler") == tmp_path / "models" / "ltx" / "upscalers"
     assert service.destination_dir("ltx_lora") == tmp_path / "models" / "ltx" / "loras"
+    assert service.destination_dir("ltx_vae") == tmp_path / "models" / "ltx" / "vae"
+    assert service.destination_dir("ltx_audio_vae") == tmp_path / "models" / "ltx" / "audio_vae"
     assert service.destination_dir("ltx_text_encoder") == tmp_path / "models" / "ltx" / "text_encoder"
+    assert service.destination_dir("llm_gguf") == tmp_path / "models" / "LLM" / "GGUF"
+    assert service.destination_dir("llm_safetensor") == tmp_path / "models" / "LLM"
 
 
 def test_ensure_dirs_creates_nested_category_folders(tmp_path: Path):
@@ -132,8 +142,12 @@ def test_ensure_dirs_creates_nested_category_folders(tmp_path: Path):
     assert (tmp_path / "models" / "z-image" / "GGUF").is_dir()
     assert (tmp_path / "models" / "z-image" / "Components").is_dir()
     assert (tmp_path / "models" / "ltx" / "checkpoints").is_dir()
+    assert (tmp_path / "models" / "ltx" / "GGUF").is_dir()
     assert (tmp_path / "models" / "ltx" / "upscalers").is_dir()
+    assert (tmp_path / "models" / "ltx" / "vae").is_dir()
+    assert (tmp_path / "models" / "ltx" / "audio_vae").is_dir()
     assert (tmp_path / "models" / "ltx" / "text_encoder").is_dir()
+    assert (tmp_path / "models" / "LLM" / "GGUF").is_dir()
 
 
 def test_wan_download_categories_validate_file_type(tmp_path: Path):
@@ -213,14 +227,42 @@ def test_ltx_download_categories_validate_file_type(tmp_path: Path):
     assert service.destination_for("ltx_checkpoint", safetensors.filename) == (
         tmp_path / "models" / "ltx" / "checkpoints" / "ltx.safetensors"
     )
+    assert service.destination_for("ltx_gguf", gguf.filename) == (
+        tmp_path / "models" / "ltx" / "GGUF" / "ltx.gguf"
+    )
     assert service.destination_for("ltx_upscaler", safetensors.filename) == (
         tmp_path / "models" / "ltx" / "upscalers" / "ltx.safetensors"
     )
     assert service.destination_for("ltx_lora", safetensors.filename) == (
         tmp_path / "models" / "ltx" / "loras" / "ltx.safetensors"
     )
+    assert service.destination_for("ltx_vae", safetensors.filename) == (
+        tmp_path / "models" / "ltx" / "vae" / "ltx.safetensors"
+    )
+    assert service.destination_for("ltx_audio_vae", safetensors.filename) == (
+        tmp_path / "models" / "ltx" / "audio_vae" / "ltx.safetensors"
+    )
     with pytest.raises(ValueError, match="LTX 2.3 checkpoint"):
         service.download_parsed(gguf, category="ltx_checkpoint")
+    with pytest.raises(ValueError, match="LTX 2.3 GGUF"):
+        service.download_parsed(safetensors, category="ltx_gguf")
+
+
+def test_llm_download_categories_validate_file_type(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    gguf = ParsedRemote(source="direct", url="https://example.com/model.gguf", filename="model.gguf")
+    safetensors = ParsedRemote(source="direct", url="https://example.com/model.safetensors", filename="model.safetensors")
+
+    assert service.destination_for("llm_gguf", gguf.filename) == (
+        tmp_path / "models" / "LLM" / "GGUF" / "model.gguf"
+    )
+    assert service.destination_for("llm_safetensor", safetensors.filename) == (
+        tmp_path / "models" / "LLM" / "model.safetensors"
+    )
+    with pytest.raises(ValueError, match="LLM GGUF"):
+        service.download_parsed(safetensors, category="llm_gguf")
+    with pytest.raises(ValueError, match="LLM safetensors"):
+        service.download_parsed(gguf, category="llm_safetensor")
 
 
 def test_wan_diffusers_rejects_single_file_downloads(tmp_path: Path):
@@ -310,10 +352,17 @@ def test_hf_snapshot_allowed_for_ltx_text_encoder(tmp_path: Path, monkeypatch):
     "category,repo_id,expected",
     [
         ("flux2_components", "black-forest-labs/FLUX.2-klein-4B", ("flux2", "Components", "FLUX.2-klein-4B")),
+        ("flux2_diffusers", "black-forest-labs/FLUX.2-klein-4B", ("flux2", "Diffusers", "FLUX.2-klein-4B")),
         ("z_image_components", "Tongyi-MAI/Z-Image-Turbo", ("z-image", "Components", "Z-Image-Turbo")),
+        ("qwen_image_diffusers", "Qwen/Qwen-Image-2512", ("qwen-image", "Diffusers", "Qwen-Image-2512")),
+        (
+            "sana_diffusers",
+            "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+            ("sana", "Diffusers", "Sana_Sprint_1.6B_1024px_diffusers"),
+        ),
     ],
 )
-def test_hf_snapshot_allowed_for_flux2_and_z_image_components(
+def test_hf_snapshot_allowed_for_image_runtime_folders(
     tmp_path: Path,
     monkeypatch,
     category,
@@ -462,7 +511,7 @@ def test_catalog_lists_entries(tmp_path: Path):
 def test_flux_quick_start_uses_supported_runtime_assets(tmp_path: Path):
     service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
 
-    assert QUICK_START_BUNDLES["flux"] == ["flux-fusion-v2-q4km", "flux-t5-fp16", "flux-clip-l", "flux-ae-vae"]
+    assert QUICK_START_BUNDLES["flux"] == ["flux-fusion-v2-q4km", "flux-t5-fp8", "flux-clip-l", "flux-ae-vae"]
     entries = [service.find_catalog(key) for key in QUICK_START_BUNDLES["flux"]]
     assert all(entry is not None for entry in entries)
     assert [entry.source for entry in entries if entry is not None] == [
@@ -485,21 +534,17 @@ def test_flux_quick_start_uses_supported_runtime_assets(tmp_path: Path):
     assert remote.repo_filename == "split_files/vae/ae.safetensors"
 
 
-def test_flux2_and_z_image_quick_start_use_separate_runtime_assets(tmp_path: Path):
+def test_flux2_z_image_qwen_and_sana_quick_start_use_runtime_assets(tmp_path: Path):
     service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
 
-    assert QUICK_START_BUNDLES["flux2"] == ["fluxtrait-klein9b-v2-q4km", "flux2-klein-9b-components"]
+    assert QUICK_START_BUNDLES["flux2"] == ["flux2-klein-4b-diffusers"]
     flux2_entries = [service.find_catalog(key) for key in QUICK_START_BUNDLES["flux2"]]
     assert all(entry is not None for entry in flux2_entries)
     assert [entry.category for entry in flux2_entries if entry is not None] == [
-        "flux2_unet_gguf",
-        "flux2_components",
+        "flux2_diffusers",
     ]
-    assert service.destination_for("flux2_unet_gguf", "fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf") == (
-        tmp_path / "models" / "flux2" / "GGUF" / "fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf"
-    )
-    assert service.snapshot_destination_for("flux2_components", "black-forest-labs/FLUX.2-klein-9B") == (
-        tmp_path / "models" / "flux2" / "Components" / "FLUX.2-klein-9B"
+    assert service.snapshot_destination_for("flux2_diffusers", "black-forest-labs/FLUX.2-klein-4B") == (
+        tmp_path / "models" / "flux2" / "Diffusers" / "FLUX.2-klein-4B"
     )
 
     assert QUICK_START_BUNDLES["zimage"] == ["fluxtrait-zimage-v2-q4", "z-image-turbo-components"]
@@ -514,6 +559,40 @@ def test_flux2_and_z_image_quick_start_use_separate_runtime_assets(tmp_path: Pat
     )
     assert service.snapshot_destination_for("z_image_components", "Tongyi-MAI/Z-Image-Turbo") == (
         tmp_path / "models" / "z-image" / "Components" / "Z-Image-Turbo"
+    )
+
+    assert QUICK_START_BUNDLES["qwen-image"] == ["qwen-image-2512-diffusers"]
+    qwen = service.find_catalog("qwen-image-2512-diffusers")
+    assert qwen is not None
+    assert qwen.category == "qwen_image_diffusers"
+    assert service.snapshot_destination_for(qwen.category, qwen.repo_id) == (
+        tmp_path / "models" / "qwen-image" / "Diffusers" / "Qwen-Image-2512"
+    )
+    assert QUICK_START_BUNDLES["qwen-nunchaku"] == ["qwen-nunchaku-image-lightning-int4-r32"]
+    qwen_nunchaku = service.find_catalog("qwen-nunchaku-image-lightning-int4-r32")
+    assert qwen_nunchaku is not None
+    assert qwen_nunchaku.category == "qwen_image_nunchaku"
+    assert service.destination_for(qwen_nunchaku.category, qwen_nunchaku.filename) == (
+        tmp_path
+        / "models"
+        / "qwen-image"
+        / "Nunchaku"
+        / "svdq-int4_r32-qwen-image-lightningv1.0-4steps.safetensors"
+    )
+
+    assert QUICK_START_BUNDLES["sana"] == ["sana-sprint-06b-diffusers"]
+    sana = service.find_catalog("sana-sprint-06b-diffusers")
+    assert sana is not None
+    assert sana.category == "sana_diffusers"
+    assert service.snapshot_destination_for(sana.category, sana.repo_id) == (
+        tmp_path / "models" / "sana" / "Diffusers" / "Sana_Sprint_0.6B_1024px_diffusers"
+    )
+    assert QUICK_START_BUNDLES["sana-video"] == ["sana-video-2b-480p-diffusers"]
+    sana_video = service.find_catalog("sana-video-2b-480p-diffusers")
+    assert sana_video is not None
+    assert sana_video.category == "sana_video_diffusers"
+    assert service.snapshot_destination_for(sana_video.category, sana_video.repo_id) == (
+        tmp_path / "models" / "sana-video" / "Diffusers" / "SANA-Video_2B_480p_diffusers"
     )
 
 
