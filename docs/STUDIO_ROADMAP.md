@@ -14,6 +14,7 @@
 - Stream decode/process/encode in bounded chunks.
 - Preserve all user-selected streams, timestamps, rotation, color metadata, chapters, and subtitles where the container permits.
 - Add tracked masks and temporal consistency.
+- Evaluate NVLabs SANA video follow-ups after image support is stable: https://github.com/NVlabs/SANA
 - Add Wan/VACE editing only after deterministic restoration is stable.
 
 ## Priority 3 — Audio Lab workstation

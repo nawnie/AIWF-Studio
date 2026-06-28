@@ -9,13 +9,16 @@ AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion 
 
 This `main` branch is the stable sharing branch. It only advertises features intended for normal local use. Experimental work lives on `dev`.
 
+For a complete GitHub-facing inventory, see [`docs/FEATURES.md`](docs/FEATURES.md).
+For the multi-pipeline LoRA design direction, see [`docs/LORA_PIPELINE_STRATEGY.md`](docs/LORA_PIPELINE_STRATEGY.md).
+
 ## UI Rebuild
 
 AIWF Studio ships three interchangeable web UIs on top of the same backend:
 
 - **Studio** (`webui.bat` / `python launch.py`, `aiwf/app.py`) - the original Gradio-based tabbed workspace. Still the default and most complete surface for image, inpaint, ControlNet, enhance, segment, and video.
 - **Modern** (`webui_modern.py`, `aiwf/app_modern.py`) - a restyled Gradio shell (`aiwf/web/modern/`) with the same backend, aimed at a cleaner layout pass.
-- **Pro** (`webui_pro.py`, `aiwf/app_pro.py`) - a FastAPI + React/TypeScript/Vite frontend (`frontend/`) talking to `aiwf/web/pro_api.py`. This is the active UI rebuild track and the long-term direction for the project. It currently covers image, video, inpaint, and model browsing, and needs a frontend build (`cd frontend && npm install && npm run build`) before `webui_pro.py` will serve it.
+- **Pro** (`webui_pro.py`, `aiwf/app_pro.py`) - a from-scratch FastAPI + React/TypeScript/Vite frontend (`frontend/`) talking to a dedicated `aiwf/web/pro_api.py` API. This is the active UI rebuild track and the long-term direction for the project; it covers the Create, Models, Data, Monitor, Logs, and Settings workspaces, including runtime monitoring and a lazy browser-side prompt helper. It needs a frontend build (`cd frontend && npm install && npm run build`) before `webui_pro.py` will serve it.
 
 All three read and write the same model folders, history, and settings, so switching between them is safe. Studio remains the one to recommend for new users until Pro reaches parity.
 
@@ -37,8 +40,18 @@ Current focus: image generation, inpainting, video generation, and video-audio p
 - sampler, scheduler, steps, CFG, seed, size, VAE, clip skip, and hires fix controls
 - live preview, interrupt, continuous generation, and job history
 - prompt styles, wildcards, prompt files, dynamic prompt syntax, and Compel support
-- LoRA selection and keyword expansion from the local model catalog
+- LoRA selection, keyword expansion, saved aliases/strengths, and runtime adapter loading for supported Diffusers image families
 - PNG metadata and PNG Info import back into the Image tab
+
+### Pro UI And Monitoring
+
+- FastAPI + React/TypeScript/Vite app shell with left-rail navigation
+- Create, Models, Data, Monitor, Logs, and Settings workspaces
+- preset 1 cream/navy/coral visual direction, with dark planned as preset 2
+- scroll-safe panels, popup tool windows, and resizable workspace columns
+- runtime monitor for backend state, queue health, logs, resources, and recent receipts
+- browser-side Transformers.js prompt helper loaded only when **Analyze prompt** is clicked
+- Pro API endpoints for runtime, bootstrap, generation, data, logs, and settings
 
 ### Inpaint And Masking
 
@@ -61,6 +74,14 @@ Current focus: image generation, inpainting, video generation, and video-audio p
 - model aliases and trigger-word helpers
 - curated download entries for common local model folders
 - import helpers for model folders from another local install
+
+### LoRA Status
+
+- SD/SDXL/SD3.5-style runtime LoRA loading is wired through Diffusers adapter APIs.
+- Studio includes LoRA prompt insertion, LoRA stack composition, trigger-word helpers, aliases, and saved default strengths.
+- Model Manager includes LoRA metadata controls and a LoRA fuse worker for supported Diffusers exports.
+- Wan supports stage LoRAs for supported 5B and high/low transformer routes, with runtime-aware filtering.
+- Flux/new transformer-image LoRA and ONNX LoRA are intentionally blocked until their pipeline-specific appliers are implemented and tested.
 
 ### Enhance
 
