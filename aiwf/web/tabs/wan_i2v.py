@@ -1137,6 +1137,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     save_bad_video = gr.Button("Save bad result", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
                     status = gr.Markdown("**Ready** - upload an image and generate.", elem_classes=["aiwf-status-bar"])
 
+                    default_ltx_pipeline = ltx_service.default_launch_pipeline()
                     with gr.Accordion("LTX 2.3 optional engine", open=False, elem_classes=["aiwf-prompt-tools"]):
                         gr.Markdown(ltx_service.status_markdown(), elem_classes=["aiwf-settings-paths"])
                         ltx_source = gr.Image(
@@ -1156,7 +1157,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                                 ("Distilled two-stage (fast/default)", LTX_PIPELINE_DISTILLED),
                                 ("Full one-stage checkpoint", LTX_PIPELINE_ONE_STAGE),
                             ],
-                            value=LTX_PIPELINE_DISTILLED,
+                            value=default_ltx_pipeline,
                         )
                         with gr.Row():
                             ltx_width = gr.Slider(256, 1280, value=512, step=32, label="Width")
@@ -1194,8 +1195,13 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             ltx_enhance_prompt = gr.Checkbox(label="Enhance prompt", value=False)
                         ltx_checkpoint = gr.Textbox(
                             label="LTX checkpoint",
-                            value=str(ltx_service.default_checkpoint_path()),
-                            info="Distilled route expects ltx-2.3-22b-distilled-1.1.safetensors.",
+                            value=str(ltx_service.default_checkpoint_path(default_ltx_pipeline)),
+                            info=(
+                                "Distilled route expects ltx-2.3-22b-distilled-1.1.safetensors. "
+                                "Full one-stage route expects ltx-2.3-22b-dev-bf16.safetensors "
+                                "(dequantized from the nvfp4 release; clear this box to use the "
+                                "per-pipeline default)."
+                            ),
                         )
                         ltx_upsampler = gr.Textbox(
                             label="LTX spatial upscaler",
@@ -2326,7 +2332,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     prompt=prompt_text,
                     negative_prompt=str(negative_v or ""),
                     source_image_path=str(source_path or "") or None,
-                    pipeline=str(pipeline_v or LTX_PIPELINE_DISTILLED),
+                    pipeline=str(pipeline_v or default_ltx_pipeline),
                     width=int(width_v or 512),
                     height=int(height_v or 512),
                     num_frames=snap_ltx_num_frames(int(frames_v or 81)),

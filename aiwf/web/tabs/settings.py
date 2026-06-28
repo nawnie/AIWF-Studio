@@ -15,6 +15,7 @@ import gradio as gr
 from aiwf.bootstrap import AppContext
 from aiwf.api.security import api_security_warnings
 from aiwf.core.config.launch import LaunchSettings, format_launch_status
+from aiwf.core.user_messages import attention_display_label
 from aiwf.core.util.access import build_network_access_info, format_remote_access_markdown
 from aiwf.services.model_path_imports import (
     import_automatic1111_paths,
@@ -109,14 +110,7 @@ def _launch_form_values(ctx: AppContext) -> LaunchSettings:
 
 
 def _attention_summary(ctx: AppContext) -> str:
-    backend = getattr(ctx.flags, "attention_backend", "sage_sdpa")
-    if backend == "sage_sdpa":
-        return "Sage -> SDPA"
-    if backend == "sdpa":
-        return "PyTorch SDPA"
-    if backend == "xformers" or ctx.flags.xformers:
-        return "xFormers"
-    return "Off/default"
+    return attention_display_label(ctx.flags)
 
 
 def _format_gb(value: int | float | None) -> str:
@@ -329,6 +323,7 @@ def _launch_component_values(settings: LaunchSettings) -> list:
         settings.lowvram,
         settings.no_half,
         settings.fp8,
+        settings.fluxfp8,
         settings.async_offload,
         settings.pinned_memory,
         settings.cuda_malloc,
@@ -940,6 +935,15 @@ def register_settings(registry: WebRegistry) -> None:
                                 interactive=enable_experimental_settings,
                                 info="Halves UNet VRAM — recommended for SDXL on 8GB cards. Tiny quality cost.",
                             )
+                            launch_fluxfp8 = gr.Checkbox(
+                                label="Flux FP8 transformer weights",
+                                value=launch.fluxfp8,
+                                info=(
+                                    "Loads Flux/Flux.2/Z-Image transformers in FP8 so they fit "
+                                    "resident in VRAM on 12-16GB cards instead of CPU-offloading "
+                                    "(offload uses shared/system memory and is much slower)."
+                                ),
+                            )
                             launch_async_offload = gr.Checkbox(
                                 label="Wan async offload (preload low during high denoise)",
                                 value=launch.async_offload,
@@ -1043,13 +1047,13 @@ def register_settings(registry: WebRegistry) -> None:
                                 label="TorchAO int8 weight-only quantization (AIWF_TORCHAO)",
                                 value=launch.torchao,
                                 interactive=enable_experimental_settings,
-                                info="Halves UNet weight memory. Requires torchao installed.",
+                                info="Experimental startup flag. Current generation paths do not apply TorchAO weight-only quantization yet.",
                             )
                             engine_fp8 = gr.Checkbox(
                                 label="FP8 weight-only quantization (AIWF_FP8)",
                                 value=launch.fp8_quant,
                                 interactive=enable_experimental_settings,
-                                info="Requires NVIDIA Ada Lovelace (RTX 40xx) or newer and torchao.",
+                                info="Experimental startup flag. Wan native FP8 uses its own loader and ignores this toggle.",
                             )
                             engine_torch_compile = gr.Checkbox(
                                 label="torch.compile reduce-overhead (AIWF_TORCH_COMPILE)",
@@ -1258,6 +1262,7 @@ def register_settings(registry: WebRegistry) -> None:
             launch_lowvram,
             launch_no_half,
             launch_fp8,
+            launch_fluxfp8,
             launch_async_offload,
             launch_pinned_memory,
             launch_cuda_malloc,
@@ -1577,6 +1582,7 @@ def register_settings(registry: WebRegistry) -> None:
                 lowvram,
                 no_half,
                 fp8,
+                fluxfp8,
                 async_offload,
                 pinned_memory,
                 cuda_malloc,
@@ -1610,6 +1616,7 @@ def register_settings(registry: WebRegistry) -> None:
                 lowvram=bool(lowvram),
                 no_half=bool(no_half),
                 fp8=bool(fp8) if enable_experimental_settings else False,
+                fluxfp8=bool(fluxfp8),
                 async_offload=bool(async_offload),
                 pinned_memory=bool(pinned_memory),
                 cuda_malloc=bool(cuda_malloc),

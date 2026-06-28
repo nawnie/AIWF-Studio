@@ -72,7 +72,7 @@ def default_checkpoint_title(
 
 def checkpoint_dropdown(
     ctx: AppContext,
-    label: str = "Checkpoint",
+    label: str = "Model",
     engine_filter: str = "All",
 ) -> tuple[gr.Dropdown, dict[str, str]]:
     checkpoints = ctx.generation.list_checkpoints()
@@ -135,15 +135,15 @@ def format_model_status(ctx: AppContext, engine_filter: str = "All") -> str:
     filtered = _filter_checkpoints(checkpoints, engine_filter)
     ckpt_dir = ctx.flags.resolved_ckpt_dir()
     models_dir = ctx.flags.resolved_models_dir()
-    engine_desc = f"{engine_filter} " if engine_filter != "All" else ""
+    engine_desc = f" for {engine_filter}" if engine_filter != "All" else ""
     if filtered:
         names = ", ".join(c.filename for c in filtered[:5])
         extra = f" (+{len(filtered) - 5} more)" if len(filtered) > 5 else ""
-        return f"**{len(filtered)}** {engine_desc}checkpoints · `{ckpt_dir.name}` — {names}{extra}"
+        return f"**{len(filtered)}** models{engine_desc} · `{ckpt_dir.name}` — {names}{extra}"
     return (
-        f"No {engine_desc}models found.\n\n"
+        f"No models{engine_desc} found.\n\n"
         f"Place `.safetensors` or `.ckpt` files in:\n"
         f"- `{ckpt_dir}`\n"
         f"- or directly in `{models_dir}`\n\n"
-        f"Then click **Refresh models**."
+        f"Then click **Refresh models** or choose another engine."
     )

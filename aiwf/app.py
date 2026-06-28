@@ -27,10 +27,22 @@ from aiwf.core.config.launch import (
     merge_launch_settings,
 )
 from aiwf.core.config.settings import RuntimeFlags
+from aiwf.core.user_messages import STARTUP_MESSAGES
 from aiwf.core.util.access import build_network_access_info
 from aiwf.core.util.network import find_free_port
 
 logger = logging.getLogger("aiwf")
+
+
+class _ConsoleNoiseFilter(logging.Filter):
+    """Keep terminal output user-facing; detailed diagnostics still go to aiwf.log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name.startswith("aiwf"):
+            return True
+        if record.name in {"uvicorn.error"} and record.levelno >= logging.ERROR:
+            return True
+        return record.levelno >= logging.ERROR
 
 
 def _configure_logging(data_dir: Path) -> None:
@@ -40,8 +52,9 @@ def _configure_logging(data_dir: Path) -> None:
     root.setLevel(logging.INFO)
 
     console = logging.StreamHandler()
-    console.setLevel(logging.WARNING)
+    console.setLevel(logging.INFO)
     console.setFormatter(formatter)
+    console.addFilter(_ConsoleNoiseFilter())
     root.addHandler(console)
 
     try:
@@ -60,6 +73,14 @@ def _configure_logging(data_dir: Path) -> None:
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("xformers").setLevel(logging.ERROR)
+    # Chatty third-party loggers that aren't about loading/generation progress —
+    # keep these quiet so they don't bury the aiwf.* INFO lines the console now shows.
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("PIL").setLevel(logging.WARNING)
+    logging.getLogger("filelock").setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+    logging.getLogger("gradio").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 
 def _startup_message(message: str) -> None:
@@ -95,6 +116,24 @@ def _background_model_warmup(ctx) -> None:
                 "Background warmup: Flux text encoders resident (T5 on %s)",
                 backend._flux_t5_device,
             )
+        prewarm = getattr(backend, "prewarm_common_prompt_embeddings", None)
+        if callable(prewarm) and os.environ.get("AIWF_PREWARM_COMMON_PROMPTS", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            try:
+                limit = int(os.environ.get("AIWF_PREWARM_COMMON_PROMPT_LIMIT", "24"))
+            except ValueError:
+                limit = 24
+            try:
+                budget_seconds = float(os.environ.get("AIWF_PREWARM_COMMON_PROMPT_BUDGET_SECONDS", "300"))
+            except ValueError:
+                budget_seconds = 300.0
+            warmed = prewarm(limit=limit, budget_seconds=budget_seconds)
+            if warmed:
+                logger.info("Background warmup: prewarmed %d common prompt embeddings", warmed)
         logger.info("Background warmup: checkpoint %s is ready", checkpoint_id)
     except Exception:
         logger.exception("Background model warmup failed for %s", checkpoint_id)
@@ -152,6 +191,11 @@ def _parse_cli() -> RuntimeFlags:
         "--fp8",
         action="store_true",
         help="Store UNet weights in FP8 (halves UNet VRAM; tiny quality cost; great for SDXL on 8GB)",
+    )
+    parser.add_argument(
+        "--fluxfp8",
+        action="store_true",
+        help="Load Flux transformer weights in FP8 (saves ~10GB VRAM on 12/16GB cards)",
     )
     parser.add_argument(
         "--cpu",
@@ -244,6 +288,7 @@ def _parse_cli() -> RuntimeFlags:
         genlog=args.genlog,
         no_half=args.no_half,
         fp8=args.fp8,
+        fluxfp8=args.fluxfp8,
         directml=args.directml,
         cpu=args.cpu,
         inference_backend=args.inference_backend,
@@ -349,9 +394,30 @@ def _log_api_security_warnings(flags: RuntimeFlags) -> None:
 
 
 def _auth_pairs(auth: str | None):
-    if not auth:
+    if not (auth or "").strip():
         return None
-    return [tuple(chunk.strip().split(":", 1)) for chunk in auth.split(",") if ":" in chunk]
+    pairs = []
+    for chunk in auth.split(","):
+        cleaned = chunk.strip()
+        if not cleaned:
+            continue
+        username, separator, password = cleaned.partition(":")
+        username = username.strip()
+        password = password.strip()
+        if not separator or not username or not password:
+            raise ValueError("gradio_auth must be comma-separated username:password pairs")
+        pairs.append((username, password))
+    return pairs or None
+
+
+def _gradio_allowed_paths(flags: RuntimeFlags) -> list[str]:
+    """Narrow Gradio file serving to generated outputs.
+
+    Gradio 6 blocks arbitrary local files unless paths are explicitly allowed.
+    The output directory is needed for history/previews/downloads; model and
+    repo roots should not be exposed through Gradio static file serving.
+    """
+    return [str(flags.resolved_output_dir().resolve())]
 
 
 def _resolve_flags() -> RuntimeFlags:
@@ -364,19 +430,21 @@ def run() -> None:
     os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
     flags = _resolve_flags()
     _configure_logging(flags.data_dir)
-    _startup_message("Starting AIWF Studio...")
-    _startup_message("Checking your hardware and loading tools...")
+    _startup_message(STARTUP_MESSAGES["starting"])
+    _startup_message(STARTUP_MESSAGES["checking_runtime"])
     if flags.cuda_malloc:
-        _startup_message("CUDA allocator: cudaMallocAsync (Comfy --cuda-malloc parity).")
+        _startup_message(STARTUP_MESSAGES["allocator_cuda"])
     if flags.genlog:
-        _startup_message(f"Generation log enabled: {flags.resolved_output_dir() / 'genlog' / 'generation-log.jsonl'}")
+        _startup_message(
+            STARTUP_MESSAGES["genlog_enabled"].format(path=flags.resolved_output_dir() / "genlog" / "generation-log.jsonl")
+        )
     wan_perf = []
     if flags.async_offload:
         wan_perf.append("async-offload")
     if flags.pinned_memory:
         wan_perf.append("pinned-memory")
     if wan_perf:
-        _startup_message(f"Wan throughput flags: {', '.join(wan_perf)}.")
+        _startup_message(STARTUP_MESSAGES["wan_flags"].format(flags=", ".join(wan_perf)))
     ctx = build_context(flags)
 
     if flags.nowebui:
@@ -405,13 +473,13 @@ def run() -> None:
 
     from aiwf.web.app import create_web_ui
 
-    _startup_message(f"Using {_friendly_device_name(ctx.generation.backend.devices.describe())}.")
-    _startup_message("Loading model library...")
+    _startup_message(STARTUP_MESSAGES["using_device"].format(device=_friendly_device_name(ctx.generation.backend.devices.describe())))
+    _startup_message(STARTUP_MESSAGES["loading_library"])
     checkpoint_count = len(ctx.generation.list_checkpoints())
     lora_count = len(ctx.generation.list_loras())
     _startup_message(_friendly_library_message(checkpoint_count, lora_count))
-    _startup_message("Building the workspace...")
-    demo, theme, css, js = create_web_ui(ctx)
+    _startup_message(STARTUP_MESSAGES["building_workspace"])
+    demo, theme, css, js = create_web_ui(ctx, checkpoint_count=checkpoint_count)
     threading.Thread(
         target=_background_model_warmup,
         args=(ctx,),
@@ -430,6 +498,7 @@ def run() -> None:
         css=css,
         js=js,
         quiet=True,
+        allowed_paths=_gradio_allowed_paths(flags),
     )
     security_middleware = _api_security_middleware(flags)
     if security_middleware:
@@ -444,14 +513,14 @@ def run() -> None:
         app.include_router(build_router(ctx))
         logger.info("API mounted at /api/v1")
 
-    _startup_message("AIWF Studio is ready.")
-    _startup_message(f"Open in your browser: {local_url}")
+    _startup_message(STARTUP_MESSAGES["ready"])
+    _startup_message(STARTUP_MESSAGES["open_browser"].format(url=local_url))
     if access.recommended_phone_url:
-        _startup_message(f"Phone and tablet access: {access.recommended_phone_url}")
+        _startup_message(STARTUP_MESSAGES["phone_access"].format(url=access.recommended_phone_url))
     elif not flags.listen:
-        _startup_message("Phone and tablet access is off for now. Turn it on later in Settings -> Remote access.")
+        _startup_message(STARTUP_MESSAGES["phone_access_off"])
     if share_url:
-        _startup_message(f"Public share link: {share_url}")
+        _startup_message(STARTUP_MESSAGES["share_link"].format(url=share_url))
 
     try:
         import time

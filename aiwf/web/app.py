@@ -10,6 +10,7 @@ from pathlib import Path
 import gradio as gr
 
 from aiwf.bootstrap import AppContext
+from aiwf.core.user_messages import attention_display_label
 from aiwf.web.registry import WebRegistry
 from aiwf.web.studio import register_studio
 from aiwf.web.tabs.audio import register_audio
@@ -38,7 +39,15 @@ def _static_text(name: str) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
-def _topbar_runtime_html(ctx: AppContext) -> str:
+def _safe_runtime_value(label: str, fallback: str, getter) -> str:
+    try:
+        return str(getter())
+    except Exception:
+        logger.debug("Topbar runtime value unavailable: %s", label, exc_info=True)
+        return fallback
+
+
+def _topbar_runtime_html(ctx: AppContext, *, checkpoint_count: int | None = None) -> str:
     try:
         import torch
 
@@ -46,25 +55,24 @@ def _topbar_runtime_html(ctx: AppContext) -> str:
     except Exception:
         torch_version = "unavailable"
 
-    if ctx.flags.xformers:
-        attention = "xFormers"
-    elif ctx.flags.opt_sdp_attention or ctx.flags.opt_split_attention:
-        attention = "SDP"
-    else:
-        attention = "Default"
-
-    device = ctx.generation.backend.devices.describe()
+    attention = _safe_runtime_value("attention", "Auto", lambda: attention_display_label(ctx.flags))
+    device = _safe_runtime_value("device", "Unavailable", lambda: ctx.generation.backend.devices.describe())
     if device.startswith("CUDA ("):
         device = device.removeprefix("CUDA (").rstrip(")")
     elif device.startswith("CPU ("):
         device = "CPU"
+    models = _safe_runtime_value(
+        "models",
+        "Unavailable",
+        lambda: checkpoint_count if checkpoint_count is not None else len(ctx.generation.list_checkpoints()),
+    )
 
     badges = [
         ("Python", platform.python_version()),
         ("Torch", torch_version),
         ("Attention", attention),
         ("Device", device),
-        ("Models", str(len(ctx.generation.list_checkpoints()))),
+        ("Models", models),
     ]
     chips = "".join(
         (
@@ -114,7 +122,7 @@ def register_default_tabs(registry: WebRegistry) -> None:
     register_settings(registry)
 
 
-def create_web_ui(ctx: AppContext) -> tuple[gr.Blocks, object, str, str]:
+def create_web_ui(ctx: AppContext, *, checkpoint_count: int | None = None) -> tuple[gr.Blocks, object, str, str]:
     registry = WebRegistry()
     register_default_tabs(registry)
 
@@ -167,7 +175,7 @@ def create_web_ui(ctx: AppContext) -> tuple[gr.Blocks, object, str, str]:
                     <p class="aiwf-tagline">Professional diffusion workspace</p>
                 </div>
                 <div class="aiwf-topbar-end">
-                    {_topbar_runtime_html(ctx)}
+                    {_topbar_runtime_html(ctx, checkpoint_count=checkpoint_count)}
                     <span class="aiwf-status-pill" id="aiwf-topbar-status" data-state="ready" role="status" aria-live="polite">
                         <span class="aiwf-status-dot" aria-hidden="true"></span>
                         <span class="aiwf-status-label">Ready</span>

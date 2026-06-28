@@ -46,6 +46,7 @@ class LaunchSettings(BaseSettings):
     cuda_malloc: bool = True
     no_half: bool = False
     fp8: bool = False
+    fluxfp8: bool = False
     directml: bool = False
     cpu: bool = False
     inference_backend: str = "diffusers"
@@ -142,6 +143,7 @@ class LaunchSettings(BaseSettings):
             cuda_malloc=flags.cuda_malloc,
             no_half=flags.no_half,
             fp8=flags.fp8,
+            fluxfp8=flags.fluxfp8,
             directml=flags.directml,
             cpu=flags.cpu,
             inference_backend=flags.inference_backend,
@@ -194,6 +196,7 @@ class LaunchSettings(BaseSettings):
                 "cuda_malloc": self.cuda_malloc,
                 "no_half": self.no_half,
                 "fp8": self.fp8,
+                "fluxfp8": self.fluxfp8,
                 "directml": self.directml,
                 "cpu": self.cpu,
                 "inference_backend": self.inference_backend,
@@ -275,6 +278,8 @@ class LaunchSettings(BaseSettings):
             args.append("--no-half")
         if self.fp8:
             args.append("--fp8")
+        if self.fluxfp8:
+            args.append("--fluxfp8")
         if self.directml:
             args.append("--directml")
         if self.cpu:
@@ -401,6 +406,7 @@ def merge_launch_settings(
         "cuda_malloc": "--no-cuda-malloc",
         "no_half": "--no-half",
         "fp8": "--fp8",
+        "fluxfp8": "--fluxfp8",
         "directml": "--directml",
         "cpu": "--cpu",
         "inference_backend": "--inference-backend",

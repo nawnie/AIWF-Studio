@@ -9,6 +9,7 @@ from aiwf.app import (
     _configure_logging,
     _friendly_device_name,
     _friendly_library_message,
+    _gradio_allowed_paths,
     _log_api_security_warnings,
     _mount_gradio_extensions,
     _resolve_flags,
@@ -58,6 +59,7 @@ def run() -> None:
         css=css,
         js=js,
         quiet=True,
+        allowed_paths=_gradio_allowed_paths(flags),
     )
     security_middleware = _api_security_middleware(flags)
     if security_middleware:

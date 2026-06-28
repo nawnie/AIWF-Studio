@@ -155,7 +155,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                 with gr.Column(elem_classes=["aiwf-panel"]):
                     gr.Markdown("Model", elem_classes=["aiwf-section-label"])
                     engine_selector = gr.Dropdown(
-                        label="Engine Filter",
+                        label="Engine",
                         choices=[
                             "All",
                             "Flux",
@@ -1073,26 +1073,79 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         choices = ctx.models.lora_choices(ckpt_id)
         return [gr.update(choices=choices, value=None) for _ in range(1 + len(lora_stack_components[0::2]))]
 
+    def _preset_field_updates(ckpt_id):
+        """gr.update()s for steps/cfg/sampler/scheduler/width/height from this
+        checkpoint's last-used settings, falling back to architecture sane
+        defaults. Fields the preset has no opinion on are left untouched."""
+        no_op = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+        if not ckpt_id:
+            return no_op
+        try:
+            preset = ctx.generation.get_model_preset(ckpt_id)
+        except Exception:
+            return no_op
+        if not preset:
+            return no_op
+        sampler_label = catalogs.sampler_id_to_label.get(preset.get("sampler"))
+        schedule_label = catalogs.schedule_id_to_label.get(preset.get("scheduler"))
+        return (
+            gr.update(value=preset["steps"]) if "steps" in preset else gr.update(),
+            gr.update(value=preset["cfg_scale"]) if "cfg_scale" in preset else gr.update(),
+            gr.update(value=sampler_label) if sampler_label else gr.update(),
+            gr.update(value=schedule_label) if schedule_label else gr.update(),
+            gr.update(value=preset["width"]) if "width" in preset else gr.update(),
+            gr.update(value=preset["height"]) if "height" in preset else gr.update(),
+        )
+
     def _on_checkpoint_change(ckpt_title, ckpt_map, engine_val):
-        """Remember the selected checkpoint without loading model weights."""
+        """Remember the selected checkpoint without loading model weights, and
+        apply that model's remembered (or sane-default) generation settings."""
         help_md = _model_help_md(ckpt_title)
         ckpt_id = ckpt_map.get(ckpt_title) if ckpt_title and ckpt_map else None
         lora_updates = _lora_picker_updates_for_checkpoint(ckpt_id)
+        no_preset_updates = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
         if not ckpt_title or not ckpt_map:
-            return (gr.update(), help_md, *lora_updates)
+            return (gr.update(), help_md, *lora_updates, *no_preset_updates)
         if ckpt_id is None:
-            return (gr.update(value=f"**Error:** unknown checkpoint {ckpt_title}"), help_md, *lora_updates)
+            return (
+                gr.update(value=f"**Error:** unknown checkpoint {ckpt_title}"),
+                help_md,
+                *lora_updates,
+                *no_preset_updates,
+            )
         try:
             ctx.generation.remember_checkpoint_selection(ckpt_id)
             base_status = format_model_status(ctx, engine_val)
-            return (gr.update(value=f"**Selected:** {ckpt_title}\n\n{base_status}"), help_md, *lora_updates)
+            preset_updates = _preset_field_updates(ckpt_id)
+            return (
+                gr.update(value=f"**Selected:** {ckpt_title}\n\n{base_status}"),
+                help_md,
+                *lora_updates,
+                *preset_updates,
+            )
         except Exception as exc:
-            return (gr.update(value=f"**Selection failed:** {ckpt_title}: {exc}"), help_md, *lora_updates)
+            return (
+                gr.update(value=f"**Selection failed:** {ckpt_title}: {exc}"),
+                help_md,
+                *lora_updates,
+                *no_preset_updates,
+            )
 
     checkpoint.change(
         _on_checkpoint_change,
         inputs=[checkpoint, state, engine_selector],
-        outputs=[model_status, model_help, lora_pick, *lora_stack_components[0::2]],
+        outputs=[
+            model_status,
+            model_help,
+            lora_pick,
+            *lora_stack_components[0::2],
+            steps,
+            cfg,
+            sampler,
+            scheduler,
+            width,
+            height,
+        ],
         show_progress=False,
     )
 
@@ -1100,12 +1153,12 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         update, new_map = refresh_checkpoints(
             ctx, rescan=False, current_value=current_ckpt, engine_filter=engine_val
         )
-        return update, new_map
+        return update, format_model_status(ctx, engine_val), new_map
 
     engine_selector.change(
         _on_engine_filter_change,
         inputs=[engine_selector, checkpoint],
-        outputs=[checkpoint, state],
+        outputs=[checkpoint, model_status, state],
         show_progress=False,
     )
 

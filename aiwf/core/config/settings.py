@@ -31,6 +31,7 @@ class RuntimeFlags(BaseSettings):
     genlog: bool = False
     no_half: bool = False
     fp8: bool = False
+    fluxfp8: bool = False
     directml: bool = False
     # Custom engine feature flags (set via env AIWF_* or launch profile)
     cuda_graphs: bool = False
@@ -172,6 +173,12 @@ class UserSettings(BaseSettings):
 
     # Last checkpoint the user loaded in Studio — restored on next launch.
     last_checkpoint_id: str | None = None
+
+    # Per-checkpoint remembered generation settings (steps/cfg/sampler/etc.),
+    # keyed by checkpoint id. Applied as UI defaults when a model is selected,
+    # falling back to architecture sane-defaults (see model_presets.py) for
+    # checkpoints that have never been run before.
+    model_settings: dict[str, dict[str, object]] = Field(default_factory=dict)
 
     # Last Wan video settings — restored when the video tab opens.
     # Restored as UI hints only; Wan request validation still checks route and

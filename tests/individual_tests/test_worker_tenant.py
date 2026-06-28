@@ -54,6 +54,20 @@ def test_worker_tenant_ready_for_isolated_venv(tmp_path: Path):
     assert not status.uses_studio_venv
 
 
+def test_worker_tenant_accepts_utf8_bom_engines_json(tmp_path: Path):
+    worker, python = _write_engine_files(tmp_path)
+    (tmp_path / "engines.json").write_text(
+        "\ufeff" + json.dumps({"wan": {"enabled": True}}),
+        encoding="utf-8",
+    )
+
+    status = WorkerTenantRegistry(tmp_path).status("wan")
+
+    assert status.ready
+    assert status.worker_script == worker.resolve()
+    assert status.python_exe == python
+
+
 def test_worker_tenant_supports_shared_studio_venv_alias(tmp_path: Path):
     worker = tmp_path / "engines" / "wan" / "worker.py"
     python = python_exe_for_venv(tmp_path / "venv")

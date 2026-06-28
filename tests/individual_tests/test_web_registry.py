@@ -56,7 +56,28 @@ def test_default_user_settings_show_core_navigation_only():
 
     visible = [name for name, _builder, _order in registry.visible_tabs(ctx)]
 
-    assert visible == ["Image", "Image Lab", "Video", "Chat", "Training", "Settings"]
+    assert visible == ["Image", "Image Lab", "Video", "Chat", "Video Lab", "Audio Lab", "Training", "Settings"]
+
+
+def test_topbar_uses_provided_checkpoint_count_without_rescan():
+    from aiwf.core.config.settings import RuntimeFlags
+    from aiwf.web.app import _topbar_runtime_html
+
+    def fail_scan():
+        raise AssertionError("checkpoint scan should not run")
+
+    ctx = SimpleNamespace(
+        flags=RuntimeFlags(),
+        generation=SimpleNamespace(
+            list_checkpoints=fail_scan,
+            backend=SimpleNamespace(devices=SimpleNamespace(describe=lambda: "CPU (test)")),
+        ),
+    )
+
+    html = _topbar_runtime_html(ctx, checkpoint_count=7)
+
+    assert "Models" in html
+    assert ">7<" in html
 
 
 def test_training_tab_is_shipped_even_with_wip_tabs(monkeypatch):
@@ -217,6 +238,8 @@ def test_wan_route_switch_filters_low_model_from_normalized_high(tmp_path):
         24,
         0,
         1.0,
+        "unipc",
+        5.0,
     )
     assert fp8[0].get("value") == "Safetensor/wan2.2_i2v_14B_high_noise_fp8.safetensors"
     assert fp8[1].get("value") == "Safetensor/wan2.2_i2v_14B_low_noise_fp8.safetensors"
@@ -239,6 +262,8 @@ def test_wan_route_switch_filters_low_model_from_normalized_high(tmp_path):
         24,
         0,
         1.0,
+        "euler",
+        5.0,
     )
     assert gguf_route[0].get("value") == "GGUF/Wan2.2-I2V-A14B-HighNoise-Q4_K_M.gguf"
     assert gguf_route[1].get("value") == "GGUF/Wan2.2-I2V-A14B-LowNoise-Q4_K_M.gguf"
@@ -261,6 +286,8 @@ def test_wan_route_switch_filters_low_model_from_normalized_high(tmp_path):
         24,
         0,
         1.0,
+        "unipc",
+        5.0,
     )
     assert fast_route[0].get("value") == "Safetensor/wan2.2_ti2v_5B_fp16.safetensors"
     assert fast_route[1].get("value") is None
@@ -283,6 +310,8 @@ def test_wan_route_switch_filters_low_model_from_normalized_high(tmp_path):
         24,
         0,
         1.0,
+        "unipc",
+        5.0,
     )
     assert missing_runtime_route[0].get("value") == "Safetensor/wan2.2_ti2v_5B_fp16.safetensors"
     assert missing_runtime_route[1].get("value") is None

@@ -24,6 +24,7 @@ GENERATION_SIZE_PRESETS: tuple[int, ...] = (
     768,
     896,
     1024,
+    1080,
 )
 
 ASPECT_RATIO_PRESETS: tuple[tuple[str, str], ...] = (
