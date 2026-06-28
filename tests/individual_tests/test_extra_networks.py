@@ -3,6 +3,7 @@ import pytest
 from aiwf.core.domain.extra_networks import LoraRef, parse_extra_networks
 from aiwf.core.domain.models import LoraInfo
 from aiwf.infrastructure.diffusers.extra_networks import apply_loras
+from aiwf.infrastructure.diffusers.backend import _supports_runtime_lora_adapters
 
 
 class FakeLoraPipe:
@@ -59,6 +60,32 @@ def test_apply_loras_rejects_sd15_lora_on_sd35():
 
     with pytest.raises(ValueError, match="targets sd15"):
         apply_loras(object(), [LoraRef("sd15_style", 1.0)], [lora], base_architecture="sd35")
+
+
+def test_apply_loras_accepts_flux_lora_on_flux(tmp_path):
+    path = tmp_path / "flux_style.safetensors"
+    path.write_bytes(b"fake")
+    lora = LoraInfo(
+        id="flux_style",
+        title="Flux Style",
+        filename=path.name,
+        path=str(path),
+        architecture="flux",
+    )
+    pipe = FakeLoraPipe()
+
+    adapters = apply_loras(pipe, [LoraRef("flux_style", 0.6)], [lora], base_architecture="flux")
+
+    assert adapters == ["aiwf_lora_0"]
+    assert pipe.loaded == [(str(tmp_path), {"weight_name": path.name, "adapter_name": "aiwf_lora_0"})]
+    assert pipe.adapters == (["aiwf_lora_0"], [0.6])
+
+
+def test_runtime_lora_policy_allows_flux_but_blocks_unwired_transformer_families():
+    assert _supports_runtime_lora_adapters("flux") is True
+    assert _supports_runtime_lora_adapters("sdxl") is True
+    assert _supports_runtime_lora_adapters("flux2_klein") is False
+    assert _supports_runtime_lora_adapters("z_image") is False
 
 
 def test_apply_loras_unloads_when_prompt_has_no_loras():

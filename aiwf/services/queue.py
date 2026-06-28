@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import deque
 from uuid import UUID
 
@@ -27,6 +28,15 @@ class JobQueue:
         self._seq: dict[UUID, int] = {}
         self._counter = 0
         self._max_history = 100
+        # Last time each running job reported any progress (model-load message,
+        # "Encoding prompt", a denoise step, ...). Used by a stall watchdog to
+        # detect a job that has gone completely silent — see seconds_since_progress.
+        self._progress_at: dict[UUID, float] = {}
+        # Jobs the watchdog has force-failed because they stalled. The worker
+        # thread for one of these may still be alive (stuck in a blocking call
+        # we cannot interrupt) — this set lets run_next() avoid clobbering the
+        # forced FAILED state if that thread ever does return.
+        self._abandoned: set[UUID] = set()
 
     def enqueue(self, record: JobRecord) -> JobRecord:
         with self._lock:
@@ -90,7 +100,52 @@ class JobQueue:
                 message=message,
                 current_image=preview,
             )
+            self._progress_at[job_id] = time.monotonic()
             return job.progress
+
+    def seconds_since_progress(self, job_id: UUID) -> float | None:
+        """How long since this job last reported progress, or None if unknown."""
+        with self._lock:
+            last = self._progress_at.get(job_id)
+        if last is None:
+            return None
+        return time.monotonic() - last
+
+    def force_fail_stalled(self, job_id: UUID, reason: str) -> bool:
+        """Forcibly fail a job that has gone silent for too long.
+
+        Used by a stall watchdog when a worker thread is stuck inside a
+        blocking call (e.g. CPU-offload weight transfer / text encoding) that
+        offers no cooperative cancellation point. We cannot kill that thread,
+        but we *can* stop it from blocking everything else forever: mark the
+        job FAILED, release its slot, and let the caller force-release the
+        GPU tenant lock. Returns True if it actually force-failed something.
+        """
+        with self._lock:
+            if self._active != job_id:
+                return False
+            job = self._jobs.get(job_id)
+            if job is None or job.state != JobState.RUNNING:
+                return False
+            job.state = JobState.FAILED
+            job.error = reason
+            self._abandoned.add(job_id)
+            self._cancel_requested.discard(job_id)
+            self._active = None
+            self._slot_ready.notify_all()
+        trace_safe("queue.force_failed", reason, job_id=str(job_id))
+        self._events.publish(JobFailed(job_id, reason))
+        return True
+
+    def is_abandoned(self, job_id: UUID) -> bool:
+        """True if a stall watchdog already force-failed this job.
+
+        Lets a worker that's about to return late (after being force-failed
+        for stalling) check whether it should skip post-processing/saving
+        instead of touching a tenant lock that's already been released.
+        """
+        with self._lock:
+            return job_id in self._abandoned
 
     def should_cancel(self, job_id: UUID) -> bool:
         with self._lock:
@@ -118,36 +173,57 @@ class JobQueue:
             self._active = job_id
             record = self._jobs[job_id]
             record.state = JobState.RUNNING
+            self._progress_at[job_id] = time.monotonic()
 
         self._events.publish(JobStarted(job_id, record.request))
         try:
             if self.should_cancel(job_id):
                 raise GenerationCancelledError()
             result = worker(record)
+            with self._lock:
+                abandoned = job_id in self._abandoned
+            if abandoned:
+                # A stall watchdog already force-failed this job and released
+                # its slot/lock. The worker thread was stuck and has now
+                # returned late — don't resurrect it as COMPLETED.
+                trace_safe(
+                    "queue.late_return_after_force_fail",
+                    "Worker returned after being force-failed for stalling",
+                    job_id=str(job_id),
+                )
+                return record
             record.result = result
             record.state = JobState.COMPLETED
             self._events.publish(JobFinished(job_id, result))
             return record
         except GenerationCancelledError:
-            record.state = JobState.CANCELLED
-            trace_safe("queue.cancelled", "Worker cancelled", job_id=str(job_id))
-            self._events.publish(JobCancelled(job_id))
+            with self._lock:
+                abandoned = job_id in self._abandoned
+            if not abandoned:
+                record.state = JobState.CANCELLED
+                trace_safe("queue.cancelled", "Worker cancelled", job_id=str(job_id))
+                self._events.publish(JobCancelled(job_id))
             return record
         except Exception as exc:
-            record.state = JobState.FAILED
-            record.error = str(exc)
-            trace_exception_safe(
-                "queue.worker_failed",
-                exc,
-                job_id=str(job_id),
-                mode=record.request.mode.value,
-                checkpoint_id=record.request.checkpoint_id,
-            )
-            self._events.publish(JobFailed(job_id, str(exc)))
+            with self._lock:
+                abandoned = job_id in self._abandoned
+            if not abandoned:
+                record.state = JobState.FAILED
+                record.error = str(exc)
+                trace_exception_safe(
+                    "queue.worker_failed",
+                    exc,
+                    job_id=str(job_id),
+                    mode=record.request.mode.value,
+                    checkpoint_id=record.request.checkpoint_id,
+                )
+                self._events.publish(JobFailed(job_id, str(exc)))
             raise
         finally:
             with self._lock:
                 self._cancel_requested.discard(job_id)
+                self._abandoned.discard(job_id)
+                self._progress_at.pop(job_id, None)
                 if self._active == job_id:
                     self._active = None
                 self._slot_ready.notify_all()

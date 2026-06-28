@@ -74,6 +74,14 @@ def torch_native_fp8_available() -> bool:
         return False
 
 
+def _torch_float8_dtypes(torch_module: Any) -> tuple[Any, ...]:
+    return tuple(
+        dtype
+        for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+        if (dtype := getattr(torch_module, name, None)) is not None
+    )
+
+
 def tensor_diag(tensor: Any) -> dict[str, Any]:
     """Return tensor metadata safe for diagnostics; never include tensor values."""
     device = getattr(tensor, "device", None)
@@ -340,6 +348,8 @@ class AIWFFP8Linear:
             prepare_started = time.perf_counter()
             original_shape = input.shape[:-1]
             x = input.reshape(-1, self.in_features)
+            if x.dtype in _torch_float8_dtypes(torch):
+                x = x.to(torch.bfloat16)
             if not x.is_contiguous():
                 x = x.contiguous()
             m, _k = x.shape

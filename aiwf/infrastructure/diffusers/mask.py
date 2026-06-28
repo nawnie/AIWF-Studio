@@ -139,6 +139,14 @@ def align_to_multiple_of_8(width: int, height: int) -> tuple[int, int]:
     return max(8, (width // 8) * 8), max(8, (height // 8) * 8)
 
 
+def align_to_multiple_of_16(width: int, height: int) -> tuple[int, int]:
+    """Flux/Flux.2 Klein/Z-Image patchify in 16x16 blocks and raise a ValueError
+    ("Height/Width must be divisible by 16") for anything else. SD/SDXL's
+    align_to_multiple_of_8 isn't strict enough for these architectures.
+    """
+    return max(16, (width // 16) * 16), max(16, (height // 16) * 16)
+
+
 def merge_inpaint_masks(
     painted: Image.Image | None,
     sam_mask: Image.Image | None,

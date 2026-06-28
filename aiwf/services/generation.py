@@ -49,6 +49,14 @@ DEFAULT_NEGATIVE_PROMPT = (
     "watermark, signature, text, error, cropped, out of frame, duplicate"
 )
 
+# How long an image job can go with zero progress updates (no "Encoding prompt",
+# no model-load message, no denoise step) before we treat it as stalled. This is
+# generous on purpose — CPU-offloaded text encoders on large DiT models (Flux,
+# Flux.2 Klein, Z-Image) can legitimately take a couple of minutes on first use.
+# Past this point there is no plausible legitimate explanation, only a hang.
+STALL_TIMEOUT_SECONDS = 240.0
+_STALL_POLL_INTERVAL_SECONDS = 5.0
+
 
 class GenerationService:
     """Application boundary for image generation orchestration.
@@ -125,11 +133,89 @@ class GenerationService:
             return request.model_copy(update={"cfg_scale": profile.recommended_cfg})
         return request
 
+    def _route_inpaint_checkpoint_for_txt2img(
+        self,
+        request: GenerationRequest,
+        checkpoint,
+        init_images: list[Image.Image] | None,
+        mask_images: list[Image.Image] | None,
+    ) -> tuple[GenerationRequest, list[Image.Image] | None, list[Image.Image] | None]:
+        """Let an inpaint (9-channel UNet) checkpoint run from the regular txt2img tab.
+
+        These checkpoints can't load through the normal txt2img pipeline (conv_in
+        expects 9 channels, not 4) so the backend used to hard-fail with
+        ModelNotFoundError and tell the user to switch to Inpaint mode. That's an
+        unnecessary mode switch for what should just work: feed the inpaint UNet a
+        blank canvas with a fully-white (fully masked) mask, which makes it denoise
+        the whole image from scratch - functionally equivalent to txt2img.
+        """
+        from aiwf.infrastructure.diffusers.model_arch import is_inpaint_architecture
+
+        if request.mode != GenerationMode.TXT2IMG:
+            return request, init_images, mask_images
+        if not is_inpaint_architecture(getattr(checkpoint, "architecture", "")):
+            return request, init_images, mask_images
+        if init_images:
+            # User already supplied an init image (e.g. via an extra-networks flow);
+            # don't override their intent.
+            return request, init_images, mask_images
+
+        width = max(64, int(request.width))
+        height = max(64, int(request.height))
+        blank = Image.new("RGB", (width, height), (127, 127, 127))
+        full_mask = Image.new("L", (width, height), 255)
+        trace_safe(
+            "generation.inpaint_checkpoint_in_txt2img",
+            "Routing inpaint checkpoint through inpaint pipeline with a full-canvas mask",
+            checkpoint_id=getattr(checkpoint, "id", None),
+            width=width,
+            height=height,
+        )
+        routed_request = request.model_copy(update={"mode": GenerationMode.INPAINT})
+        return routed_request, [blank], [full_mask]
+
     def _persist_last_checkpoint(self, checkpoint_id: str) -> None:
         """Remember the last model used so the next launch restores it."""
         if not checkpoint_id or self.settings.last_checkpoint_id == checkpoint_id:
             return
         self.settings.last_checkpoint_id = checkpoint_id
+        if self._settings_path is None:
+            return
+        self._settings_path.write_text(
+            self.settings.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+
+    def get_model_preset(self, checkpoint_id: str | None = None) -> dict:
+        """Resolve the generation settings to show for a checkpoint: last-used
+        for that exact checkpoint if we have it, else a sane default for its
+        architecture. Returns {} if the checkpoint can't be resolved."""
+        from aiwf.infrastructure.diffusers.model_presets import resolve_model_preset
+
+        try:
+            checkpoint = self.backend.resolve_checkpoint(checkpoint_id)
+        except Exception:
+            return {}
+        return resolve_model_preset(
+            self.settings.model_settings,
+            checkpoint.id,
+            getattr(checkpoint, "architecture", None),
+        )
+
+    def _persist_model_settings(self, checkpoint_id: str, request: GenerationRequest) -> None:
+        """Remember this request's generation knobs against the checkpoint that
+        produced it, so the next time this model is selected the UI defaults to
+        whatever last worked rather than a generic global default."""
+        from aiwf.infrastructure.diffusers.model_presets import extract_preset_fields
+
+        if not checkpoint_id:
+            return
+        fields = extract_preset_fields(request)
+        if not fields:
+            return
+        if self.settings.model_settings.get(checkpoint_id) == fields:
+            return
+        self.settings.model_settings[checkpoint_id] = fields
         if self._settings_path is None:
             return
         self._settings_path.write_text(
@@ -688,10 +774,62 @@ class GenerationService:
                     )
                 )
 
+    def _start_stall_watchdog(self, job_id, tenant_job_id: str) -> threading.Event:
+        """Guard against an image job that goes silent forever.
+
+        Image generation runs cooperatively on an in-process thread with no hard
+        kill switch — unlike the subprocess-based video/training engines, which
+        have a heartbeat-timeout watchdog in EngineSupervisor that can SIGTERM/
+        SIGKILL a stuck worker. A blocking call inside diffusers/accelerate (e.g.
+        moving a large text encoder during CPU offload) cannot be interrupted from
+        another thread in Python, so we cannot kill it the same way. What we *can*
+        do is stop it from blocking the rest of the app forever: if a job reports
+        no progress at all for STALL_TIMEOUT_SECONDS, force-fail the job record and
+        force-release the GPU tenant lock so other jobs (image or video) can run.
+        The original thread may still be alive in the background after this; it is
+        harmless once it loses the tenant lock and its result is discarded (see
+        JobQueue.run_next's "late return after force fail" handling).
+
+        Returns a stop Event the caller must set() once the job finishes normally,
+        so the watchdog thread exits instead of polling forever.
+        """
+        stop_event = threading.Event()
+
+        def _watch() -> None:
+            while not stop_event.wait(_STALL_POLL_INTERVAL_SECONDS):
+                elapsed = self.queue.seconds_since_progress(job_id)
+                if elapsed is None or elapsed < STALL_TIMEOUT_SECONDS:
+                    continue
+                reason = (
+                    f"Generation stalled — no progress for {elapsed:.0f}s "
+                    "(likely stuck in prompt encoding/model loading with no "
+                    "cancellation point reachable). Forcing this job to fail so "
+                    "the GPU is not blocked indefinitely."
+                )
+                trace_safe(
+                    "generation.stall_watchdog_triggered",
+                    reason,
+                    job_id=str(job_id),
+                    elapsed_seconds=elapsed,
+                )
+                failed = self.queue.force_fail_stalled(job_id, reason)
+                if failed and self.supervisor is not None:
+                    self.supervisor.request_switch(
+                        EngineSwitchRequest(
+                            target=EngineTenant.IDLE,
+                            reason=f"Force-released stalled image job {job_id}",
+                            job_id=tenant_job_id,
+                        )
+                    )
+                return
+
+        threading.Thread(target=_watch, daemon=True, name=f"stall-watchdog-{job_id}").start()
+        return stop_event
+
     def _loading_model_message(self, checkpoint) -> str:
         title = getattr(checkpoint, "title", None) or getattr(checkpoint, "id", None) or "selected model"
         warm = getattr(self.backend, "is_checkpoint_warm", None)
-        if callable(warm) and warm(getattr(checkpoint, "id", None)):
+        if callable(warm) and warm(getattr(checkpoint, "id", None)) is True:
             return f"Using warm model: {title}"
         return f"Loading image model: {title}"
 
@@ -712,6 +850,7 @@ class GenerationService:
             active = None
             optimization_plan: OptimizationPlan | None = None
             latest_preview: Image.Image | None = None
+            watchdog_stop = self._start_stall_watchdog(job.id, tenant_job_id)
             try:
                 if self.supervisor is not None:
                     # Image jobs are GPU tenants; postprocessors borrow the same
@@ -733,6 +872,10 @@ class GenerationService:
                 active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
                 self._persist_last_checkpoint(active.id)
                 job.request = self._guard_distilled_cfg(job.request, active)
+                nonlocal init_images, mask_images
+                job.request, init_images, mask_images = self._route_inpaint_checkpoint_for_txt2img(
+                    job.request, active, init_images, mask_images
+                )
                 optimization_plan = self._resolve_optimization_plan(job.request, active)
 
                 def on_progress(
@@ -764,6 +907,7 @@ class GenerationService:
                     self._save_cancelled_preview(job, job.request, active, optimization_plan, latest_preview)
                     raise
                 result.elapsed_seconds = time.perf_counter() - _gen_t0
+                self._persist_model_settings(active.id, job.request)
                 trace_model_throughput(
                     kind=str(job.request.mode.value),
                     model_id=getattr(active, "id", None),
@@ -775,6 +919,20 @@ class GenerationService:
                     image_count=len(result.images),
                     batch_size=int(job.request.batch_size),
                 )
+
+                if self.queue.is_abandoned(job.id):
+                    # A stall watchdog already force-failed this job and
+                    # released the GPU tenant lock while we were stuck inside
+                    # the blocking generate() call. The lock is gone, so any
+                    # post-processing here would fail trying to "borrow" a
+                    # tenant we no longer own. Discard quietly instead of
+                    # crashing on the way out.
+                    trace_safe(
+                        "generation.late_return_discarded",
+                        "Worker finished after being force-failed for stalling; discarding result",
+                        job_id=str(job.id),
+                    )
+                    return result
 
                 if image_postprocess is not None:
                     if self.supervisor is None:
@@ -813,7 +971,8 @@ class GenerationService:
                 )
                 raise
             finally:
-                if self.supervisor is not None and tenant_acquired:
+                watchdog_stop.set()
+                if self.supervisor is not None and tenant_acquired and not self.queue.is_abandoned(job.id):
                     self.supervisor.request_switch(
                         EngineSwitchRequest(
                             target=EngineTenant.IDLE,
@@ -856,6 +1015,7 @@ class GenerationService:
             active = None
             optimization_plan: OptimizationPlan | None = None
             latest_preview: Image.Image | None = None
+            watchdog_stop = self._start_stall_watchdog(job.id, tenant_job_id)
             try:
                 if self.supervisor is not None:
                     switch = self.supervisor.request_switch(
@@ -875,6 +1035,10 @@ class GenerationService:
                 active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
                 self._persist_last_checkpoint(active.id)
                 job.request = self._guard_distilled_cfg(job.request, active)
+                nonlocal init_images, mask_images
+                job.request, init_images, mask_images = self._route_inpaint_checkpoint_for_txt2img(
+                    job.request, active, init_images, mask_images
+                )
                 optimization_plan = self._resolve_optimization_plan(job.request, active)
                 preview_every = self.settings.live_preview_interval()
                 if job.request.save_interrupted and preview_every == 0:
@@ -914,6 +1078,7 @@ class GenerationService:
                     self._save_cancelled_preview(job, job.request, active, optimization_plan, latest_preview)
                     raise
                 result.elapsed_seconds = time.perf_counter() - _gen_t0
+                self._persist_model_settings(active.id, job.request)
                 trace_model_throughput(
                     kind=str(job.request.mode.value),
                     model_id=getattr(active, "id", None),
@@ -925,6 +1090,18 @@ class GenerationService:
                     image_count=len(result.images),
                     batch_size=int(job.request.batch_size),
                 )
+
+                if self.queue.is_abandoned(job.id):
+                    # Stall watchdog already force-failed this job and
+                    # released the GPU tenant lock while generate() was
+                    # stuck. Don't try to borrow a tenant we no longer own —
+                    # discard the late result quietly.
+                    trace_safe(
+                        "generation.late_return_discarded",
+                        "Worker finished after being force-failed for stalling; discarding result",
+                        job_id=str(job.id),
+                    )
+                    return result
 
                 if image_postprocess is not None:
                     if self.supervisor is None:
@@ -965,7 +1142,8 @@ class GenerationService:
                 )
                 raise
             finally:
-                if self.supervisor is not None and tenant_acquired:
+                watchdog_stop.set()
+                if self.supervisor is not None and tenant_acquired and not self.queue.is_abandoned(job.id):
                     self.supervisor.request_switch(
                         EngineSwitchRequest(
                             target=EngineTenant.IDLE,
@@ -996,10 +1174,24 @@ class GenerationService:
         while not done.is_set() or not progress_q.empty():
             try:
                 item = progress_q.get(timeout=0.15)
-            except queue.Empty:
+                yield item
                 continue
-            yield item
+            except queue.Empty:
+                pass
+            if not done.is_set():
+                # The worker thread is the only thing that flips `done`, and it
+                # may never return if it is stuck inside an uncancellable blocking
+                # call (see _start_stall_watchdog). If the stall watchdog already
+                # force-failed this job, stop waiting on the dead thread — the
+                # job is finished from the queue's point of view even though the
+                # underlying thread may still be alive in the background.
+                current = self.queue.get(record.id)
+                if current is not None and current.state != JobState.RUNNING:
+                    break
 
+        # Don't block the UI on a thread that may be permanently stuck; the
+        # watchdog (if it fired) has already released the job's slot and GPU
+        # tenant lock, so there is nothing further to wait for here.
         thread.join(timeout=1.0)
 
         finished = self.queue.get(record.id)
