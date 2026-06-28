@@ -280,7 +280,7 @@ class WanHeaderInfo:
     storage: str = ""        # gguf | safetensors | ...
     arch: str = ""           # e.g. "wan_2.2_14b_i2v" (safetensors) or "wan" (gguf)
     size_class: str = ""     # "5b" | "14b" | ""
-    in_channels: int = 0     # 36 (14B I2V) | 48 (5B TI2V) | 32 (T2V) | 0
+    in_channels: int = 0     # 36 (14B I2V) | 48 (5B TI2V) | 52 (Fun-Control) | 32 (T2V) | 0
     needs_vae: str = ""      # "2.1" (16-ch) | "2.2" (48-ch) | ""
     quant: str = ""          # fp8 | q2..q8 | bf16 | fp16 | ""
     role: str = ""           # high | low | ""  (header-derived only)
@@ -292,7 +292,7 @@ class WanHeaderInfo:
 def _wan_vae_for_in_channels(ic: int) -> str:
     if ic == 48:
         return "2.2"
-    if ic in (32, 36):
+    if ic in (32, 36, 52):
         return "2.1"
     return ""
 
@@ -339,7 +339,7 @@ def wan_model_header_info(path) -> "WanHeaderInfo":
             for k, v in hdr.items():
                 if k.endswith("patch_embedding.weight") and isinstance(v, dict):
                     vals = [int(x) for x in (v.get("shape") or [])]
-                    ic = next((x for x in vals if x in (32, 36, 48)), 0)
+                    ic = next((x for x in vals if x in (32, 36, 48, 52)), 0)
                     dim = max(vals) if vals else 0
                     break
             nb = len({k.split("blocks.")[1].split(".")[0] for k in hdr if "blocks." in k})

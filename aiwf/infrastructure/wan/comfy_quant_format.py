@@ -14,6 +14,7 @@ _SCALE_SUFFIXES = (
     ".input_scale",
     ".scale_input",
 )
+_LOADER_WEIGHT_SCALE_SUFFIXES = (".weight_scale", ".scale_weight")
 
 
 @dataclass(frozen=True)
@@ -106,7 +107,7 @@ def inspect_wan_quant_file(path: Path | str) -> WanQuantReport:
                 if key_l.endswith(".weight"):
                     quantized_linear_layers += 1
                     base = key.removesuffix(".weight")
-                    if not _has_any(keys, base, (".weight_scale", ".scale_weight", ".weight_scale_2")):
+                    if not _has_any(keys, base, _LOADER_WEIGHT_SCALE_SUFFIXES):
                         missing_scales.append(f"{base}.weight_scale")
 
                 count = 1
@@ -119,12 +120,14 @@ def inspect_wan_quant_file(path: Path | str) -> WanQuantReport:
 
             if quantized_weight_count and not weight_scale_count:
                 warnings.append("FP8 tensors found without weight scale sidecars.")
+            if scale_tensor_count and not quantized_weight_count:
+                warnings.append("FP8 scale tensors found, but no FP8 tensor weights were detected.")
             if any(k.lower().endswith(".comfy_quant") for k in keys) and not quantized_weight_count:
                 warnings.append("Comfy quant metadata found, but no FP8 tensor weights were detected.")
     except Exception as exc:
         return WanQuantReport(path=str(p), format="unreadable", warnings=(str(exc),))
 
-    fmt = "comfy_fp8" if quantized_weight_count or scale_tensor_count else "diffusers_safetensors"
+    fmt = "comfy_fp8" if quantized_weight_count else "diffusers_safetensors"
     return WanQuantReport(
         path=str(p),
         format=fmt,

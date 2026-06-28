@@ -47,6 +47,7 @@ def test_audio_mux_builds_ffmpeg_command(tmp_path: Path):
 
     assert captured["command"][:5] == ["ffmpeg", "-y", "-i", str(video), "-i"]
     assert str(audio) in captured["command"]
+    assert captured["command"][captured["command"].index("-af") + 1] == "apad"
     assert "-shortest" in captured["command"]
     assert result.output_path == str(out)
 

@@ -43,6 +43,22 @@ def _sage_supported(q, k, v, attn_mask, dropout_p: float) -> bool:
     return q.dtype in (torch.float16, torch.bfloat16) and k.dtype == q.dtype and v.dtype == q.dtype
 
 
+def _align_sdpa_dtypes(q, k, v):
+    if not (q.is_floating_point() and k.is_floating_point() and v.is_floating_point()):
+        return q, k, v, False
+    if q.dtype == k.dtype == v.dtype:
+        return q, k, v, False
+    target_dtype = v.dtype if v.dtype in (torch.float16, torch.bfloat16) else q.dtype
+    if target_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        return q, k, v, False
+    return (
+        q.to(target_dtype) if q.dtype != target_dtype else q,
+        k.to(target_dtype) if k.dtype != target_dtype else k,
+        v.to(target_dtype) if v.dtype != target_dtype else v,
+        True,
+    )
+
+
 @contextmanager
 def attention_call_context(flags):
     """Apply per-call attention patches that must not leak outside generation."""
@@ -58,6 +74,17 @@ def attention_call_context(flags):
     original = torch.nn.functional.scaled_dot_product_attention
 
     def _sage_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
+        query, key, value, aligned = _align_sdpa_dtypes(query, key, value)
+        if aligned:
+            return original(
+                query,
+                key,
+                value,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                **kwargs,
+            )
         if not _sage_supported(query, key, value, attn_mask, dropout_p):
             return original(
                 query,
@@ -282,7 +309,7 @@ def apply_builtin_dit_attention_backend(denoiser, flags) -> str:
             return "sage_sdpa"
         return "sdp"
 
-    backend = resolve_best_diffusers_attention_backend(flags)
+    backend = getattr(denoiser, "_aiwf_force_diffusers_attention_backend", None) or resolve_best_diffusers_attention_backend(flags)
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*Attention backends are an experimental feature.*")

@@ -77,6 +77,48 @@ def test_inspect_wan_quant_file_reports_missing_scales(tmp_path: Path):
     assert report.missing_scale_keys == ("blocks.0.attn1.to_q.weight_scale",)
 
 
+def test_inspect_wan_quant_file_scale_only_is_not_comfy_fp8(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+
+    path = tmp_path / "wan-scale-only.safetensors"
+    safetensors.save_file(
+        {"blocks.0.attn1.to_q.weight_scale": torch.tensor(0.125, dtype=torch.float32)},
+        path,
+    )
+
+    report = inspect_wan_quant_file(path)
+
+    assert report.format == "diffusers_safetensors"
+    assert report.is_comfy_fp8 is False
+    assert report.demo_ready is False
+    assert report.quantized_weight_count == 0
+    assert report.scale_tensor_count == 1
+    assert any("no FP8 tensor weights" in warning for warning in report.warnings)
+
+
+def test_inspect_wan_quant_file_weight_scale_2_only_reports_missing_loader_scale(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch float8 unavailable")
+
+    path = tmp_path / "wan-weight-scale-2.safetensors"
+    safetensors.save_file(
+        {
+            "blocks.0.attn1.to_q.weight": torch.randn(32, 16).to(torch.float8_e4m3fn),
+            "blocks.0.attn1.to_q.weight_scale_2": torch.tensor(0.125, dtype=torch.float32),
+        },
+        path,
+    )
+
+    report = inspect_wan_quant_file(path)
+
+    assert report.format == "comfy_fp8"
+    assert report.demo_ready is False
+    assert report.missing_scale_keys == ("blocks.0.attn1.to_q.weight_scale",)
+
+
 def test_inspect_wan_quant_file_reports_unsupported_metadata(tmp_path: Path):
     torch = pytest.importorskip("torch")
     safetensors = pytest.importorskip("safetensors.torch")

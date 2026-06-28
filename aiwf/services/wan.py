@@ -16,6 +16,7 @@ from PIL import Image
 from aiwf import __version__
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.engine import EngineSwitchRequest, EngineTenant
+from aiwf.core.user_messages import VIDEO_MESSAGES
 from aiwf.core.domain.wan import (
     WAN_RUNTIME_HIGH_LOW,
     WAN_RUNTIME_HIGH_LOW_FP8,
@@ -107,6 +108,20 @@ def _route_size_mismatch_error(label: str, model_path: str | Path, expected_size
             f"{expected_label} weights: {Path(model_path).name}"
         )
     return None
+
+
+def _dual_route_in_channels_error(label: str, model_path: str | Path) -> str | None:
+    try:
+        info = wan_model_header_info(model_path)
+    except Exception:
+        return None
+    if not info.ok or not info.in_channels or info.in_channels == 36:
+        return None
+    return (
+        f"{label} transformer has a {info.in_channels}-channel patch embedding, but the current "
+        "AIWF high/low route is wired for 36-channel Wan A14B I2V transformers. "
+        "Fun-Control, T2V, and camera/control variants need a dedicated conditioning pipeline."
+    )
 
 
 def _video_status(message: str) -> None:
@@ -709,6 +724,10 @@ class WanService:
             if high_res and low_res:
                 high_storage = wan_model_storage_family(high_res)
                 low_storage = wan_model_storage_family(low_res)
+                for label, resolved in (("High noise", high_res), ("Low noise", low_res)):
+                    channel_mismatch = _dual_route_in_channels_error(label, resolved)
+                    if channel_mismatch:
+                        errors.append(channel_mismatch)
                 if request.runtime_mode == WAN_RUNTIME_HIGH_LOW:
                     if high_storage != "gguf" or low_storage != "gguf":
                         errors.append("The GGUF Wan route only accepts matched `.gguf` high/low transformer files.")
@@ -1185,11 +1204,11 @@ class WanService:
     def default_text_encoder(self) -> str:
         """Return the best local text encoder filename to use by default.
 
-        Preference order: FP8 safetensors (smallest, fastest) > GGUF > "" (full precision).
+        Preference order: FP8 safetensors (smallest local file; expands on load) > GGUF > "" (full precision).
         An empty string means "use the full-precision encoder inside components_base/text_encoder/".
         """
         encoders = self.list_local_text_encoders()
-        # Prefer explicit FP8 safetensors (usually ~4 GB, much smaller than full-precision)
+        # Prefer explicit FP8 safetensors for smaller local files.
         for name in encoders:
             n = name.lower()
             if n.endswith(".safetensors") and "fp8" in n:
@@ -1686,47 +1705,54 @@ class WanService:
             )
 
             if steps_per_second is not None and steps_per_second > 0:
-                message = (
+                technical_message = (
                     f"{frame_count} frames at {w}x{h} in {elapsed:.1f}s; "
                     f"{steps_per_second:.3f} steps/s ({steps_per_second:.3f} it/s, "
                     f"{1.0 / steps_per_second:.2f} s/it); denoise {denoise_seconds:.1f}s, "
                     f"write {video_write_seconds:.1f}s"
                 )
             else:
-                message = f"{frame_count} frames at {w}x{h} in {elapsed:.1f}s"
+                technical_message = f"{frame_count} frames at {w}x{h} in {elapsed:.1f}s"
             if fp8_fallback_calls:
                 reason = f": {fp8_fallback_reasons[0]}" if fp8_fallback_reasons else ""
-                message = (
-                    f"{message}; FP8 fallback calls={fp8_fallback_calls} "
+                technical_message = (
+                    f"{technical_message}; FP8 fallback calls={fp8_fallback_calls} "
                     f"across {fp8_fallback_layers} layers{reason}"
                 )
             elif fp8_linear_layers:
-                message = f"{message}; FP8 fast path clean ({fp8_linear_layers} layers, 0 fallbacks)"
+                technical_message = f"{technical_message}; FP8 fast path clean ({fp8_linear_layers} layers, 0 fallbacks)"
             if fp8_profile_enabled:
-                message = (
-                    f"{message}; FP8 profile prepare={fp8_prepare_ms:.1f}ms, "
+                technical_message = (
+                    f"{technical_message}; FP8 profile prepare={fp8_prepare_ms:.1f}ms, "
                     f"mm={fp8_scaled_mm_ms:.1f}ms, bias={fp8_bias_ms:.1f}ms"
                 )
             if latent_frame_count:
-                message = (
-                    f"{message}; latent={latent_frame_count}f, "
+                technical_message = (
+                    f"{technical_message}; latent={latent_frame_count}f, "
                     f"chunks={'on' if temporal_chunks else 'off'}, "
                     f"xfwd/step~{transformer_forwards_per_step}"
                 )
             if attention_backends:
-                message = f"{message}; attention={','.join(attention_backends)}"
+                technical_message = f"{technical_message}; attention={','.join(attention_backends)}"
             if stage_transition_count:
-                message = (
-                    f"{message}; stage_swaps={stage_transition_count} "
+                technical_message = (
+                    f"{technical_message}; stage_swaps={stage_transition_count} "
                     f"({stage_transition_total_ms:.0f}ms)"
                 )
             if cache_mode:
-                message = f"{message}; cache={cache_mode}"
+                technical_message = f"{technical_message}; cache={cache_mode}"
             if vram_reserve_enabled and vram_limit_mb and vram_total_mb:
-                message = (
-                    f"{message}; VRAM cap={vram_limit_mb}/{vram_total_mb} MB "
+                technical_message = (
+                    f"{technical_message}; VRAM cap={vram_limit_mb}/{vram_total_mb} MB "
                     f"(keep_free={vram_reserve_mb} MB)"
                 )
+            logger.debug("Wan generation metrics: %s", technical_message)
+            message = VIDEO_MESSAGES["complete"].format(
+                frames=frame_count,
+                width=w,
+                height=h,
+                seconds=elapsed,
+            )
 
             result = WanI2VResult(
                 output_path=str(output_path),

@@ -225,6 +225,8 @@ class AudioGenerationService:
             "1:a:0",
             "-c:v",
             "copy",
+            "-af",
+            "apad",
             "-c:a",
             "aac",
             "-shortest",

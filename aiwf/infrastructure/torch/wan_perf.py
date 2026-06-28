@@ -95,13 +95,8 @@ def _try_sage_attention() -> str | None:
             _ORIGINAL_SDPA = _orig
 
         def _sage_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
-            # Wan 3D tensors are (B, seq, heads, dim); sageattn expects (B, heads, seq, dim).
             if query.ndim == 4 and query.shape[2] <= 64 and query.shape[1] > query.shape[2]:
-                q = query.transpose(1, 2)
-                k = key.transpose(1, 2)
-                v = value.transpose(1, 2)
-                out = sageattn(q, k, v, is_causal=is_causal, tensor_layout="HND")
-                return out.transpose(1, 2)
+                return sageattn(query, key, value, is_causal=is_causal, tensor_layout="NHD")
             return _orig(
                 query,
                 key,

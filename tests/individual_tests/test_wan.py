@@ -821,12 +821,9 @@ def test_wan_generation_records_video_throughput(tmp_path: Path, monkeypatch):
     assert result.vram_limit_mb == 14848
     assert result.vram_total_mb == 16384
     assert result.vram_limit_fraction == 0.90625
-    assert "4.000 it/s" in result.message
-    assert "FP8 fast path clean" in result.message
-    assert "latent=13f" in result.message
-    assert "cache=gpu_active_cpu_pinned_standby" in result.message
-    assert "VRAM cap=14848/16384 MB" in result.message
-    assert "keep_free=1536 MB" in result.message
+    assert result.message.startswith("Created 5 frames at 8x8 in ")
+    assert "FP8" not in result.message
+    assert "VRAM" not in result.message
 
 
 def test_wan_generation_fast_5b_uses_local_model_without_high_low(tmp_path: Path, monkeypatch):
@@ -1655,6 +1652,26 @@ def test_fp8_scaled_linear_uses_column_major_weight_for_scaled_mm():
     assert y.shape == (2, 64)
     assert y.dtype == torch.bfloat16
     assert not getattr(layer, "_scaled_mm_warned", False)
+    assert layer.fast_mm_calls == 1
+    assert layer.fallback_calls == 0
+
+
+def test_fp8_scaled_linear_accepts_float8_activation_for_scaled_mm():
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available() or not hasattr(torch, "float8_e4m3fn") or not hasattr(torch, "_scaled_mm"):
+        pytest.skip("native CUDA FP8 runtime is unavailable")
+
+    layer = _new_fp8_scaled_linear(32, 64, bias=False)
+    weight = torch.randn(64, 32).clamp(-2, 2).to(device="cuda", dtype=torch.float8_e4m3fn)
+    layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+    layer.weight_scale = torch.ones((), dtype=torch.float32)
+    layer = layer.cuda()
+    x = torch.randn(2, 32, device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+
+    y = layer(x)
+
+    assert y.shape == (2, 64)
+    assert y.dtype == torch.bfloat16
     assert layer.fast_mm_calls == 1
     assert layer.fallback_calls == 0
 

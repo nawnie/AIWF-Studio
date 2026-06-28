@@ -36,7 +36,17 @@ if (!(Test-Path $Python)) {
 
 & $Python -m pip install --upgrade pip
 
-& $Python -c "import torch; raise SystemExit(0 if torch.cuda.is_available() and torch.version.cuda else 1)" 2>$null
+$TorchProbe = @'
+import importlib.util
+if importlib.util.find_spec('torch') is None:
+    raise SystemExit(1)
+try:
+    import torch
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if torch.cuda.is_available() and torch.version.cuda else 1)
+'@
+& $Python -c $TorchProbe 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[AIWF] Installing CUDA torch for audio engine"
     & $Python -m pip install --disable-pip-version-check --upgrade --force-reinstall `

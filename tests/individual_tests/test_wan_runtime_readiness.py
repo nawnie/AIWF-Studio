@@ -44,6 +44,22 @@ def _write_fake_safetensors(path: Path) -> None:
     safetensors.save_file({"blocks.0.weight": torch.ones(1)}, path)
 
 
+def _write_fake_comfy_fp8_wan_transformer(path: Path, *, in_channels: int) -> None:
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch float8 unavailable")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tensors = {
+        "patch_embedding.weight": torch.zeros((1, in_channels, 1, 1, 1), dtype=torch.float32),
+        "blocks.0.attn.q.weight": torch.ones((1, 1), dtype=torch.float32).to(torch.float8_e4m3fn),
+        "blocks.0.attn.q.weight_scale": torch.ones((1,), dtype=torch.float32),
+    }
+    for index in range(40):
+        tensors[f"blocks.{index}.dummy"] = torch.ones((1,), dtype=torch.float32)
+    safetensors.save_file(tensors, path)
+
+
 def test_pass5_runtime_mode_contracts_are_explicit():
     fast = WanI2VRequest(runtime_mode=WAN_RUNTIME_FAST_5B)
     quality = WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW)
@@ -155,6 +171,34 @@ def test_pass5_high_low_modes_still_require_both_transformers(tmp_path: Path):
         result = service.preflight(WanI2VRequest(runtime_mode=mode, high_noise_model_id=high.name))
         assert result.ok is False
         assert any("Select a Low noise transformer" in error for error in result.errors)
+
+
+def test_pass5_fp8_preflight_rejects_fun_control_channel_count(tmp_path: Path, monkeypatch):
+    import aiwf.services.wan as wan_service_module
+
+    service = _svc(tmp_path)
+    monkeypatch.setattr(service, "_wan_file_candidates", lambda: [])
+    monkeypatch.setattr(wan_service_module, "_native_fp8_runtime_available", lambda: True)
+    _write_component_base(service)
+    vae = service.flags.resolved_models_dir() / "VAE" / "wan2.1_vae.safetensors"
+    high = service.models_dir() / "Safetensor" / "wan2.2_fun_control_high_noise_14B_fp8_scaled.safetensors"
+    low = service.models_dir() / "Safetensor" / "wan2.2_fun_control_low_noise_14B_fp8_scaled.safetensors"
+    _write_fake_safetensors(vae)
+    _write_fake_comfy_fp8_wan_transformer(high, in_channels=52)
+    _write_fake_comfy_fp8_wan_transformer(low, in_channels=52)
+
+    result = service.preflight(
+        WanI2VRequest(
+            runtime_mode=WAN_RUNTIME_HIGH_LOW_FP8,
+            high_noise_model_id=high.name,
+            low_noise_model_id=low.name,
+            offload="streamed",
+        )
+    )
+
+    assert result.ok is False
+    assert any("52-channel patch embedding" in error for error in result.errors)
+    assert any("36-channel Wan A14B I2V" in error for error in result.errors)
 
 
 def test_pass5_fp8_metric_aggregation_deduplicates_shared_modules(monkeypatch):
