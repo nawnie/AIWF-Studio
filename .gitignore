@@ -144,6 +144,8 @@ Thumbs.db
 .vscode/
 .codex-remote-attachments/
 cache/
+downloads/
+qa-screenshots/
 *.lnk
 prompt_image.txt
 prompt_video.txt
