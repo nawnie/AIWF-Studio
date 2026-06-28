@@ -2,6 +2,8 @@ export type CreationMode = 'image' | 'video' | 'inpaint'
 
 export type ProMode = CreationMode | 'models' | 'data'
 
+export type EngineId = 'all' | 'flux' | 'flux2' | 'sd15' | 'sdxl' | 'sd35' | 'zimage' | 'unknown'
+
 export type ResourceTone = 'mint' | 'blue' | 'amber' | 'red' | 'neutral'
 
 export interface AspectRatioOption {
@@ -15,8 +17,16 @@ export interface ProModelOption {
   id: string
   name: string
   architecture?: string
+  engineId?: EngineId
+  engineLabel?: string
   backend?: string
   status?: string
+}
+
+export interface EngineSummary {
+  id: EngineId
+  label: string
+  count: number
 }
 
 export interface GenerationSettings {
@@ -85,6 +95,7 @@ export interface ProBootstrap {
   version: string
   localFirst: boolean
   onboardingSeen: boolean
+  engines: EngineSummary[]
   models: ProModelOption[]
   samplers: string[]
   aspectRatios: AspectRatioOption[]
@@ -100,4 +111,76 @@ export interface ProGenerateResult {
   message: string
   output: RecentOutput | null
   recentOutputs: RecentOutput[]
+}
+
+export interface ProDataStatus {
+  outputRoot: string
+  counts: {
+    checkpoints: number
+    recentOutputs: number
+    engines: number
+  }
+  engines: EngineSummary[]
+  recentOutputs: RecentOutput[]
+}
+
+export interface ProLogFile {
+  name: string
+  path: string
+  sizeBytes: number
+  modifiedAt: string
+}
+
+export interface ProLogEvent {
+  id: string
+  source: string
+  time: string
+  title: string
+  detail: string
+}
+
+export interface ProLogStatus {
+  runtime: ProRuntimeStatus
+  files: ProLogFile[]
+  events: ProLogEvent[]
+}
+
+export interface ProSettingsStatus {
+  paths: {
+    settings: string
+    launch: string
+    models: string
+    checkpoints: string
+    outputs: string
+  }
+  generationDefaults: GenerationSettings
+  ui: {
+    accentPreset: string
+    galleryColumns: number
+    galleryHeight: number
+    livePreview: boolean
+    hiddenTabs: string[]
+  }
+  runtime: {
+    listen: boolean
+    api: boolean
+    genlog: boolean
+    backend: string
+    attention: string
+  }
+}
+
+export interface PromptInsight {
+  status: 'idle' | 'loading' | 'ready' | 'error'
+  summary: string
+  modelLabel: string
+  modelScore: number
+  modelId: string
+  progress: number
+  signals: Array<{
+    label: string
+    value: string
+    tone: ResourceTone
+  }>
+  suggestions: string[]
 }

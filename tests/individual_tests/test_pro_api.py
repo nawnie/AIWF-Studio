@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -33,6 +34,7 @@ class _Generation:
                 title="Model A",
                 filename="model-a.safetensors",
                 path="F:/models/model-a.safetensors",
+                architecture="sdxl",
             )
         ]
 
@@ -97,6 +99,9 @@ def test_bootstrap_returns_catalog_defaults_runtime_and_recent_images(tmp_path):
     assert data["runtime"]["device"] == "CPU (test)"
     assert data["settings"]["width"] == 640
     assert data["checkpoints"][0]["id"] == "model-a"
+    assert data["checkpoints"][0]["engineId"] == "sdxl"
+    assert data["checkpoints"][0]["engineLabel"] == "Stable Diffusion XL"
+    assert data["engines"] == [{"id": "sdxl", "label": "Stable Diffusion XL", "count": 1}]
     assert "path" not in data["checkpoints"][0]
     assert data["samplers"][0]["supportsKarras"] is False
     assert data["recentImages"][0]["dataUrl"].startswith("data:image/png;base64,")
@@ -173,3 +178,55 @@ def test_create_app_serves_frontend_dist_when_present(tmp_path):
     assert "AIWF Pro" in client.get("/").text
     assert client.get("/asset.txt").text == "asset"
     assert "AIWF Pro" in client.get("/unknown/route").text
+    assert client.get("/api/pro/removed-route").status_code == 404
+
+
+def test_data_endpoint_returns_output_receipts_and_counts(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.generation.submit(GenerationRequest(prompt="seed recent"))
+    client = _client(ctx)
+
+    response = client.get("/api/pro/data")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["counts"]["checkpoints"] == 1
+    assert data["counts"]["recentOutputs"] >= 1
+    assert data["outputRoot"].endswith("outputs")
+    assert data["recentOutputs"][0]["url"].startswith("data:image/png;base64,")
+
+
+def test_logs_endpoint_returns_runtime_files_and_events(tmp_path):
+    ctx = _ctx(tmp_path)
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir(parents=True)
+    (output_dir / "client-events.jsonl").write_text(
+        json.dumps({"action": "qa-open", "detail": "opened logs"}) + "\n",
+        encoding="utf-8",
+    )
+    client = _client(ctx)
+
+    response = client.get("/api/pro/logs")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["runtime"]["status"] == "idle"
+    assert any(item["name"] == "client-events.jsonl" for item in data["files"])
+    assert any(item["title"] == "qa-open" for item in data["events"])
+
+
+def test_settings_endpoint_returns_paths_defaults_and_runtime_flags(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.settings_path = tmp_path / "config.json"
+    ctx.launch_settings_path = tmp_path / "launch.json"
+    client = _client(ctx)
+
+    response = client.get("/api/pro/settings")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["paths"]["settings"].endswith("config.json")
+    assert data["paths"]["outputs"].endswith("outputs")
+    assert data["generationDefaults"]["width"] == 640
+    assert data["ui"]["galleryColumns"] == 2
+    assert data["runtime"]["backend"] == "diffusers"

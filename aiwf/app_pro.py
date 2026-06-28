@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.middleware import Middleware
 
@@ -41,6 +41,8 @@ def _mount_frontend(app: FastAPI, dist: Path) -> bool:
 
     @app.get("/{requested_path:path}", include_in_schema=False)
     def frontend(requested_path: str = ""):
+        if requested_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
         target = (dist / requested_path).resolve() if requested_path else index
         if requested_path and _is_inside(target, dist) and target.is_file():
             return FileResponse(target)

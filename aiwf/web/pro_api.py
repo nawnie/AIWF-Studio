@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import heapq
 import io
+import json
 import platform
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,19 @@ _RECENT_MAX_SIDE = 512
 _RECENT_MAX_BYTES = 2 * 1024 * 1024
 _MAX_PRO_BATCH_IMAGES = 4
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+_LOG_FILE_LIMIT = 6
+_LOG_ROW_LIMIT = 80
+
+_ENGINE_LABELS = {
+    "all": "All engines",
+    "flux": "Flux",
+    "flux2": "Flux 2",
+    "sd15": "Stable Diffusion 1.5",
+    "sdxl": "Stable Diffusion XL",
+    "sd35": "Stable Diffusion 3.5",
+    "zimage": "Z-Image",
+    "unknown": "Other",
+}
 
 
 class ProGeneratePayload(BaseModel):
@@ -64,6 +79,7 @@ def _dump_model(item: Any) -> dict[str, Any]:
 
 def _checkpoint_payload(item: Any) -> dict[str, Any]:
     data = _dump_model(item)
+    engine_id = _engine_id_for_architecture(str(data.get("architecture", "unknown")))
     return {
         "id": data.get("id", ""),
         "title": data.get("title", data.get("id", "")),
@@ -71,6 +87,8 @@ def _checkpoint_payload(item: Any) -> dict[str, Any]:
         "hash": data.get("hash"),
         "kind": data.get("kind", "checkpoint"),
         "architecture": data.get("architecture", "unknown"),
+        "engineId": engine_id,
+        "engineLabel": _ENGINE_LABELS.get(engine_id, _ENGINE_LABELS["unknown"]),
     }
 
 
@@ -82,6 +100,40 @@ def _sampler_payload(item: Any) -> dict[str, Any]:
         "family": data.get("family", "diffusers"),
         "supportsKarras": bool(data.get("supports_karras", False)),
     }
+
+
+def _engine_id_for_architecture(architecture: str) -> str:
+    normalized = (architecture or "").strip().lower()
+    if normalized == "flux":
+        return "flux"
+    if normalized in {"flux2_klein", "flux2", "flux.2"}:
+        return "flux2"
+    if normalized == "z_image":
+        return "zimage"
+    if normalized in {"sd15", "sd1.5", "sd1", "inpaint"}:
+        return "sd15"
+    if normalized in {"sdxl", "sdxl_inpaint"}:
+        return "sdxl"
+    if normalized in {"sd35", "sd3", "stable-diffusion-3.5"}:
+        return "sd35"
+    return "unknown"
+
+
+def _engine_summaries(checkpoints: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for checkpoint in checkpoints:
+        engine_id = str(checkpoint.get("engineId") or "unknown")
+        counts[engine_id] = counts.get(engine_id, 0) + 1
+    order = ["flux", "flux2", "sd15", "sdxl", "sd35", "zimage", "unknown"]
+    return [
+        {
+            "id": engine_id,
+            "label": _ENGINE_LABELS.get(engine_id, _ENGINE_LABELS["unknown"]),
+            "count": counts.get(engine_id, 0),
+        }
+        for engine_id in order
+        if counts.get(engine_id, 0) > 0
+    ]
 
 
 def _artifact_payload(item: Any) -> dict[str, str]:
@@ -286,6 +338,195 @@ def _recent_output_images(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT) -> list
     return images
 
 
+def _safe_jsonl_tail(path: Path, *, limit: int = _LOG_ROW_LIMIT) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            value = {"message": line[:1000]}
+        if isinstance(value, dict):
+            rows.append(
+                {
+                    "id": f"{path.name}-{index}",
+                    "source": path.name,
+                    "time": str(value.get("logged_at") or value.get("created_at") or value.get("time") or ""),
+                    "title": str(value.get("action") or value.get("kind") or value.get("status") or path.stem),
+                    "detail": str(value.get("detail") or value.get("message") or value.get("error") or value)[:1000],
+                }
+            )
+    return rows
+
+
+def _safe_text_tail(path: Path, *, limit: int = 24) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]
+    except OSError:
+        return []
+    return [
+        {
+            "id": f"{path.name}-{index}",
+            "source": path.name,
+            "time": "",
+            "title": path.stem,
+            "detail": line[:1000],
+        }
+        for index, line in enumerate(lines)
+        if line.strip()
+    ]
+
+
+def _log_root(ctx: Any) -> Path | None:
+    return _safe_output_root(ctx)
+
+
+def _log_files(ctx: Any) -> list[dict[str, Any]]:
+    root = _log_root(ctx)
+    if root is None:
+        return []
+    candidates = [
+        root / "client-events.jsonl",
+        root / "client-errors.jsonl",
+        root / "client-errors.log",
+        root / "genlog" / "generation-log.jsonl",
+        root / "failures" / "index.jsonl",
+    ]
+    rows: list[dict[str, Any]] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        rows.append(
+            {
+                "name": path.name,
+                "path": str(path),
+                "sizeBytes": stat.st_size,
+                "modifiedAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            }
+        )
+    return rows[:_LOG_FILE_LIMIT]
+
+
+def _event_rows(ctx: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for job in _safe_recent_jobs(ctx, 24):
+        status = _job_status(job)
+        rows.append(
+            {
+                "id": status.get("id") or f"job-{len(rows)}",
+                "source": "generation",
+                "time": "",
+                "title": str(status.get("state") or "job"),
+                "detail": str(status.get("message") or status.get("error") or "Generation job receipt"),
+            }
+        )
+    root = _log_root(ctx)
+    if root is not None:
+        rows.extend(_safe_jsonl_tail(root / "client-events.jsonl", limit=24))
+        rows.extend(_safe_jsonl_tail(root / "client-errors.jsonl", limit=24))
+        rows.extend(_safe_jsonl_tail(root / "genlog" / "generation-log.jsonl", limit=24))
+        rows.extend(_safe_jsonl_tail(root / "failures" / "index.jsonl", limit=24))
+        rows.extend(_safe_text_tail(root / "client-errors.log", limit=12))
+    return rows[:_LOG_ROW_LIMIT]
+
+
+def _recent_output_payload(ctx: Any) -> list[dict[str, Any]]:
+    outputs: list[dict[str, Any]] = []
+    for index, item in enumerate(_recent_output_images(ctx, limit=_RECENT_IMAGE_LIMIT)):
+        path = str(item.get("path") or "")
+        width = 0
+        height = 0
+        created_at = ""
+        if path:
+            try:
+                path_obj = Path(path)
+                if path_obj.is_file():
+                    stat = path_obj.stat()
+                    created_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+                    with Image.open(path_obj) as image:
+                        width, height = image.size
+            except OSError:
+                pass
+        outputs.append(
+            {
+                "id": f"recent-{index}-{path or item.get('source', 'memory')}",
+                "url": item.get("dataUrl"),
+                "thumbnailUrl": item.get("dataUrl"),
+                "path": path,
+                "prompt": str(item.get("infotext") or "Local output"),
+                "width": width,
+                "height": height,
+                "createdAt": created_at,
+                "mode": "image",
+                "seed": item.get("seed"),
+                "modelName": None,
+                "status": "available",
+                "source": item.get("source", "output"),
+            }
+        )
+    return outputs
+
+
+def _data_summary(ctx: Any) -> dict[str, Any]:
+    output_root = _safe_output_root(ctx)
+    checkpoints = [_checkpoint_payload(item) for item in _safe_list(ctx.generation.list_checkpoints)]
+    recent_outputs = _recent_output_payload(ctx)
+    return {
+        "outputRoot": str(output_root) if output_root is not None else "",
+        "counts": {
+            "checkpoints": len(checkpoints),
+            "recentOutputs": len(recent_outputs),
+            "engines": len(_engine_summaries(checkpoints)),
+        },
+        "engines": _engine_summaries(checkpoints),
+        "recentOutputs": recent_outputs,
+    }
+
+
+def _settings_payload(ctx: Any) -> dict[str, Any]:
+    settings = getattr(ctx, "settings", None)
+    flags = getattr(ctx, "flags", None)
+    settings_path = getattr(ctx, "settings_path", None)
+    launch_settings_path = getattr(ctx, "launch_settings_path", None)
+    return {
+        "paths": {
+            "settings": str(settings_path or ""),
+            "launch": str(launch_settings_path or ""),
+            "models": str(flags.resolved_models_dir()) if flags is not None else "",
+            "checkpoints": str(flags.resolved_ckpt_dir()) if flags is not None else "",
+            "outputs": str(flags.resolved_output_dir()) if flags is not None else "",
+        },
+        "generationDefaults": _settings_defaults(ctx),
+        "ui": {
+            "accentPreset": getattr(settings, "accent_preset", "mint"),
+            "galleryColumns": getattr(settings, "gallery_columns", 2),
+            "galleryHeight": getattr(settings, "gallery_height", 480),
+            "livePreview": getattr(settings, "enable_live_preview", True),
+            "hiddenTabs": list(getattr(settings, "hidden_tabs", []) or []),
+        },
+        "runtime": {
+            "listen": bool(getattr(flags, "listen", False)),
+            "api": bool(getattr(flags, "api", False)),
+            "genlog": bool(getattr(flags, "genlog", False)),
+            "backend": getattr(flags, "inference_backend", "unknown") if flags is not None else "unknown",
+            "attention": getattr(flags, "attention_backend", "unknown") if flags is not None else "unknown",
+        },
+    }
+
+
 def _checkpoint_id_from_payload(ctx: Any, payload: ProGeneratePayload) -> str | None:
     if payload.checkpoint_id:
         return payload.checkpoint_id
@@ -422,10 +663,27 @@ def build_router(ctx: Any) -> APIRouter:
             "runtime": _runtime_summary(ctx),
             "settings": _settings_defaults(ctx),
             "checkpoints": checkpoints,
+            "engines": _engine_summaries(checkpoints),
             "samplers": samplers,
             "schedulers": [item.model_dump(mode="json") for item in SCHEDULE_TYPES],
             "recentImages": _recent_output_images(ctx),
         }
+
+    @router.get("/data")
+    def data():
+        return _data_summary(ctx)
+
+    @router.get("/logs")
+    def logs():
+        return {
+            "runtime": _runtime_summary(ctx),
+            "files": _log_files(ctx),
+            "events": _event_rows(ctx),
+        }
+
+    @router.get("/settings")
+    def settings():
+        return _settings_payload(ctx)
 
     @router.post("/generate")
     def generate(payload: ProGeneratePayload):

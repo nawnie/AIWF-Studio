@@ -1,13 +1,19 @@
 import type {
   AspectRatioOption,
   CreationMode,
+  EngineSummary,
   GenerationSettings,
   LoadedModelInfo,
   ProBootstrap,
+  ProDataStatus,
   ProGenerateRequest,
   ProGenerateResult,
+  ProLogEvent,
+  ProLogFile,
+  ProLogStatus,
   ProModelOption,
   ProRuntimeStatus,
+  ProSettingsStatus,
   RecentOutput,
   ResourceMetric,
   ResourceTone,
@@ -30,6 +36,8 @@ const DEFAULT_MODELS: ProModelOption[] = [
     id: 'sdxl-base-1.0',
     name: 'sdxl-base-1.0 (Diffusers)',
     architecture: 'SDXL 1.0',
+    engineId: 'sdxl',
+    engineLabel: 'Stable Diffusion XL',
     backend: 'Diffusers',
     status: 'Loaded',
   },
@@ -99,6 +107,7 @@ export function getFallbackBootstrap(): ProBootstrap {
     version: 'v0.2.0',
     localFirst: true,
     onboardingSeen: false,
+    engines: buildEngineSummaries(DEFAULT_MODELS),
     models: DEFAULT_MODELS.map((model) => ({ ...model })),
     samplers: [...DEFAULT_SAMPLERS],
     aspectRatios: DEFAULT_ASPECT_RATIOS.map((ratio) => ({ ...ratio })),
@@ -123,6 +132,21 @@ export async function fetchProBootstrap(signal?: AbortSignal): Promise<ProBootst
 export async function fetchProRuntime(signal?: AbortSignal): Promise<ProRuntimeStatus> {
   const payload = await requestJson('/api/pro/runtime', { signal })
   return normalizeRuntime(payload)
+}
+
+export async function fetchProData(signal?: AbortSignal): Promise<ProDataStatus> {
+  const payload = await requestJson('/api/pro/data', { signal })
+  return normalizeDataStatus(payload)
+}
+
+export async function fetchProLogs(signal?: AbortSignal): Promise<ProLogStatus> {
+  const payload = await requestJson('/api/pro/logs', { signal })
+  return normalizeLogStatus(payload)
+}
+
+export async function fetchProSettings(signal?: AbortSignal): Promise<ProSettingsStatus> {
+  const payload = await requestJson('/api/pro/settings', { signal })
+  return normalizeSettingsStatus(payload)
 }
 
 export async function generateProOutput(
@@ -201,10 +225,13 @@ function normalizeBootstrap(value: unknown): ProBootstrap {
   const models = readArray(record, ['models', 'checkpoints'])
     .map(normalizeModel)
     .filter(isPresent)
+  const engines = readArray(record, ['engines'])
+    .map(normalizeEngineSummary)
+    .filter(isPresent)
   const samplers = readArray(record, ['samplers'])
     .map((item) => readLooseString(item, ''))
     .filter((item) => item.length > 0)
-  const recentOutputs = readArray(record, ['recent_outputs', 'recentOutputs', 'outputs'])
+  const recentOutputs = readArray(record, ['recent_outputs', 'recentOutputs', 'outputs', 'recentImages'])
     .map((item, index) => normalizeRecentOutput(item, index, fallback.defaults))
     .filter(isPresent)
 
@@ -219,11 +246,106 @@ function normalizeBootstrap(value: unknown): ProBootstrap {
     version: readString(record, ['version'], fallback.version),
     localFirst: readBoolean(record, ['local_first', 'localFirst'], fallback.localFirst),
     onboardingSeen: readBoolean(record, ['onboarding_seen', 'onboardingSeen'], fallback.onboardingSeen),
+    engines: engines.length > 0 ? engines : buildEngineSummaries(modelOptions),
     models: modelOptions,
     samplers: samplerOptions,
     aspectRatios: ratios,
     defaults,
     recentOutputs: recentOutputs.length > 0 ? recentOutputs : fallback.recentOutputs,
+  }
+}
+
+function normalizeDataStatus(value: unknown): ProDataStatus {
+  const record = asRecord(value)
+  const fallback = getFallbackBootstrap()
+  const counts = readRecord(record, ['counts'])
+  const recentOutputs = readArray(record, ['recent_outputs', 'recentOutputs', 'outputs'])
+    .map((item, index) => normalizeRecentOutput(item, index, fallback.defaults))
+    .filter(isPresent)
+  const engines = readArray(record, ['engines'])
+    .map(normalizeEngineSummary)
+    .filter(isPresent)
+  return {
+    outputRoot: readString(record, ['outputRoot', 'output_root'], ''),
+    counts: {
+      checkpoints: readNumber(counts, ['checkpoints'], fallback.models.length),
+      recentOutputs: readNumber(counts, ['recentOutputs', 'recent_outputs'], recentOutputs.length),
+      engines: readNumber(counts, ['engines'], engines.length),
+    },
+    engines,
+    recentOutputs,
+  }
+}
+
+function normalizeLogStatus(value: unknown): ProLogStatus {
+  const record = asRecord(value)
+  return {
+    runtime: normalizeRuntime(readUnknown(record, ['runtime'])),
+    files: readArray(record, ['files']).map(normalizeLogFile).filter(isPresent),
+    events: readArray(record, ['events']).map(normalizeLogEvent).filter(isPresent),
+  }
+}
+
+function normalizeSettingsStatus(value: unknown): ProSettingsStatus {
+  const record = asRecord(value)
+  const fallback = getFallbackBootstrap()
+  const paths = readRecord(record, ['paths'])
+  const ui = readRecord(record, ['ui'])
+  const runtime = readRecord(record, ['runtime'])
+  return {
+    paths: {
+      settings: readString(paths, ['settings'], ''),
+      launch: readString(paths, ['launch'], ''),
+      models: readString(paths, ['models'], ''),
+      checkpoints: readString(paths, ['checkpoints'], ''),
+      outputs: readString(paths, ['outputs'], ''),
+    },
+    generationDefaults: normalizeSettings(readRecord(record, ['generationDefaults', 'generation_defaults']), fallback.defaults, fallback.aspectRatios, fallback.models, fallback.samplers),
+    ui: {
+      accentPreset: readString(ui, ['accentPreset', 'accent_preset'], 'mint'),
+      galleryColumns: readNumber(ui, ['galleryColumns', 'gallery_columns'], 2),
+      galleryHeight: readNumber(ui, ['galleryHeight', 'gallery_height'], 480),
+      livePreview: readBoolean(ui, ['livePreview', 'live_preview'], true),
+      hiddenTabs: readArray(ui, ['hiddenTabs', 'hidden_tabs']).map((item) => readLooseString(item, '')).filter(Boolean),
+    },
+    runtime: {
+      listen: readBoolean(runtime, ['listen'], false),
+      api: readBoolean(runtime, ['api'], false),
+      genlog: readBoolean(runtime, ['genlog'], false),
+      backend: readString(runtime, ['backend'], 'unknown'),
+      attention: readString(runtime, ['attention'], 'unknown'),
+    },
+  }
+}
+
+function normalizeLogFile(value: unknown): ProLogFile | null {
+  const record = asRecord(value)
+  const name = readString(record, ['name'], '')
+  const path = readString(record, ['path'], '')
+  if (!name && !path) {
+    return null
+  }
+  return {
+    name: name || path,
+    path,
+    sizeBytes: readNumber(record, ['sizeBytes', 'size_bytes'], 0),
+    modifiedAt: readString(record, ['modifiedAt', 'modified_at'], ''),
+  }
+}
+
+function normalizeLogEvent(value: unknown): ProLogEvent | null {
+  const record = asRecord(value)
+  const title = readString(record, ['title'], '')
+  const detail = readString(record, ['detail', 'message'], '')
+  if (!title && !detail) {
+    return null
+  }
+  return {
+    id: readString(record, ['id'], `${title}-${detail}`),
+    source: readString(record, ['source'], 'runtime'),
+    time: readString(record, ['time', 'createdAt', 'created_at'], ''),
+    title: title || 'Event',
+    detail,
   }
 }
 
@@ -360,9 +482,22 @@ function normalizeModel(value: unknown): ProModelOption | null {
     id: id || name,
     name,
     architecture: readOptionalString(record, ['architecture', 'base_model', 'baseModel']),
+    engineId: normalizeEngineId(readUnknown(record, ['engineId', 'engine_id', 'engine'])),
+    engineLabel: readOptionalString(record, ['engineLabel', 'engine_label']),
     backend: readOptionalString(record, ['backend']),
     status: readOptionalString(record, ['status', 'state']),
   }
+}
+
+function normalizeEngineSummary(value: unknown): EngineSummary | null {
+  const record = asRecord(value)
+  const id = normalizeEngineId(readUnknown(record, ['id', 'engineId', 'engine_id']))
+  const label = readString(record, ['label', 'engineLabel', 'engine_label'], '')
+  const count = readNumber(record, ['count'], 0)
+  if (!id || !label) {
+    return null
+  }
+  return { id, label, count }
 }
 
 function normalizeRecentOutput(
@@ -389,7 +524,7 @@ function normalizeRecentOutput(
   const record = asRecord(value)
   const rawUrl = readString(
     record,
-    ['url', 'image_url', 'imageUrl', 'path', 'src', 'file'],
+    ['url', 'dataUrl', 'data_url', 'image', 'image_url', 'imageUrl', 'path', 'src', 'file'],
     '',
   )
   if (!rawUrl) {
@@ -561,6 +696,37 @@ function normalizeTone(value: unknown, fallback: ResourceTone): ResourceTone {
     return value
   }
   return fallback
+}
+
+function normalizeEngineId(value: unknown): ProModelOption['engineId'] {
+  if (
+    value === 'all' ||
+    value === 'flux' ||
+    value === 'flux2' ||
+    value === 'sd15' ||
+    value === 'sdxl' ||
+    value === 'sd35' ||
+    value === 'zimage' ||
+    value === 'unknown'
+  ) {
+    return value
+  }
+  return undefined
+}
+
+function buildEngineSummaries(models: ProModelOption[]): EngineSummary[] {
+  const groups = new Map<string, EngineSummary>()
+  for (const model of models) {
+    const id = model.engineId ?? 'unknown'
+    const label = model.engineLabel ?? model.engineId ?? 'Other'
+    const existing = groups.get(id)
+    if (existing) {
+      existing.count += 1
+    } else {
+      groups.set(id, { id, label, count: 1 })
+    }
+  }
+  return Array.from(groups.values())
 }
 
 function asRecord(value: unknown): JsonRecord {
