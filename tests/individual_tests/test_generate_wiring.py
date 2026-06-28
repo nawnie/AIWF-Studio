@@ -37,7 +37,8 @@ ANCHORS = [
     ("inpaint_source", 64),
     ("continuous_toggle", 65),
     ("cooldown_seconds", 66),
-    ("reactor_at_gen", 67),
+    ("training_metadata_toggle", 67),
+    ("reactor_at_gen", 68),
 ]
 
 WAN_RUN_ANCHORS = [
@@ -90,7 +91,7 @@ def test_generate_inputs_anchor_positions_align_with_runner_indexes():
 
 def test_studio_tab_delegates_generation_to_runner():
     node = _function_node(STUDIO, "run")
-    assert _module_constant(RUNNER, "GENERATION_RUNNER_INPUT_COUNT") == 67
+    assert _module_constant(RUNNER, "GENERATION_RUNNER_INPUT_COUNT") == 68
     assert any(
         isinstance(call, ast.Call)
         and isinstance(call.func, ast.Attribute)
@@ -107,7 +108,7 @@ def test_studio_tab_delegates_generation_to_runner():
         and isinstance(subscript.slice.lower, ast.Name)
         and subscript.slice.lower.id == "GENERATION_RUNNER_INPUT_COUNT"
         for subscript in ast.walk(node)
-    ), "ReActor arguments must start after cooldown_seconds at index 67"
+    ), "ReActor arguments must start after training_metadata_toggle at index 68"
     assert any(
         isinstance(call, ast.Call)
         and isinstance(call.func, ast.Name)
@@ -118,10 +119,28 @@ def test_studio_tab_delegates_generation_to_runner():
 
 def test_reactor_generation_arg_count_matches_generate_inputs_tail():
     inputs_names = _generate_input_names()
-    assert len(inputs_names) - _module_constant(RUNNER, "GENERATION_RUNNER_INPUT_COUNT") == _module_constant(
-        REACTOR_WORKFLOW,
-        "REACTOR_GENERATION_ARG_COUNT",
-    )
+    runner_count = _module_constant(RUNNER, "GENERATION_RUNNER_INPUT_COUNT")
+    reactor_count = _module_constant(REACTOR_WORKFLOW, "REACTOR_GENERATION_ARG_COUNT")
+    assert inputs_names[runner_count : runner_count + reactor_count] == [
+        "reactor_at_gen",
+        "reactor_source",
+        "reactor_source_index",
+        "reactor_target_index",
+        "reactor_restore",
+        "reactor_restorer",
+        "reactor_visibility",
+        "reactor_cf_weight",
+        "reactor_model",
+        "reactor_gender_source",
+        "reactor_gender_target",
+        "reactor_mask",
+    ]
+    assert inputs_names[runner_count + reactor_count :] == [
+        "vsr_enabled",
+        "vsr_scale",
+        "vsr_mode",
+        "vsr_strength",
+    ]
 
 
 def test_generation_runner_delegates_to_request_builder():

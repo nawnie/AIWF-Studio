@@ -135,20 +135,27 @@ class FilesystemImageStore:
         index: int | None = None,
         model_name: str | None = None,
         prefix: str = "",
+        filename_stem: str | None = None,
+        format_override: str | None = None,
     ) -> SavedArtifact:
         target_dir = self.root / subdir
         target_dir.mkdir(parents=True, exist_ok=True)
         fmt, quality = self._format()
+        if format_override:
+            fmt = str(format_override).lower()
         ext = "jpg" if fmt in ("jpg", "jpeg") else ("webp" if fmt == "webp" else "png")
 
-        stem = render_filename(
-            self._pattern(),
-            seed=seed,
-            index=index,
-            model_name=model_name,
-            width=getattr(image, "width", None),
-            height=getattr(image, "height", None),
-        )
+        if filename_stem:
+            stem = _sanitize(filename_stem)
+        else:
+            stem = render_filename(
+                self._pattern(),
+                seed=seed,
+                index=index,
+                model_name=model_name,
+                width=getattr(image, "width", None),
+                height=getattr(image, "height", None),
+            )
         if prefix:
             stem = f"{prefix}{stem}"
         path = self._unique_path(target_dir, stem, ext)

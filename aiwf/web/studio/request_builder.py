@@ -98,6 +98,7 @@ def build_generation_request(
     checkpoint_architecture: str | None = None,
     resolve_checkpoint_architecture=None,
     default_hr_upscaler: str = "lanczos",
+    training_metadata: bool = False,
 ):
     # Raise gr.Error for user-correctable validation so Gradio renders the
     # message in the UI instead of exposing a traceback.
@@ -127,6 +128,7 @@ def build_generation_request(
             prompt_seed=dynamic_seed,
             **style_fields,
             tags=tags,
+            training_metadata=bool(training_metadata),
             steps=int(step_count),
             cfg_scale=float(cfg_scale),
             width=int(w),
@@ -159,6 +161,7 @@ def build_generation_request(
             prompt_seed=dynamic_seed,
             **style_fields,
             tags=tags,
+            training_metadata=bool(training_metadata),
             steps=int(step_count),
             cfg_scale=float(cfg_scale),
             seed=int(seed_value),
@@ -206,6 +209,7 @@ def build_generation_request(
             prompt_seed=dynamic_seed,
             **style_fields,
             tags=tags,
+            training_metadata=bool(training_metadata),
             steps=int(step_count),
             cfg_scale=float(cfg_scale),
             seed=int(seed_value),

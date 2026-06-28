@@ -70,6 +70,7 @@ class GenerationRequest(BaseModel):
     vae_id: str | None = None
     tags: list[str] = Field(default_factory=list)
     save_images: bool = True
+    training_metadata: bool = False
     prompt_file: str | None = None
     use_prompt_file: bool = False
     prompt_seed: int | None = None

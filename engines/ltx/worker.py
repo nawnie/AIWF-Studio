@@ -10,7 +10,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
-from aiwf.core.domain.ltx import LTX_PIPELINE_DISTILLED
+from aiwf.core.domain.ltx import LTX_GEMMA_BACKEND_GGUF, LTX_PIPELINE_DISTILLED
 from aiwf.engine_workers.base import WorkerContext, emit_artifact, emit_complete, emit_status, run_worker
 
 
@@ -29,6 +29,10 @@ def _require_package(module: str, package: str) -> None:
         )
 
 
+def _module_state(module: str) -> str:
+    return "available" if importlib.util.find_spec(module) is not None else "MISSING"
+
+
 def main(ctx: WorkerContext) -> None:
     mode = str(ctx.request.get("mode") or "probe")
     emit_status(ctx.job_id, f"LTX 2.3 worker mode: {mode}")
@@ -38,13 +42,18 @@ def main(ctx: WorkerContext) -> None:
         f"torch={_version('torch')}, "
         f"ltx-core={_version('ltx-core')}, "
         f"ltx-pipelines={_version('ltx-pipelines')}, "
-        f"transformers={_version('transformers')}",
+        f"transformers={_version('transformers')}, "
+        f"gguf={_version('gguf')}, "
+        f"llama_cpp={_module_state('llama_cpp')}",
     )
     _require_package("ltx_core", "ltx-core")
     _require_package("ltx_pipelines", "ltx-pipelines")
 
     if mode == "probe":
         emit_complete(ctx.job_id, "LTX 2.3 worker probe complete.")
+        return
+    if mode == "probe_gemma_gguf":
+        _probe_gemma_gguf(ctx)
         return
     if mode != "generate":
         raise RuntimeError(f"Unsupported LTX worker mode: {mode}")
@@ -53,6 +62,8 @@ def main(ctx: WorkerContext) -> None:
 
 def _run_generation(ctx: WorkerContext) -> None:
     request = ctx.request
+    if str(request.get("gemma_backend") or "").strip().lower() == LTX_GEMMA_BACKEND_GGUF:
+        raise RuntimeError(_native_gemma_gguf_blocker(request))
     module = (
         "ltx_pipelines.distilled"
         if str(request.get("pipeline") or LTX_PIPELINE_DISTILLED) == LTX_PIPELINE_DISTILLED
@@ -132,6 +143,64 @@ def _run_generation(ctx: WorkerContext) -> None:
         raise RuntimeError(f"LTX pipeline exited without creating output: {output_path}")
     emit_artifact(ctx.job_id, path=str(output_path))
     emit_complete(ctx.job_id, f"LTX 2.3 video complete: {output_path.name}")
+
+
+def _probe_gemma_gguf(ctx: WorkerContext) -> None:
+    gguf_path = Path(str(ctx.request.get("gemma_gguf_path") or "")).resolve()
+    gemma_root = Path(str(ctx.request.get("gemma_root") or "")).resolve()
+    emit_status(ctx.job_id, f"Probing native Gemma GGUF text encoder: {gguf_path}")
+    if not gguf_path.is_file():
+        raise RuntimeError(f"Gemma GGUF file missing: {gguf_path}")
+    if gguf_path.suffix.lower() != ".gguf":
+        raise RuntimeError(f"Gemma GGUF path must end in .gguf: {gguf_path}")
+    if not gemma_root.exists():
+        raise RuntimeError(f"Gemma tokenizer/processor sidecar folder missing: {gemma_root}")
+
+    _require_package("gguf", "gguf")
+    import gguf
+
+    reader = gguf.GGUFReader(str(gguf_path))
+    architecture = _gguf_field_text(reader, "general.architecture")
+    name = _gguf_field_text(reader, "general.name")
+    hidden_size = _gguf_field_text(reader, "gemma3.embedding_length")
+    layer_count = _gguf_field_text(reader, "gemma3.block_count")
+    head_count = _gguf_field_text(reader, "gemma3.attention.head_count")
+    emit_status(
+        ctx.job_id,
+        "GGUF metadata: "
+        f"architecture={architecture or 'unknown'}, "
+        f"name={name or 'unknown'}, "
+        f"hidden_size={hidden_size or 'unknown'}, "
+        f"layers={layer_count or 'unknown'}, "
+        f"heads={head_count or 'unknown'}, "
+        f"tensors={len(reader.tensors)}",
+    )
+    if architecture and architecture.lower() != "gemma3":
+        raise RuntimeError(f"Expected a Gemma 3 GGUF for LTX, got architecture={architecture!r}.")
+    raise RuntimeError(_native_gemma_gguf_blocker(ctx.request))
+
+
+def _gguf_field_text(reader, key: str) -> str:  # noqa: ANN001
+    field = reader.fields.get(key)
+    if field is None:
+        return ""
+    try:
+        return str(field.contents())
+    except Exception:
+        try:
+            return field.parts[-1].tobytes().decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+
+def _native_gemma_gguf_blocker(request: dict) -> str:
+    return (
+        "Native Gemma GGUF is wired for selection/probing, but generation is blocked: "
+        "LTX needs raw Gemma hidden states for every layer plus an attention mask, and "
+        "this worker has no verified GGUF backend that exposes that contract. "
+        f"GGUF path: {request.get('gemma_gguf_path') or 'not selected'}. "
+        "No dequantization was run."
+    )
 
 
 def _run_child(ctx: WorkerContext, args: list[str], env: dict[str, str]) -> None:

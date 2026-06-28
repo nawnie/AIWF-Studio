@@ -65,6 +65,7 @@ class PipelineRegistry:
         ]
 
     def video_pipelines(self) -> list[PipelineInfo]:
+        ltx2b = self._ltx2b_pipeline()
         ltx = self._ltx_pipeline()
         sana_video = self._sana_video_pipeline()
         return [
@@ -87,6 +88,7 @@ class PipelineRegistry:
                 message="available when GGUF high/low transformer files are configured",
             ),
             sana_video,
+            ltx2b,
             ltx,
         ]
 
@@ -129,9 +131,14 @@ class PipelineRegistry:
         return (self.flags.resolved_models_dir() / "onnx").resolve()
 
     def _ltx_pipeline(self) -> PipelineInfo:
+        from aiwf.core.domain.ltx import LTX_PIPELINE_ONE_STAGE, LtxVideoRequest
         from aiwf.services.pipeline_preflight import preflight_ltx_pipeline
 
-        preflight = preflight_ltx_pipeline(self.flags, self.settings)
+        preflight = preflight_ltx_pipeline(
+            self.flags,
+            self.settings,
+            request=LtxVideoRequest(pipeline=LTX_PIPELINE_ONE_STAGE),
+        )
         if preflight.ok:
             selected = preflight.metadata.get("selected_pipeline", "default")
             message = f"ready via isolated LTX worker ({selected})"
@@ -148,6 +155,30 @@ class PipelineRegistry:
             summary="Optional Lightricks LTX 2.3 text/image-to-video path in engines/ltx/.venv.",
             ready=preflight.ok,
             message=message or "enable/install the LTX worker in Settings",
+        )
+
+    def _ltx2b_pipeline(self) -> PipelineInfo:
+        from aiwf.core.domain.ltx import LTX_PIPELINE_DIFFUSERS_2B, LtxVideoRequest
+        from aiwf.services.pipeline_preflight import preflight_ltx_pipeline
+
+        preflight = preflight_ltx_pipeline(
+            self.flags,
+            self.settings,
+            request=LtxVideoRequest(pipeline=LTX_PIPELINE_DIFFUSERS_2B),
+        )
+        if preflight.ok:
+            message = f"ready with {preflight.metadata.get('checkpoint_path', '')}"
+        else:
+            blocking = [item.message for item in preflight.items if not item.ok]
+            message = "; ".join(blocking)
+        return PipelineInfo(
+            id="ltx-2b-diffusers",
+            label="LTX 2B Diffusers pipeline",
+            kind="video",
+            engine="Studio Video Engine",
+            summary="Local LTX 0.9.5 2B text-to-video route using Diffusers and local T5XXL weights.",
+            ready=preflight.ok,
+            message=message or "install the LTX 2B checkpoint and T5XXL text encoder",
         )
 
     def _sana_video_pipeline(self) -> PipelineInfo:

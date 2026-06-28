@@ -26,7 +26,7 @@ from aiwf.web.studio.summaries import result_summary_markdown
 
 
 ImagePostprocess = Callable[[Any], Any]
-GENERATION_RUNNER_INPUT_COUNT = 67
+GENERATION_RUNNER_INPUT_COUNT = 68
 
 
 class GenerationRunner:
@@ -290,6 +290,7 @@ class GenerationRunner:
             cn3_threshold_a=inputs[63],
             cn3_threshold_b=inputs[64],
             inpaint_source_choice=inputs[65],
+            training_metadata=inputs[66],
             controlnet=self._ctx.controlnet,
             resolve_checkpoint_architecture=self._checkpoint_architecture,
             default_hr_upscaler=self._ctx.settings.default_hr_upscaler,
@@ -393,6 +394,7 @@ class GenerationRunner:
         inpaint_source = args[64]
         continuous_enabled = args[65]
         cooldown_wait = args[66]
+        training_metadata = args[67]
 
         self._session.loop_active = True
         self._reset_session_outputs()
@@ -431,7 +433,7 @@ class GenerationRunner:
                 else:
                     dynamic_seed = base_seed
 
-                request_inputs = (*args[:34], dynamic_seed, *args[34:64], inpaint_source)
+                request_inputs = (*args[:34], dynamic_seed, *args[34:64], inpaint_source, training_metadata)
                 for update in self.run_once(
                     mode_label,
                     request_inputs,

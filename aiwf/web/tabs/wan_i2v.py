@@ -9,7 +9,16 @@ import gradio as gr
 from aiwf.core.domain.audio import AudioGenerationOptions
 from aiwf.core.domain.enhance import RestoreOptions
 from aiwf.core.domain.faceswap import FaceSwapOptions
-from aiwf.core.domain.ltx import LTX_PIPELINE_DISTILLED, LTX_PIPELINE_ONE_STAGE, LtxVideoRequest, snap_ltx_num_frames
+from aiwf.core.domain.ltx import (
+    LTX_GEMMA_BACKEND_GGUF,
+    LTX_GEMMA_BACKEND_HF_SAFETENSORS,
+    LTX_PIPELINE_DIFFUSERS_2B,
+    LTX_PIPELINE_DISTILLED,
+    LTX_PIPELINE_ONE_STAGE,
+    LTX_T5_TOKENIZER,
+    LtxVideoRequest,
+    snap_ltx_num_frames,
+)
 from aiwf.core.domain.rife import RifeOptions
 from aiwf.core.domain.vsr import VideoFxAigsOptions, VideoFxDenoiseOptions, VideoFxRelightOptions, VsrOptions
 from aiwf.bootstrap import AppContext
@@ -1138,7 +1147,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     status = gr.Markdown("**Ready** - upload an image and generate.", elem_classes=["aiwf-status-bar"])
 
                     default_ltx_pipeline = ltx_service.default_launch_pipeline()
-                    with gr.Accordion("LTX 2.3 optional engine", open=False, elem_classes=["aiwf-prompt-tools"]):
+                    with gr.Accordion("LTX optional engine", open=False, elem_classes=["aiwf-prompt-tools"]):
                         gr.Markdown(ltx_service.status_markdown(), elem_classes=["aiwf-settings-paths"])
                         ltx_source = gr.Image(
                             label="LTX source image (optional)",
@@ -1154,38 +1163,38 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         ltx_pipeline = gr.Radio(
                             label="LTX route",
                             choices=[
-                                ("Distilled two-stage (fast/default)", LTX_PIPELINE_DISTILLED),
+                                ("Local 2B Diffusers", LTX_PIPELINE_DIFFUSERS_2B),
+                                ("Distilled two-stage", LTX_PIPELINE_DISTILLED),
                                 ("Full one-stage checkpoint", LTX_PIPELINE_ONE_STAGE),
                             ],
                             value=default_ltx_pipeline,
                         )
                         with gr.Row():
-                            ltx_width = gr.Slider(256, 1280, value=512, step=32, label="Width")
-                            ltx_height = gr.Slider(256, 1280, value=512, step=32, label="Height")
+                            ltx_width = gr.Slider(128, 1280, value=128, step=32, label="Width")
+                            ltx_height = gr.Slider(128, 1280, value=128, step=32, label="Height")
                             ltx_frames = gr.Slider(
                                 9,
                                 257,
-                                value=81,
+                                value=9,
                                 step=8,
                                 label="Frames",
                                 info="LTX uses 8*k+1 frame counts.",
                             )
                         with gr.Row():
-                            ltx_fps = gr.Slider(1, 60, value=25, step=1, label="FPS")
+                            ltx_fps = gr.Slider(1, 60, value=8, step=1, label="FPS")
                             ltx_steps = gr.Slider(
                                 1,
                                 80,
-                                value=20,
+                                value=1,
                                 step=1,
-                                label="One-stage steps",
-                                info="Distilled uses its fixed upstream sigma schedule.",
+                                label="Steps",
                             )
                             ltx_seed = gr.Number(value=-1, precision=0, label="Seed")
                         with gr.Row():
                             ltx_offload = gr.Radio(
                                 label="Offload",
-                                choices=[("CPU offload", "cpu"), ("None", "none"), ("Disk fallback", "disk")],
-                                value="cpu",
+                                choices=[("Disk fallback", "disk"), ("CPU offload", "cpu"), ("None", "none")],
+                                value="disk",
                             )
                             ltx_quantization = gr.Radio(
                                 label="Quantization",
@@ -1209,17 +1218,38 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             info="Required for the distilled two-stage route.",
                         )
                         ltx_gemma = gr.Textbox(
-                            label="LTX Gemma text encoder folder",
+                            label="LTX Gemma tokenizer/processor folder",
                             value=str(ltx_service.default_gemma_root()),
                         )
-                        ltx_run = gr.Button("Generate LTX 2.3 video", variant="primary")
+                        ltx_t5_encoder = gr.Textbox(
+                            label="LTX 2B T5XXL text encoder",
+                            value=str(ltx_service.default_t5_encoder_path()),
+                        )
+                        ltx_t5_tokenizer = gr.Textbox(
+                            label="LTX 2B tokenizer",
+                            value=LTX_T5_TOKENIZER,
+                        )
+                        with gr.Row():
+                            ltx_gemma_backend = gr.Radio(
+                                label="Gemma backend",
+                                choices=[
+                                    ("HF safetensors", LTX_GEMMA_BACKEND_HF_SAFETENSORS),
+                                    ("Heretic GGUF Q3", LTX_GEMMA_BACKEND_GGUF),
+                                ],
+                                value=LTX_GEMMA_BACKEND_HF_SAFETENSORS,
+                            )
+                            ltx_gemma_gguf = gr.Textbox(
+                                label="Heretic GGUF",
+                                value=str(ltx_service.default_gemma_gguf_path()),
+                            )
+                        ltx_run = gr.Button("Generate LTX video", variant="primary")
                         ltx_video_out = gr.Video(label="LTX result", interactive=False)
                         ltx_save_bad_video = gr.Button(
                             "Save bad LTX result",
                             elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
                         )
                         ltx_status = gr.Markdown(
-                            "**LTX ready when installed** - use Settings to install/probe the LTX engine.",
+                            "**LTX ready** - Local 2B Diffusers uses the app venv; LTX-2.3 uses the optional engine.",
                             elem_classes=["aiwf-status-bar"],
                         )
 
@@ -1241,10 +1271,44 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             next_width, next_height = dimensions_from_generation_preset(size_value, square_ratio_value or "1:1")
             return gr.update(value=next_width), gr.update(value=next_height), gr.update(value=None)
 
+        def _ltx_route_defaults(route_value):
+            route = str(route_value or default_ltx_pipeline)
+            checkpoint = ltx_service.default_checkpoint_path(route)
+            quantization = "" if route == LTX_PIPELINE_DIFFUSERS_2B else "fp8-cast"
+            return (
+                gr.update(value=str(checkpoint)),
+                gr.update(value=str(ltx_service.default_spatial_upsampler_path())),
+                gr.update(value=str(ltx_service.default_t5_encoder_path())),
+                gr.update(value=LTX_T5_TOKENIZER),
+                gr.update(value=LTX_GEMMA_BACKEND_HF_SAFETENSORS),
+                gr.update(value=128),
+                gr.update(value=128),
+                gr.update(value=1),
+                gr.update(value="disk"),
+                gr.update(value=quantization),
+            )
+
         resolution_size.change(
             _apply_resolution_preset,
             inputs=[resolution_size, resolution_ratio, resolution_ratio_square],
             outputs=[width, height],
+            show_progress=False,
+        )
+        ltx_pipeline.change(
+            _ltx_route_defaults,
+            inputs=[ltx_pipeline],
+            outputs=[
+                ltx_checkpoint,
+                ltx_upsampler,
+                ltx_t5_encoder,
+                ltx_t5_tokenizer,
+                ltx_gemma_backend,
+                ltx_width,
+                ltx_height,
+                ltx_steps,
+                ltx_offload,
+                ltx_quantization,
+            ],
             show_progress=False,
         )
         resolution_ratio.change(
@@ -2294,7 +2358,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             return gr.update(value=None), "**Generating** -- preparing Wan video..."
 
         def _clear_previous_ltx_video():
-            return gr.update(value=None), "**Generating** -- preparing LTX 2.3 video..."
+            return gr.update(value=None), "**Generating** -- preparing LTX video..."
 
         def _stop_video():
             _wan_cancel_flag[0] = True
@@ -2321,40 +2385,48 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             checkpoint_v,
             upsampler_v,
             gemma_v,
+            t5_encoder_v,
+            t5_tokenizer_v,
+            gemma_backend_v,
+            gemma_gguf_v,
             progress=gr.Progress(),
         ):
             prompt_text = str(prompt_v or "").strip()
             if not prompt_text:
                 raise gr.Error("Enter an LTX prompt first.")
-            progress(0.02, desc="Validating LTX 2.3 engine and model paths")
+            progress(0.02, desc="Validating LTX route and model paths")
             try:
                 request = LtxVideoRequest(
                     prompt=prompt_text,
                     negative_prompt=str(negative_v or ""),
                     source_image_path=str(source_path or "") or None,
                     pipeline=str(pipeline_v or default_ltx_pipeline),
-                    width=int(width_v or 512),
-                    height=int(height_v or 512),
-                    num_frames=snap_ltx_num_frames(int(frames_v or 81)),
-                    fps=float(fps_v or 25),
-                    steps=int(steps_v or 20),
+                    width=int(width_v or 128),
+                    height=int(height_v or 128),
+                    num_frames=snap_ltx_num_frames(int(frames_v or 9)),
+                    fps=float(fps_v or 8),
+                    steps=int(steps_v or 1),
                     seed=int(seed_v if seed_v is not None else -1),
-                    offload=str(offload_v or "cpu"),
+                    offload=str(offload_v or "disk"),
                     quantization=str(quantization_v or ""),
                     enhance_prompt=bool(enhance_prompt_v),
                     checkpoint_path=str(checkpoint_v or ""),
                     spatial_upsampler_path=str(upsampler_v or ""),
                     gemma_root=str(gemma_v or ""),
+                    t5_encoder_path=str(t5_encoder_v or ""),
+                    t5_tokenizer=str(t5_tokenizer_v or LTX_T5_TOKENIZER),
+                    gemma_backend=str(gemma_backend_v or LTX_GEMMA_BACKEND_HF_SAFETENSORS),
+                    gemma_gguf_path=str(gemma_gguf_v or ""),
                 )
-                progress(0.05, desc="Launching isolated LTX 2.3 worker")
+                progress(0.05, desc="Launching LTX route")
                 result = ltx_service.generate(request)
             except LtxUnavailable as exc:
                 raise gr.Error(str(exc))
             except ValueError as exc:
                 raise gr.Error(str(exc))
             except Exception as exc:
-                logger.exception("LTX 2.3 generation failed")
-                raise gr.Error(f"LTX 2.3 generation failed: {exc}") from exc
+                logger.exception("LTX generation failed")
+                raise gr.Error(f"LTX generation failed: {exc}") from exc
             return result.output_path, f"**Done** -- {result.message}"
 
         run_event = run.click(
@@ -2484,6 +2556,10 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 ltx_checkpoint,
                 ltx_upsampler,
                 ltx_gemma,
+                ltx_t5_encoder,
+                ltx_t5_tokenizer,
+                ltx_gemma_backend,
+                ltx_gemma_gguf,
             ],
             outputs=[ltx_video_out, ltx_status],
             show_progress="minimal",

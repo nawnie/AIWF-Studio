@@ -69,6 +69,21 @@ def test_save_never_overwrites_batch(tmp_path: Path):
     assert Path(a.path).exists() and Path(b.path).exists()
 
 
+def test_save_accepts_filename_stem_and_format_override(tmp_path: Path):
+    settings = UserSettings(image_format="jpg")
+    store = FilesystemImageStore(tmp_path, settings=settings)
+
+    artifact = store.save(
+        Image.new("RGB", (8, 8), "red"),
+        "",
+        "txt2img-images",
+        filename_stem="bad/prompt:model-1",
+        format_override="png",
+    )
+
+    assert Path(artifact.path).name == "bad_prompt_model-1.png"
+
+
 def test_sidecar_txt_written_when_enabled(tmp_path: Path):
     settings = UserSettings(save_sidecar_txt=True)
     store = FilesystemImageStore(tmp_path, settings=settings)

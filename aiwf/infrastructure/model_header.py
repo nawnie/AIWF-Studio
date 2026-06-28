@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
-MODEL_HEADER_CACHE_VERSION = 2
+MODEL_HEADER_CACHE_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Architecture / role constants
@@ -647,10 +647,39 @@ def _looks_like_gemma_transformer_file(p: Path, tensor_keys: Iterable[str], text
     return "gemma" in combined and any(key.startswith("model.layers.") for key in tensor_keys[:80])
 
 
+def _semantic_metadata_text(meta: dict) -> str:
+    """Return metadata that can safely drive architecture detection.
+
+    Some safetensors files embed thumbnails or other large opaque values in
+    metadata. Searching every value for short family tokens such as "ltx" can
+    classify unrelated checkpoints from random base64. Keep detection to fields
+    that are meant to describe the model.
+    """
+
+    allowed_exact = {
+        "config",
+        "modelspec.architecture",
+        "modelspec.author",
+        "modelspec.description",
+        "modelspec.implementation",
+        "modelspec.title",
+        "ss_base_model_version",
+        "ss_output_name",
+        "ss_sd_model_name",
+    }
+    allowed_prefixes = ("modelspec.tags",)
+    values = [
+        str(value)
+        for key, value in meta.items()
+        if key in allowed_exact or any(key.startswith(prefix) for prefix in allowed_prefixes)
+    ]
+    return " ".join(values).lower()
+
+
 def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple:
     # 1. modelspec.architecture
     spec_arch = meta.get("modelspec.architecture", "").lower()
-    combined_meta = " ".join(str(v) for v in meta.values()).lower()
+    combined_meta = _semantic_metadata_text(meta)
     if "wan" in spec_arch:
         return ARCH_WAN_TRANSFORMER_FP8, _role_from_meta_and_filename(meta, p.name)
     if "ltx" in spec_arch or "ltx" in combined_meta or "lightricks" in combined_meta or "ltx" in p.name.lower():

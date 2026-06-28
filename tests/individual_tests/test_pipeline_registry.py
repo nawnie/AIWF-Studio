@@ -53,7 +53,7 @@ def test_pipeline_registry_lists_wan_diffusers_and_gguf_methods(tmp_path: Path):
 
     ids = {pipeline.id for pipeline in registry.video_pipelines()}
 
-    assert {"wan-diffusers", "wan-gguf", "sana-video", "ltx-2.3"}.issubset(ids)
+    assert {"wan-diffusers", "wan-gguf", "sana-video", "ltx-2b-diffusers", "ltx-2.3"}.issubset(ids)
 
 
 def test_pipeline_registry_marks_ltx_missing_until_worker_ready(tmp_path: Path):
@@ -63,6 +63,22 @@ def test_pipeline_registry_marks_ltx_missing_until_worker_ready(tmp_path: Path):
 
     assert not ltx.ready
     assert "enabled=true" in ltx.message or "missing" in ltx.message
+
+
+def test_pipeline_registry_marks_ltx2b_ready_when_assets_exist(tmp_path: Path):
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models")
+    checkpoint = flags.resolved_models_dir() / "ltx" / "checkpoints" / "ltx-video-2b-v0.9.5.safetensors"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"fake")
+    t5 = flags.resolved_models_dir() / "flux" / "Textencoder" / "t5xxl_fp16.safetensors"
+    t5.parent.mkdir(parents=True)
+    t5.write_bytes(b"fake")
+    registry = PipelineRegistry(flags, UserSettings())
+
+    ltx = [pipeline for pipeline in registry.video_pipelines() if pipeline.id == "ltx-2b-diffusers"][0]
+
+    assert ltx.ready
+    assert str(checkpoint.resolve()) in ltx.message
 
 
 def test_pipeline_registry_marks_sana_video_waiting_for_snapshot(tmp_path: Path):

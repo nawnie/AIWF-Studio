@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
@@ -574,6 +575,100 @@ class GenerationService:
             GenerationMode.INPAINT: self.settings.inpaint_output_subdir,
         }[mode]
 
+    @staticmethod
+    def _metadata_model_name(checkpoint) -> str:
+        filename = getattr(checkpoint, "filename", "") or ""
+        fallback = Path(filename).stem if filename else ""
+        return (
+            getattr(checkpoint, "title", None)
+            or getattr(checkpoint, "name", None)
+            or fallback
+            or getattr(checkpoint, "id", None)
+            or "model"
+        )
+
+    @staticmethod
+    def _prompt_head(prompt: str) -> str:
+        return (" ".join((prompt or "").split())[:24] or "prompt").strip()
+
+    def _training_filename_stem(self, request: GenerationRequest, checkpoint, counter: int) -> str:
+        model_name = str(self._metadata_model_name(checkpoint)).strip()[:80] or "model"
+        return f"{self._prompt_head(request.prompt)}-{model_name}-{counter}"
+
+    def _training_caption(
+        self,
+        request: GenerationRequest,
+        checkpoint,
+        *,
+        seed: int | None,
+        index: int,
+        image: Image.Image,
+    ) -> str:
+        prompt = " ".join((request.prompt or "").split())
+        negative = " ".join((request.negative_prompt or "").split())
+        model_name = self._metadata_model_name(checkpoint)
+        parts = [prompt or "Generated image"]
+        if request.tags:
+            parts.append("Tags: " + ", ".join(request.tags) + ".")
+        if negative:
+            parts.append("Negative prompt: " + negative + ".")
+        details = [
+            f"mode {request.mode.value}",
+            f"model {model_name}",
+            f"{getattr(image, 'width', request.width)}x{getattr(image, 'height', request.height)}",
+            f"seed {seed if seed is not None else request.seed}",
+            f"image {index + 1}",
+            f"{request.steps} steps",
+            f"CFG {request.cfg_scale:g}",
+            f"sampler {request.sampler}",
+        ]
+        scheduler = getattr(request, "scheduler", "automatic")
+        if scheduler and scheduler != "automatic":
+            details.append(f"schedule {scheduler}")
+        if request.enable_hr:
+            details.append(f"hires {request.hr_scale:g}x")
+        if request.controlnet_units:
+            active_units = sum(1 for unit in request.controlnet_units if getattr(unit, "enabled", False))
+            if active_units:
+                details.append(f"{active_units} ControlNet unit(s)")
+        parts.append("Generation details: " + ", ".join(details) + ".")
+        return " ".join(parts)
+
+    def _training_metadata_payload(
+        self,
+        request: GenerationRequest,
+        checkpoint,
+        *,
+        caption: str,
+        seed: int | None,
+        index: int,
+        image: Image.Image,
+        optimization_plan: OptimizationPlan | None,
+    ) -> dict[str, Any]:
+        return {
+            "for_ai_training": True,
+            "caption": caption,
+            "full_prompt": request.prompt,
+            "negative_prompt": request.negative_prompt,
+            "image_index": index,
+            "counter": index + 1,
+            "seed": seed if seed is not None else request.seed,
+            "output_width": getattr(image, "width", request.width),
+            "output_height": getattr(image, "height", request.height),
+            "request": request.model_dump(mode="json"),
+            "model": {
+                "id": getattr(checkpoint, "id", None),
+                "title": getattr(checkpoint, "title", None),
+                "filename": getattr(checkpoint, "filename", None),
+                "architecture": getattr(checkpoint, "architecture", None),
+                "hash": getattr(checkpoint, "hash", None),
+            },
+            "optimization_profile_id": (
+                optimization_plan.profile_id if optimization_plan is not None else None
+            ),
+            "metadata_schema": "aiwf.training.v1",
+        }
+
     def _save_generation_result(
         self,
         result: GenerationResult,
@@ -585,8 +680,18 @@ class GenerationService:
         model_name = getattr(checkpoint, "name", None) or getattr(checkpoint, "id", None)
         artifacts = []
         saved_images = []
+        training_enabled = bool(getattr(request, "training_metadata", False))
         for index, image in enumerate(result.images):
             infotext = result.infotexts[index] if index < len(result.infotexts) else ""
+            seed = result.seeds[index] if index < len(result.seeds) else None
+            if training_enabled and not (infotext or "").strip():
+                infotext = self.metadata.build_infotext(
+                    request,
+                    seed if seed is not None else request.seed,
+                    checkpoint,
+                    output_width=getattr(image, "width", None),
+                    output_height=getattr(image, "height", None),
+                )
             infotext = self._enrich_saved_infotext(
                 infotext,
                 request,
@@ -595,11 +700,60 @@ class GenerationService:
             )
             if index < len(result.infotexts):
                 result.infotexts[index] = infotext
-            seed = result.seeds[index] if index < len(result.seeds) else None
-            if self.settings.embed_metadata or request.tags:
-                image = self.metadata.embed(image, infotext, tags=request.tags)
+            elif infotext:
+                result.infotexts.append(infotext)
+            caption = None
+            extra_text = None
+            extra_payload = None
+            filename_stem = None
+            format_override = None
+            if training_enabled:
+                caption = self._training_caption(
+                    request,
+                    checkpoint,
+                    seed=seed,
+                    index=index,
+                    image=image,
+                )
+                training_payload = self._training_metadata_payload(
+                    request,
+                    checkpoint,
+                    caption=caption,
+                    seed=seed,
+                    index=index,
+                    image=image,
+                    optimization_plan=optimization_plan,
+                )
+                extra_text = {
+                    "full_prompt": request.prompt,
+                    "negative_prompt": request.negative_prompt,
+                    "aiwf_training": json.dumps(training_payload, sort_keys=True),
+                }
+                extra_payload = {
+                    "for_ai_training": True,
+                    "training_metadata_schema": "aiwf.training.v1",
+                    "training": training_payload,
+                }
+                filename_stem = self._training_filename_stem(request, checkpoint, index + 1)
+                format_override = "png"
+            if self.settings.embed_metadata or request.tags or training_enabled:
+                image = self.metadata.embed(
+                    image,
+                    infotext,
+                    tags=request.tags,
+                    caption=caption,
+                    extra_text=extra_text,
+                    extra_payload=extra_payload,
+                )
             artifact = self.store.save(
-                image, infotext, subdir, seed=seed, index=index, model_name=model_name
+                image,
+                infotext,
+                subdir,
+                seed=seed,
+                index=index,
+                model_name=model_name,
+                filename_stem=filename_stem,
+                format_override=format_override,
             )
             artifacts.append(artifact)
             saved_images.append(image)

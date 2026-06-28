@@ -15,6 +15,7 @@ from aiwf.infrastructure.model_header import (
     ARCH_LTX_LORA,
     ARCH_LTX_TRANSFORMER,
     ARCH_LTX_VAE,
+    ARCH_SD_CHECKPOINT,
     ARCH_SD35_CHECKPOINT,
     ARCH_T5XXL_ENCODER,
     ARCH_UMT5_ENCODER,
@@ -510,6 +511,28 @@ def test_ltx_headers_route_gguf_lora_and_vaes_to_ltx_folders(tmp_path: Path):
     assert info_by_name[text_encoder.name].role == ROLE_TEXT_ENCODER
     assert by_name[text_encoder.name].family == "text_encoder"
     assert by_name[text_encoder.name].recommended_subdir == "ltx/text_encoder"
+
+
+def test_thumbnail_metadata_does_not_drive_ltx_detection(tmp_path: Path):
+    path = tmp_path / "models" / "Stable-diffusion" / "sd15-with-thumbnail.safetensors"
+    _write_safetensors_header(
+        path,
+        {
+            "model.diffusion_model.input_blocks.0.0.weight": {
+                "dtype": "F16",
+                "shape": [320, 4, 3, 3],
+                "data_offsets": [0, 23040],
+            }
+        },
+        {
+            "modelspec.title": "Stable Diffusion v1.5",
+            "modelspec.thumbnail": "data:image/jpeg;base64,this-value-mentions-ltx-by-accident",
+        },
+    )
+
+    info = read_model_info(path)
+
+    assert info.arch == ARCH_SD_CHECKPOINT
 
 
 def test_wan_lora_header_overrides_wrong_flux_folder_and_stays_out_of_image_loras(tmp_path: Path):

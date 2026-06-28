@@ -364,8 +364,14 @@ def preflight_ltx_pipeline(
     settings: UserSettings | None = None,
     request=None,  # noqa: ANN001
 ) -> PipelinePreflightResult:
-    from aiwf.core.domain.ltx import LTX_PIPELINE_DISTILLED, LTX_PIPELINE_ONE_STAGE, LtxVideoRequest
-    from aiwf.services.ltx import LtxService
+    from aiwf.core.domain.ltx import (
+        LTX_GEMMA_BACKEND_GGUF,
+        LTX_PIPELINE_DIFFUSERS_2B,
+        LTX_PIPELINE_DISTILLED,
+        LTX_PIPELINE_ONE_STAGE,
+        LtxVideoRequest,
+    )
+    from aiwf.services.ltx import LtxService, ltx_checkpoint_openability_error
 
     runtime_flags = flags if isinstance(flags, RuntimeFlags) else RuntimeFlags(data_dir=Path(flags))
     service = LtxService(runtime_flags, settings or UserSettings())
@@ -373,33 +379,73 @@ def preflight_ltx_pipeline(
     if not isinstance(base_request, LtxVideoRequest):
         base_request = LtxVideoRequest.model_validate(base_request)
 
-    status = service.registry.status("ltx")
     payload = service._resolve_request(base_request)
     selected_pipeline = str(payload.get("pipeline") or base_request.pipeline)
     checkpoint = Path(str(payload.get("checkpoint_path") or ""))
+    t5_encoder = Path(str(payload.get("t5_encoder_path") or ""))
     gemma_root = Path(str(payload.get("gemma_root") or ""))
+    gemma_backend = str(payload.get("gemma_backend") or "")
+    gemma_gguf = Path(str(payload.get("gemma_gguf_path") or ""))
     upsampler = Path(str(payload.get("spatial_upsampler_path") or ""))
 
-    items: list[PipelineCheckItem] = [
-        PipelineCheckItem(
-            "engine worker",
-            status.ready,
-            "ready via isolated worker" if status.ready else "; ".join(status.messages),
-            status.worker_script,
-        ),
-        PipelineCheckItem(
-            "checkpoint",
-            checkpoint.is_file(),
-            str(checkpoint) if checkpoint.is_file() else f"missing LTX checkpoint: {checkpoint}",
-            checkpoint,
-        ),
-        PipelineCheckItem(
-            "Gemma text encoder",
-            gemma_root.exists(),
-            str(gemma_root) if gemma_root.exists() else f"missing Gemma root: {gemma_root}",
-            gemma_root,
-        ),
-    ]
+    if selected_pipeline == LTX_PIPELINE_DIFFUSERS_2B:
+        items = [
+            PipelineCheckItem(
+                "checkpoint",
+                checkpoint.is_file(),
+                str(checkpoint) if checkpoint.is_file() else f"missing LTX 2B checkpoint: {checkpoint}",
+                checkpoint,
+            ),
+            PipelineCheckItem(
+                "T5XXL text encoder",
+                t5_encoder.is_file(),
+                str(t5_encoder) if t5_encoder.is_file() else f"missing T5XXL text encoder: {t5_encoder}",
+                t5_encoder,
+            ),
+        ]
+    else:
+        status = service.registry.status("ltx")
+        items = [
+            PipelineCheckItem(
+                "engine worker",
+                status.ready,
+                "ready via isolated worker" if status.ready else "; ".join(status.messages),
+                status.worker_script,
+            ),
+            PipelineCheckItem(
+                "checkpoint",
+                checkpoint.is_file(),
+                str(checkpoint) if checkpoint.is_file() else f"missing LTX checkpoint: {checkpoint}",
+                checkpoint,
+            ),
+            PipelineCheckItem(
+                "Gemma tokenizer/processor",
+                gemma_root.exists(),
+                str(gemma_root) if gemma_root.exists() else f"missing Gemma root: {gemma_root}",
+                gemma_root,
+            ),
+        ]
+        if checkpoint.is_file():
+            openability_error = ltx_checkpoint_openability_error(checkpoint)
+            items.append(
+                PipelineCheckItem(
+                    "checkpoint openability",
+                    not openability_error,
+                    openability_error or "shallow safetensors open check passed",
+                    checkpoint,
+                )
+            )
+    if gemma_backend == LTX_GEMMA_BACKEND_GGUF:
+        items.append(
+            PipelineCheckItem(
+                "Gemma GGUF",
+                gemma_gguf.is_file() and gemma_gguf.suffix.lower() == ".gguf",
+                str(gemma_gguf)
+                if gemma_gguf.is_file() and gemma_gguf.suffix.lower() == ".gguf"
+                else f"missing Gemma GGUF file: {gemma_gguf}",
+                gemma_gguf,
+            )
+        )
     if selected_pipeline == LTX_PIPELINE_DISTILLED:
         items.append(
             PipelineCheckItem(
@@ -424,19 +470,28 @@ def preflight_ltx_pipeline(
             )
     if str(payload.get("offload") or "").lower() == "none":
         warnings.append("LTX offload is disabled; use CPU offload for consumer GPUs.")
+    if gemma_backend == LTX_GEMMA_BACKEND_GGUF:
+        warnings.append(
+            "Native Gemma GGUF is path-checked only; LTX generation still needs a GGUF backend "
+            "that returns every Gemma hidden-state layer."
+        )
 
     metadata = {
         "requested_pipeline": str(base_request.pipeline),
         "selected_pipeline": selected_pipeline,
         "checkpoint_path": str(checkpoint),
+        "t5_encoder_path": str(t5_encoder),
+        "t5_tokenizer": str(payload.get("t5_tokenizer") or ""),
         "gemma_root": str(gemma_root),
+        "gemma_backend": gemma_backend,
+        "gemma_gguf_path": str(gemma_gguf) if str(gemma_gguf) != "." else "",
         "spatial_upsampler_path": str(upsampler),
         "offload": str(payload.get("offload") or ""),
         "quantization": str(payload.get("quantization") or ""),
         "steps": str(payload.get("steps") or ""),
     }
     return PipelinePreflightResult(
-        pipeline="LTX 2.3",
+        pipeline="LTX 2B" if selected_pipeline == LTX_PIPELINE_DIFFUSERS_2B else "LTX 2.3",
         ok=all(item.ok for item in items),
         items=tuple(items),
         warnings=tuple(warnings),

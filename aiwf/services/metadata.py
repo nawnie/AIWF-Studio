@@ -4,6 +4,7 @@ import hashlib
 import json
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 from PIL import Image, PngImagePlugin
 
@@ -115,13 +116,35 @@ class MetadataService:
             return parse_tags(stored)
         return []
 
-    def embed(self, image: Image.Image, infotext: str, *, tags: list[str] | None = None) -> Image.Image:
+    def embed(
+        self,
+        image: Image.Image,
+        infotext: str,
+        *,
+        tags: list[str] | None = None,
+        caption: str | None = None,
+        extra_text: dict[str, Any] | None = None,
+        extra_payload: dict[str, Any] | None = None,
+    ) -> Image.Image:
         meta = PngImagePlugin.PngInfo()
         meta.add_text("parameters", infotext)
         payload: dict[str, object] = {"generator": "aiwf-studio", "version": __version__}
         if tags:
             payload["tags"] = tags
-        meta.add_text("aiwf", json.dumps(payload))
+        if caption:
+            meta.add_text("caption", caption)
+            meta.add_text("aiwf_caption", caption)
+            payload["caption"] = caption
+        if extra_payload:
+            payload.update(extra_payload)
+        for key, value in (extra_text or {}).items():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                meta.add_text(str(key), value)
+            else:
+                meta.add_text(str(key), json.dumps(value, sort_keys=True))
+        meta.add_text("aiwf", json.dumps(payload, sort_keys=True))
         buffer = BytesIO()
         image.save(buffer, format="PNG", pnginfo=meta)
         buffer.seek(0)

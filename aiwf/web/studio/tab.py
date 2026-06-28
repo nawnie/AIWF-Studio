@@ -192,6 +192,12 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                             scale=1,
                             elem_classes=["aiwf-continuous-toggle"],
                         )
+                        training_metadata_toggle = gr.Checkbox(
+                            label="AI training",
+                            value=False,
+                            scale=1,
+                            elem_classes=["aiwf-continuous-toggle", "aiwf-training-toggle"],
+                        )
                     gr.Markdown(
                         '<kbd>Shift</kbd> + <kbd>Enter</kbd> in the prompt runs Generate.',
                         elem_classes=["aiwf-hotkey-hint"],
@@ -2197,6 +2203,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         inpaint_source,
         continuous_toggle,
         cooldown_seconds,
+        training_metadata_toggle,
         reactor_at_gen,
         reactor_source,
         reactor_source_index,

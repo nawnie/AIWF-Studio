@@ -20,6 +20,7 @@ from aiwf.services.failure_archive import FailureArchiveService
 from aiwf.services.genlog import GenerationLogService
 from aiwf.services.generation import GenerationService
 from aiwf.services.gpu_tenant_lock import GpuTenantLock
+from aiwf.infrastructure.storage.filesystem import FilesystemImageStore
 from aiwf.services.metadata import MetadataService
 from aiwf.services.prompt_processor import PromptProcessorService
 
@@ -91,6 +92,68 @@ def test_generation_service_enriches_saved_infotext(tmp_path: Path):
     assert "VAE hash:" in enriched
     assert "Lora hashes: detail:" in enriched
     assert "AIWF Studio:" in enriched
+
+
+def test_ai_training_metadata_mode_writes_caption_payload_and_filename(tmp_path: Path):
+    backend = MagicMock()
+    backend.list_vaes.return_value = []
+    backend.list_loras.return_value = []
+    settings = UserSettings(image_format="jpg", embed_metadata=False)
+    service = GenerationService(
+        backend=backend,
+        store=FilesystemImageStore(tmp_path, settings=settings),
+        metadata=MetadataService(),
+        queue=MagicMock(),
+        events=MagicMock(),
+        settings=settings,
+    )
+    request = GenerationRequest(
+        prompt="portrait photo with detailed lighting and red coat",
+        negative_prompt="blur",
+        steps=4,
+        cfg_scale=5.5,
+        seed=123,
+        tags=["subject"],
+        training_metadata=True,
+    )
+    checkpoint = Checkpoint(
+        id="tiny-xl",
+        title="Tiny/Model:XL",
+        filename="tiny-xl.safetensors",
+        path="/models/tiny-xl.safetensors",
+        hash="abc123",
+        architecture="sdxl",
+    )
+    result = GenerationResult(
+        job_id=uuid4(),
+        images=[
+            Image.new("RGB", (8, 8), "red"),
+            Image.new("RGB", (8, 8), "blue"),
+        ],
+        seeds=[11, 12],
+        infotexts=["", ""],
+        mode=GenerationMode.TXT2IMG,
+    )
+
+    service._save_generation_result(result, request, checkpoint, None)
+
+    artifact_paths = [Path(item.path) for item in result.artifacts]
+    assert [path.name for path in artifact_paths] == [
+        "portrait photo with deta-Tiny_Model_XL-1.png",
+        "portrait photo with deta-Tiny_Model_XL-2.png",
+    ]
+    with Image.open(artifact_paths[0]) as saved:
+        assert saved.text["parameters"].startswith(request.prompt)
+        assert saved.text["full_prompt"] == request.prompt
+        assert saved.text["negative_prompt"] == "blur"
+        assert "Generation details:" in saved.text["caption"]
+        payload = json.loads(saved.text["aiwf"])
+        assert payload["for_ai_training"] is True
+        training = json.loads(saved.text["aiwf_training"])
+        assert training["caption"] == saved.text["caption"]
+        assert training["full_prompt"] == request.prompt
+        assert training["request"]["training_metadata"] is True
+        assert training["model"]["title"] == "Tiny/Model:XL"
 
 
 def test_streaming_generation_reports_model_loading_before_backend_steps():

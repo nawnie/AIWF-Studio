@@ -56,6 +56,15 @@ def unload_all_gpu_models(ctx: AppContext) -> str:
         logger.exception("Failed to unload Wan video pipeline")
         errors.append(f"Wan video ({exc})")
 
+    try:
+        from aiwf.services.ltx_diffusers import unload_ltx2b_diffusers_cache
+
+        if unload_ltx2b_diffusers_cache():
+            unloaded.append("LTX 2B Diffusers")
+    except Exception as exc:
+        logger.exception("Failed to unload LTX 2B Diffusers pipeline")
+        errors.append(f"LTX 2B Diffusers ({exc})")
+
     for label, unload_fn in (
         ("Enhance", ctx.enhance.unload_models),
         ("Face swap", ctx.faceswap.unload),

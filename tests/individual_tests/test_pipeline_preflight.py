@@ -9,7 +9,15 @@ from unittest.mock import patch
 import pytest
 
 from aiwf.core.config.settings import RuntimeFlags
-from aiwf.core.domain.ltx import LTX_FULL_CHECKPOINT, LTX_GEMMA_REPO, LTX_PIPELINE_ONE_STAGE
+from aiwf.core.domain.ltx import (
+    LTX_DIFFUSERS_2B_CHECKPOINT,
+    LTX_FULL_CHECKPOINT,
+    LTX_GEMMA_REPO,
+    LTX_PIPELINE_DIFFUSERS_2B,
+    LTX_PIPELINE_ONE_STAGE,
+    LTX_T5XXL_FP16,
+    LtxVideoRequest,
+)
 from aiwf.services.pipeline_preflight import (
     preflight_diffusers_pipeline,
     preflight_ltx_pipeline,
@@ -208,6 +216,40 @@ def test_ltx_preflight_uses_installed_one_stage_when_distilled_missing(tmp_path:
     assert result.ok
     assert result.metadata["selected_pipeline"] == LTX_PIPELINE_ONE_STAGE
     assert any("falls back" in warning for warning in result.warnings)
+
+
+def test_ltx_preflight_blocks_unloadable_native_checkpoint(tmp_path: Path, monkeypatch):
+    _write_ready_ltx_worker(tmp_path)
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", output_dir=tmp_path / "outputs")
+    checkpoint = flags.resolved_models_dir() / "ltx" / "checkpoints" / LTX_FULL_CHECKPOINT
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"fake")
+    gemma = flags.resolved_models_dir() / "ltx" / "text_encoder" / LTX_GEMMA_REPO.split("/", 1)[1]
+    gemma.mkdir(parents=True)
+    monkeypatch.setattr("aiwf.services.ltx.ltx_checkpoint_openability_error", lambda _path: "pagefile too small")
+
+    result = preflight_ltx_pipeline(flags, request=LtxVideoRequest(pipeline=LTX_PIPELINE_ONE_STAGE))
+
+    assert not result.ok
+    assert "checkpoint openability" in result.markdown()
+    assert "pagefile too small" in result.markdown()
+
+
+def test_ltx_preflight_uses_local_diffusers_2b_without_worker(tmp_path: Path):
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", output_dir=tmp_path / "outputs")
+    checkpoint = flags.resolved_models_dir() / "ltx" / "checkpoints" / LTX_DIFFUSERS_2B_CHECKPOINT
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"fake")
+    t5 = flags.resolved_models_dir() / "flux" / "Textencoder" / LTX_T5XXL_FP16
+    t5.parent.mkdir(parents=True)
+    t5.write_bytes(b"fake")
+
+    result = preflight_ltx_pipeline(flags)
+
+    assert result.ok
+    assert result.pipeline == "LTX 2B"
+    assert result.metadata["selected_pipeline"] == LTX_PIPELINE_DIFFUSERS_2B
+    assert result.metadata["t5_encoder_path"] == str(t5.resolve())
 
 
 def test_ltx_preflight_blocks_missing_launch_checkpoint(tmp_path: Path):

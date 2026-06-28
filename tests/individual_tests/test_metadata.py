@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from PIL import Image
 
@@ -74,3 +75,21 @@ def test_embed_and_read_infotext_round_trip():
     info = "a cat\nSteps: 20, Seed: 7"
     embedded = md.embed(Image.new("RGB", (8, 8)), info, tags=["x"])
     assert md.read_infotext(embedded) == info
+
+
+def test_embed_training_caption_and_extra_payload():
+    md = MetadataService()
+    embedded = md.embed(
+        Image.new("RGB", (8, 8)),
+        "a cat\nSteps: 20, Seed: 7",
+        caption="a detailed training caption",
+        extra_text={"full_prompt": "a cat"},
+        extra_payload={"for_ai_training": True},
+    )
+
+    assert embedded.text["caption"] == "a detailed training caption"
+    assert embedded.text["aiwf_caption"] == "a detailed training caption"
+    assert embedded.text["full_prompt"] == "a cat"
+    payload = json.loads(embedded.text["aiwf"])
+    assert payload["for_ai_training"] is True
+    assert payload["caption"] == "a detailed training caption"

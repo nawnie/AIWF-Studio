@@ -15,7 +15,7 @@ if not exist "%PY%" (
 mkdir "outputs\ltx-videos" 2>nul
 
 echo ============================================================ > "%LOG%"
-echo LTX bf16 generation smoke test - %DATE% %TIME% >> "%LOG%"
+echo LTX 2.3 generation smoke test - %DATE% %TIME% >> "%LOG%"
 echo ============================================================ >> "%LOG%"
 
 "%PY%" "%WORKER%" "%REQ%" >> "%LOG%" 2>&1
