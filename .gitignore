@@ -36,6 +36,7 @@ engines/nvidia-vfx-sdk/
 engines/rtx-video-sdk/
 engines/audio/MMAudio/
 engines/ed2/EveryDream2trainer/
+engines/ltx/LTX-2/
 training/EveryDream2trainer/
 
 # Local config / logs
