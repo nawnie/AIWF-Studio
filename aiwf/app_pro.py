@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import webbrowser
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -105,6 +106,8 @@ def run() -> None:
     _startup_message("AIWF Studio Pro is ready.")
     if frontend_ready:
         _startup_message(f"Open in your browser: {local_url}")
+        if flags.autolaunch:
+            webbrowser.open(local_url)
     else:
         _startup_message(f"API ready at {local_url}/api/pro")
         _startup_message("React frontend build not found at frontend/dist; run the frontend build to serve it here.")

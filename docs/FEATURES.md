@@ -6,9 +6,9 @@ project grows.
 
 ## Application Surfaces
 
-- Studio UI: original Gradio workspace launched by `webui.bat` or `python launch.py`.
+- Studio UI / Gradio Lab: original Gradio workspace launched by `AIWF Studio Gradio Lab.bat` or `python launch_gradio.py`.
 - Modern UI: cleaner Gradio shell launched by `python webui_modern.py`.
-- Pro UI: FastAPI plus React/TypeScript/Vite shell launched by `python webui_pro.py`.
+- Pro UI: FastAPI plus React/TypeScript/Vite shell launched by `AIWF Studio Pro.bat` or `python launch_pro.py`.
 - Shared backend: all UI shells use the same local model folders, outputs, settings, and services.
 - Pro API: `/api/pro/runtime`, `/api/pro/bootstrap`, `/api/pro/generate`, `/api/pro/data`, `/api/pro/logs`, and `/api/pro/settings`.
 - Compatibility API: native `/api/v1` plus A1111-style `/sdapi/v1` adapter.

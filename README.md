@@ -12,15 +12,21 @@ This `main` branch is the stable sharing branch. It only advertises features int
 For a complete GitHub-facing inventory, see [`docs/FEATURES.md`](docs/FEATURES.md).
 For the multi-pipeline LoRA design direction, see [`docs/LORA_PIPELINE_STRATEGY.md`](docs/LORA_PIPELINE_STRATEGY.md).
 
+## Which App Should I Use?
+
+If you are new or hit friction, start with **AIWF Studio Pro**. It is the production-oriented React app and the calmer path through the project.
+
+Use **AIWF Studio Gradio Lab** when you want the full Gradio workspace, WIP features, or the newest pipeline tests. Gradio gets work-in-progress features first; Pro gets them after the Python and Gradio path is proven.
+
 ## UI Rebuild
 
 AIWF Studio ships three interchangeable web UIs on top of the same backend:
 
-- **Studio** (`webui.bat` / `python launch.py`, `aiwf/app.py`) - the original Gradio-based tabbed workspace. Still the default and most complete surface for image, inpaint, ControlNet, enhance, segment, and video.
+- **Studio / Gradio Lab** (`AIWF Studio Gradio Lab.bat`, `python launch_gradio.py`, `aiwf/app.py`) - the original Gradio-based tabbed workspace. Still the broadest surface for image, inpaint, ControlNet, enhance, segment, and video.
 - **Modern** (`webui_modern.py`, `aiwf/app_modern.py`) - a restyled Gradio shell (`aiwf/web/modern/`) with the same backend, aimed at a cleaner layout pass.
-- **Pro** (`webui_pro.py`, `aiwf/app_pro.py`) - a from-scratch FastAPI + React/TypeScript/Vite frontend (`frontend/`) talking to a dedicated `aiwf/web/pro_api.py` API. This is the active UI rebuild track and the long-term direction for the project; it covers the Create, Models, Data, Monitor, Logs, and Settings workspaces, including runtime monitoring and a lazy browser-side prompt helper. It needs a frontend build (`cd frontend && npm install && npm run build`) before `webui_pro.py` will serve it.
+- **Pro** (`AIWF Studio Pro.bat`, `python launch_pro.py`, `aiwf/app_pro.py`) - a from-scratch FastAPI + React/TypeScript/Vite frontend (`frontend/`) talking to a dedicated `aiwf/web/pro_api.py` API. This is the active UI rebuild track and the long-term direction for the project; it covers the Create, Models, Data, Monitor, Logs, and Settings workspaces, including runtime monitoring and a lazy browser-side prompt helper. It needs a frontend build (`cd frontend && npm install && npm run build`) before Pro will serve it.
 
-All three read and write the same model folders, history, and settings, so switching between them is safe. Studio remains the one to recommend for new users until Pro reaches parity.
+All three read and write the same model folders, history, and settings, so switching between them is safe. Use Pro for the steadier React path, and use Studio when you want the Gradio development surface.
 
 ## Release Gate
 
@@ -137,23 +143,38 @@ Recent local receipts:
 
 ## Quick Start
 
-Run the classic Studio UI:
+On Windows, use the simple installer:
 
 ```bat
-webui.bat
+Install AIWF Studio.bat
 ```
 
-Or:
+Choose **Express**. It checks or installs Git, uv, Python 3.10, and Node.js LTS; prepares the AIWF runtime; builds the Pro frontend; and creates two Desktop shortcuts:
 
-```powershell
-python launch.py
+- **AIWF Studio Pro** - production-oriented React app
+- **AIWF Studio Gradio Lab** - Gradio workspace for WIP features and full pipeline testing
+
+Manual launchers:
+
+```bat
+AIWF Studio Pro.bat
+AIWF Studio Gradio Lab.bat
 ```
 
-Other UI entry points, see [UI Rebuild](#ui-rebuild):
+Python entry points:
 
 ```powershell
+python launch_pro.py
+python launch_gradio.py
+```
+
+Older compatibility entry points still work:
+
+```powershell
+python launch.py        # Gradio Studio
+webui.bat               # Gradio Studio
 python webui_modern.py   # Modern Gradio shell
-python webui_pro.py      # Pro FastAPI + React frontend (build frontend/ first)
+python webui_pro.py      # Pro API/React app (build frontend/ first)
 ```
 
 Optional local speed/settings logging:
