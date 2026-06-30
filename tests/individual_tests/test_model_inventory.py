@@ -21,6 +21,7 @@ from aiwf.infrastructure.model_header import (
     ARCH_UMT5_ENCODER,
     ARCH_Z_IMAGE_TRANSFORMER,
     ROLE_TEXT_ENCODER,
+    ROLE_VAE,
     read_model_info,
 )
 from aiwf.infrastructure.model_inventory import inventory_path, scan_and_write_model_inventory
@@ -239,6 +240,47 @@ def test_flux2_klein_gguf_is_runtime_asset_and_selectable_flux2_checkpoint(tmp_p
     assert checkpoints[0].kind == "flux2"
 
 
+def test_comfy_saved_flux2_klein_safetensor_is_selectable_runtime_asset(tmp_path: Path):
+    models = tmp_path / "models"
+    klein = models / "flux" / "UNet" / "snofsSexNudesAndOtherFunStuff_distilledV12Fp8.safetensors"
+    _write_safetensors_header(
+        klein,
+        {
+            "model.diffusion_model.double_blocks.0.img_attn.qkv.weight": {
+                "dtype": "F8_E4M3",
+                "shape": [12288, 4096],
+                "data_offsets": [0, 1],
+            }
+        },
+        metadata={
+            "prompt": json.dumps(
+                {
+                    "1": {
+                        "class_type": "UNETLoader",
+                        "inputs": {"unet_name": "flux-2-klein-9b.safetensors"},
+                    }
+                }
+            )
+        },
+    )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    info = read_model_info(klein)
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+
+    record = next(item for item in records if item.filename == klein.name)
+    assert info.arch == ARCH_FLUX2_KLEIN_TRANSFORMER
+    assert record.family == "runtime_asset"
+    assert record.architecture == "flux2_klein"
+    assert record.current_subdir == "flux/UNet"
+    assert record.recommended_subdir == "flux2/UNet"
+    assert record.should_move is True
+    assert [checkpoint.id for checkpoint in checkpoints] == ["snofsSexNudesAndOtherFunStuff_distilledV12Fp8"]
+    assert checkpoints[0].architecture == "flux2_klein"
+    assert checkpoints[0].kind == "flux2"
+
+
 def test_z_image_gguf_is_runtime_asset_and_selectable_z_image_checkpoint(tmp_path: Path):
     models = tmp_path / "models"
     z_image = models / "flux" / "GGUF" / "fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf"
@@ -283,6 +325,7 @@ def test_qwen_and_sana_diffusers_dirs_are_selectable_runtime_assets(tmp_path: Pa
     for root, class_name, _, _, _ in specs:
         root.mkdir(parents=True)
         (root / "model_index.json").write_text(json.dumps({"_class_name": class_name}), encoding="utf-8")
+        (root / "transformer.safetensors").write_bytes(b"weights")
     flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
 
     records = scan_and_write_model_inventory(flags)
@@ -296,6 +339,37 @@ def test_qwen_and_sana_diffusers_dirs_are_selectable_runtime_assets(tmp_path: Pa
         assert record.architecture == architecture
         assert record.recommended_subdir == recommended_subdir
         assert by_kind[kind].architecture == architecture
+        assert by_kind[kind].file_count == 2
+        assert by_kind[kind].asset_summary.startswith("folder, 2 files")
+        assert by_kind[kind].asset_summary in by_kind[kind].title
+
+
+def test_incomplete_qwen_diffusers_dir_is_not_selectable(tmp_path: Path):
+    models = tmp_path / "models"
+    root = models / "qwen-image" / "Diffusers" / "Qwen-Image"
+    transformer = root / "transformer"
+    transformer.mkdir(parents=True)
+    (root / "model_index.json").write_text(json.dumps({"_class_name": "QwenImagePipeline"}), encoding="utf-8")
+    (transformer / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": 1},
+                "weight_map": {
+                    "transformer_blocks.0.attn.to_q.weight": "diffusion_pytorch_model-00001-of-00009.safetensors"
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+
+    record = next(item for item in records if Path(item.path) == root.resolve())
+    assert record.family == "runtime_asset"
+    assert record.architecture == "qwen_image"
+    assert checkpoints == []
 
 
 def test_sana_video_diffusers_dir_is_video_runtime_asset_not_image_checkpoint(tmp_path: Path):
@@ -589,6 +663,54 @@ def test_t5xxl_and_umT5_headers_stay_separate(tmp_path: Path):
     assert umt5_info.is_t5xxl() is False
     assert records[umt5.name].architecture == "wan"
     assert records[umt5.name].recommended_subdir == "Textencoder"
+
+
+def test_qwen_text_encoder_stays_in_textencoder_folder(tmp_path: Path):
+    models = tmp_path / "models"
+    qwen = models / "Textencoder" / "qwen_3_8b_fp8mixed.safetensors"
+    _write_safetensors_header(
+        qwen,
+        {
+            "model.layers.0.self_attn.q_proj.weight": {
+                "dtype": "F8_E4M3",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+    )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    info = read_model_info(qwen)
+    record = next(item for item in scan_and_write_model_inventory(flags) if item.filename == qwen.name)
+
+    assert info.role == ROLE_TEXT_ENCODER
+    assert record.family == "text_encoder"
+    assert record.architecture == "unknown"
+    assert record.recommended_subdir == "Textencoder"
+
+
+def test_flux2_vae_role_overrides_transformer_filename(tmp_path: Path):
+    models = tmp_path / "models"
+    vae = models / "VAE" / "flux2-vae.safetensors"
+    _write_safetensors_header(
+        vae,
+        {
+            "encoder.conv_in.weight": {
+                "dtype": "F32",
+                "shape": [4, 4],
+                "data_offsets": [0, 32],
+            }
+        },
+    )
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    info = read_model_info(vae)
+    record = next(item for item in scan_and_write_model_inventory(flags) if item.filename == vae.name)
+
+    assert info.role == ROLE_VAE
+    assert record.family == "vae"
+    assert record.architecture == "flux2_klein"
+    assert record.recommended_subdir == "VAE"
 
 
 def test_flux_ae_vae_is_not_treated_as_wan_vae(tmp_path: Path):

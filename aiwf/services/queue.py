@@ -73,6 +73,10 @@ class JobQueue:
                 return None
             return self._jobs.get(self._active)
 
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._order)
+
     def list_recent(self, limit: int = 20) -> list[JobRecord]:
         with self._lock:
             jobs = list(self._jobs.values())

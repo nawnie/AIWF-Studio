@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -21,6 +22,11 @@ from aiwf.infrastructure.diffusers.model_arch import (
     is_inpaint_architecture,
     looks_like_lora_weights,
 )
+from aiwf.infrastructure.diffusers.model_blocks import (
+    is_blocked_selectable_image_asset,
+    is_non_selectable_image_asset_path,
+)
+from aiwf.infrastructure.model_asset_summary import asset_file_count, asset_shape_label, asset_size_bytes
 from aiwf.infrastructure.model_inventory import ModelInventoryRecord, get_model_inventory
 
 logger = logging.getLogger(__name__)
@@ -38,6 +44,7 @@ SKIP_DIR_NAMES = {
     "gfpgan",
     "esrgan",
     "realesrgan",
+    "upscale_models",
     "deepbooru",
     "diffusion_models",
     "karlo",
@@ -161,6 +168,9 @@ def scan_checkpoints(roots: list[Path]) -> list[Checkpoint]:
             continue
 
         for path in _iter_checkpoint_files(root):
+            if is_blocked_selectable_image_asset(path):
+                logger.debug("Skipping blocked/non-selectable image asset in checkpoint scan: %s", path)
+                continue
             resolved = str(path.resolve())
             dedup_key = os.path.normcase(resolved)
             if dedup_key in seen_paths:
@@ -174,9 +184,10 @@ def scan_checkpoints(roots: list[Path]) -> list[Checkpoint]:
             checkpoint_id = path.stem
             architecture = detect_checkpoint_architecture(path)
             arch_tag = architecture_label(architecture)
-            title = f"{checkpoint_id} [{arch_tag}]"
-            if short_hash:
-                title = f"{title} [{short_hash}]"
+            size_bytes = asset_size_bytes(path)
+            file_count = asset_file_count(path)
+            summary = asset_shape_label(path, size_bytes=size_bytes, file_count=file_count)
+            title = f"{checkpoint_id} [{arch_tag}] [{summary}]"
             results.append(
                 Checkpoint(
                     id=checkpoint_id,
@@ -186,6 +197,9 @@ def scan_checkpoints(roots: list[Path]) -> list[Checkpoint]:
                     hash=short_hash,
                     kind="inpaint" if is_inpaint_architecture(architecture) else "checkpoint",
                     architecture=architecture,
+                    size_bytes=size_bytes,
+                    file_count=file_count,
+                    asset_summary=summary,
                 )
             )
 
@@ -215,8 +229,7 @@ def scan_from_flags(flags: RuntimeFlags) -> list[Checkpoint]:
     checkpoints = [
         _checkpoint_from_inventory(record)
         for record in inventory
-        if (record.family == "checkpoint" and record.architecture not in non_image_runtime_arches)
-        or (record.family == "runtime_asset" and record.architecture in selectable_runtime_arches)
+        if _is_selectable_inventory_checkpoint(record, selectable_runtime_arches, non_image_runtime_arches)
     ]
     checkpoints.sort(key=lambda item: (1 if item.kind == "inpaint" else 0, item.title.lower()))
 
@@ -229,14 +242,62 @@ def scan_from_flags(flags: RuntimeFlags) -> list[Checkpoint]:
     return checkpoints
 
 
+def _is_selectable_inventory_checkpoint(
+    record: ModelInventoryRecord,
+    selectable_runtime_arches: set[str],
+    non_image_runtime_arches: set[str],
+) -> bool:
+    path = Path(record.path)
+    if is_blocked_selectable_image_asset(path):
+        logger.debug("Skipping blocked/non-selectable inventory checkpoint: %s", path)
+        return False
+    if is_non_selectable_image_asset_path(path):
+        return False
+    if record.family == "runtime_asset" and record.architecture in selectable_runtime_arches:
+        if path.is_dir() and not diffusers_dir_has_required_local_files(path):
+            logger.info("Skipping incomplete Diffusers runtime folder in checkpoint scan: %s", path)
+            return False
+    if record.family == "checkpoint" and record.architecture not in non_image_runtime_arches:
+        return True
+    return record.family == "runtime_asset" and record.architecture in selectable_runtime_arches
+
+
+def diffusers_dir_has_required_local_files(path: Path) -> bool:
+    """Best-effort offline check for sharded Diffusers folders.
+
+    A folder can have model_index.json while one of its component shard files is
+    missing. Diffusers catches that only at load time; checkpoint discovery
+    should avoid offering those folders as selectable routes.
+    """
+    if not (path / "model_index.json").is_file():
+        return False
+    for index_path in path.rglob("*.index.json"):
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.debug("Could not inspect Diffusers shard index: %s", index_path, exc_info=True)
+            return False
+        weight_map = payload.get("weight_map")
+        if not isinstance(weight_map, dict):
+            continue
+        for shard_name in set(str(name) for name in weight_map.values()):
+            if not (index_path.parent / shard_name).is_file():
+                return False
+    return True
+
+
+_diffusers_dir_has_required_local_files = diffusers_dir_has_required_local_files
+
+
 def _checkpoint_from_inventory(record: ModelInventoryRecord) -> Checkpoint:
     path = Path(record.path)
     architecture = record.architecture or detect_checkpoint_architecture(path)
     short_hash = _fast_fingerprint(path)
     checkpoint_id = path.name if path.is_dir() else path.stem
-    title = f"{checkpoint_id} [{architecture_label(architecture)}]"
-    if short_hash:
-        title = f"{title} [{short_hash}]"
+    size_bytes = asset_size_bytes(path)
+    file_count = asset_file_count(path)
+    summary = asset_shape_label(path, size_bytes=size_bytes, file_count=file_count)
+    title = f"{checkpoint_id} [{architecture_label(architecture)}] [{summary}]"
     is_runtime_asset = record.family == "runtime_asset"
     if is_runtime_asset and architecture == ARCH_FLUX:
         kind = "flux"
@@ -262,4 +323,7 @@ def _checkpoint_from_inventory(record: ModelInventoryRecord) -> Checkpoint:
         hash=short_hash,
         kind=kind,
         architecture=architecture,
+        size_bytes=size_bytes,
+        file_count=file_count,
+        asset_summary=summary,
     )

@@ -150,6 +150,7 @@ qa-screenshots/
 *.lnk
 prompt_image.txt
 prompt_video.txt
+test_image.txt
 
 # Local AI/model artifacts - do not commit the VRAM goblins
 models/

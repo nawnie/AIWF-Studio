@@ -13,6 +13,8 @@ sys.path.insert(0, str(_ROOT))
 from aiwf.core.domain.ltx import LTX_GEMMA_BACKEND_GGUF, LTX_PIPELINE_DISTILLED
 from aiwf.engine_workers.base import WorkerContext, emit_artifact, emit_complete, emit_status, run_worker
 
+_LTX_GEMMA_SEQUENCE_LENGTH = 1024
+
 
 def _version(package: str) -> str:
     try:
@@ -162,22 +164,53 @@ def _probe_gemma_gguf(ctx: WorkerContext) -> None:
     reader = gguf.GGUFReader(str(gguf_path))
     architecture = _gguf_field_text(reader, "general.architecture")
     name = _gguf_field_text(reader, "general.name")
-    hidden_size = _gguf_field_text(reader, "gemma3.embedding_length")
-    layer_count = _gguf_field_text(reader, "gemma3.block_count")
+    hidden_size = _gguf_field_int(reader, "gemma3.embedding_length")
+    layer_count = _gguf_field_int(reader, "gemma3.block_count")
     head_count = _gguf_field_text(reader, "gemma3.attention.head_count")
+    expected_hidden_states = layer_count + 1 if layer_count is not None else "unknown"
+    hidden_shape = (
+        f"[1, {_LTX_GEMMA_SEQUENCE_LENGTH}, {hidden_size}]"
+        if hidden_size is not None
+        else f"[1, {_LTX_GEMMA_SEQUENCE_LENGTH}, hidden_size]"
+    )
+    stacked_shape = (
+        f"[1, {_LTX_GEMMA_SEQUENCE_LENGTH}, {hidden_size}, {expected_hidden_states}]"
+        if hidden_size is not None and isinstance(expected_hidden_states, int)
+        else f"[1, {_LTX_GEMMA_SEQUENCE_LENGTH}, hidden_size, hidden_state_count]"
+    )
     emit_status(
         ctx.job_id,
         "GGUF metadata: "
         f"architecture={architecture or 'unknown'}, "
         f"name={name or 'unknown'}, "
-        f"hidden_size={hidden_size or 'unknown'}, "
-        f"layers={layer_count or 'unknown'}, "
+        f"hidden_size={hidden_size if hidden_size is not None else 'unknown'}, "
+        f"layers={layer_count if layer_count is not None else 'unknown'}, "
+        f"expected_hidden_states={expected_hidden_states}, "
         f"heads={head_count or 'unknown'}, "
         f"tensors={len(reader.tensors)}",
     )
+    emit_status(
+        ctx.job_id,
+        "LTX Gemma contract: GemmaTextEncoder.encode() must return a tuple of "
+        f"{expected_hidden_states} hidden-state tensors shaped {hidden_shape} plus "
+        f"attention_mask [1, {_LTX_GEMMA_SEQUENCE_LENGTH}].",
+    )
+    emit_status(
+        ctx.job_id,
+        "LTX embeddings processor contract: hidden states are stacked to "
+        f"{stacked_shape} before video/audio projection.",
+    )
+    emit_status(
+        ctx.job_id,
+        "Installed GGUF capability: gguf can inspect/dequantize tensors; "
+        f"llama_cpp={_module_state('llama_cpp')}; no installed backend exposes the required "
+        "Gemma hidden-state tuple directly from quantized GGUF.",
+    )
     if architecture and architecture.lower() != "gemma3":
         raise RuntimeError(f"Expected a Gemma 3 GGUF for LTX, got architecture={architecture!r}.")
-    raise RuntimeError(_native_gemma_gguf_blocker(ctx.request))
+    blocker = _native_gemma_gguf_blocker(ctx.request)
+    emit_status(ctx.job_id, blocker)
+    raise RuntimeError(blocker)
 
 
 def _gguf_field_text(reader, key: str) -> str:  # noqa: ANN001
@@ -193,11 +226,22 @@ def _gguf_field_text(reader, key: str) -> str:  # noqa: ANN001
             return ""
 
 
+def _gguf_field_int(reader, key: str) -> int | None:  # noqa: ANN001
+    text = _gguf_field_text(reader, key)
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
 def _native_gemma_gguf_blocker(request: dict) -> str:
     return (
         "Native Gemma GGUF is wired for selection/probing, but generation is blocked: "
-        "LTX needs raw Gemma hidden states for every layer plus an attention mask, and "
-        "this worker has no verified GGUF backend that exposes that contract. "
+        "LTX needs raw Gemma hidden states for the embedding output plus every layer, "
+        "and an attention mask; this worker has no verified GGUF backend that exposes "
+        "that contract from quantized weights. "
         f"GGUF path: {request.get('gemma_gguf_path') or 'not selected'}. "
         "No dequantization was run."
     )

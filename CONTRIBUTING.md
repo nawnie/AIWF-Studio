@@ -117,7 +117,8 @@ Useful starting docs:
 - `ARCHITECTURE.md`
 - `docs/ENGINE_ISOLATION.md`
 - `docs/WORKER_PROTOCOL.md`
-- `docs/TRAINING_ENGINE_ROADMAP.md`
+- `docs/FEATURES.md`
+- `docs/IMAGE_MATURITY_MATRIX.md`
 
 ## 7. Before opening a PR
 

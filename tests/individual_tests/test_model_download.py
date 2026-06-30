@@ -17,6 +17,7 @@ from aiwf.services.model_download import (
     split_hf_url,
 )
 from aiwf.services.model_download_catalog import QUICK_START_BUNDLES
+from scripts.ensure_default_sd15 import DEFAULT_SD15_CATALOG_KEY
 
 
 def test_detect_source():
@@ -508,14 +509,25 @@ def test_catalog_lists_entries(tmp_path: Path):
     assert "gdino-swinb" in keys         # GroundingDINO
 
 
+def test_default_sd15_install_seed_uses_small_fp16_single_file(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    entry = service.find_catalog(DEFAULT_SD15_CATALOG_KEY)
+
+    assert entry is not None
+    assert entry.repo_id == "Comfy-Org/stable-diffusion-v1-5-archive"
+    assert entry.filename == "v1-5-pruned-emaonly-fp16.safetensors"
+    assert entry.category == "checkpoint"
+    assert entry.size_mb is not None and entry.size_mb <= 2100
+
+
 def test_flux_quick_start_uses_supported_runtime_assets(tmp_path: Path):
     service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
 
-    assert QUICK_START_BUNDLES["flux"] == ["flux-fusion-v2-q4km", "flux-t5-fp8", "flux-clip-l", "flux-ae-vae"]
+    assert QUICK_START_BUNDLES["flux"] == ["flux-dev-q4km", "flux-t5-fp8", "flux-clip-l", "flux-ae-vae"]
     entries = [service.find_catalog(key) for key in QUICK_START_BUNDLES["flux"]]
     assert all(entry is not None for entry in entries)
     assert [entry.source for entry in entries if entry is not None] == [
-        "civitai",
+        "huggingface",
         "huggingface",
         "huggingface",
         "huggingface",

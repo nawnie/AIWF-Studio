@@ -15,6 +15,7 @@ from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.errors import GenerationCancelledError
 from aiwf.core.domain.generation import GenerationRequest
 from aiwf.core.domain.models import Checkpoint
+from aiwf.infrastructure.diffusers.checkpoints import diffusers_dir_has_required_local_files
 from aiwf.infrastructure.diffusers.model_arch import is_qwen_nunchaku_architecture
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,8 @@ class QwenNunchakuService:
             messages.append(f"base components missing: {base_dir}")
         elif not (base_dir / "model_index.json").is_file():
             messages.append(f"base components missing model_index.json: {base_dir}")
+        elif not diffusers_dir_has_required_local_files(base_dir):
+            messages.append(f"base components incomplete; missing local shard files under: {base_dir}")
         if not transformer.is_file():
             messages.append(f"transformer missing: {transformer}")
         return QwenNunchakuStatus(

@@ -26,6 +26,7 @@ from aiwf.core.domain.wan import (
 )
 from aiwf.infrastructure.wan.sampler_policy import audit_wan_sampler_settings
 from aiwf.dev.diagnostics import trace_exception_safe, trace_model_throughput
+from aiwf.infrastructure.model_inventory import ModelInventoryRecord, get_model_inventory
 from aiwf.infrastructure.video import VideoError, write_frames
 from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
 from aiwf.services.failure_archive import FailureArchiveService
@@ -33,6 +34,7 @@ from aiwf.services.genlog import GenerationLogService
 from aiwf.services.wan_models import (
     WanModelPairCheck,
     wan_lora_matches,
+    wan_lora_stage_matches,
     wan_model_pair_compatibility,
     wan_model_pair_family_key,
     wan_model_header_info,
@@ -1093,6 +1095,20 @@ class WanService:
         Filters out T5-XXL (incompatible with Wan) and flags remaining files
         with their detected precision in the label.
         """
+        records = self._text_encoder_inventory_records()
+        if records:
+            labeled: list[tuple[str, str]] = []
+            seen: set[str] = set()
+            for record in records:
+                if record.filename in seen:
+                    continue
+                seen.add(record.filename)
+                identifiers = record.header_identifiers or {}
+                precision = identifiers.get("header_precision", "")
+                suffix = f" [{precision}]" if precision else ""
+                labeled.append((f"{Path(record.filename).stem}{suffix}", record.filename))
+            return labeled
+
         try:
             from aiwf.infrastructure.model_header import read_model_info
         except ImportError:
@@ -1153,6 +1169,17 @@ class WanService:
                 deduped.append(r)
         return deduped
 
+    def _text_encoder_inventory_records(self) -> list[ModelInventoryRecord]:
+        records = [
+            record
+            for record in get_model_inventory(self.flags)
+            if record.family == "text_encoder"
+            and record.architecture == "wan"
+            and Path(record.path).suffix.lower() in {".safetensors", ".gguf"}
+            and not self._is_t5xxl_name(record.filename)
+        ]
+        return sorted(records, key=lambda item: item.filename.lower())
+
     # File stems that signal this is a T5-XXL (Flux/SD3) encoder - NOT UMT5-XXL (Wan).
     # Wan's text encoder is UMT5-XXL; these T5 files will produce garbage output if used.
     _T5_REJECT_STEMS = frozenset([
@@ -1170,6 +1197,10 @@ class WanService:
         T5-XXL files (Flux/SD3) are excluded - they are NOT compatible with Wan.
         Returns filenames (not full paths), or an empty list if none found.
         """
+        records = self._text_encoder_inventory_records()
+        if records:
+            return list(dict.fromkeys(record.filename for record in records))
+
         out: list[str] = []
         seen: set[str] = set()
         for root in self._text_encoder_roots():
@@ -1290,7 +1321,7 @@ class WanService:
                     continue
                 if child.suffix.lower() not in {".safetensors", ".pt", ".pth"}:
                     continue
-                if required and required not in child.name.lower():
+                if required and not wan_lora_stage_matches(child, stage=required):
                     continue
                 if child.name in seen_file_names:
                     continue

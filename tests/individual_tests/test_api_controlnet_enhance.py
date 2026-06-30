@@ -12,6 +12,7 @@ from PIL import Image
 
 from aiwf.api.v1.routes import build_router
 from aiwf.core.config.settings import RuntimeFlags
+from aiwf.core.domain.enhance import EnhanceResult
 from aiwf.services.controlnet import ControlNetService
 
 
@@ -22,6 +23,10 @@ def _b64(image: Image.Image) -> str:
 
 
 class FakeEnhance:
+    def __init__(self, output_dir: Path):
+        self.output_dir = output_dir
+        self.saved = []
+
     def list_upscalers(self):
         return []
 
@@ -31,13 +36,27 @@ class FakeEnhance:
     def run_pipeline(self, image, upscale=None, restore=None):
         return image.resize((image.width * 2, image.height * 2)), "upscaled x2"
 
+    def save_result(self, image, infotext, **kwargs):
+        self.saved.append({"image": image, "infotext": infotext, **kwargs})
+        image_path = self.output_dir / "enhanced.png"
+        receipt_path = self.output_dir / "enhanced.png.receipt.json"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(image_path)
+        receipt_path.write_text("{}", encoding="utf-8")
+        return EnhanceResult(
+            image_path=str(image_path),
+            receipt_path=str(receipt_path),
+            infotext=infotext,
+            message=f"Saved to {image_path}",
+        )
+
 
 def _client(tmp_path: Path):
     flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models")
     controlnet = ControlNetService(flags)
     controlnet.ensure_dir()
     (controlnet.models_dir() / "control_canny.safetensors").write_bytes(b"x")
-    ctx = SimpleNamespace(controlnet=controlnet, enhance=FakeEnhance())
+    ctx = SimpleNamespace(controlnet=controlnet, enhance=FakeEnhance(tmp_path / "outputs"))
     app = FastAPI()
     app.include_router(build_router(ctx))
     return TestClient(app)
@@ -91,6 +110,9 @@ def test_enhance_endpoint(tmp_path: Path):
     assert resp.status_code == 200
     assert resp.json()["image"]
     assert "x2" in resp.json()["infotext"]
+    assert resp.json()["image_path"].endswith("enhanced.png")
+    assert resp.json()["receipt_path"].endswith("enhanced.png.receipt.json")
+    assert resp.json()["message"].startswith("Saved to")
 
 
 def test_enhance_requires_a_model(tmp_path: Path):

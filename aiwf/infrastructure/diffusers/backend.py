@@ -8,6 +8,7 @@ import random
 import threading
 import time
 import warnings
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
@@ -125,6 +126,8 @@ from aiwf.infrastructure.diffusers.model_arch import (
 )
 from aiwf.infrastructure.diffusers.prompt_encode import build_prompt_kwargs
 from aiwf.infrastructure.diffusers.vae import resolve_vae, scan_vaes
+from aiwf.infrastructure.model_asset_summary import asset_size_bytes, format_size
+from aiwf.infrastructure.model_inventory import get_model_inventory
 try:
     from aiwf.infrastructure.torch.attention import (
         apply_attention_optimizations,
@@ -344,6 +347,7 @@ def _add_cached_single_file_config(load_kwargs: dict, pipeline_cls) -> None:
 
 class DiffusersBackend:
     _QWEN_NUNCHAKU_SENTINEL = object()
+    _PROMPT_EMBED_CACHE_LIMIT = 32
 
     def __init__(self, flags: RuntimeFlags, devices: DeviceManager) -> None:
         self.flags = flags
@@ -372,13 +376,19 @@ class DiffusersBackend:
         self._flux_text_encoder_override: str | None = None
         self._flux_clip_device: torch.device | None = None
         self._flux_t5_device: torch.device | None = None
-        self._flux_prompt_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-        self._flux2_prompt_cache: dict[str, torch.Tensor] = {}
+        self._flux_prompt_cache: OrderedDict[str, tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
+        self._flux2_prompt_cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         # Rolling average encode duration per family, used to show a live ETA
         # while the prompt is being encoded (no per-step granularity exists
         # inside a single forward pass, so we estimate from past runs instead).
         self._encode_duration_estimates: dict[str, float] = {}
-        self._z_image_prompt_cache: dict[tuple[str, str], tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
+        self._z_image_prompt_cache: OrderedDict[
+            tuple[str, str], tuple[list[torch.Tensor], list[torch.Tensor]]
+        ] = OrderedDict()
+        self._qwen_prompt_cache: OrderedDict[
+            tuple[str, str, int, int], tuple[torch.Tensor, torch.Tensor | None]
+        ] = OrderedDict()
+        self._sana_prompt_cache: OrderedDict[tuple, tuple] = OrderedDict()
         self._common_prompt_cache_warmed_for: set[str] = set()
         self._qwen_nunchaku = QwenNunchakuService(flags)
 
@@ -603,7 +613,14 @@ class DiffusersBackend:
 
     _AUTO_OFFLOAD_VRAM_GB = 10.0
 
-    def _place_pipeline(self, pipe, *, prefer_offload: bool = False, architecture: str | None = None):
+    def _place_pipeline(
+        self,
+        pipe,
+        *,
+        prefer_offload: bool = False,
+        architecture: str | None = None,
+        checkpoint: Checkpoint | None = None,
+    ):
         if self.devices.device().type not in ("cuda",) and (self.flags.lowvram or self.flags.medvram or prefer_offload):
             logger.warning("CPU offload modes need a CUDA device; loading fully on %s.", self.devices.device())
             pipe = pipe.to(self.devices.device())
@@ -629,7 +646,7 @@ class DiffusersBackend:
             # Use the *actual* threshold this architecture was evaluated against
             # (see _offload_threshold_gb) rather than the SDXL-only constant, so
             # this message can't claim "<10 GB" when the real cutoff was 20 GB.
-            threshold = self._offload_threshold_gb(architecture or "")
+            threshold = self._offload_threshold_gb(architecture or "", checkpoint=checkpoint)
             logger.info(
                 "%s on a <%.0f GB GPU — enabling model CPU offload automatically "
                 "(use Low VRAM mode in Settings if you still hit out-of-memory).",
@@ -643,7 +660,13 @@ class DiffusersBackend:
             self._offload_active = False
         return pipe
 
-    def _place_transformer_pipeline_keep_text_cpu(self, pipe, *, architecture: str):
+    def _place_transformer_pipeline_keep_text_cpu(
+        self,
+        pipe,
+        *,
+        architecture: str,
+        checkpoint: Checkpoint | None = None,
+    ):
         """Place image denoising modules on the active device, but keep large
         text encoders in system RAM.
 
@@ -657,14 +680,16 @@ class DiffusersBackend:
         if is_qwen_image_architecture(architecture) or is_sana_architecture(architecture):
             return self._place_pipeline(
                 pipe,
-                prefer_offload=self._wants_offload(architecture),
+                prefer_offload=self._wants_offload(architecture, checkpoint=checkpoint),
                 architecture=architecture,
+                checkpoint=checkpoint,
             )
         if device.type != "cuda" or self.flags.lowvram or self.flags.medvram:
             return self._place_pipeline(
                 pipe,
-                prefer_offload=self._wants_offload(architecture),
+                prefer_offload=self._wants_offload(architecture, checkpoint=checkpoint),
                 architecture=architecture,
+                checkpoint=checkpoint,
             )
 
         for module_name in ("transformer", "vae"):
@@ -1288,6 +1313,38 @@ class DiffusersBackend:
         UMT5 encoders (Wan video only) are excluded — they are not compatible
         with Flux and would produce broken output if selected.
         """
+        inventory = get_model_inventory(self.flags)
+        text_encoder_records = [
+            record
+            for record in inventory
+            if record.family == "text_encoder"
+            and record.architecture == ARCH_FLUX
+            and Path(record.path).suffix.lower() in (".safetensors", ".gguf")
+        ]
+        if text_encoder_records:
+            seen: set[str] = set()
+            out: list[tuple[str, str]] = []
+            for record in sorted(text_encoder_records, key=lambda item: item.filename.lower()):
+                header_arch = (record.header_identifiers or {}).get("header_arch", "")
+                if header_arch and "t5xxl" not in header_arch.lower():
+                    continue
+                if not header_arch and "t5" not in record.filename.lower():
+                    continue
+                path = Path(record.path)
+                key = str(path.resolve()).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    size_label = format_size(path.stat().st_size)
+                except OSError:
+                    size_label = "unknown size"
+                out.append((f"{path.stem}  [{size_label}]", str(path.resolve())))
+            return out
+
+        return self._scan_flux_text_encoders_from_dirs()
+
+    def _scan_flux_text_encoders_from_dirs(self) -> list[tuple[str, str]]:
         from aiwf.infrastructure.model_header import read_model_info
 
         subdirs = ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders")
@@ -1414,6 +1471,45 @@ class DiffusersBackend:
         self._flux_prompt_cache.clear()
         logger.info("Flux text encoders warm: CLIP-L on %s, T5 on %s", clip_device, t5_device)
 
+    def _prompt_cache_get(self, cache: dict, key, family: str):
+        cached = cache.get(key)
+        if cached is None:
+            logger.debug("%s prompt cache miss", family)
+            return None
+        move_to_end = getattr(cache, "move_to_end", None)
+        if callable(move_to_end):
+            move_to_end(key)
+        logger.info("%s prompt cache hit", family)
+        return cached
+
+    def _prompt_cache_put(self, cache: dict, key, value, family: str) -> None:
+        cache[key] = value
+        move_to_end = getattr(cache, "move_to_end", None)
+        if callable(move_to_end):
+            move_to_end(key)
+        limit = max(1, int(getattr(self, "_PROMPT_EMBED_CACHE_LIMIT", 32)))
+        evicted = 0
+        while len(cache) > limit:
+            if isinstance(cache, OrderedDict):
+                cache.popitem(last=False)
+            else:
+                cache.pop(next(iter(cache)))
+            evicted += 1
+        if evicted:
+            logger.info("%s prompt cache evicted %d old entr%s", family, evicted, "y" if evicted == 1 else "ies")
+
+    @staticmethod
+    def _cache_tensor(value):
+        return value.detach().cpu() if isinstance(value, torch.Tensor) else None
+
+    @staticmethod
+    def _cached_tensor_to_device(value, device: torch.device):
+        return value.to(device=device) if isinstance(value, torch.Tensor) else None
+
+    def _active_prompt_cache_scope(self) -> str:
+        active = getattr(self, "_active", None)
+        return str(getattr(active, "id", "") or getattr(active, "path", "") or "")
+
     def _encode_flux_prompt(
         self,
         prompt: str,
@@ -1428,7 +1524,7 @@ class DiffusersBackend:
         assert self._flux_tokenizer_2 is not None
 
         cache_key = f"{prompt}|{batch_size}|{max_sequence_length}"
-        cached = self._flux_prompt_cache.get(cache_key)
+        cached = self._prompt_cache_get(self._flux_prompt_cache, cache_key, "Flux")
         if cached is not None:
             prompt_embeds, pooled = cached
             return (
@@ -1469,9 +1565,14 @@ class DiffusersBackend:
         )
         prompt_embeds = prompt_embeds.to(dtype=torch.bfloat16, device=device)
         pooled = pooled.to(dtype=torch.bfloat16, device=device)
-        self._flux_prompt_cache[cache_key] = (
-            prompt_embeds.detach().cpu(),
-            pooled.detach().cpu(),
+        self._prompt_cache_put(
+            self._flux_prompt_cache,
+            cache_key,
+            (
+                prompt_embeds.detach().cpu(),
+                pooled.detach().cpu(),
+            ),
+            "Flux",
         )
         if batch_size > 1:
             prompt_embeds = prompt_embeds.repeat(batch_size, 1, 1)
@@ -1578,29 +1679,111 @@ class DiffusersBackend:
                     logger.warning("Failed to restore Flux transformer to GPU after encode", exc_info=True)
             logger.info("Flux fast encode: transformer restored in %.2fs", time.perf_counter() - swap_t0)
 
+    def _encode_with_text_encoder_gpu_swap(
+        self,
+        pipe,
+        *,
+        architecture: str,
+        device: torch.device,
+        encode: Callable[[torch.device], object],
+    ):
+        text_encoder = getattr(pipe, "text_encoder", None)
+        text_encoder_device = getattr(text_encoder, "device", None)
+        fallback_device = text_encoder_device if isinstance(text_encoder_device, torch.device) else torch.device("cpu")
+        if (
+            device.type != "cuda"
+            or self.flags.lowvram
+            or self.flags.medvram
+            or text_encoder is None
+            or not hasattr(text_encoder, "to")
+            or (isinstance(text_encoder_device, torch.device) and text_encoder_device.type == "cuda")
+        ):
+            return encode(text_encoder_device if isinstance(text_encoder_device, torch.device) else device)
+
+        denoisers_to_restore: list[tuple[str, object]] = []
+        seen_denoisers: set[int] = set()
+        encoded = None
+        failed = False
+        started = time.perf_counter()
+        try:
+            for attr in ("transformer", "unet"):
+                denoiser = getattr(pipe, attr, None)
+                if denoiser is None or not hasattr(denoiser, "to"):
+                    continue
+                denoiser_id = id(denoiser)
+                if denoiser_id in seen_denoisers:
+                    continue
+                seen_denoisers.add(denoiser_id)
+                denoiser.to("cpu")
+                denoisers_to_restore.append((attr, denoiser))
+            if denoisers_to_restore:
+                self.devices.empty_cache()
+            text_encoder.to(device)
+            if denoisers_to_restore:
+                logger.info(
+                    "%s parked %s on CPU for prompt encode",
+                    architecture,
+                    ", ".join(attr for attr, _module in denoisers_to_restore),
+                )
+            logger.info("%s text encoder moved to %s for prompt encode", architecture, device)
+            encoded = encode(device)
+        except Exception:
+            failed = True
+            logger.warning("%s GPU prompt-encode swap failed; falling back to CPU encode.", architecture, exc_info=True)
+        finally:
+            try:
+                text_encoder.to("cpu")
+                self.devices.empty_cache()
+            except Exception:
+                logger.debug("Could not park %s text encoder back on CPU", architecture, exc_info=True)
+            for attr, denoiser in denoisers_to_restore:
+                try:
+                    denoiser.to(device)
+                except Exception:
+                    logger.warning("Failed to restore %s %s after prompt encode", architecture, attr, exc_info=True)
+            try:
+                pipe._execution_device = device
+            except Exception:
+                logger.debug("Could not restore %s execution device after prompt encode", architecture, exc_info=True)
+        if failed:
+            return encode(fallback_device)
+        logger.info("%s GPU prompt encode swap finished in %.2fs", architecture, time.perf_counter() - started)
+        return encoded
+
     def _encode_flux2_prompt(self, pipe, prompt: str, device: torch.device) -> torch.Tensor:
         """Cache Qwen3 prompt embeddings — Flux.2 Klein re-encodes every call otherwise."""
         cache_key = prompt
-        cached = self._flux2_prompt_cache.get(cache_key)
+        cached = self._prompt_cache_get(self._flux2_prompt_cache, cache_key, "Flux.2 Klein")
         if cached is not None:
             return cached.to(device=device)
         try:
             from diffusers.pipelines.flux2.pipeline_flux2_klein import Flux2KleinPipeline
         except ImportError as exc:
             raise ModelNotFoundError("Flux.2 Klein prompt encoding is unavailable.") from exc
-        text_encoder_device = getattr(getattr(pipe, "text_encoder", None), "device", None)
-        target_device = text_encoder_device or device
-        encode_t0 = time.perf_counter()
-        offload_note = f" on {target_device}"
-        logger.info("Flux.2 Klein: starting prompt encode%s", offload_note)
-        prompt_embeds = Flux2KleinPipeline._get_qwen3_prompt_embeds(
-            text_encoder=pipe.text_encoder,
-            tokenizer=pipe.tokenizer,
-            prompt=prompt,
-            device=target_device,
+        def encode(target_device: torch.device) -> torch.Tensor:
+            encode_t0 = time.perf_counter()
+            logger.info("Flux.2 Klein: starting prompt encode on %s", target_device)
+            prompt_embeds = Flux2KleinPipeline._get_qwen3_prompt_embeds(
+                text_encoder=pipe.text_encoder,
+                tokenizer=pipe.tokenizer,
+                prompt=prompt,
+                device=target_device,
+            )
+            logger.info("Flux.2 Klein prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+            return prompt_embeds
+
+        prompt_embeds = self._encode_with_text_encoder_gpu_swap(
+            pipe,
+            architecture="Flux.2 Klein",
+            device=device,
+            encode=encode,
         )
-        logger.info("Flux.2 Klein prompt encoded in %.2fs", time.perf_counter() - encode_t0)
-        self._flux2_prompt_cache[cache_key] = prompt_embeds.detach().cpu()
+        self._prompt_cache_put(
+            self._flux2_prompt_cache,
+            cache_key,
+            prompt_embeds.detach().cpu(),
+            "Flux.2 Klein",
+        )
         return prompt_embeds.to(device=device)
 
     def _encode_z_image_prompts(
@@ -1611,33 +1794,209 @@ class DiffusersBackend:
         device: torch.device,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         cache_key = (prompt, negative_prompt or "")
-        cached = self._z_image_prompt_cache.get(cache_key)
+        cached = self._prompt_cache_get(self._z_image_prompt_cache, cache_key, "Z-Image")
         if cached is not None:
             prompt_embeds, negative_embeds = cached
             return (
                 [tensor.to(device=device) for tensor in prompt_embeds],
                 [tensor.to(device=device) for tensor in negative_embeds],
             )
-        text_encoder_device = getattr(getattr(pipe, "text_encoder", None), "device", None)
-        target_device = text_encoder_device or device
-        encode_t0 = time.perf_counter()
-        prompt_embeds, negative_embeds = pipe.encode_prompt(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            device=target_device,
-            do_classifier_free_guidance=getattr(pipe, "do_classifier_free_guidance", True),
+        def encode(target_device: torch.device) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+            encode_t0 = time.perf_counter()
+            prompt_embeds, negative_embeds = pipe.encode_prompt(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                device=target_device,
+                do_classifier_free_guidance=getattr(pipe, "do_classifier_free_guidance", True),
+            )
+            logger.info("Z-Image prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+            return prompt_embeds, negative_embeds
+
+        prompt_embeds, negative_embeds = self._encode_with_text_encoder_gpu_swap(
+            pipe,
+            architecture="Z-Image",
+            device=device,
+            encode=encode,
         )
-        logger.info("Z-Image prompt encoded in %.2fs", time.perf_counter() - encode_t0)
-        self._z_image_prompt_cache[cache_key] = (
-            [tensor.detach().cpu() for tensor in prompt_embeds],
-            [tensor.detach().cpu() for tensor in negative_embeds],
+        self._prompt_cache_put(
+            self._z_image_prompt_cache,
+            cache_key,
+            (
+                [tensor.detach().cpu() for tensor in prompt_embeds],
+                [tensor.detach().cpu() for tensor in negative_embeds],
+            ),
+            "Z-Image",
         )
         return (
             [tensor.to(device=device) for tensor in prompt_embeds],
             [tensor.to(device=device) for tensor in negative_embeds],
         )
 
-    def prewarm_common_prompt_embeddings(self, *, limit: int = 24, budget_seconds: float = 300.0) -> int:
+    def _encode_qwen_image_prompt(
+        self,
+        pipe,
+        prompt: str,
+        device: torch.device,
+        *,
+        batch_size: int,
+        max_sequence_length: int = 512,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cache_key = (self._active_prompt_cache_scope(), prompt, int(batch_size), int(max_sequence_length))
+        cached = self._prompt_cache_get(self._qwen_prompt_cache, cache_key, "Qwen Image")
+        if cached is not None:
+            prompt_embeds, prompt_mask = cached
+            return (
+                self._cached_tensor_to_device(prompt_embeds, device),
+                self._cached_tensor_to_device(prompt_mask, device),
+            )
+
+        def encode(target_device: torch.device) -> tuple[torch.Tensor, torch.Tensor | None]:
+            encode_t0 = time.perf_counter()
+            prompt_embeds, prompt_mask = pipe.encode_prompt(
+                prompt=prompt,
+                device=target_device,
+                num_images_per_prompt=batch_size,
+                max_sequence_length=max_sequence_length,
+            )
+            logger.info("Qwen Image prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+            return prompt_embeds, prompt_mask
+
+        prompt_embeds, prompt_mask = self._encode_with_text_encoder_gpu_swap(
+            pipe,
+            architecture="Qwen Image",
+            device=device,
+            encode=encode,
+        )
+        self._prompt_cache_put(
+            self._qwen_prompt_cache,
+            cache_key,
+            (
+                self._cache_tensor(prompt_embeds),
+                self._cache_tensor(prompt_mask),
+            ),
+            "Qwen Image",
+        )
+        return (
+            self._cached_tensor_to_device(prompt_embeds, device),
+            self._cached_tensor_to_device(prompt_mask, device),
+        )
+
+    def _encode_qwen_image_prompts(
+        self,
+        pipe,
+        prompt: str,
+        negative_prompt: str | None,
+        device: torch.device,
+        *,
+        batch_size: int,
+        true_cfg_scale: float,
+        max_sequence_length: int = 512,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        prompt_embeds, prompt_mask = self._encode_qwen_image_prompt(
+            pipe,
+            prompt,
+            device,
+            batch_size=batch_size,
+            max_sequence_length=max_sequence_length,
+        )
+        if true_cfg_scale <= 1.0 or negative_prompt is None:
+            return prompt_embeds, prompt_mask, None, None
+        negative_embeds, negative_mask = self._encode_qwen_image_prompt(
+            pipe,
+            negative_prompt,
+            device,
+            batch_size=batch_size,
+            max_sequence_length=max_sequence_length,
+        )
+        return prompt_embeds, prompt_mask, negative_embeds, negative_mask
+
+    def _encode_sana_prompts(
+        self,
+        pipe,
+        prompt: str,
+        negative_prompt: str | None,
+        device: torch.device,
+        *,
+        batch_size: int,
+        guidance_scale: float,
+        max_sequence_length: int = 300,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        is_sprint = pipe.__class__.__name__ == "SanaSprintPipeline"
+        do_cfg = (not is_sprint) and guidance_scale > 1.0
+        cache_key = (
+            self._active_prompt_cache_scope(),
+            pipe.__class__.__name__,
+            prompt,
+            negative_prompt or "",
+            bool(do_cfg),
+            int(batch_size),
+            int(max_sequence_length),
+        )
+        cached = self._prompt_cache_get(self._sana_prompt_cache, cache_key, pipe.__class__.__name__)
+        if cached is not None:
+            prompt_embeds, prompt_mask, negative_embeds, negative_mask = cached
+            return (
+                self._cached_tensor_to_device(prompt_embeds, device),
+                self._cached_tensor_to_device(prompt_mask, device),
+                self._cached_tensor_to_device(negative_embeds, device),
+                self._cached_tensor_to_device(negative_mask, device),
+            )
+
+        def encode(target_device: torch.device):
+            encode_t0 = time.perf_counter()
+            if is_sprint:
+                prompt_embeds, prompt_mask = pipe.encode_prompt(
+                    prompt=prompt,
+                    num_images_per_prompt=batch_size,
+                    device=target_device,
+                    clean_caption=False,
+                    max_sequence_length=max_sequence_length,
+                )
+                logger.info("Sana Sprint prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+                return prompt_embeds, prompt_mask, None, None
+            prompt_embeds, prompt_mask, negative_embeds, negative_mask = pipe.encode_prompt(
+                prompt=prompt,
+                do_classifier_free_guidance=do_cfg,
+                negative_prompt=negative_prompt or "",
+                num_images_per_prompt=batch_size,
+                device=target_device,
+                clean_caption=False,
+                max_sequence_length=max_sequence_length,
+            )
+            logger.info("Sana prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+            return prompt_embeds, prompt_mask, negative_embeds, negative_mask
+
+        prompt_embeds, prompt_mask, negative_embeds, negative_mask = self._encode_with_text_encoder_gpu_swap(
+            pipe,
+            architecture="Sana Sprint" if is_sprint else "Sana",
+            device=device,
+            encode=encode,
+        )
+        self._prompt_cache_put(
+            self._sana_prompt_cache,
+            cache_key,
+            (
+                self._cache_tensor(prompt_embeds),
+                self._cache_tensor(prompt_mask),
+                self._cache_tensor(negative_embeds),
+                self._cache_tensor(negative_mask),
+            ),
+            pipe.__class__.__name__,
+        )
+        return (
+            self._cached_tensor_to_device(prompt_embeds, device),
+            self._cached_tensor_to_device(prompt_mask, device),
+            self._cached_tensor_to_device(negative_embeds, device),
+            self._cached_tensor_to_device(negative_mask, device),
+        )
+
+    def prewarm_common_prompt_embeddings(
+        self,
+        *,
+        limit: int = 24,
+        budget_seconds: float = 300.0,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> int:
         """Prime runtime prompt-embedding caches with short common starters.
 
         This is intentionally in-memory and bounded. It is meant for the
@@ -1657,9 +2016,21 @@ class DiffusersBackend:
         device = self._execution_device(pipe)
         started = time.perf_counter()
         warmed = 0
+        stopped = False
+
+        def _should_stop() -> bool:
+            try:
+                return bool(should_stop and should_stop())
+            except Exception:
+                logger.debug("Background prompt prewarm stop check failed", exc_info=True)
+                return False
+
         try:
             if is_flux2_klein_architecture(checkpoint.architecture):
                 for prompt in prompts:
+                    if _should_stop():
+                        stopped = True
+                        break
                     if warmed and time.perf_counter() - started >= budget_seconds:
                         break
                     if prompt in self._flux2_prompt_cache:
@@ -1668,6 +2039,9 @@ class DiffusersBackend:
                     warmed += 1
             elif is_z_image_architecture(checkpoint.architecture):
                 for prompt in prompts:
+                    if _should_stop():
+                        stopped = True
+                        break
                     if warmed and time.perf_counter() - started >= budget_seconds:
                         break
                     cache_key = (prompt, "")
@@ -1679,6 +2053,9 @@ class DiffusersBackend:
                 component_paths = getattr(pipe, "_aiwf_flux_components", None) or self._resolve_flux_component_paths()
                 self._load_flux_prompt_models({key: Path(value) for key, value in component_paths.items()})
                 for prompt in prompts:
+                    if _should_stop():
+                        stopped = True
+                        break
                     if warmed and time.perf_counter() - started >= budget_seconds:
                         break
                     cache_key = f"{prompt}|1|256"
@@ -1687,6 +2064,9 @@ class DiffusersBackend:
                     self._encode_flux_prompt(prompt, device=device, batch_size=1)
                     warmed += 1
         finally:
+            if stopped:
+                logger.info("Background prompt prewarm paused because a foreground job is active.")
+                return warmed
             self._common_prompt_cache_warmed_for.add(checkpoint.id)
 
         if warmed:
@@ -1781,7 +2161,56 @@ class DiffusersBackend:
             return self.devices.device()
         return dev
 
-    def _offload_threshold_gb(self, architecture: str) -> float:
+    def _checkpoint_size_gb(self, checkpoint: Checkpoint | None = None) -> float:
+        if checkpoint is None:
+            return 0.0
+        size_bytes = int(getattr(checkpoint, "size_bytes", 0) or 0)
+        if size_bytes <= 0:
+            try:
+                size_bytes = asset_size_bytes(Path(getattr(checkpoint, "path", "")))
+            except Exception:
+                size_bytes = 0
+        return float(size_bytes) / (1024.0 ** 3) if size_bytes > 0 else 0.0
+
+    @staticmethod
+    def _checkpoint_name_blob(checkpoint: Checkpoint | None = None) -> str:
+        if checkpoint is None:
+            return ""
+        return " ".join(
+            str(getattr(checkpoint, field, "") or "")
+            for field in ("id", "title", "filename", "path")
+        ).lower()
+
+    def _is_sana_sprint_checkpoint(self, checkpoint: Checkpoint | None = None) -> bool:
+        return "sprint" in self._checkpoint_name_blob(checkpoint)
+
+    @staticmethod
+    def _is_sana_sprint_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "SanaSprintPipeline"
+
+    def _transformer_offload_threshold_gb(self, architecture: str, checkpoint: Checkpoint | None = None) -> float:
+        size_gb = self._checkpoint_size_gb(checkpoint)
+        if is_qwen_nunchaku_architecture(architecture):
+            return 12.0
+        if is_sana_architecture(architecture):
+            if self._is_sana_sprint_checkpoint(checkpoint) or (0.0 < size_gb <= 9.0):
+                return 12.0
+            return 18.0
+        if is_z_image_architecture(architecture):
+            return 12.0 if 0.0 < size_gb <= 8.0 else 16.0
+        if is_flux2_klein_architecture(architecture):
+            if 0.0 < size_gb <= 8.0:
+                return 12.0
+            if 0.0 < size_gb <= 12.0:
+                return 16.0
+            return 20.0
+        if is_qwen_image_architecture(architecture):
+            return 20.0 if size_gb >= 12.0 else 16.0
+        if is_flux_architecture(architecture):
+            return 11.0 if getattr(self.flags, "fluxfp8", False) else 20.0
+        return 20.0
+
+    def _offload_threshold_gb(self, architecture: str, *, checkpoint: Checkpoint | None = None) -> float:
         """The VRAM threshold (GB) actually used to decide CPU offload for `architecture`.
 
         Kept as a single source of truth so the auto-offload log message
@@ -1799,14 +2228,14 @@ class DiffusersBackend:
             or is_qwen_image_architecture(architecture)
             or is_sana_architecture(architecture)
         ):
-            return 11.0 if getattr(self.flags, "fluxfp8", False) else 20.0
+            return self._transformer_offload_threshold_gb(architecture, checkpoint=checkpoint)
         if is_sd3_architecture(architecture):
             return 24.0
         if is_sdxl_architecture(architecture):
             return 7.0 if self.flags.fp8 else self._AUTO_OFFLOAD_VRAM_GB
         return self._AUTO_OFFLOAD_VRAM_GB
 
-    def _wants_offload(self, architecture: str) -> bool:
+    def _wants_offload(self, architecture: str, *, checkpoint: Checkpoint | None = None) -> bool:
         # DiT image families (Flux / Flux.2 / Z-Image / Qwen / Sana) stay GPU-resident for warm reuse.
         # CPU offload shuffles weights every generation and feels like a full reload.
         vram = self.devices.total_vram_gb()
@@ -1820,21 +2249,36 @@ class DiffusersBackend:
             # On cards with less than 20 GB (e.g. 16 GB, 12 GB, 8 GB), we must offload large DiT models
             # to avoid VRAM exhaustion / driver-level system memory paging.
             # If the user runs Flux in FP8, it fits in VRAM on 12/16GB cards, so we don't offload (threshold is 11.0 GB).
-            return vram < self._offload_threshold_gb(architecture)
+            return vram < self._offload_threshold_gb(architecture, checkpoint=checkpoint)
         if is_sd3_architecture(architecture):
             return 0.0 < vram < 24.0
         if not is_sdxl_architecture(architecture) or vram <= 0.0:
             return False
         # FP8 storage halves the active denoiser, so ~8GB cards can keep the whole
         # pipeline resident — much faster than offloading.
-        return vram < self._offload_threshold_gb(architecture)
+        return vram < self._offload_threshold_gb(architecture, checkpoint=checkpoint)
 
     def _compile_allowed_for_architecture(self, architecture: str) -> bool:
         if is_transformer_image_architecture(architecture):
             return False
         return not (self.flags.lowvram or self.flags.medvram or self._wants_offload(architecture))
 
-    def _tune_vae_memory(self, pipe, architecture: str) -> None:
+    def _transformer_vae_needs_tiling(
+        self,
+        pipe,
+        architecture: str,
+        checkpoint: Checkpoint | None = None,
+    ) -> bool:
+        if self._is_sana_sprint_pipe(pipe) or self._is_sana_sprint_checkpoint(checkpoint):
+            return False
+        if self.flags.lowvram or self.flags.medvram or self._offload_active:
+            return True
+        size_gb = self._checkpoint_size_gb(checkpoint)
+        if size_gb >= 12.0:
+            return True
+        return is_qwen_image_architecture(architecture) and not is_qwen_nunchaku_architecture(architecture)
+
+    def _tune_vae_memory(self, pipe, architecture: str, checkpoint: Checkpoint | None = None) -> None:
         """SDXL's 1024px VAE decode is the peak-VRAM step — slice and tile it."""
         if not (
             is_sdxl_architecture(architecture)
@@ -1846,12 +2290,25 @@ class DiffusersBackend:
         if vae is None:
             return
         try:
-            vae.enable_slicing()
-            vae.enable_tiling()
-            pipe._aiwf_sdxl = True
-            logger.info("VAE slicing + tiling enabled (cuts decode VRAM spike)")
+            should_slice = True
+            should_tile = is_sdxl_architecture(architecture) or is_sd3_architecture(architecture)
+            if is_transformer_image_architecture(architecture):
+                should_tile = self._transformer_vae_needs_tiling(pipe, architecture, checkpoint)
+            if should_slice and hasattr(vae, "enable_slicing"):
+                vae.enable_slicing()
+            if should_tile and hasattr(vae, "enable_tiling"):
+                vae.enable_tiling()
+            elif not should_tile and hasattr(vae, "disable_tiling"):
+                vae.disable_tiling()
+            pipe._aiwf_vae_slicing_enabled = should_slice
+            pipe._aiwf_vae_tiling_enabled = should_tile
+            pipe._aiwf_sdxl = should_tile
+            if should_tile:
+                logger.info("VAE slicing + tiling enabled for %s", architecture)
+            else:
+                logger.info("VAE slicing enabled for %s; tiling left off for faster decode", architecture)
         except Exception:
-            logger.debug("Could not enable VAE slicing/tiling", exc_info=True)
+            logger.debug("Could not apply VAE memory policy", exc_info=True)
 
     def _sync_img2img_from_txt2img(self) -> None:
         assert self._txt2img is not None
@@ -1905,12 +2362,16 @@ class DiffusersBackend:
         vae = AutoencoderKL.from_single_file(vae_info.path, torch_dtype=dtype)
         device = self._execution_device(pipe)
         pipe.vae = vae.to(device)
-        if getattr(pipe, "_aiwf_sdxl", False):
+        if getattr(pipe, "_aiwf_vae_slicing_enabled", False):
             try:
                 pipe.vae.enable_slicing()
+            except Exception:
+                logger.debug("Could not re-enable VAE slicing", exc_info=True)
+        if getattr(pipe, "_aiwf_vae_tiling_enabled", False):
+            try:
                 pipe.vae.enable_tiling()
             except Exception:
-                logger.debug("Could not re-enable VAE slicing/tiling", exc_info=True)
+                logger.debug("Could not re-enable VAE tiling", exc_info=True)
         apply_image_pipeline_optimizations(
             pipe,
             self.flags,
@@ -2026,7 +2487,7 @@ class DiffusersBackend:
             self.flags,
             compile_allowed=self._compile_allowed_for_architecture(ARCH_FLUX),
         )
-        self._tune_vae_memory(pipe, ARCH_FLUX)
+        self._tune_vae_memory(pipe, ARCH_FLUX, checkpoint)
 
         self._load_flux_prompt_models(component_paths)
 
@@ -2122,9 +2583,9 @@ class DiffusersBackend:
             self.flags,
             compile_allowed=self._compile_allowed_for_architecture(ARCH_FLUX2_KLEIN),
         )
-        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_FLUX2_KLEIN)
+        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_FLUX2_KLEIN, checkpoint=checkpoint)
         pipe.set_progress_bar_config(disable=True)
-        self._tune_vae_memory(pipe, ARCH_FLUX2_KLEIN)
+        self._tune_vae_memory(pipe, ARCH_FLUX2_KLEIN, checkpoint)
 
         self._flux2_prompt_cache.clear()
         self._z_image_prompt_cache.clear()
@@ -2219,9 +2680,9 @@ class DiffusersBackend:
             self.flags,
             compile_allowed=self._compile_allowed_for_architecture(ARCH_Z_IMAGE),
         )
-        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_Z_IMAGE)
+        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_Z_IMAGE, checkpoint=checkpoint)
         pipe.set_progress_bar_config(disable=True)
-        self._tune_vae_memory(pipe, ARCH_Z_IMAGE)
+        self._tune_vae_memory(pipe, ARCH_Z_IMAGE, checkpoint)
 
         self._z_image_prompt_cache.clear()
         self._active = checkpoint
@@ -2309,10 +2770,11 @@ class DiffusersBackend:
             self.flags,
             compile_allowed=self._compile_allowed_for_architecture(ARCH_QWEN_IMAGE),
         )
-        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_QWEN_IMAGE)
+        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_QWEN_IMAGE, checkpoint=checkpoint)
         pipe.set_progress_bar_config(disable=True)
-        self._tune_vae_memory(pipe, ARCH_QWEN_IMAGE)
+        self._tune_vae_memory(pipe, ARCH_QWEN_IMAGE, checkpoint)
 
+        self._qwen_prompt_cache.clear()
         self._active = checkpoint
         self._txt2img = pipe
         self._img2img = None
@@ -2361,10 +2823,11 @@ class DiffusersBackend:
         self._remember_base_scheduler_config(pipe)
         # Sana uses a custom linear attention layout; the generic AttnProcessor2_0
         # swap used for SD/SDXL corrupts its q/k/v tensor shapes.
-        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_SANA)
+        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_SANA, checkpoint=checkpoint)
         pipe.set_progress_bar_config(disable=True)
-        self._tune_vae_memory(pipe, ARCH_SANA)
+        self._tune_vae_memory(pipe, ARCH_SANA, checkpoint)
 
+        self._sana_prompt_cache.clear()
         self._active = checkpoint
         self._txt2img = pipe
         self._img2img = None
@@ -2807,6 +3270,8 @@ class DiffusersBackend:
             self._flux_prompt_cache.clear()
         self._flux2_prompt_cache.clear()
         self._z_image_prompt_cache.clear()
+        self._qwen_prompt_cache.clear()
+        self._sana_prompt_cache.clear()
         gc.collect()
         self.devices.empty_cache()
         try:
@@ -3332,15 +3797,38 @@ class DiffusersBackend:
         width: int,
         height: int,
         steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ):
         if should_cancel and should_cancel():
             raise GenerationCancelledError()
+        device = self._execution_device(pipe)
+        true_cfg_scale = float(request.cfg_scale)
+        prompt_embeds, prompt_mask, negative_embeds, negative_mask = self._encode_with_progress(
+            "qwen_image",
+            lambda: self._encode_qwen_image_prompts(
+                pipe,
+                parsed_prompt,
+                request.negative_prompt or None,
+                device,
+                batch_size=request.batch_size,
+                true_cfg_scale=true_cfg_scale,
+                max_sequence_length=512,
+            ),
+            steps=steps,
+            on_progress=on_progress,
+        )
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
         return self._call_pipe(
             pipe,
-            prompt=parsed_prompt,
-            negative_prompt=request.negative_prompt or None,
-            true_cfg_scale=float(request.cfg_scale),
+            prompt=None,
+            negative_prompt=None,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_mask,
+            negative_prompt_embeds=negative_embeds,
+            negative_prompt_embeds_mask=negative_mask,
+            true_cfg_scale=true_cfg_scale,
             num_inference_steps=steps,
             num_images_per_prompt=request.batch_size,
             generator=generator,
@@ -3363,12 +3851,32 @@ class DiffusersBackend:
         width: int,
         height: int,
         steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ):
         if should_cancel and should_cancel():
             raise GenerationCancelledError()
+        device = self._execution_device(pipe)
+        prompt_embeds, prompt_mask, negative_embeds, negative_mask = self._encode_with_progress(
+            "sana",
+            lambda: self._encode_sana_prompts(
+                pipe,
+                parsed_prompt,
+                request.negative_prompt or None,
+                device,
+                batch_size=request.batch_size,
+                guidance_scale=float(request.cfg_scale),
+                max_sequence_length=300,
+            ),
+            steps=steps,
+            on_progress=on_progress,
+        )
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
         common = dict(
-            prompt=parsed_prompt,
+            prompt=None,
+            prompt_embeds=prompt_embeds,
+            prompt_attention_mask=prompt_mask,
             num_inference_steps=steps,
             guidance_scale=float(request.cfg_scale),
             num_images_per_prompt=request.batch_size,
@@ -3385,7 +3893,9 @@ class DiffusersBackend:
             if steps != 2:
                 common["intermediate_timesteps"] = None
         else:
-            common["negative_prompt"] = request.negative_prompt or ""
+            common["negative_prompt"] = None
+            common["negative_prompt_embeds"] = negative_embeds
+            common["negative_prompt_attention_mask"] = negative_mask
         return self._call_pipe(pipe, **common)
 
     def _run_img2img_pass(
@@ -3957,6 +4467,7 @@ class DiffusersBackend:
                         width=width,
                         height=height,
                         steps=request.steps,
+                        on_progress=on_progress,
                         should_cancel=should_cancel,
                     )
                     batch_images = output.images
@@ -3979,6 +4490,7 @@ class DiffusersBackend:
                         width=width,
                         height=height,
                         steps=request.steps,
+                        on_progress=on_progress,
                         should_cancel=should_cancel,
                     )
                     batch_images = output.images

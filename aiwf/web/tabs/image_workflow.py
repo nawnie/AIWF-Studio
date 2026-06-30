@@ -28,8 +28,8 @@ def _normalized_stages(values) -> list[str]:
 
 def _order_markdown(stages, warnings: list[str] | None = None) -> str:
     normalized = _normalized_stages(stages)
-    flow = " → ".join(IMAGE_STAGE_LABELS[item] for item in normalized)
-    warning_text = "" if not warnings else "  \n" + "  \n".join(f"⚠ {item}" for item in warnings)
+    flow = " -> ".join(IMAGE_STAGE_LABELS[item] for item in normalized)
+    warning_text = "" if not warnings else "  \n" + "  \n".join(f"! {item}" for item in warnings)
     return f"**Resolved order:** {flow}{warning_text}"
 
 
@@ -430,7 +430,7 @@ def build_image_workflow_panel(ctx: AppContext) -> None:
         }
         return (
             result.image,
-            f"**Done** — {result.message}",
+            f"**Done** -- {result.message}",
             json.dumps(payload, indent=2),
             result.mask,
             result.mask_preview,

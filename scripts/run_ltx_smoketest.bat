@@ -8,7 +8,7 @@ set "LOG=scripts\ltx_smoketest.log"
 
 if not exist "%PY%" (
     echo Could not find %PY% > "%LOG%"
-    pause
+    if not "%AIWF_NO_PAUSE%"=="1" pause
     exit /b 1
 )
 
@@ -19,8 +19,10 @@ echo LTX 2.3 generation smoke test - %DATE% %TIME% >> "%LOG%"
 echo ============================================================ >> "%LOG%"
 
 "%PY%" "%WORKER%" "%REQ%" >> "%LOG%" 2>&1
+set "EXIT_CODE=%ERRORLEVEL%"
 echo. >> "%LOG%"
-echo Finished with exit code %ERRORLEVEL% at %DATE% %TIME% >> "%LOG%"
+echo Finished with exit code %EXIT_CODE% at %DATE% %TIME% >> "%LOG%"
 
 echo Done. See %CD%\%LOG%
-pause
+if not "%AIWF_NO_PAUSE%"=="1" pause
+exit /b %EXIT_CODE%

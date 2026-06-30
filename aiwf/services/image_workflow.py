@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from PIL import Image, ImageEnhance, ImageFilter
 
+from aiwf import __version__
 from aiwf.core.domain.enhance import RestoreOptions, UpscaleOptions
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest
 from aiwf.core.domain.image_workflow import (
@@ -148,6 +150,25 @@ class ImageWorkflowService:
         finally:
             temp.unlink(missing_ok=True)
 
+    @staticmethod
+    def _image_receipt(image: Image.Image, *, path: Path | None = None) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "width": int(image.width),
+            "height": int(image.height),
+            "mode": image.mode,
+        }
+        if path is not None:
+            payload["path"] = str(path)
+        return payload
+
+    @staticmethod
+    def _route_for_plan(plan: ImageWorkflowPlan) -> str:
+        if "auto_mask" in plan.stages and "inpaint" in plan.stages:
+            return "segment-to-inpaint"
+        if "inpaint" in plan.stages:
+            return "mask-to-inpaint"
+        return "image-workflow"
+
     def process(
         self,
         source: Image.Image,
@@ -240,13 +261,13 @@ class ImageWorkflowService:
                             tile_overlap=settings.tile_overlap,
                         ),
                     )
-                    stage_log.append(f"Upscale: {settings.upscaler_model_id} at {settings.upscale_factor:g}×")
+                    stage_log.append(f"Upscale: {settings.upscaler_model_id} at {settings.upscale_factor:g}x")
                 else:
                     stage_log.append("Upscale skipped: no model selected")
             elif stage == "resize":
                 before = working.size
                 working = self._apply_resize(working, settings)
-                stage_log.append(f"Resize: {before[0]}×{before[1]} → {working.width}×{working.height}")
+                stage_log.append(f"Resize: {before[0]}x{before[1]} -> {working.width}x{working.height}")
 
         job_id = f"ilab_{uuid.uuid4().hex[:12]}"
         job_dir = self.output_root / datetime.now().strftime("%Y%m%d") / job_id
@@ -254,25 +275,70 @@ class ImageWorkflowService:
         output_path = job_dir / f"image_workflow.{extension}"
         manifest_path = job_dir / "job.json"
         self._atomic_save(working, output_path, quality=settings.export_quality)
+        mask_path: Path | None = None
         if mask is not None:
-            self._atomic_save(mask.convert("L"), job_dir / "mask.png", quality=100)
+            mask_path = job_dir / "mask.png"
+            self._atomic_save(mask.convert("L"), mask_path, quality=100)
         elapsed = time.perf_counter() - started
+        created_at = datetime.now(timezone.utc).isoformat()
         manifest = {
+            "receipt_type": "image_workflow",
+            "receipt_version": 1,
             "schema": 1,
             "job_id": job_id,
-            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "created_at_utc": created_at,
+            "app_version": __version__,
+            "status": "completed",
+            "route": self._route_for_plan(plan),
             "resolved_order": plan.stages,
+            "labels": plan.labels,
             "settings": settings.model_dump(mode="json"),
             "warnings": plan.warnings,
             "stage_log": stage_log,
+            "input": self._image_receipt(source),
+            "output": self._image_receipt(working, path=output_path),
+            "mask": (
+                {
+                    **self._image_receipt(mask, path=mask_path),
+                    "source": "auto_mask" if "auto_mask" in plan.stages else "uploaded",
+                    "preset": settings.mask_preset,
+                    "model_id": settings.mask_model_id,
+                    "threshold": settings.mask_threshold,
+                    "candidate_index": settings.mask_index,
+                    "dilation": settings.mask_dilation,
+                    "blur": settings.mask_blur,
+                    "feather": settings.mask_feather,
+                }
+                if mask is not None
+                else {}
+            ),
+            "inpaint": (
+                {
+                    "prompt": settings.inpaint_prompt,
+                    "negative_prompt": settings.inpaint_negative_prompt,
+                    "checkpoint_id": settings.checkpoint_id,
+                    "sampler": settings.sampler,
+                    "steps": settings.steps,
+                    "cfg_scale": settings.cfg_scale,
+                    "seed": settings.seed,
+                    "denoising_strength": settings.denoising_strength,
+                }
+                if "inpaint" in plan.stages
+                else {}
+            ),
             "output_path": str(output_path),
+            "mask_path": str(mask_path) if mask_path is not None else "",
             "elapsed_seconds": elapsed,
         }
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        manifest["receipt_id"] = hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:20]
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         return ImageWorkflowResult(
             image=working,
             output_path=str(output_path),
             manifest_path=str(manifest_path),
+            receipt_path=str(manifest_path),
             mask=mask,
             mask_preview=mask_preview,
             message=f"Completed {len(plan.stages)} stage(s) in {elapsed:.2f}s.",

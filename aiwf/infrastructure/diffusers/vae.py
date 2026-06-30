@@ -5,6 +5,13 @@ from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.models import VaeInfo
+from aiwf.infrastructure.model_asset_summary import (
+    asset_file_count,
+    asset_shape_label,
+    asset_size_bytes,
+    precision_from_text,
+    safetensors_precision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +59,21 @@ def scan_vaes(flags: RuntimeFlags) -> list[VaeInfo]:
                 continue
             seen.add(resolved)
             vae_id = path.stem
+            size_bytes = asset_size_bytes(path)
+            file_count = asset_file_count(path)
+            summary = asset_shape_label(path, size_bytes=size_bytes, file_count=file_count)
+            precision = safetensors_precision(path) or precision_from_text(path.name)
+            precision_suffix = f", {precision}" if precision else ""
             results.append(
                 VaeInfo(
                     id=vae_id,
-                    title=vae_id,
+                    title=f"{vae_id} [{summary}{precision_suffix}]",
                     filename=path.name,
                     path=resolved,
+                    size_bytes=size_bytes,
+                    file_count=file_count,
+                    asset_summary=summary,
+                    precision=precision,
                 )
             )
 

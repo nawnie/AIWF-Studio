@@ -7,6 +7,16 @@ from pathlib import Path
 from typing import Iterable
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
+from aiwf.infrastructure.diffusers.checkpoints import diffusers_dir_has_required_local_files
+from aiwf.infrastructure.diffusers.model_arch import (
+    ARCH_FLUX,
+    ARCH_FLUX2_KLEIN,
+    ARCH_QWEN_IMAGE,
+    ARCH_QWEN_IMAGE_NUNCHAKU,
+    ARCH_SANA,
+    ARCH_Z_IMAGE,
+)
+from aiwf.infrastructure.diffusers.model_blocks import known_broken_selectable_image_asset
 
 READINESS_STATUSES = (
     "working",
@@ -180,10 +190,11 @@ def _ltx_route_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
     from aiwf.core.domain.ltx import (
         LTX_GEMMA_BACKEND_GGUF,
         LTX_GEMMA_BACKEND_HF_SAFETENSORS,
+        LTX_HERETIC_Q3_CONVERTED_FOLDER,
         LTX_PIPELINE_ONE_STAGE,
         LtxVideoRequest,
     )
-    from aiwf.services.ltx import LtxService, ltx_checkpoint_openability_error
+    from aiwf.services.ltx import LtxService, ltx_checkpoint_openability_error, ltx_native_checkpoint_runtime_blocker
 
     service = LtxService(flags, settings)
     records: list[PipelineReadinessRecord] = []
@@ -203,7 +214,9 @@ def _ltx_route_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
         except Exception:
             engine_ready = False
         openability_error = ltx_checkpoint_openability_error(checkpoint) if checkpoint.is_file() else ""
+        runtime_blocker = ltx_native_checkpoint_runtime_blocker(checkpoint) if checkpoint.is_file() else ""
         route_ready = engine_ready and checkpoint.is_file() and not openability_error and gemma_root.exists()
+        receipt = _latest_receipt(flags, "ltx", route="ltx-2.3")
         if backend == LTX_GEMMA_BACKEND_GGUF:
             route_ready = route_ready and gguf_path.is_file()
             records.append(
@@ -225,7 +238,7 @@ def _ltx_route_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
                     quantization="Q3_K_M",
                     required_text_encoder="Gemma 3 hidden states from every layer plus attention mask",
                     tokenizer="Gemma tokenizer/processor sidecar folder",
-                    smoke_command="venv\\Scripts\\python.exe scripts\\probe_ltx_runtime.py --gguf",
+                    smoke_command="venv\\Scripts\\python.exe scripts\\probe_ltx_runtime.py --gguf --json --allow-blocked",
                     suggested_action=(
                         "Use this as a no-dequant probe route only; generation needs a native hidden-state adapter."
                     ),
@@ -234,6 +247,8 @@ def _ltx_route_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
                         "gemma_root": str(gemma_root),
                         "engine_ready": str(engine_ready).lower(),
                         "checkpoint_openability": "blocked" if openability_error else "ok",
+                        "offload": str(payload.get("offload") or ""),
+                        "quantization": str(payload.get("quantization") or ""),
                     },
                 )
             )
@@ -244,25 +259,43 @@ def _ltx_route_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
                 family="ltx",
                 asset_type=asset_type,
                 path=str(checkpoint),
-                status="metadata-only" if route_ready else "blocked-cleanly",
+                status=(
+                    "working"
+                    if route_ready and not runtime_blocker and receipt
+                    else "metadata-only"
+                    if route_ready and not runtime_blocker
+                    else "blocked-cleanly"
+                ),
                 route=route,
                 reason=(
+                    "One-stage LTX HF Gemma route has a runtime smoke receipt."
+                    if route_ready and not runtime_blocker and receipt
+                    else
                     "One-stage LTX HF Gemma route is wired and ready for bounded generation smoke."
-                    if route_ready
+                    if route_ready and not runtime_blocker
                     else openability_error
+                    or runtime_blocker
                     or "One-stage LTX HF Gemma route is missing engine, checkpoint, or Gemma sidecar files."
                 ),
                 storage="safetensors",
                 quantization="runtime fp8-cast",
-                required_text_encoder="google/gemma-3-12b-it-qat-q4_0-unquantized",
+                required_text_encoder=(
+                    LTX_HERETIC_Q3_CONVERTED_FOLDER
+                    if LTX_HERETIC_Q3_CONVERTED_FOLDER in str(gemma_root)
+                    else "google/gemma-3-12b-it-qat-q4_0-unquantized"
+                ),
                 tokenizer="Gemma tokenizer/processor sidecar folder",
                 smoke_command="scripts\\run_ltx_smoketest.bat",
+                receipt_path=str(receipt) if receipt and route_ready and not runtime_blocker else "",
                 suggested_action="Run 1-step/9-frame smoke first, then the 4-step usable default.",
                 metadata={
                     "checkpoint_path": str(checkpoint),
                     "gemma_root": str(gemma_root),
                     "engine_ready": str(engine_ready).lower(),
                     "checkpoint_openability": "blocked" if openability_error else "ok",
+                    "native_worker_compatibility": "blocked" if runtime_blocker else "ok",
+                    "offload": str(payload.get("offload") or ""),
+                    "quantization": str(payload.get("quantization") or ""),
                 },
             )
         )
@@ -332,7 +365,7 @@ def _inventory_records(flags: RuntimeFlags, *, force_rescan: bool) -> list[Pipel
         }:
             continue
         path = Path(record.path)
-        out.append(_classify_model_record(record.family, record.architecture, path, source="models", metadata=record.metadata))
+        out.append(_classify_model_record(record.family, record.architecture, path, source="models", metadata=record.metadata, flags=flags))
     return out
 
 
@@ -474,6 +507,7 @@ def _classify_ltx(
     required_text_encoder = "google/gemma-3-12b-it-qat-q4_0-unquantized"
     tokenizer = "Gemma tokenizer files in text_encoder repo folder"
     smoke_command = "scripts\\run_ltx_smoketest.bat"
+    ltx23_receipt = _latest_receipt(flags, "ltx", route="ltx-2.3") if flags is not None else None
 
     if suffix == ".gguf":
         status = "unsupported-no-route"
@@ -484,13 +518,32 @@ def _classify_ltx(
         reason = "LTX FP4/NVFP4 assets are present but the worker does not have a stable FP4/NVFP4 loading route."
         suggested = "Keep metadata-only until native FP4/NVFP4 loading is implemented and smoked."
     elif "fp8" in lower and "gemma" not in lower:
-        status = "unsupported-no-route"
-        reason = "LTX FP8 checkpoint files are present but the current worker route is native safetensors plus runtime fp8-cast/scaled-mm, not FP8 checkpoint loading."
-        suggested = "Use BF16 or distilled safetensors first; add an explicit FP8 checkpoint loader later."
-    elif "gemma" in lower and suffix == ".safetensors":
-        status = "unsupported-no-route"
-        reason = "Single-file Gemma safetensors is not the repo-shaped text encoder folder expected by the LTX worker."
-        suggested = "Use the Gemma folder with config, tokenizer files, index JSON, and shards."
+        route = "ltx-one-stage-hf-gemma"
+        status = "working" if ltx23_receipt else "metadata-only"
+        reason = (
+            "LTX FP8 checkpoint has a one-stage runtime smoke receipt using offload=none and runtime fp8-cast."
+            if ltx23_receipt
+            else "LTX FP8 checkpoint is supported by the one-stage route with offload=none and runtime fp8-cast."
+        )
+        suggested = (
+            "Run the 1-step/9-frame smoke first, then a 5-second 4-step full-sane pass before marking new hardware stable."
+        )
+    elif "gemma" in path.as_posix().lower() and suffix == ".safetensors":
+        if _is_ltx_gemma_folder_safetensors(path):
+            route = "ltx-one-stage-hf-gemma"
+            status = "working" if ltx23_receipt else "metadata-only"
+            reason = (
+                "Gemma safetensors is inside a complete LTX text-encoder folder; select the parent folder as gemma_root."
+                if not ltx23_receipt
+                else "Gemma safetensors is inside the text-encoder folder used by the latest LTX 2.3 smoke receipt."
+            )
+            suggested = "Use the parent text_encoder folder in the LTX Gemma field; do not select this file directly."
+            required_text_encoder = str(path.parent)
+            tokenizer = "Tokenizer and processor files next to the converted Gemma safetensors"
+        else:
+            status = "unsupported-no-route"
+            reason = "Single-file Gemma safetensors is not the repo-shaped text encoder folder expected by the LTX worker."
+            suggested = "Use the Gemma folder with config, tokenizer files, index JSON, and shards."
     elif lower == "ltx-video-2b-v0.9.5.safetensors":
         route = "ltx-0.9.5-diffusers-local-t5xxl"
         reason = "LTX 0.9.5 2B single-file checkpoint can run through Diffusers with a local T5XXL text encoder."
@@ -542,6 +595,7 @@ def _classify_ltx(
 
 def _classify_llm(path: Path, *, source: str, metadata: dict[str, str] | None = None) -> PipelineReadinessRecord:
     storage = "gguf" if path.suffix.lower() == ".gguf" else path.suffix.lower().lstrip(".")
+    is_gemma_gguf = storage == "gguf" and any(token in path.name.lower() for token in ("gemma", "heretic"))
     return PipelineReadinessRecord(
         id=f"asset:llm:{_slug(path.stem)}:{source}",
         family="llm-vl",
@@ -557,8 +611,15 @@ def _classify_llm(path: Path, *, source: str, metadata: dict[str, str] | None = 
         storage=storage,
         quantization=_quant_from_name(path.name),
         tokenizer="model-specific tokenizer assets required",
-        smoke_command="",
-        suggested_action="Add engines/llm_gguf with llama.cpp or llama-cpp-python, then add tokenizer/eval smoke receipts.",
+        smoke_command=(
+            "venv\\Scripts\\python.exe scripts\\probe_ltx_runtime.py --gguf-inventory --json"
+            if is_gemma_gguf
+            else ""
+        ),
+        suggested_action=(
+            "Add Model Manager tags for llama.cpp GGUF serving, TensorRT-LLM export/serving, "
+            "bitsandbytes safetensors, and GGUF metadata; then add engines/llm_gguf with tokenizer/eval smoke receipts."
+        ),
         metadata={
             **_clean_metadata(metadata),
             "source": source,
@@ -575,28 +636,30 @@ def _classify_image(
     source: str,
     metadata: dict[str, str] | None = None,
 ) -> PipelineReadinessRecord:
-    lower = path.name.lower()
     status = "metadata-only"
     route = _image_route_for_arch(architecture, path)
     reason = "Image model asset discovered; runtime smoke not executed by the readiness ledger."
     suggested = "Run the targeted image smoke for this checkpoint or pipeline family before marking it working."
 
-    if "fluxedupfluxnsfw_110fp8" in lower:
-        status = "broken-runtime"
-        reason = "Known Flux FP8 selectable failure: checkpoint keys do not match the expected Flux loader schema."
-        suggested = "Keep blocked until key mapping/loading support is fixed."
-    elif "fluxfusion" in lower and path.suffix.lower() == ".gguf" and ("nf4" in lower or "ggufq4" in lower):
-        status = "broken-runtime"
-        reason = "Known Flux GGUF/NF4 mismatch: metadata/quantization does not match the current image route."
-        suggested = "Do not expose as a normal Flux checkpoint until a compatible GGUF/NF4 route exists."
-    elif lower == "4xbhi_dat2_multiblurjpg.safetensors":
-        status = "broken-runtime"
-        reason = "Known bad selectable: checkpoint is missing the expected CLIP text model."
-        suggested = "Classify as an auxiliary/upscale asset instead of a txt2img checkpoint."
-    elif path.suffix.lower() == ".gguf" and architecture in {"flux", "flux2-klein", "z-image"}:
-        status = "unsupported-no-route"
-        reason = "Image GGUF transformer route is not the default Diffusers checkpoint route."
-        suggested = "Keep separate from normal checkpoint dropdowns until the matching GGUF loader is wired."
+    blocked_asset = known_broken_selectable_image_asset(path)
+    if blocked_asset is not None:
+        status = blocked_asset.status
+        reason = blocked_asset.reason
+        suggested = blocked_asset.suggested_action
+    elif path.is_dir() and _normalized_image_arch(architecture) in {ARCH_QWEN_IMAGE, ARCH_SANA}:
+        if not diffusers_dir_has_required_local_files(path):
+            status = "blocked-cleanly"
+            reason = "Diffusers snapshot folder is incomplete; model_index.json exists but required local shard files are missing."
+            suggested = "Finish the snapshot download or remove the partial folder before exposing it as selectable."
+    elif path.suffix.lower() == ".gguf" and _normalized_image_arch(architecture) in {
+        ARCH_FLUX,
+        ARCH_FLUX2_KLEIN,
+        ARCH_Z_IMAGE,
+    }:
+        route = _image_route_for_arch(architecture, path)
+        status = "metadata-only"
+        reason = "Image GGUF transformer asset is routed through AIWF's image runtime path; smoke proof is still required."
+        suggested = "Run scripts\\smoke_image_routes.py for the matching Flux, Flux.2 Klein, or Z-Image route."
 
     return PipelineReadinessRecord(
         id=f"asset:image:{_slug(path.stem)}:{source}",
@@ -731,16 +794,27 @@ def _smoke_command_for_route(family: str, route: str) -> str:
 
 
 def _image_route_for_arch(architecture: str, path: Path) -> str:
-    arch = str(architecture or "").lower()
-    if arch in {"qwen-image", "qwen-image-nunchaku"}:
+    arch = _normalized_image_arch(architecture)
+    if arch in {ARCH_QWEN_IMAGE, ARCH_QWEN_IMAGE_NUNCHAKU}:
         return "qwen-nunchaku" if "nunchaku" in path.as_posix().lower() or arch.endswith("nunchaku") else "qwen-image"
-    if arch in {"sana", "sana-video"}:
+    if arch == ARCH_SANA:
         return arch
-    if arch in {"flux2-klein", "z-image"}:
-        return arch
-    if arch == "flux":
+    if arch == ARCH_FLUX2_KLEIN:
+        return "flux2-klein"
+    if arch == ARCH_Z_IMAGE:
+        return "z-image"
+    if arch == ARCH_FLUX:
         return "flux"
     return "diffusers"
+
+
+def _normalized_image_arch(architecture: str) -> str:
+    arch = str(architecture or "").lower().replace("-", "_")
+    if arch == "zimage":
+        return ARCH_Z_IMAGE
+    if arch == "flux2klein":
+        return ARCH_FLUX2_KLEIN
+    return arch
 
 
 def _looks_like_llm(path: Path) -> bool:
@@ -752,8 +826,23 @@ def _looks_like_ltx_default_checkpoint(path: Path) -> bool:
     lower = path.name.lower()
     return lower in {
         "ltx-2.3-22b-dev-bf16.safetensors",
+        "ltx-2.3-22b-dev-fp8.safetensors",
         "ltx-2.3-22b-distilled-1.1.safetensors",
     }
+
+
+def _is_ltx_gemma_folder_safetensors(path: Path) -> bool:
+    if path.name.lower() not in {"model.safetensors", "vision_projector.safetensors"}:
+        return False
+    return all(
+        (path.parent / filename).is_file()
+        for filename in (
+            "model.safetensors",
+            "vision_projector.safetensors",
+            "tokenizer.model",
+            "preprocessor_config.json",
+        )
+    )
 
 
 def _ltx_distilled_suggestion(path: Path, flags: RuntimeFlags | None) -> str:

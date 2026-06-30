@@ -400,7 +400,24 @@ def build_router(ctx: AppContext) -> APIRouter:
         if upscale is None and restore is None:
             raise HTTPException(422, "Provide an upscaler_id and/or restorer_id")
         result_image, infotext = ctx.enhance.run_pipeline(image, upscale=upscale, restore=restore)
-        return {"image": _b64(result_image), "infotext": infotext}
+        saved = None
+        save_result = getattr(ctx.enhance, "save_result", None)
+        if callable(save_result):
+            saved = save_result(
+                result_image,
+                infotext,
+                source_image=image,
+                route="api-enhance",
+                upscale=upscale,
+                restore=restore,
+            )
+        return {
+            "image": _b64(result_image),
+            "infotext": infotext,
+            "image_path": getattr(saved, "image_path", None) if saved is not None else None,
+            "receipt_path": getattr(saved, "receipt_path", None) if saved is not None else None,
+            "message": getattr(saved, "message", "") if saved is not None else "",
+        }
 
     @native.post("/controlnet/detect")
     def controlnet_detect(payload: ControlNetDetectPayload):

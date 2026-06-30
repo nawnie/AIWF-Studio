@@ -517,6 +517,66 @@ def test_native_denoise_runs_under_no_grad():
     assert torch.is_grad_enabled() is True
 
 
+def test_native_denoise_raises_when_cancelled_before_first_forward():
+    torch = pytest.importorskip("torch")
+    from aiwf.infrastructure.wan.native.denoise import NativeWanDenoiseCancelled, run_native_wan_denoise
+
+    high = _FakeTransformer("high", torch.float32, output_value=1.0)
+    low = _FakeTransformer("low", torch.float32, output_value=3.0)
+    scheduler = _FakeScheduler((1000.0, 800.0))
+    pipe = _FakePipe(high, low, scheduler, boundary_ratio=0.5)
+
+    with pytest.raises(NativeWanDenoiseCancelled):
+        run_native_wan_denoise(
+            pipe,
+            image=object(),
+            prompt="a cat",
+            negative_prompt="",
+            height=64,
+            width=64,
+            num_frames=9,
+            num_inference_steps=2,
+            guidance_scale=2.0,
+            output_type="latent",
+            should_cancel=lambda: True,
+        )
+
+    assert high.forward_calls == []
+    assert low.forward_calls == []
+    assert scheduler.step_calls == []
+
+
+def test_native_denoise_raises_after_step_callback_cancel_before_decode():
+    torch = pytest.importorskip("torch")
+    from aiwf.infrastructure.wan.native.denoise import NativeWanDenoiseCancelled, run_native_wan_denoise
+
+    high = _FakeTransformer("high", torch.float32, output_value=1.0)
+    low = _FakeTransformer("low", torch.float32, output_value=3.0)
+    scheduler = _FakeScheduler((1000.0, 800.0))
+    pipe = _FakePipe(high, low, scheduler, boundary_ratio=0.5)
+
+    def _cancel_after_step(pipe, i, t, callback_kwargs):
+        pipe._interrupt = True
+        return callback_kwargs
+
+    with pytest.raises(NativeWanDenoiseCancelled):
+        run_native_wan_denoise(
+            pipe,
+            image=object(),
+            prompt="a cat",
+            negative_prompt="",
+            height=64,
+            width=64,
+            num_frames=9,
+            num_inference_steps=2,
+            guidance_scale=2.0,
+            callback_on_step_end=_cancel_after_step,
+        )
+
+    assert len(scheduler.step_calls) == 1
+    assert pipe._interrupt is True
+
+
 def test_latent_model_input_concatenates_condition_channels():
     """Non-expand path must feed latent + condition channels to the
     transformer. With 16 latent channels + 20 condition channels that is the

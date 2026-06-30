@@ -26,7 +26,7 @@ QUICK_START_BUNDLES: dict[str, list[str]] = {
     "sd": ["hf-sd15-pruned", "hf-vae-mse"],
     "sdxl": ["hf-sdxl-base", "hf-vae-sdxl", "hf-sdxl-refiner"],
     "sd35": ["hf-sd35-medium"],
-    "flux": ["flux-fusion-v2-q4km", "flux-t5-fp8", "flux-clip-l", "flux-ae-vae"],
+    "flux": ["flux-dev-q4km", "flux-t5-fp8", "flux-clip-l", "flux-ae-vae"],
     "flux2": ["flux2-klein-4b-diffusers"],
     "zimage": ["fluxtrait-zimage-v2-q4", "z-image-turbo-components"],
     "qwen-image": ["qwen-image-2512-diffusers"],
@@ -126,7 +126,11 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         category="ltx_text_encoder",
         source="huggingface",
         repo_id="google/gemma-3-12b-it-qat-q4_0-unquantized",
-        notes="Repository-shaped Gemma text encoder required by LTX 2.3. May require accepted HF access.",
+        notes=(
+            "Repository-shaped Gemma text encoder required by LTX 2.3. May require accepted HF access. "
+            "Track Heretic GGUF, llama.cpp, TensorRT-LLM, and bitsandbytes as separate routes; "
+            "they are not direct LTX backends."
+        ),
         snapshot=True,
     ),
     CatalogEntry(
@@ -360,8 +364,8 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         filename="fluxFusionV24StepsGGUFNF4_V2GGUFQ4KM.gguf",
         size_mb=6595,
         notes=(
-            "CivitAI Flux.1 dev derivative with a working public download. "
-            "Fast 4-step Q4_K_M route for first Flux tests on 16 GB cards."
+            "CivitAI Flux.1 dev derivative with a public download. "
+            "Known blocked in the current AIWF Flux GGUF/NF4 route; keep out of quick-start flows until the loader is fixed."
         ),
     ),
     CatalogEntry(

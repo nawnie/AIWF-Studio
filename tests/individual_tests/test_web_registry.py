@@ -181,9 +181,10 @@ def test_wan_route_switch_filters_low_model_from_normalized_high(tmp_path):
     models = tmp_path / "models"
     safetensors = models / "wan" / "Safetensor"
     gguf = models / "wan" / "GGUF"
+    loras = models / "Loras" / "Wan"
     vae = models / "VAE"
     output = tmp_path / "outputs"
-    for folder in (safetensors, gguf, vae, output):
+    for folder in (safetensors, gguf, loras, vae, output):
         folder.mkdir(parents=True, exist_ok=True)
 
     for name in (
@@ -199,6 +200,13 @@ def test_wan_route_switch_filters_low_model_from_normalized_high(tmp_path):
         (gguf / name).write_bytes(b"")
     (vae / "wan2.2_vae.safetensors").write_bytes(b"")
     (vae / "wan2.1_vae.safetensors").write_bytes(b"")
+    for name in (
+        "motion_5b_ti2v_rank16.safetensors",
+        "motion_a14b_high_rank16.safetensors",
+        "motion_a14b_low_rank16.safetensors",
+        "style_neutral_rank16.safetensors",
+    ):
+        (loras / name).write_bytes(b"")
 
     ctx = build_context(RuntimeFlags(data_dir=tmp_path, models_dir=models, output_dir=output))
     demo, *_ = create_web_ui(ctx)
@@ -243,6 +251,16 @@ def test_wan_route_switch_filters_low_model_from_normalized_high(tmp_path):
     )
     assert fp8[0].get("value") == "Safetensor/wan2.2_i2v_14B_high_noise_fp8.safetensors"
     assert fp8[1].get("value") == "Safetensor/wan2.2_i2v_14B_low_noise_fp8.safetensors"
+    assert fp8[1].get("visible") is True
+    assert fp8[2].get("visible") is True
+    assert fp8[4].get("choices") == [
+        "Wan/motion_a14b_high_rank16.safetensors",
+        "Wan/style_neutral_rank16.safetensors",
+    ]
+    assert fp8[5].get("choices") == [
+        "Wan/motion_a14b_low_rank16.safetensors",
+        "Wan/style_neutral_rank16.safetensors",
+    ]
     assert fp8[8].get("value") == "streamed"
 
     gguf_route = sync_runtime(
@@ -292,6 +310,20 @@ def test_wan_route_switch_filters_low_model_from_normalized_high(tmp_path):
     assert fast_route[0].get("value") == "Safetensor/wan2.2_ti2v_5B_fp16.safetensors"
     assert fast_route[1].get("value") is None
     assert fast_route[1].get("interactive") is False
+    assert fast_route[1].get("visible") is False
+    assert fast_route[2].get("visible") is False
+    assert fast_route[4].get("label") == "5B LoRA"
+    assert fast_route[4].get("choices") == [
+        "Wan/motion_5b_ti2v_rank16.safetensors",
+        "Wan/style_neutral_rank16.safetensors",
+    ]
+    assert fast_route[4].get("interactive") is True
+    assert fast_route[5].get("choices") == []
+    assert fast_route[5].get("interactive") is False
+    assert fast_route[5].get("visible") is False
+    assert fast_route[10].get("visible") is False
+    assert fast_route[12].get("visible") is False
+    assert fast_route[13].get("visible") is False
 
     missing_runtime_route = sync_runtime(
         None,

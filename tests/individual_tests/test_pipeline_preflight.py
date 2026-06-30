@@ -12,6 +12,8 @@ from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.ltx import (
     LTX_DIFFUSERS_2B_CHECKPOINT,
     LTX_FULL_CHECKPOINT,
+    LTX_FULL_CHECKPOINT_FP8,
+    LTX_HERETIC_Q3_CONVERTED_FOLDER,
     LTX_GEMMA_REPO,
     LTX_PIPELINE_DIFFUSERS_2B,
     LTX_PIPELINE_ONE_STAGE,
@@ -146,6 +148,44 @@ def test_qwen_nunchaku_preflight_checks_engine_and_assets(tmp_path: Path):
     assert result.metadata["storage_mode"] == "single_transformer_safetensors_plus_base_components"
 
 
+def test_qwen_nunchaku_preflight_blocks_incomplete_base_snapshot(tmp_path: Path):
+    engine = tmp_path / "engines" / "qwen_nunchaku"
+    python = engine / ".venv" / "Scripts" / "python.exe"
+    runner = engine / "run_qwen_lightning.py"
+    base_dir = tmp_path / "models" / "qwen-image" / "Diffusers" / "Qwen-Image"
+    transformer_dir = base_dir / "transformer"
+    transformer_path = (
+        tmp_path
+        / "models"
+        / "qwen-image"
+        / "Nunchaku"
+        / "svdq-int4_r32-qwen-image-lightningv1.0-4steps.safetensors"
+    )
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_bytes(b"")
+    runner.write_text("print('ok')", encoding="utf-8")
+    transformer_dir.mkdir(parents=True)
+    (base_dir / "model_index.json").write_text(json.dumps({"_class_name": "QwenImagePipeline"}), encoding="utf-8")
+    (transformer_dir / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": 1},
+                "weight_map": {
+                    "transformer_blocks.0.attn.to_q.weight": "diffusion_pytorch_model-00001-of-00009.safetensors"
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    transformer_path.parent.mkdir(parents=True, exist_ok=True)
+    transformer_path.write_bytes(b"")
+
+    result = preflight_qwen_nunchaku_pipeline(tmp_path)
+
+    assert not result.ok
+    assert "base components incomplete" in result.markdown()
+
+
 def test_qwen_nunchaku_preflight_blocks_missing_runtime(tmp_path: Path):
     result = preflight_qwen_nunchaku_pipeline(tmp_path)
 
@@ -218,6 +258,47 @@ def test_ltx_preflight_uses_installed_one_stage_when_distilled_missing(tmp_path:
     assert any("falls back" in warning for warning in result.warnings)
 
 
+def test_ltx_preflight_prefers_fp8_one_stage_no_offload(tmp_path: Path):
+    _write_ready_ltx_worker(tmp_path)
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", output_dir=tmp_path / "outputs")
+    checkpoint = flags.resolved_models_dir() / "ltx" / "checkpoints" / LTX_FULL_CHECKPOINT_FP8
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"fake")
+    gemma = flags.resolved_models_dir() / "ltx" / "text_encoder" / LTX_GEMMA_REPO.split("/", 1)[1]
+    gemma.mkdir(parents=True)
+
+    result = preflight_ltx_pipeline(flags, request=LtxVideoRequest(pipeline=LTX_PIPELINE_ONE_STAGE))
+
+    assert result.ok
+    assert result.metadata["checkpoint_path"] == str(checkpoint.resolve())
+    assert result.metadata["offload"] == "none"
+    assert result.metadata["quantization"] == "fp8-cast"
+    assert any("FP8 checkpoint uses offload=none" in warning for warning in result.warnings)
+
+
+def test_ltx_preflight_uses_converted_heretic_gemma_root_when_complete(tmp_path: Path):
+    _write_ready_ltx_worker(tmp_path)
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", output_dir=tmp_path / "outputs")
+    checkpoint = flags.resolved_models_dir() / "ltx" / "checkpoints" / LTX_FULL_CHECKPOINT_FP8
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"fake")
+    converted = flags.resolved_models_dir() / "ltx" / "text_encoder" / LTX_HERETIC_Q3_CONVERTED_FOLDER
+    converted.mkdir(parents=True)
+    for filename in (
+        "model.safetensors",
+        "vision_projector.safetensors",
+        "preprocessor_config.json",
+        "tokenizer_config.json",
+        "tokenizer.model",
+    ):
+        (converted / filename).write_bytes(b"fake")
+
+    result = preflight_ltx_pipeline(flags, request=LtxVideoRequest(pipeline=LTX_PIPELINE_ONE_STAGE))
+
+    assert result.ok
+    assert result.metadata["gemma_root"] == str(converted.resolve())
+
+
 def test_ltx_preflight_blocks_unloadable_native_checkpoint(tmp_path: Path, monkeypatch):
     _write_ready_ltx_worker(tmp_path)
     flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", output_dir=tmp_path / "outputs")
@@ -233,6 +314,24 @@ def test_ltx_preflight_blocks_unloadable_native_checkpoint(tmp_path: Path, monke
     assert not result.ok
     assert "checkpoint openability" in result.markdown()
     assert "pagefile too small" in result.markdown()
+
+
+def test_ltx_preflight_blocks_native_worker_runtime_crash(tmp_path: Path, monkeypatch):
+    _write_ready_ltx_worker(tmp_path)
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", output_dir=tmp_path / "outputs")
+    checkpoint = flags.resolved_models_dir() / "ltx" / "checkpoints" / LTX_FULL_CHECKPOINT
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"fake")
+    gemma = flags.resolved_models_dir() / "ltx" / "text_encoder" / LTX_GEMMA_REPO.split("/", 1)[1]
+    gemma.mkdir(parents=True)
+    monkeypatch.setattr("aiwf.services.ltx.ltx_checkpoint_openability_error", lambda _path: "")
+    monkeypatch.setattr("aiwf.services.ltx.ltx_native_checkpoint_runtime_blocker", lambda _path: "access violation 3221225477")
+
+    result = preflight_ltx_pipeline(flags, request=LtxVideoRequest(pipeline=LTX_PIPELINE_ONE_STAGE))
+
+    assert not result.ok
+    assert "native worker compatibility" in result.markdown()
+    assert "access violation 3221225477" in result.markdown()
 
 
 def test_ltx_preflight_uses_local_diffusers_2b_without_worker(tmp_path: Path):
@@ -272,4 +371,8 @@ def test_sana_video_preflight_reports_runtime_and_default_model_path(tmp_path: P
     assert result.ok
     assert result.metadata["default_repo"] == "Efficient-Large-Model/SANA-Video_2B_480p_diffusers"
     assert result.metadata["model_path"].endswith("SANA-Video_2B_480p_diffusers")
+    assert "sage_attention" in result.metadata
+    assert "bitsandbytes" in result.metadata
+    assert result.metadata["default_quantization"] == "auto"
+    assert result.metadata["vae_tiling"] == "auto"
     assert any("silent MP4" in warning for warning in result.warnings)

@@ -1,3 +1,8 @@
+from collections import OrderedDict
+from types import SimpleNamespace
+
+import torch
+
 from aiwf.core.domain.generation import GenerationRequest
 from aiwf.infrastructure.diffusers.backend import DiffusersBackend
 from aiwf.infrastructure.diffusers.model_arch import (
@@ -23,6 +28,34 @@ def test_qwen_sana_flux2_and_z_image_architecture_detection_from_names():
     assert detect_checkpoint_architecture("flux-kontext-4bit-fp4") == ARCH_FLUX_KONTEXT
     assert detect_checkpoint_architecture("fluxtraitFLUX2KleinFLUXZ_klein4bQ4KM.gguf") == ARCH_FLUX2_KLEIN
     assert detect_checkpoint_architecture("fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf") == ARCH_Z_IMAGE
+
+
+def test_comfy_saved_flux2_klein_safetensor_metadata_detects_architecture(tmp_path):
+    import json
+    import struct
+
+    header = {
+        "model.diffusion_model.double_blocks.0.img_attn.qkv.weight": {
+            "dtype": "F8_E4M3",
+            "shape": [12288, 4096],
+            "data_offsets": [0, 1],
+        },
+        "__metadata__": {
+            "prompt": json.dumps(
+                {
+                    "1": {
+                        "class_type": "UNETLoader",
+                        "inputs": {"unet_name": "flux-2-klein-9b.safetensors"},
+                    }
+                }
+            )
+        },
+    }
+    payload = json.dumps(header).encode("utf-8")
+    path = tmp_path / "snofsSexNudesAndOtherFunStuff_distilledV12Fp8.safetensors"
+    path.write_bytes(struct.pack("<Q", len(payload)) + payload + b"\0")
+
+    assert detect_checkpoint_architecture(path) == ARCH_FLUX2_KLEIN
 
 
 def test_runtime_family_presets_are_sane_first_run_defaults():
@@ -66,9 +99,23 @@ def test_sana_sprint_allows_manual_non_default_steps():
         calls.append(kwargs)
         return "ok"
 
-    pipe = type("SanaSprintPipeline", (), {"__call__": fake_call})()
+    def fake_encode_prompt(self, **kwargs):
+        return torch.ones(1, 2, 3), torch.ones(1, 2, dtype=torch.bool)
+
+    pipe = type(
+        "SanaSprintPipeline",
+        (),
+        {
+            "__call__": fake_call,
+            "encode_prompt": fake_encode_prompt,
+            "_execution_device": torch.device("cpu"),
+        },
+    )()
     backend = DiffusersBackend.__new__(DiffusersBackend)
-    backend.flags = None
+    backend.flags = SimpleNamespace(lowvram=False, medvram=False)
+    backend.devices = SimpleNamespace(device=lambda: torch.device("cpu"), empty_cache=lambda: None)
+    backend._active = None
+    backend._sana_prompt_cache = OrderedDict()
 
     result = backend._run_sana_txt2img_pass(
         pipe,
@@ -83,6 +130,177 @@ def test_sana_sprint_allows_manual_non_default_steps():
 
     assert result == "ok"
     assert calls[0]["intermediate_timesteps"] is None
+    assert calls[0]["prompt"] is None
+    assert calls[0]["prompt_embeds"].shape == (1, 2, 3)
+
+
+def test_qwen_image_pass_preencodes_prompt_embeddings():
+    calls = []
+    encoded_prompts = []
+
+    def fake_call(self, **kwargs):
+        calls.append(kwargs)
+        return "ok"
+
+    def fake_encode_prompt(self, **kwargs):
+        encoded_prompts.append(kwargs["prompt"])
+        return torch.ones(1, 2, 3), torch.ones(1, 2, dtype=torch.bool)
+
+    pipe = type(
+        "QwenImagePipeline",
+        (),
+        {
+            "__call__": fake_call,
+            "encode_prompt": fake_encode_prompt,
+            "_execution_device": torch.device("cpu"),
+        },
+    )()
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend.flags = SimpleNamespace(lowvram=False, medvram=False)
+    backend.devices = SimpleNamespace(device=lambda: torch.device("cpu"), empty_cache=lambda: None)
+    backend._active = None
+    backend._qwen_prompt_cache = OrderedDict()
+
+    request = GenerationRequest(prompt="cat", negative_prompt="bad", cfg_scale=4.0)
+    result = backend._run_qwen_image_txt2img_pass(
+        pipe,
+        request,
+        "cat",
+        None,
+        None,
+        width=512,
+        height=512,
+        steps=4,
+    )
+
+    assert result == "ok"
+    assert encoded_prompts == ["cat", "bad"]
+    assert calls[0]["prompt"] is None
+    assert calls[0]["negative_prompt"] is None
+    assert calls[0]["prompt_embeds"].shape == (1, 2, 3)
+    assert calls[0]["negative_prompt_embeds"].shape == (1, 2, 3)
+
+
+def _policy_backend(total_vram_gb: float = 16.0) -> DiffusersBackend:
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend.flags = SimpleNamespace(lowvram=False, medvram=False, fluxfp8=False, fp8=False)
+    backend.devices = SimpleNamespace(total_vram_gb=lambda: total_vram_gb)
+    backend._offload_active = False
+    return backend
+
+
+def _checkpoint(name: str, size_gib: float, architecture: str):
+    return SimpleNamespace(
+        id=name,
+        title=name,
+        filename=name,
+        path=name,
+        architecture=architecture,
+        size_bytes=int(size_gib * 1024**3),
+    )
+
+
+def test_size_aware_transformer_policy_keeps_small_sana_sprint_resident_on_16gb():
+    backend = _policy_backend(total_vram_gb=16.0)
+
+    assert backend._wants_offload(
+        ARCH_SANA,
+        checkpoint=_checkpoint("Sana_Sprint_0.6B_1024px_diffusers", 7.17, ARCH_SANA),
+    ) is False
+    assert backend._wants_offload(
+        ARCH_QWEN_IMAGE,
+        checkpoint=_checkpoint("Qwen-Image", 15.7, ARCH_QWEN_IMAGE),
+    ) is True
+    assert backend._wants_offload(
+        ARCH_FLUX2_KLEIN,
+        checkpoint=_checkpoint("fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM", 4.99, ARCH_FLUX2_KLEIN),
+    ) is False
+
+
+def test_sana_sprint_vae_policy_slices_without_tiling():
+    backend = _policy_backend(total_vram_gb=16.0)
+    calls: list[str] = []
+
+    class Vae:
+        def enable_slicing(self):
+            calls.append("slicing")
+
+        def enable_tiling(self):
+            calls.append("tiling")
+
+        def disable_tiling(self):
+            calls.append("disable_tiling")
+
+    pipe = type("SanaSprintPipeline", (), {"vae": Vae()})()
+    backend._tune_vae_memory(
+        pipe,
+        ARCH_SANA,
+        _checkpoint("Sana_Sprint_0.6B_1024px_diffusers", 7.17, ARCH_SANA),
+    )
+
+    assert calls == ["slicing", "disable_tiling"]
+    assert pipe._aiwf_vae_slicing_enabled is True
+    assert pipe._aiwf_vae_tiling_enabled is False
+
+
+def test_prompt_embedding_cache_is_bounded_and_keeps_recent_entries():
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend._PROMPT_EMBED_CACHE_LIMIT = 2
+    cache = OrderedDict()
+
+    backend._prompt_cache_put(cache, "first", "a", "Test")
+    backend._prompt_cache_put(cache, "second", "b", "Test")
+    assert backend._prompt_cache_get(cache, "first", "Test") == "a"
+
+    backend._prompt_cache_put(cache, "third", "c", "Test")
+
+    assert list(cache) == ["first", "third"]
+    assert "second" not in cache
+
+
+def test_text_encoder_gpu_swap_moves_denoisers_aside_for_prompt_encode():
+    backend = _policy_backend(total_vram_gb=16.0)
+    calls = {"empty_cache": 0}
+    backend.devices = SimpleNamespace(
+        total_vram_gb=lambda: 16.0,
+        empty_cache=lambda: calls.__setitem__("empty_cache", calls["empty_cache"] + 1),
+    )
+
+    class Module:
+        def __init__(self):
+            self.device = torch.device("cpu")
+            self.moves: list[str] = []
+
+        def to(self, device):
+            self.moves.append(str(device))
+            self.device = torch.device(device)
+            return self
+
+    text_encoder = Module()
+    transformer = Module()
+    unet = Module()
+    pipe = SimpleNamespace(
+        text_encoder=text_encoder,
+        transformer=transformer,
+        unet=unet,
+        _execution_device=torch.device("cpu"),
+    )
+    seen_devices: list[str] = []
+
+    result = backend._encode_with_text_encoder_gpu_swap(
+        pipe,
+        architecture="Flux.2 Klein",
+        device=torch.device("cuda"),
+        encode=lambda device: seen_devices.append(str(device)) or "encoded",
+    )
+
+    assert result == "encoded"
+    assert seen_devices == ["cuda"]
+    assert text_encoder.moves == ["cuda", "cpu"]
+    assert transformer.moves == ["cpu", "cuda"]
+    assert unet.moves == ["cpu", "cuda"]
+    assert pipe._execution_device == torch.device("cuda")
+    assert calls["empty_cache"] >= 2
 
 
 def test_image_runtime_preflight_has_required_diffusers_classes():

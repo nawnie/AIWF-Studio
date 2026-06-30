@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 import time
@@ -57,6 +58,14 @@ DEFAULT_NEGATIVE_PROMPT = (
 # Past this point there is no plausible legitimate explanation, only a hang.
 STALL_TIMEOUT_SECONDS = 240.0
 _STALL_POLL_INTERVAL_SECONDS = 5.0
+logger = logging.getLogger(__name__)
+
+
+def _print_generation_progress(job_id: Any, step: int, total: int, message: str) -> None:
+    total = max(1, int(total or 1))
+    step = max(0, int(step or 0))
+    label = str(job_id)[:8]
+    print(f"[AIWF] Generation {label}: {step}/{total} - {message}", flush=True)
 
 
 class GenerationService:
@@ -1037,12 +1046,22 @@ class GenerationService:
                     total: int,
                     message: str,
                     preview: Image.Image | None = None,
+                    completed_batch: list[Image.Image] | None = None,
+                    batch_seeds: list[int] | None = None,
                 ) -> None:
                     nonlocal latest_preview
                     if preview is not None:
                         latest_preview = preview
                     self.queue.update_progress(job.id, step, total, message, preview)
                     self.events.publish(JobProgressed(job.id, step, total, message))
+                    _print_generation_progress(job.id, step, total, message)
+                    logger.info(
+                        "Generation progress: job=%s step=%s/%s message=%s",
+                        job.id,
+                        step,
+                        total,
+                        message,
+                    )
 
                 on_progress(0, max(1, int(job.request.steps)), self._loading_model_message(active))
                 _gen_t0 = time.perf_counter()
@@ -1135,7 +1154,7 @@ class GenerationService:
                         )
                     )
 
-        self.queue.run_next(worker)
+        self.queue.run_next(worker, block=True)
         finished = self.queue.get(record.id)
         assert finished is not None
         return finished
@@ -1211,6 +1230,14 @@ class GenerationService:
                         latest_preview = preview
                     self.queue.update_progress(job.id, step, total, message, preview)
                     self.events.publish(JobProgressed(job.id, step, total, message))
+                    _print_generation_progress(job.id, step, total, message)
+                    logger.info(
+                        "Generation progress: job=%s step=%s/%s message=%s",
+                        job.id,
+                        step,
+                        total,
+                        message,
+                    )
                     if completed_batch:
                         progress_q.put(("batch_images", list(completed_batch), list(batch_seeds or [])))
                     else:
@@ -1318,7 +1345,6 @@ class GenerationService:
                     job_id=str(record.id),
                     mode=request.mode.value,
                 )
-                raise
             finally:
                 done.set()
 
@@ -1360,6 +1386,9 @@ class GenerationService:
 
     def active_job(self):
         return self.queue.active()
+
+    def pending_count(self) -> int:
+        return self.queue.pending_count()
 
     def recent_jobs(self, limit: int = 20):
         return self.queue.list_recent(limit)

@@ -11,6 +11,9 @@ class Checkpoint(BaseModel):
     hash: str | None = None
     kind: str = "checkpoint"
     architecture: str = "sd15"
+    size_bytes: int = 0
+    file_count: int = 1
+    asset_summary: str = ""
 
 
 class LoraInfo(BaseModel):
@@ -29,6 +32,10 @@ class VaeInfo(BaseModel):
     title: str
     filename: str
     path: str
+    size_bytes: int = 0
+    file_count: int = 1
+    asset_summary: str = ""
+    precision: str | None = None
 
 
 class EmbeddingInfo(BaseModel):

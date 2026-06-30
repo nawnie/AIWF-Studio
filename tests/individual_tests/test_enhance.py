@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +11,7 @@ from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.enhance import RestoreOptions, UpscaleOptions
 from aiwf.infrastructure.enhance.catalog import EnhanceModelCatalog
 from aiwf.infrastructure.enhance.tiles import combine_grid, split_grid
+from aiwf.infrastructure.storage.filesystem import FilesystemImageStore
 from aiwf.services.enhance import EnhanceService
 
 
@@ -60,3 +62,48 @@ def test_run_pipeline_restore_then_upscale(tmp_path):
     assert result.size == (128, 128)
     assert "Restore" in infotext
     assert "Upscale" in infotext
+
+
+def test_save_result_writes_enhance_receipt(tmp_path):
+    flags = RuntimeFlags(data_dir=tmp_path)
+    settings = UserSettings(save_images=True, enhance_output_subdir="enhanced-images")
+    devices = MagicMock()
+    store = FilesystemImageStore(tmp_path / "outputs", settings=settings)
+    service = EnhanceService(flags, settings, devices, store)
+    source = Image.new("RGB", (16, 12), color=(10, 20, 30))
+    output = Image.new("RGB", (32, 24), color=(40, 50, 60))
+    options = UpscaleOptions(model_id="realesrgan-x4plus", scale=2, tile_size=128, tile_overlap=16)
+
+    result = service.save_result(
+        output,
+        "Upscale: RealESRGAN (2x)",
+        source_image=source,
+        route="upscale",
+        upscale=options,
+    )
+
+    assert result.image_path
+    assert result.receipt_path
+    assert Path(result.image_path).is_file()
+    receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
+    assert receipt["receipt_type"] == "enhance"
+    assert receipt["route"] == "upscale"
+    assert receipt["input"]["width"] == 16
+    assert receipt["output"]["height"] == 24
+    assert receipt["upscale"]["model_id"] == "realesrgan-x4plus"
+    assert receipt["settings"]["enhance_output_subdir"] == "enhanced-images"
+    assert receipt["receipt_id"]
+
+
+def test_save_result_skips_receipt_when_save_disabled(tmp_path):
+    flags = RuntimeFlags(data_dir=tmp_path)
+    settings = UserSettings(save_images=False)
+    devices = MagicMock()
+    store = FilesystemImageStore(tmp_path / "outputs", settings=settings)
+    service = EnhanceService(flags, settings, devices, store)
+
+    result = service.save_result(Image.new("RGB", (8, 8)), "Restore", route="restore")
+
+    assert result.image_path is None
+    assert result.receipt_path is None
+    assert result.message == "Done (save disabled in Settings)"

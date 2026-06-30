@@ -108,6 +108,6 @@ Not allowed:
 
 - `docs/ENGINE_ISOLATION.md`
 - `docs/WORKER_PROTOCOL.md`
-- `docs/TRAINING_ENGINE_ROADMAP.md`
-- `docs/ACCELERATION_EXPERIMENTS.md`
-- `docs/PIPELINE_OPTIMIZATION_AUDIT.md`
+- `docs/FEATURES.md`
+- `docs/IMAGE_MATURITY_MATRIX.md`
+- `docs/qa/README.md`

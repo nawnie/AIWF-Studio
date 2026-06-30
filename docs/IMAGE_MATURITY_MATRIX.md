@@ -6,7 +6,7 @@ Target: bring every native AIWF core image route to at least `8.0` maturity agai
 
 - Native AIWF features first. Do not make A1111 the runtime dependency.
 - A1111 is the parity reference for common image workflows: txt2img, img2img, inpaint, batch, XYZ, hires/refiner, ControlNet, extras, PNG/API replay.
-- Flux expansion stays txt2img-first for now. Flux img2img, inpaint, LoRA, hires, VAE, refiner, and ControlNet are deferred until the SD/SDXL image route is above target.
+- Flux stays txt2img-only for this release pass. Flux img2img, inpaint, LoRA, hires, VAE, refiner, and ControlNet remain gated for Step 3+.
 - No speed or quality claim is valid without a benchmark receipt.
 
 ## Route Matrix
@@ -19,10 +19,10 @@ Target: bring every native AIWF core image route to at least `8.0` maturity agai
 | Hires fix / SDXL refiner | 8.0 | 8.0 | `hires` | Ready |
 | ControlNet conditioning | 8.0 | 8.1 | `controlnet` | Ready |
 | XYZ plots | 8.0 | 8.0 | `txt2img` | Ready |
-| Extras / enhance | 8.0 | 7.8 | Pending | Needs receipt wiring |
-| Segment to inpaint | 8.0 | 7.7 | Pending | Needs one-click repair hardening |
+| Extras / enhance | 8.0 | 8.0 | Receipt-backed | Ready |
+| Segment to inpaint | 8.0 | 8.0 | Receipt-backed | Ready |
 | PNG/API replay | 8.0 | 8.0 | `txt2img` | Ready |
-| Flux text to image | 8.0 | 7.0 | `txt2img` | Maturing |
+| Flux text to image | 8.0 | 8.0 | `txt2img` | Ready |
 
 ## Implemented Bridge
 
@@ -41,6 +41,12 @@ Target: bring every native AIWF core image route to at least `8.0` maturity agai
   - `controlnet`
   - `hires`
   - `wan_i2v`
+- Enhance outputs:
+  - image-sidecar receipt JSON for upscale, restore, photo restore, and full enhance pipeline runs
+- Segment to inpaint:
+  - Object Replace preset runs Auto mask into Inpaint and saves a workflow receipt with source, mask, output, and repair settings
+- Flux text to image:
+  - `scripts/smoke_image_routes.py --plan-json` emits the bounded txt2img smoke plan for Flux, Flux.2 Klein, and Z-Image routes without loading models
 
 ## Benchmark Config Examples
 

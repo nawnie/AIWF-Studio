@@ -151,9 +151,20 @@ def register_enhance(registry: WebRegistry) -> None:
                 raise gr.Error("Upload a source image first.")
             return image
 
-        def _save_and_return(before, after, infotext: str):
-            result = service.save_result(after, infotext)
-            status_text = f"**Done** — {result.message}"
+        def _save_and_return(before, after, infotext: str, *, route: str, upscale=None, restore=None, extra=None):
+            result = service.save_result(
+                after,
+                infotext,
+                source_image=before,
+                route=route,
+                upscale=upscale,
+                restore=restore,
+                extra=extra,
+            )
+            status_lines = [f"**Done**: {result.message}"]
+            if result.receipt_path:
+                status_lines.append(f"Receipt: `{result.receipt_path}`")
+            status_text = "\n\n".join(status_lines)
             show_compare = before is not None
             return (
                 after,
@@ -173,7 +184,7 @@ def register_enhance(registry: WebRegistry) -> None:
             result = service.upscale(image, options)
             model = service.catalog.get_model(model_id)
             infotext = f"Upscale: {model.title if model else model_id} ({scale}x)"
-            return _save_and_return(image, result, infotext)
+            return _save_and_return(image, result, infotext, route="upscale", upscale=options)
 
         run_upscale.click(
             do_upscale,
@@ -193,7 +204,7 @@ def register_enhance(registry: WebRegistry) -> None:
             result = service.restore(image, options)
             model = service.catalog.get_model(model_id)
             infotext = f"Restore: {model.title if model else model_id} (strength {visibility:.2f})"
-            return _save_and_return(image, result, infotext)
+            return _save_and_return(image, result, infotext, route="restore", restore=options)
 
         run_restore.click(
             do_restore,
@@ -264,7 +275,15 @@ def register_enhance(registry: WebRegistry) -> None:
                 upscale=upscale_opts,
             )
             result, infotext = service.run_photo_restore(image, options)
-            return _save_and_return(image, result, infotext)
+            return _save_and_return(
+                image,
+                result,
+                infotext,
+                route="photo-restore",
+                upscale=upscale_opts,
+                restore=restore_opts,
+                extra={"photo_restore": options.model_dump(mode="json")},
+            )
 
         run_photo_restore.click(
             do_photo_restore,
@@ -321,7 +340,15 @@ def register_enhance(registry: WebRegistry) -> None:
                 upscale=upscale_opts,
                 restore_first=order.startswith("Restore"),
             )
-            return _save_and_return(image, result, infotext)
+            return _save_and_return(
+                image,
+                result,
+                infotext,
+                route="enhance-pipeline",
+                upscale=upscale_opts,
+                restore=restore_opts,
+                extra={"restore_first": bool(order.startswith("Restore"))},
+            )
 
         run_pipeline.click(
             do_pipeline,

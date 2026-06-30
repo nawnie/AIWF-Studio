@@ -20,6 +20,10 @@ def test_scan_finds_nested_checkpoint(tmp_path: Path):
     checkpoints = scan_from_flags(flags)
     assert len(checkpoints) == 1
     assert checkpoints[0].filename == "test_model.safetensors"
+    assert checkpoints[0].file_count == 1
+    assert checkpoints[0].size_bytes == model.stat().st_size
+    assert "1 file" in checkpoints[0].title
+    assert checkpoints[0].asset_summary in checkpoints[0].title
 
 
 def test_scan_skips_loras_folder(tmp_path: Path):
@@ -37,9 +41,11 @@ def test_scan_skips_non_image_model_runtime_folders(tmp_path: Path):
     (models / "Textencoder").mkdir(parents=True)
     (models / "wan" / "Safetensor").mkdir(parents=True)
     (models / "diffusion_models").mkdir(parents=True)
+    (models / "upscale_models").mkdir(parents=True)
     (models / "Textencoder" / "umt5-xxl.safetensors").write_bytes(b"text encoder")
     (models / "wan" / "Safetensor" / "wan2.2_ti2v_5B_fp16.safetensors").write_bytes(b"wan")
     (models / "diffusion_models" / "clip_l.safetensors").write_bytes(b"clip")
+    (models / "upscale_models" / "4xBHI_dat2_real.safetensors").write_bytes(b"upscaler")
     (models / "root_model.ckpt").write_bytes(b"root checkpoint")
 
     flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
@@ -50,6 +56,27 @@ def test_scan_skips_non_image_model_runtime_folders(tmp_path: Path):
     assert "umt5-xxl.safetensors" not in filenames
     assert "wan2.2_ti2v_5B_fp16.safetensors" not in filenames
     assert "clip_l.safetensors" not in filenames
+    assert "4xBHI_dat2_real.safetensors" not in filenames
+
+
+def test_known_broken_runtime_assets_do_not_enter_selectable_checkpoint_catalog(tmp_path: Path):
+    models = tmp_path / "models"
+    good = models / "Stable-diffusion" / "root_model.ckpt"
+    flux_fp8 = models / "flux" / "UNet" / "fluxedUpFluxNSFW_110FP8.safetensors"
+    flux_gguf = models / "flux" / "GGUF" / "fluxFusionV24StepsGGUFNF4_V2GGUFQ4KM.gguf"
+    bad_upscaler = models / "upscale_models" / "4xBHI_dat2_multiblurjpg.safetensors"
+    for path in (good, flux_fp8, flux_gguf, bad_upscaler):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fake")
+
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+    checkpoints = scan_from_flags(flags)
+
+    filenames = {checkpoint.filename for checkpoint in checkpoints}
+    assert "root_model.ckpt" in filenames
+    assert "fluxedUpFluxNSFW_110FP8.safetensors" not in filenames
+    assert "fluxFusionV24StepsGGUFNF4_V2GGUFQ4KM.gguf" not in filenames
+    assert "4xBHI_dat2_multiblurjpg.safetensors" not in filenames
 
 
 def test_looks_like_lora_weights_detects_lora_keys(tmp_path: Path):

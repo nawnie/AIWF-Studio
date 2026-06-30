@@ -39,6 +39,10 @@ class NativeWanDenoiseOutput:
     frames: Any
 
 
+class NativeWanDenoiseCancelled(RuntimeError):
+    pass
+
+
 def _trace_native_denoise(event: str, message: str, **fields: Any) -> None:
     """Best-effort diagnostics for a real native denoise run.
 
@@ -400,6 +404,7 @@ def _run_native_wan_denoise_impl(
     callback_on_step_end: Callable[..., Any] | None = None,
     callback_on_step_end_tensor_inputs: Sequence[str] = ("latents",),
     aiwf_on_phase_progress: Callable[[str], Any] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
     max_sequence_length: int = 512,
     **_extra: Any,
 ) -> NativeWanDenoiseOutput:
@@ -429,6 +434,36 @@ def _run_native_wan_denoise_impl(
         except Exception:
             pass
 
+    def _cancel_requested() -> bool:
+        if getattr(pipe, "interrupt", False):
+            return True
+        if should_cancel is None:
+            return False
+        try:
+            if should_cancel():
+                pipe._interrupt = True
+                return True
+        except Exception:
+            _trace_native_denoise(
+                "wan.native_cancel_check_failed",
+                "Wan native cancel check failed",
+            )
+        return bool(getattr(pipe, "interrupt", False))
+
+    def _raise_if_cancelled(phase: str) -> None:
+        if not _cancel_requested():
+            return
+        _trace_native_denoise(
+            "wan.native_denoise_cancelled",
+            "Wan native denoise cancelled",
+            phase=phase,
+        )
+        try:
+            pipe._current_timestep = None
+        except Exception:
+            pass
+        raise NativeWanDenoiseCancelled("Wan native denoise cancelled by user.")
+
     device = getattr(pipe, "_aiwf_execution_device", None) or pipe._execution_device
 
     # --- frame-count / spatial alignment (mirrors diffusers __call__) ---
@@ -454,6 +489,7 @@ def _run_native_wan_denoise_impl(
     pipe._attention_kwargs = attention_kwargs
     pipe._current_timestep = None
     pipe._interrupt = False
+    _raise_if_cancelled("start")
 
     if prompt is not None and isinstance(prompt, str):
         batch_size = 1
@@ -463,6 +499,7 @@ def _run_native_wan_denoise_impl(
         batch_size = prompt_embeds.shape[0]
 
     _evict_active_stage_before_prompt(pipe)
+    _raise_if_cancelled("before_prompt_encode")
     with _component_on_device(getattr(pipe, "text_encoder", None), device, label="text_encoder"):
         prompt_embeds, negative_prompt_embeds = pipe.encode_prompt(
             prompt=prompt,
@@ -474,6 +511,7 @@ def _run_native_wan_denoise_impl(
             max_sequence_length=max_sequence_length,
             device=device,
         )
+    _raise_if_cancelled("after_prompt_encode")
 
     transformer_dtype = transformer.dtype if transformer is not None else transformer_2.dtype
     prompt_embeds = prompt_embeds.to(transformer_dtype)
@@ -484,11 +522,13 @@ def _run_native_wan_denoise_impl(
     # dual-stage 14B transformers have image_dim=None and skip this.
     if transformer is not None and transformer.config.image_dim is not None:
         if image_embeds is None:
+            _raise_if_cancelled("before_image_encode")
             with _component_on_device(getattr(pipe, "image_encoder", None), device, label="image_encoder"):
                 if last_image is None:
                     image_embeds = pipe.encode_image(image, device)
                 else:
                     image_embeds = pipe.encode_image([image, last_image], device)
+            _raise_if_cancelled("after_image_encode")
         image_embeds = image_embeds.repeat(batch_size, 1, 1)
         image_embeds = image_embeds.to(transformer_dtype)
 
@@ -508,6 +548,7 @@ def _run_native_wan_denoise_impl(
             device, dtype=torch.float32
         )
 
+    _raise_if_cancelled("before_latents")
     with _component_on_device(getattr(pipe, "vae", None), device, label="vae_encode"):
         latents_outputs = pipe.prepare_latents(
             image_tensor,
@@ -522,6 +563,7 @@ def _run_native_wan_denoise_impl(
             latents,
             last_image_tensor,
         )
+    _raise_if_cancelled("after_latents")
     expand_timesteps = bool(getattr(pipe.config, "expand_timesteps", False))
     first_frame_mask = None
     if expand_timesteps:
@@ -587,11 +629,11 @@ def _run_native_wan_denoise_impl(
         pass
 
     _emit_phase("Denoising video; first GGUF step can take several minutes")
+    _raise_if_cancelled("before_denoise")
 
     for i, t in enumerate(timesteps):
         step_started = time.perf_counter()
-        if pipe.interrupt:
-            continue
+        _raise_if_cancelled("step_start")
 
         pipe._current_timestep = t
 
@@ -629,8 +671,10 @@ def _run_native_wan_denoise_impl(
             step=i + 1,
             pipe=pipe,
         )
+        _raise_if_cancelled(f"{stage_name}_stage_ready")
         fp8_before = _fp8_metrics_for(current_model)
 
+        _raise_if_cancelled(f"{stage_name}_before_cond_forward")
         with current_model.cache_context("cond"), _strict_sdpa_context():
             noise_pred = current_model(
                 hidden_states=latent_model_input,
@@ -640,8 +684,10 @@ def _run_native_wan_denoise_impl(
                 attention_kwargs=attention_kwargs,
                 return_dict=False,
             )[0]
+        _raise_if_cancelled(f"{stage_name}_after_cond_forward")
 
         if pipe.do_classifier_free_guidance:
+            _raise_if_cancelled(f"{stage_name}_before_uncond_forward")
             with current_model.cache_context("uncond"), _strict_sdpa_context():
                 noise_uncond = current_model(
                     hidden_states=latent_model_input,
@@ -652,8 +698,10 @@ def _run_native_wan_denoise_impl(
                     return_dict=False,
                 )[0]
                 noise_pred = noise_uncond + current_guidance_scale * (noise_pred - noise_uncond)
+            _raise_if_cancelled(f"{stage_name}_after_uncond_forward")
 
         latents = pipe.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+        _raise_if_cancelled(f"{stage_name}_after_scheduler_step")
         _sync_cuda_for_diag()
         fp8_after = _fp8_metrics_for(current_model)
         if _denoise_diag_enabled():
@@ -686,13 +734,16 @@ def _run_native_wan_denoise_impl(
             latents = callback_outputs.pop("latents", latents)
             prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
             negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+            _raise_if_cancelled("after_step_callback")
 
     pipe._current_timestep = None
+    _raise_if_cancelled("after_denoise")
 
     if expand_timesteps:
         latents = (1 - first_frame_mask) * condition + first_frame_mask * latents
 
     if output_type != "latent":
+        _raise_if_cancelled("before_decode")
         _emit_phase("Denoise complete; decoding video frames")
         _emit_phase("Decoding video frames")
         latents = latents.to(pipe.vae.dtype)
@@ -709,6 +760,7 @@ def _run_native_wan_denoise_impl(
             video = pipe.vae.decode(latents, return_dict=False)[0]
             _emit_phase("Post-processing video frames")
             video = pipe.video_processor.postprocess_video(video, output_type=output_type)
+        _raise_if_cancelled("after_decode")
     else:
         _emit_phase("Denoise complete; returning latents")
         video = latents

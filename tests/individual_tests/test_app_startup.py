@@ -1,5 +1,7 @@
 import pytest
+import json
 
+from aiwf import app_pro
 from aiwf.app import (
     _ConsoleNoiseFilter,
     _auth_pairs,
@@ -67,3 +69,43 @@ def test_gradio_allowed_paths_only_exposes_outputs(tmp_path):
     flags = RuntimeFlags(data_dir=tmp_path, output_dir=tmp_path / "outputs", models_dir=tmp_path / "models")
 
     assert _gradio_allowed_paths(flags) == [str((tmp_path / "outputs").resolve())]
+
+
+def test_pro_app_window_prefers_edge_app_mode(monkeypatch, tmp_path):
+    edge = tmp_path / "msedge.exe"
+
+    def fake_which(name: str):
+        return str(edge) if name == "msedge" else None
+
+    monkeypatch.setattr(app_pro.shutil, "which", fake_which)
+
+    assert app_pro._browser_app_command("http://127.0.0.1:7860") == [
+        str(edge),
+        "--new-window",
+        "--start-fullscreen",
+        "--app=http://127.0.0.1:7860",
+    ]
+
+
+def test_pro_autolaunch_is_default_with_opt_out_flag():
+    assert app_pro._pro_autolaunch_enabled([])
+    assert app_pro._pro_autolaunch_enabled(["--port", "7891"])
+    assert not app_pro._pro_autolaunch_enabled(["--no-autolaunch"])
+
+
+def test_existing_pro_runtime_detects_live_pro_payload(monkeypatch):
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"status": "idle", "backend": "diffusers"}).encode("utf-8")
+
+    monkeypatch.setattr(app_pro.urllib.request, "urlopen", lambda *args, **kwargs: _Response())
+
+    assert app_pro._existing_pro_runtime("http://127.0.0.1:7860")

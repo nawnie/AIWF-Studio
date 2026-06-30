@@ -78,18 +78,18 @@ def image_maturity_matrix() -> ImageMaturityMatrix:
             ImagePipelineStatus(
                 route="extras",
                 label="Extras / enhance",
-                score=7.8,
-                status="maturing",
-                benchmark_kind=None,
-                notes=["Upscale and restoration are native; benchmark receipt wiring is the remaining maturity gate."],
+                score=8.0,
+                status="ready",
+                benchmark_kind="receipt",
+                notes=["Upscale and restoration save image-sidecar receipts with route, model, input, and output metadata."],
             ),
             ImagePipelineStatus(
                 route="segment-inpaint",
                 label="Segment to inpaint",
-                score=7.7,
-                status="maturing",
-                benchmark_kind=None,
-                notes=["SAM mask handoff exists; one-click repair workflow and receipt coverage still need hardening."],
+                score=8.0,
+                status="ready",
+                benchmark_kind="receipt",
+                notes=["One-click object replacement runs Auto mask into Inpaint and writes a workflow receipt with mask and repair metadata."],
             ),
             ImagePipelineStatus(
                 route="png-api-replay",
@@ -102,10 +102,10 @@ def image_maturity_matrix() -> ImageMaturityMatrix:
             ImagePipelineStatus(
                 route="flux-txt2img",
                 label="Flux text to image",
-                score=7.0,
-                status="maturing",
+                score=8.0,
+                status="ready",
                 benchmark_kind="txt2img",
-                notes=["Flux remains txt2img-first; img2img, inpaint, LoRA, hires, VAE, refiner, and ControlNet expansion is deferred."],
+                notes=["Flux remains txt2img-only for release; bounded smoke plans cover Flux, Flux.2 Klein, and Z-Image routes while advanced modes stay gated."],
             ),
         ]
     )

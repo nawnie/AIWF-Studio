@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
-MODEL_HEADER_CACHE_VERSION = 3
+MODEL_HEADER_CACHE_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # Architecture / role constants
@@ -647,6 +647,11 @@ def _looks_like_gemma_transformer_file(p: Path, tensor_keys: Iterable[str], text
     return "gemma" in combined and any(key.startswith("model.layers.") for key in tensor_keys[:80])
 
 
+def _looks_like_qwen_transformer_file(p: Path, tensor_keys: Iterable[str], text: str) -> bool:
+    combined = f"{p.name} {p.as_posix()} {text}".lower()
+    return "qwen" in combined and any(key.startswith("model.layers.") for key in tensor_keys[:80])
+
+
 def _semantic_metadata_text(meta: dict) -> str:
     """Return metadata that can safely drive architecture detection.
 
@@ -667,11 +672,14 @@ def _semantic_metadata_text(meta: dict) -> str:
         "ss_output_name",
         "ss_sd_model_name",
     }
+    comfy_graph_keys = {"prompt", "workflow"}
     allowed_prefixes = ("modelspec.tags",)
     values = [
         str(value)
         for key, value in meta.items()
-        if key in allowed_exact or any(key.startswith(prefix) for prefix in allowed_prefixes)
+        if key in allowed_exact
+        or any(key.startswith(prefix) for prefix in allowed_prefixes)
+        or (key in comfy_graph_keys and "flux-2-klein" in str(value).lower().replace("_", "-"))
     ]
     return " ".join(values).lower()
 
@@ -692,6 +700,10 @@ def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple
         if _looks_like_ltx_video_vae_file(p, tensor_keys, combined_meta):
             return ARCH_LTX_VAE, ROLE_VAE
         return ARCH_LTX_TRANSFORMER, _role_from_meta_and_filename(meta, p.name)
+    if "flux2" in spec_arch.replace("-", "") or "flux2klein" in combined_meta.replace("-", "").replace(" ", ""):
+        if _looks_like_lora_keys(tensor_keys):
+            return ARCH_FLUX_LORA, ROLE_LORA
+        return ARCH_FLUX2_KLEIN_TRANSFORMER, _role_from_meta_and_filename(meta, p.name)
     if "flux" in spec_arch or "flux" in combined_meta:
         if _looks_like_lora_keys(tensor_keys):
             return ARCH_FLUX_LORA, ROLE_LORA
@@ -703,6 +715,9 @@ def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple
     if _looks_like_gemma_transformer_file(p, tensor_keys, combined_meta):
         role = ROLE_TEXT_ENCODER if "text_encoder" in p.as_posix().lower() or "textencoder" in p.as_posix().lower() else ROLE_UNKNOWN
         return ARCH_GEMMA_LLM, role
+    if _looks_like_qwen_transformer_file(p, tensor_keys, combined_meta):
+        role = ROLE_TEXT_ENCODER if "text_encoder" in p.as_posix().lower() or "textencoder" in p.as_posix().lower() else ROLE_UNKNOWN
+        return ARCH_UNKNOWN, role
     if p.name.lower() == "ae.safetensors":
         return ARCH_FLUX_VAE, ROLE_VAE
 
@@ -739,6 +754,8 @@ def _arch_from_folder_and_filename(p: Path) -> tuple:
         return ARCH_FLUX_VAE, ROLE_VAE
     if _looks_like_t5xxl_file(p, ""):
         return ARCH_T5XXL_ENCODER, ROLE_TEXT_ENCODER
+    if "qwen" in p.name.lower():
+        return ARCH_UNKNOWN, ROLE_TEXT_ENCODER if ("text_encoder" in path_str.lower() or "textencoder" in path_str.lower()) else ROLE_UNKNOWN
     if "umt5" in p.name.lower():
         return ARCH_UMT5_ENCODER, ROLE_TEXT_ENCODER
     if (

@@ -73,6 +73,14 @@ def _safetensors_tensor_shapes(path: Path) -> dict[str, list[int]]:
     return shapes
 
 
+def _safetensors_metadata(path: Path) -> dict[str, str]:
+    """Read safetensors metadata without loading tensor data."""
+    with path.open("rb") as handle:
+        header_size = struct.unpack("<Q", handle.read(8))[0]
+        header = json.loads(handle.read(header_size).decode("utf-8"))
+    return {str(key): str(value) for key, value in (header.get("__metadata__") or {}).items()}
+
+
 def _ckpt_tensor_shapes(path: Path) -> dict[str, list[int]]:
     """Best-effort shape map for legacy .ckpt checkpoints."""
     try:
@@ -105,6 +113,31 @@ def _shapes_for_checkpoint(path: Path) -> dict[str, list[int]]:
     return {}
 
 
+def _metadata_architecture_for_checkpoint(path: Path) -> str | None:
+    if path.suffix.lower() != ".safetensors":
+        return None
+    try:
+        metadata = _safetensors_metadata(path)
+    except Exception:
+        logger.debug("Could not read safetensors metadata for %s", path, exc_info=True)
+        return None
+    text = " ".join(
+        metadata.get(key, "")
+        for key in (
+            "modelspec.architecture",
+            "modelspec.description",
+            "modelspec.implementation",
+            "modelspec.title",
+            "ss_base_model_version",
+            "ss_sd_model_name",
+            # ComfyUI ModelSave stores the source UNETLoader graph here.
+            "prompt",
+            "workflow",
+        )
+    )
+    return _architecture_from_name(text) if text else None
+
+
 def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: str = "") -> str:
     """Classify checkpoint architecture from state-dict key shapes."""
     unet_in = shapes.get(UNET_INPUT_KEY)
@@ -118,6 +151,22 @@ def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: st
     name_arch = _architecture_from_name(filename)
     if name_arch:
         return name_arch
+
+    has_flux_blocks = any(
+        key.startswith(
+            (
+                "double_blocks.0",
+                "single_blocks.0",
+                "transformer.double_blocks.0",
+                "transformer.single_blocks.0",
+                "model.diffusion_model.double_blocks.0",
+                "model.diffusion_model.single_blocks.0",
+            )
+        )
+        for key in shapes
+    )
+    if has_flux_blocks:
+        return ARCH_FLUX
 
     if has_sd3 or "sd3.5" in lower or "sd35" in lower or "stable-diffusion-3.5" in lower:
         return ARCH_SD35
@@ -157,6 +206,9 @@ def looks_like_lora_weights(path: Path | str) -> bool:
 def detect_checkpoint_architecture(path: Path | str) -> str:
     """Detect SD1.5 / SDXL / inpaint variants from checkpoint weights."""
     resolved = Path(path)
+    metadata_arch = _metadata_architecture_for_checkpoint(resolved)
+    if metadata_arch:
+        return metadata_arch
     shapes = _shapes_for_checkpoint(resolved)
     if shapes:
         return infer_architecture_from_shapes(shapes, filename=resolved.name)

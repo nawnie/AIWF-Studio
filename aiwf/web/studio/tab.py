@@ -1173,7 +1173,12 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         service.interrupt()
         return "**Stopping** — interrupt requested", gr.update(value=False)
 
-    interrupt.click(stop_generation, outputs=[status, continuous_toggle])
+    interrupt.click(
+        stop_generation,
+        outputs=[status, continuous_toggle],
+        show_progress=False,
+        queue=False,
+    )
 
     def _reuse_last_seed(last_value):
         if int(last_value or -1) < 0:

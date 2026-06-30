@@ -5,7 +5,13 @@ import struct
 from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags
-from aiwf.core.domain.ltx import LTX_FULL_CHECKPOINT, LTX_GEMMA_REPO, LTX_HERETIC_Q3_GGUF
+from aiwf.core.domain.ltx import (
+    LTX_FULL_CHECKPOINT,
+    LTX_FULL_CHECKPOINT_FP8,
+    LTX_GEMMA_REPO,
+    LTX_HERETIC_Q3_CONVERTED_FOLDER,
+    LTX_HERETIC_Q3_GGUF,
+)
 from aiwf.services.pipeline_readiness import (
     PipelineReadinessRecord,
     classify_pipeline_asset,
@@ -64,6 +70,36 @@ def test_ltx_gguf_download_is_unsupported_no_route(tmp_path: Path):
     assert "GGUF" in record.reason
 
 
+def test_ltx_fp8_checkpoint_uses_one_stage_route(tmp_path: Path):
+    path = tmp_path / "models" / "ltx" / "checkpoints" / LTX_FULL_CHECKPOINT_FP8
+    _write_safetensors_header(path, {"__metadata__": {"modelspec.architecture": "ltx"}})
+
+    record = classify_pipeline_asset("ltx", "ltx", path)
+
+    assert record.status == "metadata-only"
+    assert record.route == "ltx-one-stage-hf-gemma"
+    assert record.storage == "safetensors"
+    assert record.quantization == "FP8"
+    assert "offload=none" in record.reason
+
+
+def test_ltx_fp8_checkpoint_is_working_when_receipt_exists(tmp_path: Path):
+    models = tmp_path / "models"
+    outputs = tmp_path / "outputs"
+    path = models / "ltx" / "checkpoints" / LTX_FULL_CHECKPOINT_FP8
+    _write_safetensors_header(path, {"__metadata__": {"modelspec.architecture": "ltx"}})
+    receipt = outputs / "ltx-videos" / "ltx23-smoke.mp4"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_bytes(b"fake mp4")
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models, output_dir=outputs)
+
+    record = classify_pipeline_asset("ltx", "ltx", path, flags=flags)
+
+    assert record.status == "working"
+    assert record.route == "ltx-one-stage-hf-gemma"
+    assert "runtime smoke receipt" in record.reason
+
+
 def test_gemma_heretic_download_stays_out_of_ltx_runtime(tmp_path: Path):
     path = tmp_path / "Downloads" / "gemma-3-12b-it-heretic-Q3_K_M.gguf"
     path.parent.mkdir(parents=True)
@@ -90,6 +126,26 @@ def test_gemma_gguf_under_ltx_models_is_ltx_asset(tmp_path: Path):
     assert record.family == "ltx"
     assert record.status == "unsupported-no-route"
     assert record.route == "ltx-2.3"
+
+
+def test_converted_heretic_gemma_folder_is_ltx_text_encoder_asset(tmp_path: Path):
+    root = tmp_path / "models" / "ltx" / "text_encoder" / LTX_HERETIC_Q3_CONVERTED_FOLDER
+    model = root / "model.safetensors"
+    model.parent.mkdir(parents=True)
+    for filename in (
+        "model.safetensors",
+        "vision_projector.safetensors",
+        "tokenizer.model",
+        "preprocessor_config.json",
+    ):
+        (root / filename).write_bytes(b"fake")
+
+    record = classify_pipeline_asset("ltx", "ltx", model, source="models")
+
+    assert record.status == "metadata-only"
+    assert record.route == "ltx-one-stage-hf-gemma"
+    assert record.required_text_encoder == str(root)
+    assert "parent text_encoder folder" in record.suggested_action
 
 
 def test_ltx_route_records_include_heretic_gguf_blocker(tmp_path: Path):
@@ -121,6 +177,7 @@ def test_ltx_route_records_include_heretic_gguf_blocker(tmp_path: Path):
     assert record.status == "blocked-cleanly"
     assert record.storage == "gguf"
     assert "hidden-state" in record.reason
+    assert "--allow-blocked" in record.smoke_command
 
 
 def test_ltx2b_diffusers_route_is_wired_when_assets_exist(tmp_path: Path):
@@ -152,6 +209,70 @@ def test_known_bad_image_checkpoint_is_broken_runtime(tmp_path: Path):
     assert record.status == "broken-runtime"
     assert record.route == "diffusers"
     assert "missing the expected CLIP text model" in record.reason
+
+
+def test_known_bad_flux_runtime_assets_are_broken_runtime(tmp_path: Path):
+    cases = [
+        (
+            tmp_path / "models" / "flux" / "UNet" / "fluxedUpFluxNSFW_110FP8.safetensors",
+            "checkpoint keys do not match",
+        ),
+        (
+            tmp_path / "models" / "flux" / "GGUF" / "fluxFusionV24StepsGGUFNF4_V2GGUFQ4KM.gguf",
+            "GGUF/NF4 mismatch",
+        ),
+    ]
+    for path, expected_reason in cases:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fake")
+
+        record = classify_pipeline_asset("runtime_asset", "flux", path)
+
+        assert record.status == "broken-runtime"
+        assert record.route == "flux"
+        assert expected_reason in record.reason
+
+
+def test_incomplete_qwen_diffusers_snapshot_is_blocked_cleanly(tmp_path: Path):
+    root = tmp_path / "models" / "qwen-image" / "Diffusers" / "Qwen-Image"
+    transformer = root / "transformer"
+    transformer.mkdir(parents=True)
+    (root / "model_index.json").write_text(json.dumps({"_class_name": "QwenImagePipeline"}), encoding="utf-8")
+    (transformer / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": 1},
+                "weight_map": {
+                    "transformer_blocks.0.attn.to_q.weight": "diffusion_pytorch_model-00001-of-00009.safetensors"
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record = classify_pipeline_asset("runtime_asset", "qwen_image", root)
+
+    assert record.status == "blocked-cleanly"
+    assert record.route == "qwen-image"
+    assert "required local shard files are missing" in record.reason
+
+
+def test_supported_image_gguf_runtime_assets_are_not_unsupported_no_route(tmp_path: Path):
+    cases = [
+        ("flux1-dev-Q4_K_M.gguf", "flux", "flux"),
+        ("fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf", "flux2_klein", "flux2-klein"),
+        ("fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf", "z_image", "z-image"),
+    ]
+    for filename, architecture, route in cases:
+        path = tmp_path / "models" / "flux" / "GGUF" / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"GGUF")
+
+        record = classify_pipeline_asset("runtime_asset", architecture, path)
+
+        assert record.status == "metadata-only"
+        assert record.route == route
+        assert "runtime path" in record.reason
 
 
 def test_collect_pipeline_readiness_includes_download_assets(tmp_path: Path):

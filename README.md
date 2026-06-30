@@ -313,9 +313,11 @@ Useful project docs:
 - `docs/ATTRIBUTION.md`
 - `docs/DEPENDENCY_POLICY.md`
 - `docs/ENGINE_ISOLATION.md`
+- `docs/FEATURES.md`
+- `docs/IMAGE_MATURITY_MATRIX.md`
 - `docs/MAINTAINER_NOTES.md`
 - `docs/PATH_CONFIGURATION.md`
-- `docs/TRAINING_ENGINE_ROADMAP.md`
+- `docs/qa/README.md`
 
 ## License And Third-party Status
 
@@ -334,11 +336,11 @@ This is a practical release checklist, not legal advice.
 
 Keep optional restricted components clearly marked as local/user-installed.
 
-## SageAttention And SDK Cache
+## Attention Acceleration
 
-SageAttention is a candidate Wan/video optimization, and the upstream project is Apache-2.0. It belongs in a shared local SDK/cache folder as a future accelerator reference and disposable test lane, not as a required runtime dependency yet.
+AIWF uses PyTorch SDPA as the stable attention baseline. Wan video now prefers Diffusers' per-module SAGE backend when SageAttention 2.2 is installed and callable, then falls back to AIWF's SageAttention SDPA patch, then plain Torch SDPA.
 
-Current rule for `main`: do not wire SageAttention as a required path until a copied-venv test proves installability, output quality, and speed on this Windows/NVIDIA setup. Wan should keep working through the existing torch SDPA fallback when SageAttention is missing.
+Current rule for `main`: keep SageAttention optional and benchmark-gated. Wan must still run when SageAttention is missing, and any speed claim needs matched local receipts. Flash-attn and xFormers are optional experiment lanes, not default requirements for the RTX 4070 Ti SUPER setup.
 
 ## WIP And Help Wanted
 

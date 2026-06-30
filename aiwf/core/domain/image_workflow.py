@@ -111,13 +111,14 @@ class ImageWorkflowPlan(BaseModel):
 
     @property
     def summary(self) -> str:
-        return " → ".join(self.labels)
+        return " -> ".join(self.labels)
 
 
 class ImageWorkflowResult(BaseModel):
     image: Image.Image
     output_path: str
     manifest_path: str
+    receipt_path: str | None = None
     mask: Image.Image | None = None
     mask_preview: Image.Image | None = None
     message: str

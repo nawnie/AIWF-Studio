@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -14,9 +15,11 @@ from aiwf.core.domain.ltx import (
     LTX_DISTILLED_CHECKPOINT,
     LTX_DIFFUSERS_2B_CHECKPOINT,
     LTX_FULL_CHECKPOINT,
+    LTX_FULL_CHECKPOINT_FP8,
     LTX_GEMMA_BACKEND_GGUF,
     LTX_GEMMA_BACKEND_HF_SAFETENSORS,
     LTX_GEMMA_REPO,
+    LTX_HERETIC_Q3_CONVERTED_FOLDER,
     LTX_HERETIC_Q3_GGUF,
     LTX_PIPELINE_DIFFUSERS_2B,
     LTX_PIPELINE_DISTILLED,
@@ -59,13 +62,15 @@ class LtxService:
         return self.flags.resolved_models_dir() / "ltx"
 
     def default_checkpoint_path(self, pipeline: str = LTX_PIPELINE_DISTILLED) -> Path:
+        root = self.models_root() / "checkpoints"
         if pipeline == LTX_PIPELINE_DIFFUSERS_2B:
             name = LTX_DIFFUSERS_2B_CHECKPOINT
         elif pipeline == LTX_PIPELINE_DISTILLED:
             name = LTX_DISTILLED_CHECKPOINT
         else:
-            name = LTX_FULL_CHECKPOINT
-        return self.models_root() / "checkpoints" / name
+            fp8 = root / LTX_FULL_CHECKPOINT_FP8
+            name = LTX_FULL_CHECKPOINT_FP8 if fp8.is_file() else LTX_FULL_CHECKPOINT
+        return root / name
 
     def default_t5_encoder_path(self) -> Path:
         primary = self.flags.resolved_models_dir() / "flux" / "Textencoder" / LTX_T5XXL_FP16
@@ -77,10 +82,18 @@ class LtxService:
         if self.default_checkpoint_path(LTX_PIPELINE_DIFFUSERS_2B).is_file() and self.default_t5_encoder_path().is_file():
             return LTX_PIPELINE_DIFFUSERS_2B
         one_stage = self.default_checkpoint_path(LTX_PIPELINE_ONE_STAGE)
-        if one_stage.is_file() and not ltx_checkpoint_openability_error(one_stage):
+        if (
+            one_stage.is_file()
+            and not ltx_checkpoint_openability_error(one_stage)
+            and not ltx_native_checkpoint_runtime_blocker(one_stage)
+        ):
             return LTX_PIPELINE_ONE_STAGE
         distilled = self.default_checkpoint_path(LTX_PIPELINE_DISTILLED)
-        if distilled.is_file() and not ltx_checkpoint_openability_error(distilled):
+        if (
+            distilled.is_file()
+            and not ltx_checkpoint_openability_error(distilled)
+            and not ltx_native_checkpoint_runtime_blocker(distilled)
+        ):
             return LTX_PIPELINE_DISTILLED
         return LTX_PIPELINE_DISTILLED
 
@@ -90,8 +103,17 @@ class LtxService:
     def default_spatial_upsampler_path(self) -> Path:
         return self.models_root() / "upscalers" / LTX_SPATIAL_UPSCALER_X2
 
-    def default_gemma_root(self) -> Path:
+    def default_official_gemma_root(self) -> Path:
         return self.models_root() / "text_encoder" / LTX_GEMMA_REPO.split("/", 1)[1]
+
+    def default_heretic_converted_gemma_root(self) -> Path:
+        return self.models_root() / "text_encoder" / LTX_HERETIC_Q3_CONVERTED_FOLDER
+
+    def default_gemma_root(self) -> Path:
+        heretic = self.default_heretic_converted_gemma_root()
+        if _converted_heretic_gemma_ready(heretic):
+            return heretic
+        return self.default_official_gemma_root()
 
     def default_gemma_gguf_path(self) -> Path:
         return self.flags.resolved_models_dir() / "LLM" / "GGUF" / LTX_HERETIC_Q3_GGUF
@@ -165,8 +187,13 @@ class LtxService:
             logger.exception("LTX 2.3 generation failed")
 
         terminal_error = _last_error(events)
-        if error_message or terminal_error:
-            raise LtxUnavailable(terminal_error or error_message)
+        if error_message:
+            status_tail = _interesting_status_tail(events)
+            if status_tail and status_tail not in error_message:
+                error_message = f"{error_message}\n\nRecent LTX output:\n{status_tail}"
+            raise LtxUnavailable(_clip(error_message))
+        if terminal_error:
+            raise LtxUnavailable(terminal_error)
         if not output_path.is_file():
             raise LtxUnavailable(f"LTX worker finished but did not create output: {output_path}")
         has_audio = False
@@ -285,8 +312,13 @@ class LtxService:
             logger.info("LTX Gemma GGUF probe failed: %s", exc)
 
         terminal_error = _last_error(events)
-        if error_message or terminal_error:
-            raise LtxUnavailable(terminal_error or error_message)
+        if error_message:
+            status_tail = _interesting_status_tail(events)
+            if status_tail and status_tail not in error_message:
+                error_message = f"{error_message}\n\nRecent LTX output:\n{status_tail}"
+            raise LtxUnavailable(_clip(error_message))
+        if terminal_error:
+            raise LtxUnavailable(terminal_error)
         return events
 
     def _resolve_request(self, request: LtxVideoRequest) -> dict:
@@ -349,6 +381,7 @@ class LtxService:
                 "output_path": str(output_path),
             }
         )
+        _apply_native_runtime_profile(payload)
         return payload
 
     def _validate_request_paths(self, payload: dict) -> None:
@@ -369,6 +402,9 @@ class LtxService:
         self._validate_gemma_paths(payload)
         if payload.get("gemma_backend") == LTX_GEMMA_BACKEND_GGUF:
             raise LtxUnavailable(_native_gemma_gguf_blocker(payload))
+        runtime_blocker = ltx_native_checkpoint_runtime_blocker(checkpoint)
+        if runtime_blocker:
+            raise LtxUnavailable(runtime_blocker)
         if payload.get("pipeline") == LTX_PIPELINE_DISTILLED:
             upsampler = Path(str(payload.get("spatial_upsampler_path") or ""))
             if not upsampler.is_file():
@@ -424,13 +460,26 @@ def _resolve_optional_path(raw: str | None, root: Path) -> Path | None:
     return path.resolve() if path.is_absolute() else (root / path).resolve()
 
 
+def _converted_heretic_gemma_ready(path: Path) -> bool:
+    return all(
+        (path / filename).is_file()
+        for filename in (
+            "model.safetensors",
+            "vision_projector.safetensors",
+            "preprocessor_config.json",
+            "tokenizer_config.json",
+            "tokenizer.model",
+        )
+    )
+
+
 def ltx_checkpoint_openability_error(path: Path) -> str:
     """Return a user-facing error when a native LTX checkpoint cannot be opened.
 
-    This stays intentionally shallow: it only opens the safetensors container
-    and lists keys. It does not materialize tensor payloads or run inference.
-    On Windows, very large LTX-2.3 checkpoints can fail here with pagefile
-    mmap errors before the upstream worker gets a chance to fail harder.
+    This stays intentionally shallow: it only parses the safetensors JSON
+    header. It does not mmap tensor payloads or run inference. On Windows,
+    very large LTX-2.3 checkpoints can fail when a normal safetensors open
+    mmaps the whole file, so keep this as a header-only check.
     """
 
     if path.suffix.lower() != ".safetensors":
@@ -442,10 +491,14 @@ def ltx_checkpoint_openability_error(path: Path) -> str:
         return f"LTX checkpoint could not be inspected: {path}. {exc}"
 
     try:
-        from safetensors import safe_open
-
-        with safe_open(str(path), framework="pt", device="cpu") as f:
-            len(list(f.keys()))
+        with path.open("rb") as handle:
+            raw_size = handle.read(8)
+            if len(raw_size) != 8:
+                return f"LTX checkpoint failed a shallow safetensors header check: {path}. Header is incomplete."
+            header_size = struct.unpack("<Q", raw_size)[0]
+            if header_size <= 0:
+                return f"LTX checkpoint failed a shallow safetensors header check: {path}. Header is empty."
+            json.loads(handle.read(header_size))
     except OSError as exc:
         return (
             f"LTX checkpoint is not safely loadable in this Windows runtime: {path}. "
@@ -454,6 +507,45 @@ def ltx_checkpoint_openability_error(path: Path) -> str:
     except Exception as exc:
         return f"LTX checkpoint failed a shallow safetensors open check: {path}. {type(exc).__name__}: {exc}"
     return ""
+
+
+def ltx_native_checkpoint_runtime_blocker(path: Path) -> str:
+    """Return a blocker for native LTX-2.3 checkpoints known to crash this Windows worker."""
+
+    if str(os.environ.get("AIWF_ALLOW_UNSTABLE_LTX23") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return ""
+    if os.name != "nt" or path.suffix.lower() != ".safetensors":
+        return ""
+    name = path.name.lower()
+    if name == LTX_FULL_CHECKPOINT_FP8.lower():
+        return ""
+    if name != LTX_FULL_CHECKPOINT.lower():
+        return ""
+    try:
+        if path.stat().st_size < 1024**3:
+            return ""
+    except OSError:
+        return ""
+    return (
+        "Native LTX 2.3 22B worker is blocked on Windows after the bounded smoke exited with "
+        "access violation 3221225477. Use the working LTX 2B Diffusers route, or set "
+        "AIWF_ALLOW_UNSTABLE_LTX23=1 only for a manual retest after changing the LTX runtime/pagefile."
+    )
+
+
+def ltx_checkpoint_requires_no_offload(path: Path) -> bool:
+    return path.name.lower() == LTX_FULL_CHECKPOINT_FP8.lower()
+
+
+def _apply_native_runtime_profile(payload: dict) -> None:
+    if payload.get("pipeline") != LTX_PIPELINE_ONE_STAGE:
+        return
+    checkpoint = Path(str(payload.get("checkpoint_path") or ""))
+    if not ltx_checkpoint_requires_no_offload(checkpoint):
+        return
+    payload["offload"] = "none"
+    if str(payload.get("quantization") or "").strip().lower() not in {"fp8-cast", "fp8-scaled-mm"}:
+        payload["quantization"] = "fp8-cast"
 
 
 def _gemma_root_text(request: LtxVideoRequest) -> str:
@@ -492,8 +584,6 @@ def _last_error(events: list[dict]) -> str:
             if status_tail and status_tail not in detail:
                 detail = f"{detail}\n\nRecent LTX output:\n{status_tail}"
             return _clip(detail)
-    if status_tail:
-        return _clip(status_tail)
     return ""
 
 
@@ -509,6 +599,10 @@ def _interesting_status_tail(events: list[dict]) -> str:
         "unsupported",
         "probing native gemma gguf",
         "gguf metadata",
+        "ltx gemma contract",
+        "ltx embeddings processor contract",
+        "installed gguf capability",
+        "generation is blocked",
         "aiwf ltx loader",
     )
     messages = [
@@ -528,9 +622,9 @@ def _clip(text: str, limit: int = 4000) -> str:
 def _native_gemma_gguf_blocker(payload: dict) -> str:
     return (
         "Native Gemma GGUF was selected for LTX, but this worker cannot generate with it yet. "
-        "LTX needs Gemma hidden states from every layer plus an attention mask; the current "
-        "upstream LTX CLI only accepts a repo-shaped safetensors Gemma text encoder. "
+        "LTX needs Gemma hidden states from the embedding output plus every layer, plus an attention mask; "
+        "the current upstream LTX CLI only accepts a repo-shaped safetensors Gemma text encoder. "
         f"Selected GGUF: {payload.get('gemma_gguf_path')}. "
-        "Run `venv\\Scripts\\python.exe scripts\\probe_ltx_runtime.py --gguf` to verify the "
+        "Run `venv\\Scripts\\python.exe scripts\\probe_ltx_runtime.py --gguf --json --allow-blocked` to verify the "
         "native-GGUF blocker without dequantizing weights."
     )

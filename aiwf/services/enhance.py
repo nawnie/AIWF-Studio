@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import torch
 from PIL import Image
 
+from aiwf import __version__
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.enhance import (
     EnhanceModel,
@@ -259,12 +262,94 @@ class EnhanceService:
             infotext = " -> ".join(steps) if steps else "Photo restore"
             return working, infotext
 
-    def save_result(self, image: Image.Image, infotext: str) -> EnhanceResult:
+    def save_result(
+        self,
+        image: Image.Image,
+        infotext: str,
+        *,
+        source_image: Image.Image | None = None,
+        route: str = "enhance",
+        upscale: UpscaleOptions | None = None,
+        restore: RestoreOptions | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> EnhanceResult:
         if not self.settings.save_images:
             return EnhanceResult(infotext=infotext, message="Done (save disabled in Settings)")
         artifact = self.store.save(image, infotext, self.settings.enhance_output_subdir)
-        return EnhanceResult(image_path=artifact.path, infotext=infotext, message=f"Saved to {artifact.path}")
+        receipt_path = self._write_receipt(
+            Path(artifact.path),
+            image,
+            infotext,
+            source_image=source_image,
+            route=route,
+            upscale=upscale,
+            restore=restore,
+            extra=extra,
+        )
+        return EnhanceResult(
+            image_path=artifact.path,
+            receipt_path=str(receipt_path),
+            infotext=infotext,
+            message=f"Saved to {artifact.path}",
+        )
+
+    def _write_receipt(
+        self,
+        output_path: Path,
+        image: Image.Image,
+        infotext: str,
+        *,
+        source_image: Image.Image | None,
+        route: str,
+        upscale: UpscaleOptions | None,
+        restore: RestoreOptions | None,
+        extra: dict[str, Any] | None,
+    ) -> Path:
+        payload: dict[str, Any] = {
+            "receipt_type": "enhance",
+            "receipt_version": 1,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "app_version": __version__,
+            "route": route,
+            "infotext": infotext,
+            "output": {
+                "path": str(output_path),
+                "width": int(image.width),
+                "height": int(image.height),
+                "mode": image.mode,
+            },
+            "input": (
+                {
+                    "width": int(source_image.width),
+                    "height": int(source_image.height),
+                    "mode": source_image.mode,
+                }
+                if source_image is not None
+                else {}
+            ),
+            "upscale": _option_payload(upscale),
+            "restore": _option_payload(restore),
+            "settings": {
+                "enhance_output_subdir": self.settings.enhance_output_subdir,
+                "save_images": bool(self.settings.save_images),
+                "upscale_tile_size": int(self.settings.upscale_tile_size),
+                "upscale_tile_overlap": int(self.settings.upscale_tile_overlap),
+            },
+            "extra": extra or {},
+        }
+        payload["receipt_id"] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:20]
+        receipt_path = output_path.with_name(f"{output_path.name}.receipt.json")
+        receipt_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return receipt_path
 
     def unload_models(self) -> None:
         self._loaded.clear()
         self.devices.empty_cache()
+
+
+def _option_payload(option: UpscaleOptions | RestoreOptions | None) -> dict[str, Any]:
+    if option is None:
+        return {}
+    return option.model_dump(mode="json")

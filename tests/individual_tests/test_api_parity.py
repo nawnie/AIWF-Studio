@@ -242,7 +242,7 @@ def test_native_image_maturity_endpoint_lists_core_routes():
     assert data["target_score"] == 8.0
     assert routes["txt2img"]["benchmark_kind"] == "txt2img"
     assert routes["controlnet"]["benchmark_kind"] == "controlnet"
-    assert routes["flux-txt2img"]["status"] == "maturing"
+    assert routes["flux-txt2img"]["status"] == "ready"
 
 
 def test_native_xyz_plot_endpoint_returns_grid():

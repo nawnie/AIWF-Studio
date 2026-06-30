@@ -25,6 +25,11 @@ DEFAULT_IMAGE_PROMPT = "a studio product photo of a red ceramic teapot on a gray
 class ImageRoute:
     checkpoint_id: str
     label: str
+    family: str = "image"
+    mode: str = "txt2img"
+    smoke_steps: int = 2
+    smoke_width: int = 512
+    smoke_height: int = 512
 
 
 @dataclass(frozen=True)
@@ -38,20 +43,19 @@ class RouteResult:
 
 
 IMAGE_ROUTES: tuple[ImageRoute, ...] = (
-    ImageRoute("flux-kontext-4bit-fp4", "Flux Kontext FP4"),
-    ImageRoute("fluxFusionV24StepsGGUFNF4_V2NF4", "Flux NF4"),
-    ImageRoute("flux1-dev-Q4_K_M", "Flux GGUF dev"),
-    ImageRoute("fluxFusionV24StepsGGUFNF4_V2GGUFQ4KM", "Flux Fusion GGUF Q4"),
-    ImageRoute("fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4", "Z-Image GGUF"),
-    ImageRoute("dreamshaperXL_lightningInpaint", "SDXL inpaint"),
-    ImageRoute("realisticVisionV60-inpainting15", "SD 1.5 inpaint"),
-    ImageRoute("svdq-int4_r32-qwen-image-lightningv1.0-4steps", "Qwen Nunchaku 4-step"),
-    ImageRoute("Sana_Sprint_0.6B_1024px_diffusers", "Sana Sprint"),
-    ImageRoute("FLUX.2-klein-4B", "Flux.2 Klein 4B"),
+    ImageRoute("flux-kontext-4bit-fp4", "Flux Kontext FP4", family="flux"),
+    ImageRoute("fluxFusionV24StepsGGUFNF4_V2NF4", "Flux NF4", family="flux"),
+    ImageRoute("flux1-dev-Q4_K_M", "Flux GGUF dev", family="flux"),
+    ImageRoute("fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4", "Z-Image GGUF", family="z_image"),
+    ImageRoute("dreamshaperXL_lightningInpaint", "SDXL inpaint", family="sdxl", mode="inpaint"),
+    ImageRoute("realisticVisionV60-inpainting15", "SD 1.5 inpaint", family="sd15", mode="inpaint"),
+    ImageRoute("svdq-int4_r32-qwen-image-lightningv1.0-4steps", "Qwen Nunchaku 4-step", family="qwen_image"),
+    ImageRoute("Sana_Sprint_0.6B_1024px_diffusers", "Sana Sprint", family="sana"),
+    ImageRoute("FLUX.2-klein-4B", "Flux.2 Klein 4B", family="flux2_klein"),
 )
 
 LARGE_IMAGE_ROUTES: tuple[ImageRoute, ...] = (
-    ImageRoute("Qwen-Image", "Qwen Image Diffusers"),
+    ImageRoute("Qwen-Image", "Qwen Image Diffusers", family="qwen_image", smoke_steps=1),
 )
 
 
@@ -164,6 +168,57 @@ def run_route(
     return RouteResult(route.checkpoint_id, route.label, ok, returncode, elapsed, timed_out)
 
 
+def route_smoke_plan(
+    routes: Iterable[ImageRoute],
+    *,
+    steps: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    prompt: str | None = None,
+) -> dict[str, object]:
+    """Return a no-GPU plan for the exact bounded smoke commands."""
+    selected = list(routes)
+    route_payloads: list[dict[str, object]] = []
+    for route in selected:
+        route_steps = int(steps if steps is not None else route.smoke_steps)
+        route_width = int(width if width is not None else route.smoke_width)
+        route_height = int(height if height is not None else route.smoke_height)
+        route_prompt = prompt or DEFAULT_IMAGE_PROMPT
+        command = [
+            "venv\\Scripts\\python.exe",
+            "scripts\\smoke_backend.py",
+            "--checkpoint",
+            route.checkpoint_id,
+            "--steps",
+            str(route_steps),
+            "--width",
+            str(route_width),
+            "--height",
+            str(route_height),
+            "--prompt",
+            route_prompt,
+        ]
+        route_payloads.append(
+            {
+                "checkpoint_id": route.checkpoint_id,
+                "label": route.label,
+                "family": route.family,
+                "mode": route.mode,
+                "steps": route_steps,
+                "width": route_width,
+                "height": route_height,
+                "prompt": route_prompt,
+                "command": command,
+            }
+        )
+    return {
+        "schema": 1,
+        "kind": "image_route_smoke_plan",
+        "route_count": len(route_payloads),
+        "routes": route_payloads,
+    }
+
+
 def run_suite(
     routes: Iterable[ImageRoute],
     *,
@@ -232,6 +287,7 @@ def main() -> int:
     parser.add_argument("--height", type=int, help="Override image smoke height.")
     parser.add_argument("--prompt", default=DEFAULT_IMAGE_PROMPT, help="Image smoke prompt override.")
     parser.add_argument("--include-large", action="store_true", help="Include large full Diffusers routes.")
+    parser.add_argument("--plan-json", action="store_true", help="Print bounded smoke plan JSON without running.")
     parser.add_argument("--json", action="store_true", help="Print JSON results after the text summary.")
     parser.add_argument("--always-zero", action="store_true", help="Return 0 even if one or more routes fail.")
     args = parser.parse_args()
@@ -239,6 +295,20 @@ def main() -> int:
     routes = _selected_routes(args.only, args.skip, include_large=args.include_large)
     if args.list:
         _print_list(routes)
+        return 0
+    if args.plan_json:
+        print(
+            json.dumps(
+                route_smoke_plan(
+                    routes,
+                    steps=args.steps,
+                    width=args.width,
+                    height=args.height,
+                    prompt=args.prompt,
+                ),
+                indent=2,
+            )
+        )
         return 0
     if not routes:
         print("No image routes selected.")

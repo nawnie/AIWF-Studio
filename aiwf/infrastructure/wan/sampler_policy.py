@@ -52,7 +52,28 @@ def audit_wan_sampler_settings(
     sigma_type = str(getattr(request, "sigma_type", WAN_5B_NATIVE_SIGMA) or WAN_5B_NATIVE_SIGMA).lower()
 
     if mode == WAN_RUNTIME_FAST_5B:
-        if flow_shift >= 7.0 and not (enforce_5b_calibration and sampler == WAN_5B_NATIVE_SAMPLER):
+        if enforce_5b_calibration:
+            patch: dict[str, object] = {}
+            if sampler != WAN_5B_NATIVE_SAMPLER:
+                patch["sampler"] = WAN_5B_NATIVE_SAMPLER
+                corrections.append(
+                    f"5B sampler auto-corrected {sampler!r} -> {WAN_5B_NATIVE_SAMPLER!r} "
+                    "(Wan2.2-TI2V-5B ships calibrated for UniPC)."
+                )
+            if abs(flow_shift - WAN_5B_NATIVE_FLOW_SHIFT) > 0.01:
+                patch["flow_shift"] = WAN_5B_NATIVE_FLOW_SHIFT
+                corrections.append(
+                    f"5B flow_shift auto-corrected {flow_shift:g} -> {WAN_5B_NATIVE_FLOW_SHIFT:g} "
+                    "(Wan2.2-TI2V-5B ships with flow_shift=5.0)."
+                )
+            if patch:
+                updated = _clone_request(updated, **patch)
+                sampler = str(getattr(updated, "sampler", WAN_5B_NATIVE_SAMPLER) or WAN_5B_NATIVE_SAMPLER).lower()
+                flow_shift = float(
+                    getattr(updated, "flow_shift", WAN_5B_NATIVE_FLOW_SHIFT) or WAN_5B_NATIVE_FLOW_SHIFT
+                )
+
+        if flow_shift >= 7.0 and not enforce_5b_calibration:
             errors.append(
                 f"5B flow shift {flow_shift:g} is outside the calibrated range. "
                 "Wan2.2-TI2V-5B ships with flow_shift=5.0; values around 8.0 commonly "
@@ -68,17 +89,6 @@ def audit_wan_sampler_settings(
                 f"5B {sampler} with flow_shift={flow_shift:g} is a known bad combo. "
                 "Use UniPC + flow_shift 5.0, or lower flow_shift to 5.0 before using Euler/Heun."
             )
-
-        if enforce_5b_calibration:
-            patch: dict[str, object] = {}
-            if sampler == WAN_5B_NATIVE_SAMPLER and abs(flow_shift - WAN_5B_NATIVE_FLOW_SHIFT) > 0.01:
-                patch["flow_shift"] = WAN_5B_NATIVE_FLOW_SHIFT
-                corrections.append(
-                    f"5B flow_shift auto-corrected {flow_shift:g} -> {WAN_5B_NATIVE_FLOW_SHIFT:g} "
-                    "(UniPC uses the checkpoint's shipped scheduler)."
-                )
-            if patch:
-                updated = _clone_request(updated, **patch)
 
     elif mode == WAN_RUNTIME_HIGH_LOW_FP8:
         if str(getattr(request, "offload", "") or "") != "streamed":

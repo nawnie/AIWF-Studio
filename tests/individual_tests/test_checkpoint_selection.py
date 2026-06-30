@@ -3,9 +3,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from aiwf.core.config.settings import UserSettings
+from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.models import Checkpoint
 from aiwf.infrastructure.diffusers import backend as diffusers_backend
+from aiwf.infrastructure.model_inventory import ModelInventoryRecord
 from aiwf.services.generation import GenerationService
 from aiwf.infrastructure.diffusers.backend import DiffusersBackend
 from aiwf.web.components.checkpoints import (
@@ -138,6 +139,48 @@ def test_common_prompt_prewarm_populates_flux2_cache(monkeypatch):
         "beautiful woman",
     } <= set(backend._flux2_prompt_cache)
     assert backend.prewarm_common_prompt_embeddings(limit=16, budget_seconds=999) == 0
+
+
+def test_flux_text_encoder_choices_use_cached_inventory(tmp_path: Path, monkeypatch):
+    t5 = tmp_path / "models" / "flux" / "Textencoder" / "t5xxl_fp16.safetensors"
+    clip = tmp_path / "models" / "flux" / "Textencoder" / "clip_l.safetensors"
+    t5.parent.mkdir(parents=True)
+    t5.write_bytes(b"t5")
+    clip.write_bytes(b"clip")
+    records = [
+        ModelInventoryRecord(
+            path=str(t5),
+            filename=t5.name,
+            family="text_encoder",
+            architecture="flux",
+            current_subdir="flux/Textencoder",
+            recommended_subdir="flux/Textencoder",
+            should_move=False,
+            header_identifiers={"header_arch": "t5xxl"},
+        ),
+        ModelInventoryRecord(
+            path=str(clip),
+            filename=clip.name,
+            family="text_encoder",
+            architecture="flux",
+            current_subdir="flux/Textencoder",
+            recommended_subdir="flux/Textencoder",
+            should_move=False,
+            header_identifiers={"header_arch": "clip"},
+        ),
+    ]
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend.flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models")
+    monkeypatch.setattr(diffusers_backend, "get_model_inventory", lambda _flags: records)
+    monkeypatch.setattr(
+        DiffusersBackend,
+        "_scan_flux_text_encoders_from_dirs",
+        lambda _self: (_ for _ in ()).throw(AssertionError("directory scan should not run")),
+    )
+
+    choices = backend.list_flux_text_encoders()
+
+    assert choices == [(f"{t5.stem}  [2 bytes]", str(t5.resolve()))]
 
 
 def test_load_checkpoint_persists_last_model_to_config(tmp_path: Path):

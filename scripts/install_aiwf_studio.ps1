@@ -164,6 +164,17 @@ function Build-ProFrontend {
     }
 }
 
+function Install-DefaultBaseModel {
+    Write-Section "Default image model"
+    if ($DryRun) {
+        Write-Host "[dry-run] Would install Stable Diffusion 1.5 fp16 pruned base model if missing."
+        return
+    }
+    Invoke-External "Install default SD 1.5 base model" $VenvPython @(
+        "scripts\ensure_default_sd15.py"
+    )
+}
+
 function New-DesktopShortcut {
     param(
         [string]$Name,
@@ -260,6 +271,7 @@ if (-not $SkipPrerequisites) {
 
 Ensure-PythonVenv
 Prepare-AiwfRuntime
+Install-DefaultBaseModel
 Build-ProFrontend
 Install-DesktopShortcuts
 

@@ -890,14 +890,260 @@ def _load_comfy_fp8_transformer_weights(transformer, path: Path, *, torch_dtype)
     return list(missing), list(unexpected)
 
 
+def _wan_lora_load_prefix(lora_path: str | None) -> str | None:
+    """Pick the Diffusers LoRA prefix from the file keys before loading.
+
+    Comfy/Wan LoRAs commonly store keys under ``diffusion_model.*``. Passing
+    ``prefix="transformer"`` for those files only emits a warning and can leave
+    the adapter effectively empty, so choose ``None`` up front when the file
+    clearly is not a Diffusers ``transformer.*`` adapter.
+    """
+    if not lora_path:
+        return "transformer"
+    path = Path(lora_path)
+    try:
+        if path.suffix.lower() == ".safetensors":
+            from safetensors import safe_open
+
+            with safe_open(str(path), framework="pt", device="cpu") as handle:
+                keys = list(handle.keys())[:64]
+        else:
+            import torch
+
+            state = torch.load(str(path), map_location="cpu")
+            if isinstance(state, dict) and "state_dict" in state and isinstance(state["state_dict"], dict):
+                state = state["state_dict"]
+            keys = list(state.keys())[:64] if isinstance(state, dict) else []
+    except Exception:
+        return "transformer"
+
+    if any(str(key).startswith("transformer.") for key in keys):
+        return "transformer"
+    if any(str(key).startswith("diffusion_model.") for key in keys):
+        return None
+    return "transformer"
+
+
+def _convert_comfy_wan_lora_state_dict(lora_path: str | None) -> dict | None:
+    """Load Comfy/original Wan LoRA rank tensors as Diffusers PEFT keys.
+
+    LightX2V Wan LoRAs are commonly saved as ``diffusion_model.*`` with
+    ``lora_down/up`` tensors plus extra ``diff*`` sidecar tensors. Diffusers'
+    PEFT loader expects ``transformer.*.lora_A/B.weight`` keys, so convert the
+    rank tensors and let PEFT inject/fuse them normally.
+    """
+    if not lora_path:
+        return None
+    path = Path(lora_path)
+
+    def convert_key(key: str) -> str | None:
+        if key.endswith(".lora_down.weight"):
+            next_key = key.removesuffix(".lora_down.weight") + ".lora_A.weight"
+        elif key.endswith(".lora_up.weight"):
+            next_key = key.removesuffix(".lora_up.weight") + ".lora_B.weight"
+        else:
+            return None
+
+        next_key = _normalize_wan_transformer_key(next_key)
+        for old, new in TRANSFORMER_KEYS_RENAME_DICT.items():
+            next_key = next_key.replace(old, new)
+        if not next_key.startswith("transformer."):
+            next_key = f"transformer.{next_key}"
+        return next_key
+
+    try:
+        if path.suffix.lower() == ".safetensors":
+            from safetensors import safe_open
+
+            converted: dict = {}
+            with safe_open(str(path), framework="pt", device="cpu") as handle:
+                if not any(str(key).startswith("diffusion_model.") for key in handle.keys()):
+                    return None
+                for key in handle.keys():
+                    new_key = convert_key(str(key))
+                    if new_key is not None:
+                        converted[new_key] = handle.get_tensor(key)
+            return converted or None
+
+        import torch
+
+        state = torch.load(str(path), map_location="cpu")
+        if isinstance(state, dict) and "state_dict" in state and isinstance(state["state_dict"], dict):
+            state = state["state_dict"]
+        if not isinstance(state, dict) or not any(str(key).startswith("diffusion_model.") for key in state):
+            return None
+        converted = {}
+        for key, value in state.items():
+            new_key = convert_key(str(key))
+            if new_key is not None:
+                converted[new_key] = value
+        return converted or None
+    except Exception:
+        logger.debug("Wan LoRA conversion probe failed for %s.", path, exc_info=True)
+        return None
+
+
+def _wan_lora_target_key(key: str) -> str:
+    next_key = _normalize_wan_transformer_key(key)
+    if next_key.endswith(".diff_m"):
+        next_key = next_key.removesuffix(".diff_m") + ".scale_shift_table"
+    for old, new in TRANSFORMER_KEYS_RENAME_DICT.items():
+        next_key = next_key.replace(old, new)
+    if next_key.startswith("transformer."):
+        next_key = next_key.removeprefix("transformer.")
+    return next_key
+
+
+def _module_by_path(root, module_path: str):
+    current = root
+    for part in module_path.split("."):
+        current = current[int(part)] if part.isdigit() else getattr(current, part)
+    return current
+
+
+def _merge_delta_into_linear(module: Any, delta: Any) -> None:
+    import torch
+
+    delta = delta.to(device=module.weight.device, dtype=torch.float32)
+    if module.__class__.__name__ == "FP8ScaledLinear":
+        base = module.weight.detach().float() * module.weight_scale.detach().to(device=module.weight.device).float()
+        merged = base + delta
+        max_abs = merged.abs().max().float()
+        scale = torch.clamp(max_abs / 448.0, min=1.0e-12)
+        qweight = (merged / scale).clamp(-448.0, 448.0).to(dtype=torch.float8_e4m3fn)
+        module.weight = torch.nn.Parameter(qweight, requires_grad=False)
+        module.weight_scale = scale.reshape(()).to(dtype=torch.float32)
+        return
+
+    if isinstance(module, torch.nn.Linear):
+        module.weight.data.add_(delta.to(device=module.weight.device, dtype=module.weight.dtype))
+        return
+
+    raise TypeError(f"Target module {module.__class__.__name__} is not a supported Wan LoRA linear layer.")
+
+
+def _merge_comfy_wan_lora_into_transformer(transformer: Any, lora_path: str | None, *, weight: float) -> bool:
+    """Fuse a Comfy/original Wan LoRA into a transformer without PEFT.
+
+    This is required for AIWF's native FP8 transformer path because PEFT cannot
+    inject adapters into ``FP8ScaledLinear`` modules. The merge is in-place.
+    """
+    if not lora_path:
+        return False
+    path = Path(lora_path)
+    if path.suffix.lower() != ".safetensors":
+        return False
+
+    try:
+        import torch
+        from safetensors import safe_open
+    except Exception:
+        return False
+
+    merged_pairs = 0
+    applied_direct = 0
+    skipped = 0
+    try:
+        with safe_open(str(path), framework="pt", device="cpu") as handle:
+            keys = set(handle.keys())
+            if not any(str(key).startswith("diffusion_model.") for key in keys):
+                return False
+
+            down_keys = sorted(key for key in keys if str(key).endswith(".lora_down.weight"))
+            for down_key in down_keys:
+                up_key = down_key.removesuffix(".lora_down.weight") + ".lora_up.weight"
+                if up_key not in keys:
+                    skipped += 1
+                    continue
+                try:
+                    module_path = _wan_lora_target_key(down_key.removesuffix(".lora_down.weight"))
+                    module = _module_by_path(transformer, module_path)
+                    down = handle.get_tensor(down_key).float()
+                    up = handle.get_tensor(up_key).float()
+                    _merge_delta_into_linear(module, up.matmul(down) * float(weight))
+                    merged_pairs += 1
+                except Exception:
+                    skipped += 1
+                    logger.debug("Skipped Wan LoRA rank pair %s from %s.", down_key, path.name, exc_info=True)
+
+            for key in sorted(keys):
+                text_key = str(key)
+                if text_key.endswith(".diff_b"):
+                    try:
+                        module_path = _wan_lora_target_key(text_key.removesuffix(".diff_b"))
+                        module = _module_by_path(transformer, module_path)
+                        bias = getattr(module, "bias", None)
+                        if bias is None:
+                            skipped += 1
+                            continue
+                        delta = handle.get_tensor(text_key).to(device=bias.device, dtype=bias.dtype) * float(weight)
+                        bias.data.add_(delta)
+                        applied_direct += 1
+                    except Exception:
+                        skipped += 1
+                        logger.debug("Skipped Wan LoRA bias delta %s from %s.", text_key, path.name, exc_info=True)
+                    continue
+
+                if text_key.endswith(".diff"):
+                    try:
+                        module_path = _wan_lora_target_key(text_key.removesuffix(".diff"))
+                        module = _module_by_path(transformer, module_path)
+                        param = getattr(module, "weight", None)
+                        if param is None:
+                            skipped += 1
+                            continue
+                        delta = handle.get_tensor(text_key).to(device=param.device, dtype=param.dtype) * float(weight)
+                        param.data.add_(delta)
+                        applied_direct += 1
+                    except Exception:
+                        skipped += 1
+                        logger.debug("Skipped Wan LoRA weight delta %s from %s.", text_key, path.name, exc_info=True)
+                    continue
+
+                if text_key.endswith(".diff_m"):
+                    try:
+                        param_path = _wan_lora_target_key(text_key)
+                        parent_path, name = param_path.rsplit(".", 1)
+                        parent = _module_by_path(transformer, parent_path)
+                        param = getattr(parent, name)
+                        if not isinstance(param, torch.nn.Parameter):
+                            skipped += 1
+                            continue
+                        delta = handle.get_tensor(text_key).to(device=param.device, dtype=param.dtype) * float(weight)
+                        param.data.add_(delta)
+                        applied_direct += 1
+                    except Exception:
+                        skipped += 1
+                        logger.debug("Skipped Wan LoRA modulation delta %s from %s.", text_key, path.name, exc_info=True)
+
+        if merged_pairs:
+            logger.info(
+                "Merged Wan LoRA %s directly into transformer (%d low-rank pairs, %d direct deltas, %d skipped).",
+                path.name,
+                merged_pairs,
+                applied_direct,
+                skipped,
+            )
+            return True
+        return False
+    except Exception:
+        logger.debug("Direct Wan LoRA merge failed for %s.", path, exc_info=True)
+        return False
+
+
 def _apply_transformer_lora(transformer, lora_path: str | None, *, adapter_name: str, weight: float) -> None:
     if not lora_path:
         return
     try:
+        if _merge_comfy_wan_lora_into_transformer(transformer, lora_path, weight=weight):
+            return
+        converted_lora = _convert_comfy_wan_lora_state_dict(lora_path)
+        source = converted_lora if converted_lora is not None else lora_path
+        prefix = "transformer" if converted_lora is not None else _wan_lora_load_prefix(lora_path)
         try:
-            transformer.load_lora_adapter(lora_path, adapter_name=adapter_name, prefix="transformer")
+            transformer.load_lora_adapter(source, adapter_name=adapter_name, prefix=prefix)
         except Exception:
-            transformer.load_lora_adapter(lora_path, adapter_name=adapter_name, prefix=None)
+            transformer.load_lora_adapter(source, adapter_name=adapter_name, prefix=None)
         transformer.set_adapters(adapter_name, weights=float(weight))
         transformer.fuse_lora(adapter_names=[adapter_name], lora_scale=1.0, safe_fusing=True)
     except Exception as exc:
@@ -3464,6 +3710,22 @@ class WanI2VBackend:
         high_stage_elapsed = 0.0
         hook_timings: dict[str, float] = {}
 
+        def _cancel_requested() -> bool:
+            if should_cancel is None:
+                return False
+            try:
+                if not should_cancel():
+                    return False
+            except Exception:
+                logger.debug("Wan cancellation check failed.", exc_info=True)
+                return False
+            cancelled[0] = True
+            try:
+                pipe._interrupt = True
+            except Exception:
+                pass
+            return True
+
         def _install_call_timer(obj: Any, attr: str, metric: str):
             original = getattr(obj, attr, None)
             if original is None or not callable(original):
@@ -3545,9 +3807,7 @@ class WanI2VBackend:
 
         def _step_callback(pipe, i, t, callback_kwargs):
             nonlocal progress_steps, last_step_elapsed, high_stage_elapsed
-            if should_cancel is not None and should_cancel():
-                cancelled[0] = True
-                pipe._interrupt = True
+            _cancel_requested()
             try:
                 current_step = min(total_steps, max(1, int(i) + 1))
             except Exception:
@@ -3621,6 +3881,7 @@ class WanI2VBackend:
                     from aiwf.infrastructure.wan.native.denoise import run_native_wan_denoise
 
                     call_kwargs["aiwf_on_phase_progress"] = _phase_progress
+                    call_kwargs["should_cancel"] = _cancel_requested
                     _emit_generate_progress(
                         0,
                         total_steps,

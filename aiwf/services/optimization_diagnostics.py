@@ -22,8 +22,8 @@ KNOWN_OPTIMIZATION_FAILURES: tuple[dict[str, str], ...] = (
     },
     {
         "id": "sageattention_2_windows",
-        "status": "unavailable",
-        "summary": "SageAttention 2.x was not available from the current Windows/PyPI lane.",
+        "status": "resolved_install_benchmark_required",
+        "summary": "SageAttention 2.2 is installed and Diffusers SAGE dispatch is callable; promotion still needs matched Wan receipts.",
     },
     {
         "id": "wan_fp8_scaled_mm_fallback",

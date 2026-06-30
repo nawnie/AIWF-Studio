@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import logging
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
 import webbrowser
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware import Middleware
 
+from aiwf.api.v1.client_log import build_client_log_router
 from aiwf.app import (
     _api_security_middleware,
     _configure_logging,
@@ -23,6 +32,83 @@ from aiwf.web.pro_api import build_router
 logger = logging.getLogger("aiwf")
 
 
+def _pro_icon_path(name: str) -> Path:
+    return Path(__file__).resolve().parent.parent / "static" / "icons" / name
+
+
+def _pro_autolaunch_enabled(argv: list[str]) -> bool:
+    return "--no-autolaunch" not in argv
+
+
+def _browser_app_command(url: str) -> list[str] | None:
+    candidates = [
+        "msedge",
+        "chrome",
+        "msedge.exe",
+        "chrome.exe",
+    ]
+    for name in candidates:
+        executable = shutil.which(name)
+        if executable:
+            return [executable, "--new-window", "--start-fullscreen", f"--app={url}"]
+
+    known_paths = [
+        Path(os.environ.get("ProgramFiles", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("ProgramFiles", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+    ]
+    for path in known_paths:
+        if path.is_file():
+            return [str(path), "--new-window", "--start-fullscreen", f"--app={url}"]
+    return None
+
+
+def _open_app_window(url: str) -> bool:
+    command = _browser_app_command(url)
+    if command is not None:
+        try:
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except OSError as exc:
+            logger.warning("Could not open Pro app window: %s", exc)
+    return bool(webbrowser.open(url))
+
+
+def _wait_for_http(url: str, *, timeout_seconds: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.0):
+                return True
+        except OSError:
+            time.sleep(0.25)
+    return False
+
+
+def _existing_pro_runtime(url: str) -> bool:
+    runtime_url = f"{url.rstrip('/')}/api/pro/runtime"
+    try:
+        with urllib.request.urlopen(runtime_url, timeout=1.5) as response:
+            if getattr(response, "status", 200) >= 400:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return False
+    return isinstance(payload, dict) and "status" in payload and "backend" in payload
+
+
+def _open_app_window_when_ready(url: str) -> None:
+    if not _wait_for_http(url):
+        logger.warning("AIWF Studio Pro did not answer before the app window timeout.")
+    _open_app_window(url)
+
+
+def _schedule_app_window_open(url: str) -> None:
+    threading.Thread(target=_open_app_window_when_ready, args=(url,), name="aiwf-pro-autolaunch", daemon=True).start()
+
+
 def _frontend_dist() -> Path:
     return Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
@@ -36,6 +122,32 @@ def _is_inside(path: Path, root: Path) -> bool:
 
 
 def _mount_frontend(app: FastAPI, dist: Path) -> bool:
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return FileResponse(_pro_icon_path("aiwf-studio-pro.ico"), media_type="image/x-icon")
+
+    @app.get("/app-icon.png", include_in_schema=False)
+    def app_icon():
+        return FileResponse(_pro_icon_path("aiwf-studio-pro.png"), media_type="image/png")
+
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    def web_manifest():
+        return JSONResponse(
+            {
+                "name": "AIWF Studio Pro",
+                "short_name": "AIWF Pro",
+                "start_url": "/",
+                "scope": "/",
+                "display": "fullscreen",
+                "background_color": "#101820",
+                "theme_color": "#101820",
+                "icons": [
+                    {"src": "/app-icon.png", "sizes": "512x512", "type": "image/png"},
+                    {"src": "/favicon.ico", "sizes": "16x16 32x32 48x48", "type": "image/x-icon"},
+                ],
+            }
+        )
+
     index = dist / "index.html"
     if not dist.is_dir() or not index.is_file():
         return False
@@ -59,6 +171,7 @@ def create_app(
     frontend_dist: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(title="AIWF Studio Pro", middleware=middleware or [])
+    app.include_router(build_client_log_router(ctx), prefix="/api/v1")
     app.include_router(build_router(ctx))
     _mount_frontend(app, frontend_dist or _frontend_dist())
     return app
@@ -78,6 +191,8 @@ def _log_security_warnings(flags) -> None:
 
 def run() -> None:
     flags = _resolve_flags()
+    if _pro_autolaunch_enabled(sys.argv[1:]):
+        flags = flags.model_copy(update={"autolaunch": True})
     _configure_logging(flags.data_dir)
     _startup_message("Starting AIWF Studio Pro...")
     _startup_message("Checking your hardware and loading tools...")
@@ -85,11 +200,19 @@ def run() -> None:
 
     host = "0.0.0.0" if flags.listen else "127.0.0.1"
     port = flags.port
+    local_url = f"http://127.0.0.1:{port}"
     try:
         find_free_port(port, attempts=1)
-    except OSError:
-        port = find_free_port(flags.port + 1, attempts=32)
-        logger.warning("Port %d is already in use. AIWF Studio Pro will use %d instead.", flags.port, port)
+    except OSError as exc:
+        if _existing_pro_runtime(local_url):
+            logger.warning("AIWF Studio Pro is already running at %s. Reusing the existing session.", local_url)
+            _startup_message(f"AIWF Studio Pro is already running at {local_url}")
+            if flags.autolaunch:
+                _schedule_app_window_open(local_url)
+            return
+        raise RuntimeError(
+            f"Port {port} is already in use by another process. Close the stale listener or free the port, then relaunch Pro."
+        ) from exc
     ctx.runtime_port = port
 
     _startup_message(f"Using {_friendly_device_name(ctx.generation.backend.devices.describe())}.")
@@ -102,12 +225,13 @@ def run() -> None:
     frontend_ready = (_frontend_dist() / "index.html").is_file()
     _log_security_warnings(flags)
 
-    local_url = f"http://127.0.0.1:{port}"
     _startup_message("AIWF Studio Pro is ready.")
     if frontend_ready:
-        _startup_message(f"Open in your browser: {local_url}")
+        _startup_message(f"AIWF Studio Pro is available at {local_url}")
         if flags.autolaunch:
-            webbrowser.open(local_url)
+            @app.on_event("startup")
+            def open_pro_app_window() -> None:
+                _schedule_app_window_open(local_url)
     else:
         _startup_message(f"API ready at {local_url}/api/pro")
         _startup_message("React frontend build not found at frontend/dist; run the frontend build to serve it here.")

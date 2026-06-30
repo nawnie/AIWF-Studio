@@ -27,11 +27,12 @@ converter):
 IMPORTANT -- this GGUF is TEXT-ONLY (626 tensors, no vision_model.* /
 multi_modal_projector.* tensors at all -- the vision tower ships separately
 as a clip.cpp-format mmproj-*.gguf for these unsloth/heretic repos, which is
-NOT converted by this script). The resulting gemma_root will have no vision
-tower. This is expected to be fine for LTX's plain text-to-video prompt
-encoding (GemmaTextEncoder.encode() only runs the language-model forward
-pass), but will NOT support image-conditioned prompt enhancement
-(enhance_i2v()) -- unverified until the Builder actually loads this folder.
+NOT converted by this script). By default this script copies the official
+Gemma vision_tower/multi_modal_projector tensors into a sidecar safetensors
+file so the upstream LTX builder can initialize without meta tensors. That
+sidecar is a loader compatibility fix, not a quantized Heretic vision model.
+Plain text-to-video has been smoke-tested; image-conditioned prompt enhancement
+remains unverified.
 
 Dequantization uses the `gguf` pip package's own dequantize() (handles
 Q2_K..Q8_0, IQ*, K-quants -- the same code llama.cpp's Python tooling uses),
@@ -73,6 +74,13 @@ PROCESSOR_FILES = (
     "tokenizer.json",
     "tokenizer.model",
 )
+
+DEFAULT_SRC = Path("models/LLM/GGUF/gemma-3-12b-it-heretic-Q3_K_M.gguf")
+DEFAULT_DST = Path("models/ltx/text_encoder/gemma-3-12b-heretic-q3km-converted")
+DEFAULT_COPY_PROCESSOR_FROM = Path("models/ltx/text_encoder/gemma-3-12b-it-qat-q4_0-unquantized")
+DEFAULT_RECEIPT = Path("_local/logs/ltx_heretic_q3_gguf_conversion_plan_latest.json")
+VISION_SIDECAR = "vision_projector.safetensors"
+VISION_PREFIXES = ("vision_tower.", "multi_modal_projector.")
 
 
 def f32_to_bf16_bytes(arr: np.ndarray) -> bytes:
@@ -120,18 +128,199 @@ def remap_key(name: str) -> str | None:
     return None
 
 
-def main() -> None:
+def _size_gib(num_bytes: int | float) -> float:
+    return round(float(num_bytes) / (1024**3), 3)
+
+
+def _free_bytes_for(path: Path) -> int:
+    target = path if path.exists() else path.parent
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    return shutil.disk_usage(target).free
+
+
+def _build_plan(reader: GGUFReader) -> list[tuple[str, object]]:  # noqa: ANN401
+    plan = []
+    for tensor in reader.tensors:
+        out_key = remap_key(tensor.name)
+        if out_key is None:
+            continue
+        plan.append((out_key, tensor))
+    return plan
+
+
+def _output_shape(tensor: object) -> list[int]:  # noqa: ANN401
+    shape = [int(dim) for dim in tensor.shape]
+    if len(shape) == 2:
+        return [shape[1], shape[0]]
+    return shape
+
+
+def _header_for_plan(plan: list[tuple[str, object]]) -> tuple[dict[str, dict[str, object]], list[int], int]:  # noqa: ANN401
+    new_header: dict[str, dict[str, object]] = {}
+    offset = 0
+    sizes = []
+    for out_key, tensor in plan:
+        n_elems = 1
+        for dim in tensor.shape:
+            n_elems *= int(dim)
+        nbytes = n_elems * 2  # bf16
+        shape = _output_shape(tensor)
+        new_header[out_key] = {"dtype": "BF16", "shape": shape, "data_offsets": [offset, offset + nbytes]}
+        sizes.append(nbytes)
+        offset += nbytes
+    return new_header, sizes, offset
+
+
+def _processor_status(copy_from: Path | None) -> list[dict[str, object]]:
+    if copy_from is None:
+        return [{"filename": name, "present": False, "source": ""} for name in PROCESSOR_FILES]
+    return [
+        {
+            "filename": name,
+            "present": (copy_from / name).is_file(),
+            "source": str(copy_from / name),
+        }
+        for name in PROCESSOR_FILES
+    ]
+
+
+def _vision_sidecar_plan(copy_from: Path | None) -> dict[str, object]:
+    if copy_from is None:
+        return {"source": "", "tensor_count": 0, "size_gib": 0, "available": False}
+    tensor_count = 0
+    total_bytes = 0
+    for shard in sorted(copy_from.glob("*.safetensors")):
+        with shard.open("rb") as handle:
+            header_len = struct.unpack("<Q", handle.read(8))[0]
+            header = json.loads(handle.read(header_len))
+        for key, info in header.items():
+            if key == "__metadata__" or not key.startswith(VISION_PREFIXES):
+                continue
+            tensor_count += 1
+            start, end = info["data_offsets"]
+            total_bytes += int(end) - int(start)
+    return {
+        "source": str(copy_from),
+        "tensor_count": tensor_count,
+        "size_gib": _size_gib(total_bytes),
+        "available": tensor_count > 0,
+    }
+
+
+def _copy_vision_sidecar(copy_from: Path, dst_dir: Path, *, overwrite: bool = False) -> Path:
+    out = dst_dir / VISION_SIDECAR
+    if out.exists() and not overwrite:
+        raise FileExistsError(f"Vision sidecar already exists, pass --overwrite to replace: {out}")
+
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    tensors = {}
+    for shard in sorted(copy_from.glob("*.safetensors")):
+        with safe_open(shard, framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                if key.startswith(VISION_PREFIXES):
+                    tensors[key] = handle.get_tensor(key).clone().contiguous()
+    if not tensors:
+        raise RuntimeError(f"No vision/projector tensors found under {copy_from}")
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    save_file(tensors, out)
+    return out
+
+
+def _summary_payload(
+    *,
+    src: Path,
+    dst_dir: Path,
+    dst: Path,
+    copy_processor_from: Path | None,
+    reader: GGUFReader,
+    plan: list[tuple[str, object]],  # noqa: ANN401
+    output_bytes: int,
+) -> dict[str, object]:
+    free_bytes = _free_bytes_for(dst_dir)
+    processor_files = _processor_status(copy_processor_from)
+    missing_processor = [item["filename"] for item in processor_files if not item["present"]]
+    return {
+        "ok": bool(src.is_file() and plan and free_bytes > output_bytes and not missing_processor),
+        "mode": "dry-run",
+        "src": str(src),
+        "dst_dir": str(dst_dir),
+        "dst": str(dst),
+        "source_size_gib": _size_gib(src.stat().st_size) if src.is_file() else 0,
+        "tensor_count": len(reader.tensors),
+        "planned_tensors": len(plan),
+        "transposed_2d_tensors": sum(1 for _, tensor in plan if len(tensor.shape) == 2),
+        "output_size_gib": _size_gib(output_bytes),
+        "free_gib": _size_gib(free_bytes),
+        "processor_copy_from": str(copy_processor_from) if copy_processor_from is not None else "",
+        "processor_files": processor_files,
+        "missing_processor_files": missing_processor,
+        "vision_sidecar": _vision_sidecar_plan(copy_processor_from),
+        "vision_sidecar_path": str(dst_dir / VISION_SIDECAR),
+        "conversion_ready": bool(src.is_file() and plan and free_bytes > output_bytes and not missing_processor),
+        "source_text_only": True,
+        "vision_sidecar_required": True,
+        "generation_ready_after_conversion": (
+            "plain text-to-video when model.safetensors and vision_projector.safetensors are present; "
+            "prompt enhancement with images remains unverified"
+        ),
+        "notes": (
+            "Converts the smallest Heretic Q3 GGUF download into HF-shaped BF16 safetensors for LTX. "
+            "Runtime size is full BF16; this does not preserve Q3 memory savings."
+        ),
+    }
+
+
+def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", required=True)
-    ap.add_argument("--dst", required=True)
-    ap.add_argument("--copy-processor-from", default=None)
+    ap.add_argument("--src", default=str(DEFAULT_SRC))
+    ap.add_argument("--dst", default=str(DEFAULT_DST))
+    ap.add_argument("--copy-processor-from", default=str(DEFAULT_COPY_PROCESSOR_FROM))
+    ap.add_argument("--copy-vision-from", default=str(DEFAULT_COPY_PROCESSOR_FROM))
+    ap.add_argument(
+        "--skip-vision-sidecar",
+        action="store_true",
+        help="Do not copy vision_tower/multi_modal_projector sidecar tensors into the destination.",
+    )
+    ap.add_argument(
+        "--vision-sidecar-only",
+        action="store_true",
+        help="Only create vision_projector.safetensors in an existing converted destination.",
+    )
+    ap.add_argument("--dry-run", action="store_true", help="Inspect GGUF metadata and estimate output without writing weights.")
+    ap.add_argument("--receipt", default=str(DEFAULT_RECEIPT), help="Optional JSON receipt path for dry-run or conversion summary.")
+    ap.add_argument("--overwrite", action="store_true", help="Allow replacing an existing destination model.safetensors.")
     args = ap.parse_args()
 
     src = Path(args.src)
     dst_dir = Path(args.dst)
-    dst_dir.mkdir(parents=True, exist_ok=True)
     dst = dst_dir / "model.safetensors"
+    copy_processor_from = Path(args.copy_processor_from) if args.copy_processor_from else None
+    copy_vision_from = Path(args.copy_vision_from) if args.copy_vision_from else copy_processor_from
 
+    if args.vision_sidecar_only:
+        if copy_vision_from is None:
+            raise ValueError("--vision-sidecar-only requires --copy-vision-from")
+        sidecar = _copy_vision_sidecar(copy_vision_from, dst_dir, overwrite=args.overwrite)
+        payload = {
+            "ok": True,
+            "mode": "vision-sidecar",
+            "dst_dir": str(dst_dir),
+            "vision_sidecar_path": str(sidecar),
+            "vision_sidecar_size_gib": _size_gib(sidecar.stat().st_size),
+            "vision_sidecar": _vision_sidecar_plan(copy_vision_from),
+        }
+        if args.receipt:
+            receipt = Path(args.receipt)
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    if not src.is_file():
+        raise FileNotFoundError(f"GGUF source missing: {src}")
     print(f"Reading GGUF {src} ...")
     reader = GGUFReader(str(src))
     print(f"{len(reader.tensors)} tensors found")
@@ -140,12 +329,7 @@ def main() -> None:
     # We dequantize tensor-by-tensor in pass 2 directly (streaming), but need
     # final byte sizes up front to build the header. Since GGUF tensors are
     # already memory-mapped, computing shape/dtype without materializing is cheap.
-    plan = []  # (out_key, tensor)
-    for t in reader.tensors:
-        out_key = remap_key(t.name)
-        if out_key is None:
-            continue
-        plan.append((out_key, t))
+    plan = _build_plan(reader)
 
     print(f"{len(plan)} tensors will be written")
 
@@ -153,18 +337,7 @@ def main() -> None:
     # data anyway to know elem count for quantized types, but element shape is
     # derivable from t.shape directly (already in HF/torch order per our
     # verification: dequantize() output shape == reduce via t.shape correctly).
-    new_header = {}
-    offset = 0
-    sizes = []
-    for out_key, t in plan:
-        n_elems = 1
-        for d in t.shape:
-            n_elems *= int(d)
-        nbytes = n_elems * 2  # bf16
-        shape = [int(d) for d in t.shape]
-        new_header[out_key] = {"dtype": "BF16", "shape": shape, "data_offsets": [offset, offset + nbytes]}
-        sizes.append(nbytes)
-        offset += nbytes
+    new_header, sizes, offset = _header_for_plan(plan)
 
     header_bytes = json.dumps(new_header).encode("utf-8")
     pad = (-len(header_bytes)) % 8
@@ -172,6 +345,28 @@ def main() -> None:
     header_len = len(header_bytes)
 
     print(f"New checkpoint size: {offset / (1024**3):.2f} GiB (+ {header_len} byte header)")
+    summary = _summary_payload(
+        src=src,
+        dst_dir=dst_dir,
+        dst=dst,
+        copy_processor_from=copy_processor_from,
+        reader=reader,
+        plan=plan,
+        output_bytes=offset + header_len + 8,
+    )
+    if args.receipt:
+        receipt = Path(args.receipt)
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"Wrote receipt: {receipt}")
+    if args.dry_run:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0 if summary["conversion_ready"] else 1
+
+    if dst.exists() and not args.overwrite:
+        raise FileExistsError(f"Destination already exists, pass --overwrite to replace: {dst}")
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
     with open(dst, "wb") as fdst:
@@ -180,7 +375,10 @@ def main() -> None:
 
         for i, (out_key, t) in enumerate(plan):
             arr = dequantize(t.data, t.tensor_type)
-            arr = arr.reshape(new_header[out_key]["shape"])
+            arr = arr.reshape([int(dim) for dim in t.shape])
+            if arr.ndim == 2:
+                arr = arr.T
+            arr = np.ascontiguousarray(arr)
             fdst.write(f32_to_bf16_bytes(arr))
             del arr
             if i % 50 == 0 or i == len(plan) - 1:
@@ -189,8 +387,8 @@ def main() -> None:
 
     print(f"Wrote {dst} in {time.time() - t0:.1f}s")
 
-    if args.copy_processor_from:
-        src_dir = Path(args.copy_processor_from)
+    if copy_processor_from is not None:
+        src_dir = copy_processor_from
         for fname in PROCESSOR_FILES:
             src_file = src_dir / fname
             if src_file.exists():
@@ -201,10 +399,29 @@ def main() -> None:
     else:
         print("No --copy-processor-from given -- tokenizer/processor files must be added manually.")
 
+    if not args.skip_vision_sidecar:
+        if copy_vision_from is None:
+            print("No --copy-vision-from given -- vision/projector tensors will remain unavailable.")
+        else:
+            sidecar = _copy_vision_sidecar(copy_vision_from, dst_dir, overwrite=args.overwrite)
+            print(f"Copied vision/projector sidecar -> {sidecar}")
+
     print(f"\nDone. New gemma_root: {dst_dir}")
-    print("NOTE: this gemma_root has NO vision tower (text-only GGUF source). "
-          "Image-conditioned prompt enhancement will not work; plain text encoding should.")
+    print(
+        "NOTE: the Heretic GGUF source is text-only. This folder uses the official Gemma "
+        "vision/projector sidecar for loader compatibility; image-conditioned prompt enhancement remains unverified."
+    )
+    summary["mode"] = "conversion"
+    summary["wrote_model"] = str(dst)
+    summary["elapsed_seconds"] = round(time.time() - t0, 3)
+    sidecar = dst_dir / VISION_SIDECAR
+    if sidecar.is_file():
+        summary["vision_sidecar_written"] = str(sidecar)
+        summary["vision_sidecar_size_gib"] = _size_gib(sidecar.stat().st_size)
+    if args.receipt:
+        Path(args.receipt).write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

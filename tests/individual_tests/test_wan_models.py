@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from aiwf.services.wan_models import (
+    wan_lora_info,
+    wan_lora_stage_matches,
     wan_model_pair_compatibility,
     wan_model_quant_family,
     wan_selectable_loras,
@@ -72,3 +78,39 @@ def test_wan_selectable_loras_filters_by_runtime_size_class():
         "motion_5b_ti2v_rank16.safetensors",
         "style_rank16.safetensors",
     ]
+
+
+def test_wan_lora_info_uses_safetensors_metadata_for_size_and_stage(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+    lora = tmp_path / "motion_adapter.safetensors"
+    safetensors.save_file(
+        {"diffusion_model.blocks.39.self_attn.q.lora_down.weight": torch.ones(1, 1)},
+        lora,
+        metadata={"ss_base_model_version": "Wan2.2-I2V-A14B-HighNoise"},
+    )
+
+    info = wan_lora_info(lora)
+
+    assert info.ok is True
+    assert info.size_class == "14b"
+    assert info.role == "high"
+    assert wan_selectable_loras([str(lora)], runtime_mode="native_high_low", stage="high") == [str(lora)]
+    assert wan_selectable_loras([str(lora)], runtime_mode="fast_5b") == []
+    assert wan_lora_stage_matches(lora, stage="low") is False
+
+
+def test_wan_lora_info_infers_5b_from_block_keys_when_name_is_ambiguous(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+    lora = tmp_path / "turbo_adapter.safetensors"
+    safetensors.save_file(
+        {"diffusion_model.blocks.29.self_attn.q.lora_down.weight": torch.ones(1, 1)},
+        lora,
+    )
+
+    info = wan_lora_info(lora)
+
+    assert info.size_class == "5b"
+    assert wan_selectable_loras([str(lora)], runtime_mode="fast_5b") == [str(lora)]
+    assert wan_selectable_loras([str(lora)], runtime_mode="native_high_low") == []

@@ -99,6 +99,21 @@ def _friendly_device_name(description: str) -> str:
     return description
 
 
+def _foreground_model_work_active(ctx) -> bool:
+    try:
+        if ctx.generation.active_job() is not None:
+            return True
+    except Exception:
+        logger.debug("Could not check active image job before warmup.", exc_info=True)
+    try:
+        tenant = getattr(getattr(ctx, "supervisor", None), "active_tenant", None)
+        tenant_value = str(getattr(tenant, "value", tenant) or "").strip().lower()
+        return tenant_value not in {"", "idle", "none"}
+    except Exception:
+        logger.debug("Could not check active GPU tenant before warmup.", exc_info=True)
+        return False
+
+
 def _background_model_warmup(ctx) -> None:
     if os.environ.get("AIWF_BACKGROUND_WARMUP", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
@@ -106,6 +121,9 @@ def _background_model_warmup(ctx) -> None:
     if not checkpoint_id:
         return
     try:
+        if _foreground_model_work_active(ctx):
+            logger.info("Background warmup skipped because foreground model work is active.")
+            return
         if not ctx.generation.backend.can_preload_checkpoint_locally(checkpoint_id):
             return
         logger.info("Background warmup: preloading checkpoint %s", checkpoint_id)
@@ -131,7 +149,11 @@ def _background_model_warmup(ctx) -> None:
                 budget_seconds = float(os.environ.get("AIWF_PREWARM_COMMON_PROMPT_BUDGET_SECONDS", "300"))
             except ValueError:
                 budget_seconds = 300.0
-            warmed = prewarm(limit=limit, budget_seconds=budget_seconds)
+            warmed = prewarm(
+                limit=limit,
+                budget_seconds=budget_seconds,
+                should_stop=lambda: _foreground_model_work_active(ctx),
+            )
             if warmed:
                 logger.info("Background warmup: prewarmed %d common prompt embeddings", warmed)
         logger.info("Background warmup: checkpoint %s is ready", checkpoint_id)
@@ -169,6 +191,7 @@ def _parse_cli() -> RuntimeFlags:
     parser.add_argument("--listen", action="store_true")
     parser.add_argument("--share", action="store_true")
     parser.add_argument("--autolaunch", action="store_true")
+    parser.add_argument("--no-autolaunch", action="store_true")
     parser.add_argument("--api", action="store_true")
     parser.add_argument("--nowebui", action="store_true")
     parser.add_argument("--theme", choices=["dark", "light"], default="dark")
@@ -277,7 +300,7 @@ def _parse_cli() -> RuntimeFlags:
         port=args.port,
         listen=args.listen,
         share=args.share,
-        autolaunch=args.autolaunch,
+        autolaunch=args.autolaunch and not args.no_autolaunch,
         api=args.api,
         nowebui=args.nowebui,
         theme=args.theme,

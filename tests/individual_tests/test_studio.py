@@ -1,7 +1,10 @@
+from pathlib import Path
+
 from PIL import Image
 import gradio as gr
 import pytest
 
+from aiwf.web.studio import tab as studio_tab
 from aiwf.web.studio.catalogs import StudioCatalogs
 from aiwf.web.studio.helpers import paste_control_values, segment_source_image
 from aiwf.web.studio.request_builder import build_generation_request
@@ -128,3 +131,11 @@ def test_request_builder_normalizes_incompatible_sampler_schedule_pair():
 def test_request_builder_rejects_stale_checkpoint_selection():
     with pytest.raises(gr.Error, match="Selected checkpoint"):
         build_generation_request(**_request_kwargs(ckpt_title="Missing"))
+
+
+def test_main_studio_stop_bypasses_gradio_queue():
+    source = Path(studio_tab.__file__).read_text(encoding="utf-8")
+    stop_registration = source.split("interrupt.click(", 1)[1].split(")", 1)[0]
+
+    assert "queue=False" in stop_registration
+    assert "show_progress=False" in stop_registration

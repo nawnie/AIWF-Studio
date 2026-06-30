@@ -36,7 +36,7 @@ from aiwf.infrastructure.rife import RifeUnavailable
 from aiwf.infrastructure.video import VideoError, extract_first_frame
 from aiwf.services.rife import RifeService
 from aiwf.services.audio import AudioGenerationService, AudioUnavailable
-from aiwf.services.ltx import LtxService, LtxUnavailable
+from aiwf.services.ltx import LtxService, LtxUnavailable, ltx_checkpoint_requires_no_offload
 from aiwf.services.vsr import VsrService, VsrUnavailable
 from aiwf.services.wan import (
     WanService,
@@ -343,10 +343,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 if value in allowed and _model_allowed_for_runtime(value, runtime_value)
             ]
 
-        def _filter_lora_choices(runtime_value: str) -> list[str]:
+        def _filter_lora_choices(runtime_value: str, *, stage: str | None = None) -> list[str]:
             return wan_selectable_loras(
                 all_lora_choices,
                 runtime_mode=str(runtime_value or WAN_RUNTIME_FAST_5B),
+                stage=stage or "",
             )
 
         def _valid_or_first(value: str | None, choices: list[tuple[str, str]]) -> str | None:
@@ -554,7 +555,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         default_te_labeled = [("Default (full precision bundled encoder)", "")] + te_labeled
         default_te = _last_te if _last_te else (service.default_text_encoder() if hasattr(service, "default_text_encoder") else "")
 
-        initial_lora_choices = _filter_lora_choices(_last_runtime)
+        initial_high_lora_choices = _filter_lora_choices(_last_runtime, stage="high")
+        initial_low_lora_choices = _filter_lora_choices(_last_runtime, stage="low")
         if _last_runtime == WAN_RUNTIME_FAST_5B:
             initial_high_choices = _filter_stage_choices(
                 all_labeled,
@@ -584,7 +586,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         _initial_high_label = (
             "5B transformer" if _last_runtime == WAN_RUNTIME_FAST_5B else "High noise transformer"
         )
-        _initial_low_interactive = _last_runtime != WAN_RUNTIME_FAST_5B
+        _initial_dual_visible = _last_runtime != WAN_RUNTIME_FAST_5B
         _initial_pair_status = (
             "" if _last_runtime == WAN_RUNTIME_FAST_5B else _pair_status(initial_high, initial_low)
         )
@@ -640,11 +642,13 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         choices=initial_low_choices,
                         value=initial_low,
                         allow_custom_value=True,
-                        interactive=_initial_low_interactive,
+                        interactive=_initial_dual_visible,
+                        visible=_initial_dual_visible,
                         info="Late denoising stage. Must match the selected high-noise file.",
                     )
                     model_pair_status = gr.Markdown(
                         _initial_pair_status,
+                        visible=_initial_dual_visible,
                         elem_classes=["aiwf-settings-paths"],
                     )
                     text_encoder = gr.Dropdown(
@@ -677,11 +681,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
                     gr.Markdown("Stage LoRAs", elem_classes=["aiwf-section-label"])
                     high_lora = gr.Dropdown(
-                        label="High noise LoRA",
-                        choices=initial_lora_choices,
+                        label="High noise LoRA" if _initial_dual_visible else "5B LoRA",
+                        choices=initial_high_lora_choices,
                         value=None,
                         allow_custom_value=False,
-                        interactive=False,
+                        interactive=True,
                         info="Optional high-stage LoRA.",
                     )
                     with gr.Row():
@@ -690,8 +694,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             2.0,
                             value=1.0,
                             step=0.05,
-                            label="High LoRA strength",
-                            interactive=False,
+                            label="High LoRA strength" if _initial_dual_visible else "LoRA strength",
+                            interactive=True,
                         )
                         low_lora_scale = gr.Slider(
                             0.0,
@@ -699,14 +703,16 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             value=1.0,
                             step=0.05,
                             label="Low LoRA strength",
-                            interactive=False,
+                            interactive=_initial_dual_visible,
+                            visible=_initial_dual_visible,
                         )
                     low_lora = gr.Dropdown(
                         label="Low noise LoRA",
-                        choices=initial_lora_choices,
+                        choices=initial_low_lora_choices,
                         value=None,
                         allow_custom_value=False,
-                        interactive=False,
+                        interactive=_initial_dual_visible,
+                        visible=_initial_dual_visible,
                         info="Optional low-stage LoRA.",
                     )
 
@@ -783,10 +789,24 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     gr.Markdown("Denoising steps", elem_classes=["aiwf-section-label"])
                     with gr.Row():
                         high_steps = gr.Slider(1, 30, value=20, step=1, label="Steps")
-                        low_steps = gr.Slider(1, 30, value=1, step=1, label="Low noise steps", interactive=False)
+                        low_steps = gr.Slider(
+                            1,
+                            30,
+                            value=1,
+                            step=1,
+                            label="Low noise steps",
+                            interactive=_initial_dual_visible,
+                            visible=_initial_dual_visible,
+                        )
                     with gr.Row():
                         total_steps = gr.Number(value=20, precision=0, label="Total steps", interactive=False)
-                        boundary_ratio = gr.Number(value=1.0, precision=3, label="Stage split", interactive=False)
+                        boundary_ratio = gr.Number(
+                            value=1.0,
+                            precision=3,
+                            label="Stage split",
+                            interactive=False,
+                            visible=_initial_dual_visible,
+                        )
 
                     gr.Markdown("Sampler", elem_classes=["aiwf-section-label"])
                     sampler = gr.Dropdown(
@@ -845,6 +865,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                         info="Dual high/low models only: separate CFG for the low-noise stage. "
                              "1.0 = reuse the main guidance scale; raise to sharpen detail late in denoise.",
                         interactive=False,
+                        visible=_initial_dual_visible,
                     )
 
                     with gr.Accordion("Post-processing", open=False, elem_classes=["aiwf-prompt-tools"]):
@@ -1147,6 +1168,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                     status = gr.Markdown("**Ready** - upload an image and generate.", elem_classes=["aiwf-status-bar"])
 
                     default_ltx_pipeline = ltx_service.default_launch_pipeline()
+                    default_ltx_checkpoint = ltx_service.default_checkpoint_path(default_ltx_pipeline)
+                    default_ltx_offload = "none" if ltx_checkpoint_requires_no_offload(default_ltx_checkpoint) else "disk"
                     with gr.Accordion("LTX optional engine", open=False, elem_classes=["aiwf-prompt-tools"]):
                         gr.Markdown(ltx_service.status_markdown(), elem_classes=["aiwf-settings-paths"])
                         ltx_source = gr.Image(
@@ -1194,7 +1217,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             ltx_offload = gr.Radio(
                                 label="Offload",
                                 choices=[("Disk fallback", "disk"), ("CPU offload", "cpu"), ("None", "none")],
-                                value="disk",
+                                value=default_ltx_offload,
                             )
                             ltx_quantization = gr.Radio(
                                 label="Quantization",
@@ -1204,12 +1227,11 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             ltx_enhance_prompt = gr.Checkbox(label="Enhance prompt", value=False)
                         ltx_checkpoint = gr.Textbox(
                             label="LTX checkpoint",
-                            value=str(ltx_service.default_checkpoint_path(default_ltx_pipeline)),
+                            value=str(default_ltx_checkpoint),
                             info=(
                                 "Distilled route expects ltx-2.3-22b-distilled-1.1.safetensors. "
-                                "Full one-stage route expects ltx-2.3-22b-dev-bf16.safetensors "
-                                "(dequantized from the nvfp4 release; clear this box to use the "
-                                "per-pipeline default)."
+                                "Full one-stage route prefers ltx-2.3-22b-dev-fp8.safetensors "
+                                "with offload disabled on this Windows runtime."
                             ),
                         )
                         ltx_upsampler = gr.Textbox(
@@ -1275,6 +1297,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             route = str(route_value or default_ltx_pipeline)
             checkpoint = ltx_service.default_checkpoint_path(route)
             quantization = "" if route == LTX_PIPELINE_DIFFUSERS_2B else "fp8-cast"
+            offload = "none" if ltx_checkpoint_requires_no_offload(checkpoint) else "disk"
             return (
                 gr.update(value=str(checkpoint)),
                 gr.update(value=str(ltx_service.default_spatial_upsampler_path())),
@@ -1284,7 +1307,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 gr.update(value=128),
                 gr.update(value=128),
                 gr.update(value=1),
-                gr.update(value="disk"),
+                gr.update(value=offload),
                 gr.update(value=quantization),
             )
 
@@ -1423,7 +1446,8 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         ):
             selected_runtime = str(runtime_value or WAN_RUNTIME_FAST_5B)
             previous_runtime = str(previous_runtime_value or WAN_RUNTIME_FAST_5B)
-            lora_choices = _filter_lora_choices(selected_runtime)
+            high_lora_choices = _filter_lora_choices(selected_runtime, stage="high")
+            low_lora_choices = _filter_lora_choices(selected_runtime, stage="low")
             offload_choices = _offload_choices_for_runtime(selected_runtime)
             next_offload = _default_offload_for_runtime(selected_runtime, offload_value)
             if selected_runtime == WAN_RUNTIME_FAST_5B:
@@ -1461,19 +1485,19 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 )
                 return (
                     gr.update(label="5B transformer", choices=model_choices, value=next_model, interactive=True),
-                    gr.update(label="Low noise transformer", choices=[], value=None, interactive=False),
-                    "",
+                    gr.update(label="Low noise transformer", choices=[], value=None, interactive=False, visible=False),
+                    gr.update(value="", visible=False),
                     gr.update(value=next_vae),
-                    gr.update(choices=[], value=None, interactive=False),
-                    gr.update(choices=[], value=None, interactive=False),
-                    gr.update(value=1.0, interactive=False),
-                    gr.update(value=1.0, interactive=False),
+                    gr.update(label="5B LoRA", choices=high_lora_choices, interactive=True),
+                    gr.update(choices=[], value=None, interactive=False, visible=False),
+                    gr.update(label="LoRA strength", interactive=True),
+                    gr.update(value=1.0, interactive=False, visible=False),
                     gr.update(choices=offload_choices, value=next_offload),
                     gr.update(label="Steps", value=single_steps, interactive=True),
-                    gr.update(label="Low noise steps", interactive=False),
+                    gr.update(label="Low noise steps", interactive=False, visible=False),
                     gr.update(value=total),
-                    gr.update(value=ratio),
-                    gr.update(value=1.0, interactive=False),
+                    gr.update(value=ratio, visible=False),
+                    gr.update(value=1.0, interactive=False, visible=False),
                     trace_status,
                     selected_runtime,
                 )
@@ -1519,19 +1543,19 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             )
             return (
                 gr.update(label="High noise transformer", choices=high_choices, value=next_high, interactive=True),
-                gr.update(label="Low noise transformer", choices=low_choices, value=next_low, interactive=True),
-                _pair_status(next_high, next_low),
+                gr.update(label="Low noise transformer", choices=low_choices, value=next_low, interactive=True, visible=True),
+                gr.update(value=_pair_status(next_high, next_low), visible=True),
                 gr.update(value=next_vae),
-                gr.update(choices=lora_choices, interactive=True),
-                gr.update(choices=lora_choices, interactive=True),
-                gr.update(interactive=True),
-                gr.update(interactive=True),
+                gr.update(label="High noise LoRA", choices=high_lora_choices, interactive=True),
+                gr.update(choices=low_lora_choices, interactive=True, visible=True),
+                gr.update(label="High LoRA strength", interactive=True),
+                gr.update(interactive=True, visible=True),
                 gr.update(choices=offload_choices, value=next_offload),
                 gr.update(label="High noise steps", value=next_high_steps, interactive=True),
-                gr.update(label="Low noise steps", value=next_low_steps, interactive=True),
+                gr.update(label="Low noise steps", value=next_low_steps, interactive=True, visible=True),
                 gr.update(value=total),
-                gr.update(value=ratio),
-                gr.update(interactive=True),
+                gr.update(value=ratio, visible=True),
+                gr.update(interactive=True, visible=True),
                 trace_status,
                 selected_runtime,
             )
@@ -2366,7 +2390,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 ctx.generation.interrupt()
             except Exception:
                 pass
-            return "**Stopping** — interrupt requested for video"
+            return "**Stopping** - interrupt requested for video"
 
         def _run_ltx(
             source_path,
@@ -2530,6 +2554,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
             _stop_video,
             outputs=[status],
             show_progress=False,
+            queue=False,
         )
         ltx_event = ltx_run.click(
             _clear_previous_ltx_video,

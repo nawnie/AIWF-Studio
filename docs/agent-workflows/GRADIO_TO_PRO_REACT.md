@@ -8,7 +8,7 @@ This note is for agents adding UI-facing features to AIWF Studio.
 - Gradio Studio is the development blueprint. It gets the first UI wiring because it is the broadest working surface and exposes callback bugs quickly.
 - Pro is the production-oriented React/FastAPI version. Do not use it for first-pass experiments unless Shawn asks for a direct Pro change.
 
-This matches the existing project split: README documents Pro as `AIWF Studio Pro.bat`, `launch_pro.py`, `aiwf/app_pro.py`, `aiwf/web/pro_api.py`, and `frontend/`; `docs/STUDIO_ROADMAP.md` says shared backend and job contracts should flow outward only after Studio QA.
+This matches the existing project split: README documents Pro as `AIWF Studio Pro.bat`, `launch_pro.py`, `aiwf/app_pro.py`, `aiwf/web/pro_api.py`, and `frontend/`. Shared backend and job contracts should flow outward only after Studio QA.
 
 ## Standard path
 

@@ -14,13 +14,27 @@ from aiwf.infrastructure.wan.sampler_policy import (
 )
 
 
-def test_5b_blocks_euler_with_high_flow_shift():
+def test_5b_auto_corrects_stale_euler_sampler_and_flow_shift():
     request = WanI2VRequest(
         runtime_mode=WAN_RUNTIME_FAST_5B,
         sampler="euler",
         flow_shift=8.0,
     )
     audit = audit_wan_sampler_settings(request)
+    assert not audit.errors
+    assert audit.corrections
+    assert audit.request is not None
+    assert audit.request.sampler == WAN_5B_NATIVE_SAMPLER
+    assert audit.request.flow_shift == WAN_5B_NATIVE_FLOW_SHIFT
+
+
+def test_5b_preview_audit_flags_euler_high_shift_without_correction():
+    request = WanI2VRequest(
+        runtime_mode=WAN_RUNTIME_FAST_5B,
+        sampler="euler",
+        flow_shift=8.0,
+    )
+    audit = audit_wan_sampler_settings(request, enforce_5b_calibration=False)
     assert audit.errors
     assert any("euler" in error.lower() for error in audit.errors)
     assert any("8" in error for error in audit.errors)
@@ -71,7 +85,7 @@ def _write_5b_preflight_fixtures(service: WanService) -> tuple[Path, Path]:
     return transformer, vae
 
 
-def test_preflight_blocks_5b_euler_high_shift(tmp_path: Path):
+def test_preflight_auto_corrects_5b_euler_high_shift(tmp_path: Path):
     flags = RuntimeFlags(
         data_dir=tmp_path,
         models_dir=tmp_path / "models",
@@ -90,8 +104,10 @@ def test_preflight_blocks_5b_euler_high_shift(tmp_path: Path):
             model_id=str(transformer),
         )
     )
-    assert result.ok is False
-    assert any("euler" in error.lower() for error in result.errors)
+    assert result.ok is True
+    assert result.audited_request is not None
+    assert result.audited_request.sampler == WAN_5B_NATIVE_SAMPLER
+    assert result.audited_request.flow_shift == WAN_5B_NATIVE_FLOW_SHIFT
 
 
 def test_preflight_auto_corrects_unipc_flow_shift(tmp_path: Path):

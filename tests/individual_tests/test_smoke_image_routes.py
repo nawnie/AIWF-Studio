@@ -7,6 +7,7 @@ from scripts.smoke_image_routes import (
     _selected_routes,
     run_route,
     run_suite,
+    route_smoke_plan,
 )
 
 
@@ -16,13 +17,35 @@ def test_default_image_route_chain_includes_requested_paths():
     assert "flux-kontext-4bit-fp4" in ids
     assert "fluxFusionV24StepsGGUFNF4_V2NF4" in ids
     assert "flux1-dev-Q4_K_M" in ids
-    assert "fluxFusionV24StepsGGUFNF4_V2GGUFQ4KM" in ids
+    assert "fluxFusionV24StepsGGUFNF4_V2GGUFQ4KM" not in ids
     assert "fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4" in ids
     assert "dreamshaperXL_lightningInpaint" in ids
     assert "realisticVisionV60-inpainting15" in ids
     assert "svdq-int4_r32-qwen-image-lightningv1.0-4steps" in ids
     assert "Sana_Sprint_0.6B_1024px_diffusers" in ids
     assert "FLUX.2-klein-4B" in ids
+
+
+def test_flux_routes_have_bounded_txt2img_smoke_plan():
+    plan = route_smoke_plan(_selected_routes([], []))
+    flux_routes = [
+        route
+        for route in plan["routes"]
+        if route["family"] in {"flux", "flux2_klein", "z_image"}
+    ]
+
+    assert {route["checkpoint_id"] for route in flux_routes} >= {
+        "flux-kontext-4bit-fp4",
+        "fluxFusionV24StepsGGUFNF4_V2NF4",
+        "flux1-dev-Q4_K_M",
+        "fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4",
+        "FLUX.2-klein-4B",
+    }
+    assert all(route["mode"] == "txt2img" for route in flux_routes)
+    assert all(route["steps"] <= 2 for route in flux_routes)
+    assert all(route["width"] == 512 and route["height"] == 512 for route in flux_routes)
+    expected_prefix = ["venv\\Scripts\\python.exe", "scripts\\smoke_backend.py", "--checkpoint"]
+    assert all(route["command"][:3] == expected_prefix for route in flux_routes)
 
 
 def test_full_qwen_image_is_large_opt_in_route():

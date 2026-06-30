@@ -20,10 +20,12 @@ LTX_GEMMA_BACKENDS = (LTX_GEMMA_BACKEND_HF_SAFETENSORS, LTX_GEMMA_BACKEND_GGUF)
 
 LTX_DISTILLED_CHECKPOINT = "ltx-2.3-22b-distilled-1.1.safetensors"
 LTX_FULL_CHECKPOINT = "ltx-2.3-22b-dev-bf16.safetensors"
+LTX_FULL_CHECKPOINT_FP8 = "ltx-2.3-22b-dev-fp8.safetensors"
 LTX_FULL_CHECKPOINT_NVFP4 = "ltx-2.3-22b-dev-nvfp4.safetensors"
 LTX_DIFFUSERS_2B_CHECKPOINT = "ltx-video-2b-v0.9.5.safetensors"
 LTX_SPATIAL_UPSCALER_X2 = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
 LTX_HERETIC_Q3_GGUF = "gemma-3-12b-it-heretic-Q3_K_M.gguf"
+LTX_HERETIC_Q3_CONVERTED_FOLDER = "gemma-3-12b-heretic-q3km-converted"
 LTX_T5XXL_FP16 = "t5xxl_fp16.safetensors"
 LTX_T5_TOKENIZER = "google/t5-v1_1-xxl"
 

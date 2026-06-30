@@ -42,8 +42,11 @@ def test_maturity_matrix_has_ready_core_image_routes():
         assert routes[route].score >= matrix.target_score
         assert routes[route].benchmark_kind
 
-    assert routes["flux-txt2img"].score < matrix.target_score
-    assert "txt2img-first" in routes["flux-txt2img"].notes[0]
+    assert routes["segment-inpaint"].score >= matrix.target_score
+    assert routes["segment-inpaint"].status == "ready"
+    assert routes["flux-txt2img"].score >= matrix.target_score
+    assert routes["flux-txt2img"].status == "ready"
+    assert "txt2img-only" in routes["flux-txt2img"].notes[0]
 
 
 def test_axis_parser_normalizes_aliases_and_values():

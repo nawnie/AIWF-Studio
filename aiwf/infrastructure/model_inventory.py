@@ -307,6 +307,9 @@ def _header_family_architecture(path: Path) -> tuple[str, str, dict[str, str]] |
     if info.precision:
         identifiers["header_precision"] = info.precision
 
+    if info.role == ROLE_VAE:
+        architecture = _architecture_from_text(f"{path.as_posix()} {info.display_name} {' '.join(info.raw_meta.values())}")
+        return "vae", architecture, identifiers
     if info.arch in {ARCH_FLUX_TRANSFORMER}:
         return "runtime_asset", ARCH_FLUX, identifiers
     if info.arch == ARCH_FLUX2_KLEIN_TRANSFORMER:
@@ -344,9 +347,6 @@ def _header_family_architecture(path: Path) -> tuple[str, str, dict[str, str]] |
     if info.role == ROLE_TEXT_ENCODER:
         architecture = _architecture_from_text(f"{path.as_posix()} {info.display_name} {' '.join(info.raw_meta.values())}")
         return "text_encoder", architecture, identifiers
-    if info.role == ROLE_VAE:
-        architecture = _architecture_from_text(f"{path.as_posix()} {info.display_name} {' '.join(info.raw_meta.values())}")
-        return "vae", architecture, identifiers
     return None
 
 

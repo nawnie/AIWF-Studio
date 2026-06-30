@@ -30,14 +30,11 @@ def main() -> None:
         else str(launch.ROOT) + os.pathsep + env["PYTHONPATH"]
     )
 
-    crash_log = launch.ROOT / "aiwf-pro-crash.log"
-    ret = launch._tee_run([launch.python(), str(launch.ROOT / "webui_pro.py"), *pro_argv], env=env, log_path=crash_log)
-    if ret != 0:
-        print(
-            "\n[AIWF] Pro exited with code " + str(ret) + ". Full output saved to: " + str(crash_log),
-            flush=True,
-        )
-        sys.exit(ret)
+    os.execvpe(
+        launch.python(),
+        [launch.python(), str(launch.ROOT / "webui_pro.py"), *pro_argv],
+        env,
+    )
 
 
 if __name__ == "__main__":

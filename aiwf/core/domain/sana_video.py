@@ -9,6 +9,28 @@ SANA_VIDEO_MODEL_REPO_720P = "Efficient-Large-Model/SANA-Video_2B_720p_diffusers
 SANA_VIDEO_PIPELINE_T2V = "text_to_video"
 SANA_VIDEO_PIPELINE_I2V = "image_to_video"
 SANA_VIDEO_PIPELINES = (SANA_VIDEO_PIPELINE_T2V, SANA_VIDEO_PIPELINE_I2V)
+SANA_VIDEO_QUANTIZATION_AUTO = "auto"
+SANA_VIDEO_QUANTIZATION_BF16 = "bf16"
+SANA_VIDEO_QUANTIZATION_FP8 = "fp8_layerwise"
+SANA_VIDEO_QUANTIZATION_BNB_INT8 = "bnb_int8"
+SANA_VIDEO_QUANTIZATION_BNB_NF4 = "bnb_nf4"
+SANA_VIDEO_QUANTIZATION_BNB_FP4 = "bnb_fp4"
+SANA_VIDEO_QUANTIZATIONS = (
+    SANA_VIDEO_QUANTIZATION_AUTO,
+    SANA_VIDEO_QUANTIZATION_BF16,
+    SANA_VIDEO_QUANTIZATION_FP8,
+    SANA_VIDEO_QUANTIZATION_BNB_INT8,
+    SANA_VIDEO_QUANTIZATION_BNB_NF4,
+    SANA_VIDEO_QUANTIZATION_BNB_FP4,
+)
+SANA_VIDEO_VAE_TILING_AUTO = "auto"
+SANA_VIDEO_VAE_TILING_OFF = "off"
+SANA_VIDEO_VAE_TILING_ALWAYS = "always"
+SANA_VIDEO_VAE_TILING_MODES = (
+    SANA_VIDEO_VAE_TILING_AUTO,
+    SANA_VIDEO_VAE_TILING_OFF,
+    SANA_VIDEO_VAE_TILING_ALWAYS,
+)
 
 
 class SanaVideoRequest(BaseModel):
@@ -27,6 +49,10 @@ class SanaVideoRequest(BaseModel):
     motion_score: int = Field(default=30, ge=0, le=100)
     use_resolution_binning: bool = True
     max_sequence_length: int = Field(default=300, ge=16, le=1024)
+    quantization: str = SANA_VIDEO_QUANTIZATION_AUTO
+    vae_tiling: str = SANA_VIDEO_VAE_TILING_AUTO
+    offload_text_encoder_after_encode: bool = True
+    use_sage_attention: bool = True
     generate_audio: bool = False
     audio_prompt: str = ""
     audio_model_id: str = "mmaudio:small_16k"
@@ -43,6 +69,42 @@ class SanaVideoRequest(BaseModel):
             normalized = SANA_VIDEO_PIPELINE_I2V
         if normalized not in SANA_VIDEO_PIPELINES:
             raise ValueError(f"pipeline must be one of {SANA_VIDEO_PIPELINES}, got {value!r}")
+        return normalized
+
+    @field_validator("quantization")
+    @classmethod
+    def _validate_quantization(cls, value: str) -> str:
+        normalized = (value or SANA_VIDEO_QUANTIZATION_AUTO).strip().lower().replace("-", "_")
+        aliases = {
+            "none": SANA_VIDEO_QUANTIZATION_BF16,
+            "default": SANA_VIDEO_QUANTIZATION_BF16,
+            "fp8": SANA_VIDEO_QUANTIZATION_FP8,
+            "float8": SANA_VIDEO_QUANTIZATION_FP8,
+            "fp8_layerwise": SANA_VIDEO_QUANTIZATION_FP8,
+            "float8_layerwise": SANA_VIDEO_QUANTIZATION_FP8,
+            "int8": SANA_VIDEO_QUANTIZATION_BNB_INT8,
+            "8bit": SANA_VIDEO_QUANTIZATION_BNB_INT8,
+            "bnb_8bit": SANA_VIDEO_QUANTIZATION_BNB_INT8,
+            "nf4": SANA_VIDEO_QUANTIZATION_BNB_NF4,
+            "4bit": SANA_VIDEO_QUANTIZATION_BNB_NF4,
+            "bnb_4bit": SANA_VIDEO_QUANTIZATION_BNB_NF4,
+            "fp4": SANA_VIDEO_QUANTIZATION_BNB_FP4,
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in SANA_VIDEO_QUANTIZATIONS:
+            raise ValueError(f"quantization must be one of {SANA_VIDEO_QUANTIZATIONS}, got {value!r}")
+        return normalized
+
+    @field_validator("vae_tiling")
+    @classmethod
+    def _validate_vae_tiling(cls, value: str) -> str:
+        normalized = (value or SANA_VIDEO_VAE_TILING_AUTO).strip().lower().replace("-", "_")
+        if normalized in {"true", "on", "yes"}:
+            normalized = SANA_VIDEO_VAE_TILING_ALWAYS
+        elif normalized in {"false", "no"}:
+            normalized = SANA_VIDEO_VAE_TILING_OFF
+        if normalized not in SANA_VIDEO_VAE_TILING_MODES:
+            raise ValueError(f"vae_tiling must be one of {SANA_VIDEO_VAE_TILING_MODES}, got {value!r}")
         return normalized
 
     @field_validator("width", "height")
@@ -68,10 +130,25 @@ class SanaVideoResult(BaseModel):
     audio_path: str = ""
     video_only_path: str = ""
     infotext: str = ""
+    timings: dict[str, float] = Field(default_factory=dict)
+    progress: list[dict[str, object]] = Field(default_factory=list)
+    attention_backend: str = ""
+    quantization: str = ""
+    vae_tiling: str = ""
+    receipt_path: str = ""
 
     @property
     def path(self) -> str:
         return self.output_path
+
+
+class SanaVideoProgressEvent(BaseModel):
+    stage: str
+    progress: float = Field(default=0.0, ge=0.0, le=1.0)
+    message: str = ""
+    step: int = 0
+    total: int = 0
+    seconds: float = 0.0
 
 
 def sana_video_model_folder_name(repo_id: str = SANA_VIDEO_MODEL_REPO_480P) -> str:

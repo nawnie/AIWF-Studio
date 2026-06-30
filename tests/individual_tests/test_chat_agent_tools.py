@@ -100,6 +100,38 @@ def test_discovers_codex_or_claude_style_instruction_packs(tmp_path: Path) -> No
     assert "Helps with Python edits" in read.content
 
 
+def test_read_skill_accepts_dollar_prefixed_skill_names(tmp_path: Path) -> None:
+    skill = tmp_path / "skills" / "cartographer"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: cartographer\n"
+        "description: Local continuity cards.\n"
+        "---\n"
+        "# Cartographer\n"
+        "Use local continuity cards.\n",
+        encoding="utf-8",
+    )
+    tools = _service(tmp_path, skill_root=tmp_path / "skills")
+
+    read = tools.execute_tool("read_skill", {"name": "$cartographer"})
+    alias = tools.execute_tool("use_skill", {"skill": "$cartographer"})
+
+    assert read.ok is True
+    assert alias.ok is True
+    assert "Local continuity cards" in read.content
+    assert "Use local continuity cards" in alias.content
+
+
+def test_agent_prompt_explains_dollar_skill_usage(tmp_path: Path) -> None:
+    tools = _service(tmp_path, skill_root=tmp_path / "skills")
+
+    prompt = tools.agent_system_prompt()
+
+    assert "$cartographer" in prompt
+    assert "read_skill" in prompt
+
+
 def test_agentic_turn_executes_tool_then_returns_final_answer(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("Agent tools are local.\n", encoding="utf-8")
     tools = _service(tmp_path)

@@ -207,6 +207,10 @@ def preflight_sana_video_pipeline(
             "model_path": str(model_path),
             "model_installed": str(model_index.is_file()).lower(),
             "default_repo": "Efficient-Large-Model/SANA-Video_2B_480p_diffusers",
+            "sage_attention": service.sage_status(),
+            "bitsandbytes": service.bitsandbytes_status(),
+            "default_quantization": base_request.quantization,
+            "vae_tiling": base_request.vae_tiling,
         },
     )
 
@@ -317,6 +321,7 @@ def preflight_qwen_nunchaku_pipeline(flags: RuntimeFlags | str | Path) -> Pipeli
     runtime_flags = flags if isinstance(flags, RuntimeFlags) else RuntimeFlags(data_dir=Path(flags))
     service = QwenNunchakuService(runtime_flags)
     status = service.status()
+    base_blockers = tuple(message for message in status.messages if message.startswith("base components"))
     items = [
         PipelineCheckItem(
             "engine python",
@@ -332,8 +337,12 @@ def preflight_qwen_nunchaku_pipeline(flags: RuntimeFlags | str | Path) -> Pipeli
         ),
         PipelineCheckItem(
             "base components",
-            status.base_dir.is_dir(),
-            str(status.base_dir) if status.base_dir.is_dir() else f"Missing Qwen Image base folder: {status.base_dir}",
+            status.base_dir.is_dir() and not base_blockers,
+            "; ".join(base_blockers)
+            if base_blockers
+            else str(status.base_dir)
+            if status.base_dir.is_dir()
+            else f"Missing Qwen Image base folder: {status.base_dir}",
             status.base_dir,
         ),
         PipelineCheckItem(
@@ -371,7 +380,12 @@ def preflight_ltx_pipeline(
         LTX_PIPELINE_ONE_STAGE,
         LtxVideoRequest,
     )
-    from aiwf.services.ltx import LtxService, ltx_checkpoint_openability_error
+    from aiwf.services.ltx import (
+        LtxService,
+        ltx_checkpoint_openability_error,
+        ltx_checkpoint_requires_no_offload,
+        ltx_native_checkpoint_runtime_blocker,
+    )
 
     runtime_flags = flags if isinstance(flags, RuntimeFlags) else RuntimeFlags(data_dir=Path(flags))
     service = LtxService(runtime_flags, settings or UserSettings())
@@ -435,6 +449,15 @@ def preflight_ltx_pipeline(
                     checkpoint,
                 )
             )
+            runtime_blocker = ltx_native_checkpoint_runtime_blocker(checkpoint)
+            items.append(
+                PipelineCheckItem(
+                    "native worker compatibility",
+                    not runtime_blocker,
+                    runtime_blocker or "native worker compatibility check passed",
+                    checkpoint,
+                )
+            )
     if gemma_backend == LTX_GEMMA_BACKEND_GGUF:
         items.append(
             PipelineCheckItem(
@@ -464,11 +487,16 @@ def preflight_ltx_pipeline(
         )
     if selected_pipeline == LTX_PIPELINE_ONE_STAGE and checkpoint.is_file():
         size_gib = checkpoint.stat().st_size / (1024**3)
-        if size_gib > 12:
+        if ltx_checkpoint_requires_no_offload(checkpoint):
+            warnings.append(
+                "Selected LTX FP8 checkpoint uses offload=none on this Windows runtime; CPU/disk streaming "
+                "was isolated as the access-violation path."
+            )
+        elif size_gib > 12:
             warnings.append(
                 f"Selected LTX checkpoint is {size_gib:.1f} GiB; keep CPU offload enabled on 8-12 GB cards."
             )
-    if str(payload.get("offload") or "").lower() == "none":
+    if str(payload.get("offload") or "").lower() == "none" and not ltx_checkpoint_requires_no_offload(checkpoint):
         warnings.append("LTX offload is disabled; use CPU offload for consumer GPUs.")
     if gemma_backend == LTX_GEMMA_BACKEND_GGUF:
         warnings.append(

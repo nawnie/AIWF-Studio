@@ -11,7 +11,7 @@ from PIL import Image
 from aiwf import __version__
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.engine import EngineTenant
-from aiwf.core.domain.generation import GenerationMode, GenerationRequest, GenerationResult
+from aiwf.core.domain.generation import GenerationMode, GenerationRequest, GenerationResult, JobState
 from aiwf.core.domain.models import Checkpoint, LoraInfo, VaeInfo
 from aiwf.core.events.bus import EventBus
 from aiwf.services.engine_supervisor import EngineSupervisor
@@ -320,6 +320,44 @@ def test_image_generation_archives_backend_failure(tmp_path: Path):
     assert entries[0]["error"]["message"] == "bad latent soup"
     assert entries[0]["extra"]["checkpoint_id"] == "tiny"
     assert list((tmp_path / "outputs" / "failures").rglob("preview.png"))
+
+
+def test_streaming_generation_returns_failed_job_without_raising(tmp_path: Path):
+    checkpoint = Checkpoint(
+        id="tiny",
+        title="Tiny Model",
+        filename="tiny.safetensors",
+        path="/models/tiny.safetensors",
+        hash="abc123",
+    )
+
+    backend = MagicMock()
+    backend.resolve_checkpoint.return_value = checkpoint
+
+    def fail_generate(request, *, on_progress=None, **_kwargs):
+        if on_progress:
+            on_progress(1, request.steps, "Step 1/1", None)
+        raise RuntimeError("second run failed")
+
+    backend.generate.side_effect = fail_generate
+    events = EventBus()
+    service = GenerationService(
+        backend=backend,
+        store=MagicMock(),
+        metadata=MagicMock(),
+        queue=JobQueue(events),
+        events=events,
+        settings=UserSettings(save_images=False),
+        failure_archive=FailureArchiveService(tmp_path / "outputs"),
+    )
+
+    output = list(service.submit_streaming(GenerationRequest(prompt="dance", steps=1)))
+    done = [item for item in output if item[0] == "done"]
+
+    assert done
+    job = done[-1][1]
+    assert job.state == JobState.FAILED
+    assert job.error == "second run failed"
 
 
 def test_generation_service_records_model_throughput(monkeypatch):

@@ -29,21 +29,26 @@ from aiwf.infrastructure.wan.pipeline import (
     _load_comfy_fp8_transformer_weights,
     _load_umt5_text_encoder,
     _load_wan_vae,
+    _merge_comfy_wan_lora_into_transformer,
     _new_fp8_scaled_linear,
     _new_lazy_wan_transformer,
     _new_wan_euler_simple_scheduler,
     _orient_umt5_gguf_tensor,
     _call_accepts_kwarg,
     _collect_fp8_linear_metrics,
+    _convert_comfy_wan_lora_state_dict,
     _cuda_supports_tensorcore_fp8,
     _resolve_dual_stage_offload_for_hardware,
     _wan_output_type_for_pipe,
+    _wan_lora_load_prefix,
     _wan_cache_mode,
     estimate_gguf_expanded_gb,
 )
 from aiwf.infrastructure.video import VideoError
+from aiwf.infrastructure.model_inventory import ModelInventoryRecord
 from aiwf.services.failure_archive import FailureArchiveService
 from aiwf.services.genlog import GenerationLogService
+from aiwf.services import wan as wan_service
 from aiwf.services.wan import WanService, wan_model_pair_compatibility
 
 
@@ -965,6 +970,41 @@ def test_wan_generation_passes_resolved_paths_to_backend(tmp_path: Path, monkeyp
     assert captured["components_base"] == str(base.resolve())
 
 
+def test_wan_text_encoder_labels_use_cached_inventory(tmp_path: Path, monkeypatch):
+    s = _svc(tmp_path)
+    umt5 = s.flags.resolved_models_dir() / "Textencoder" / "wan_umt5_fp8.safetensors"
+    t5 = s.flags.resolved_models_dir() / "Textencoder" / "t5xxl_fp16.safetensors"
+    umt5.parent.mkdir(parents=True)
+    umt5.write_bytes(b"umt5")
+    t5.write_bytes(b"t5")
+    records = [
+        ModelInventoryRecord(
+            path=str(umt5),
+            filename=umt5.name,
+            family="text_encoder",
+            architecture="wan",
+            current_subdir="Textencoder",
+            recommended_subdir="Textencoder",
+            should_move=False,
+            header_identifiers={"header_arch": "umt5-encoder", "header_precision": "fp8"},
+        ),
+        ModelInventoryRecord(
+            path=str(t5),
+            filename=t5.name,
+            family="text_encoder",
+            architecture="flux",
+            current_subdir="Textencoder",
+            recommended_subdir="flux/Textencoder",
+            should_move=False,
+            header_identifiers={"header_arch": "t5xxl-encoder"},
+        ),
+    ]
+    monkeypatch.setattr(wan_service, "get_model_inventory", lambda _flags: records)
+
+    assert s.list_local_text_encoders() == [umt5.name]
+    assert s.list_local_text_encoders_labeled() == [(f"{umt5.stem} [fp8]", umt5.name)]
+
+
 def test_preflight_rejects_lora_from_wrong_runtime_size(tmp_path: Path):
     s = _svc(tmp_path)
     _force_wan_available(s)
@@ -1571,6 +1611,131 @@ def test_wan_single_5b_applies_lora_and_caches_by_lora():
         ("turbo.safetensors", "wan_5b_lora", 0.75),
         ("other.safetensors", "wan_5b_lora", 0.75),
     ]
+
+
+def test_wan_lora_load_prefix_detects_comfy_diffusion_model_keys(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+    comfy = tmp_path / "comfy_wan_lora.safetensors"
+    diffusers = tmp_path / "diffusers_wan_lora.safetensors"
+    safetensors.save_file({"diffusion_model.blocks.0.self_attn.q.lora_down.weight": torch.ones(1)}, comfy)
+    safetensors.save_file({"transformer.blocks.0.self_attn.q.lora_down.weight": torch.ones(1)}, diffusers)
+
+    assert _wan_lora_load_prefix(str(comfy)) is None
+    assert _wan_lora_load_prefix(str(diffusers)) == "transformer"
+
+
+def test_convert_comfy_wan_lora_state_dict_uses_diffusers_peft_keys(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+    lora = tmp_path / "comfy_wan_lora.safetensors"
+    safetensors.save_file(
+        {
+            "diffusion_model.blocks.0.self_attn.q.lora_down.weight": torch.ones(2, 4),
+            "diffusion_model.blocks.0.self_attn.q.lora_up.weight": torch.ones(4, 2),
+            "diffusion_model.blocks.0.cross_attn.k_img.lora_down.weight": torch.ones(2, 4),
+            "diffusion_model.blocks.0.cross_attn.k_img.lora_up.weight": torch.ones(4, 2),
+            "diffusion_model.blocks.0.self_attn.q.diff_b": torch.ones(4),
+        },
+        lora,
+    )
+
+    converted = _convert_comfy_wan_lora_state_dict(str(lora))
+
+    assert converted is not None
+    assert sorted(converted) == [
+        "transformer.blocks.0.attn1.to_q.lora_A.weight",
+        "transformer.blocks.0.attn1.to_q.lora_B.weight",
+        "transformer.blocks.0.attn2.add_k_proj.lora_A.weight",
+        "transformer.blocks.0.attn2.add_k_proj.lora_B.weight",
+    ]
+
+
+def test_apply_transformer_lora_converts_comfy_keys_for_peft(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+    lora = tmp_path / "comfy_wan_lora.safetensors"
+    safetensors.save_file(
+        {
+            "diffusion_model.blocks.0.self_attn.q.lora_down.weight": torch.ones(2, 4),
+            "diffusion_model.blocks.0.self_attn.q.lora_up.weight": torch.ones(4, 2),
+        },
+        lora,
+    )
+
+    class FakeTransformer:
+        def __init__(self) -> None:
+            self.prefixes = []
+            self.sources = []
+            self.adapters = []
+            self.fused = []
+
+        def load_lora_adapter(self, source, *, adapter_name, prefix):
+            self.prefixes.append(prefix)
+            self.sources.append(source)
+
+        def set_adapters(self, adapter_name, *, weights):
+            self.adapters.append((adapter_name, weights))
+
+        def fuse_lora(self, *, adapter_names, lora_scale, safe_fusing):
+            self.fused.append((adapter_names, lora_scale, safe_fusing))
+
+    from aiwf.infrastructure.wan.pipeline import _apply_transformer_lora
+
+    transformer = FakeTransformer()
+    _apply_transformer_lora(transformer, str(lora), adapter_name="wan_high_lora", weight=0.75)
+
+    assert transformer.prefixes == ["transformer"]
+    assert isinstance(transformer.sources[0], dict)
+    assert sorted(transformer.sources[0]) == [
+        "transformer.blocks.0.attn1.to_q.lora_A.weight",
+        "transformer.blocks.0.attn1.to_q.lora_B.weight",
+    ]
+    assert transformer.adapters == [("wan_high_lora", 0.75)]
+    assert transformer.fused == [(["wan_high_lora"], 1.0, True)]
+
+
+def test_merge_comfy_wan_lora_into_transformer_applies_linear_and_direct_deltas(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    safetensors = pytest.importorskip("safetensors.torch")
+    lora = tmp_path / "comfy_wan_lora.safetensors"
+    safetensors.save_file(
+        {
+            "diffusion_model.blocks.0.self_attn.q.lora_down.weight": torch.tensor([[1.0, 2.0]]),
+            "diffusion_model.blocks.0.self_attn.q.lora_up.weight": torch.tensor([[3.0], [4.0]]),
+            "diffusion_model.blocks.0.self_attn.q.diff_b": torch.tensor([0.5, 1.5]),
+            "diffusion_model.blocks.0.norm3.diff": torch.tensor([0.25, 0.5]),
+            "diffusion_model.blocks.0.diff_m": torch.ones(1, 6, 2),
+        },
+        lora,
+    )
+
+    class Block(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn1 = torch.nn.Module()
+            self.attn1.to_q = torch.nn.Linear(2, 2)
+            self.norm2 = torch.nn.LayerNorm(2)
+            self.norm3 = torch.nn.LayerNorm(2)
+            self.scale_shift_table = torch.nn.Parameter(torch.zeros(1, 6, 2))
+
+    class FakeTransformer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocks = torch.nn.ModuleList([Block()])
+
+    transformer = FakeTransformer()
+    linear = transformer.blocks[0].attn1.to_q
+    linear.weight.data.zero_()
+    linear.bias.data.zero_()
+    transformer.blocks[0].norm2.weight.data.zero_()
+
+    assert _merge_comfy_wan_lora_into_transformer(transformer, str(lora), weight=0.5) is True
+
+    assert torch.allclose(linear.weight, torch.tensor([[1.5, 3.0], [2.0, 4.0]]))
+    assert torch.allclose(linear.bias, torch.tensor([0.25, 0.75]))
+    assert torch.allclose(transformer.blocks[0].norm2.weight, torch.tensor([0.125, 0.25]))
+    assert torch.allclose(transformer.blocks[0].scale_shift_table, torch.full((1, 6, 2), 0.5))
 
 
 def test_dequantize_comfy_fp8_state_dict_scales_weights():

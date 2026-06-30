@@ -36,5 +36,6 @@ class RestoreOptions(BaseModel):
 
 class EnhanceResult(BaseModel):
     image_path: str | None = None
+    receipt_path: str | None = None
     infotext: str = ""
     message: str = ""

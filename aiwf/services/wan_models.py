@@ -289,6 +289,15 @@ class WanHeaderInfo:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class WanLoraInfo:
+    ok: bool = False
+    size_class: str = ""
+    role: str = ""
+    tensors: int = 0
+    error: str = ""
+
+
 def _wan_vae_for_in_channels(ic: int) -> str:
     if ic == 48:
         return "2.2"
@@ -314,6 +323,65 @@ def _wan_role_from_text(s: str) -> str:
     if "low" in s and "high" not in s:
         return "low"
     return ""
+
+
+def _wan_lora_text_hints(path: Path, metadata: dict | None = None) -> str:
+    fields = [path.name]
+    if metadata:
+        fields.extend(str(value) for value in metadata.values() if value is not None)
+    return " ".join(fields).lower()
+
+
+def _wan_lora_size_from_text(text: str) -> str:
+    if "a14b" in text or "14b" in text:
+        return "14b"
+    if "5b" in text or "ti2v" in text:
+        return "5b"
+    return ""
+
+
+def _wan_lora_size_from_keys(keys) -> str:
+    max_block = -1
+    for key in keys:
+        match = re.search(r"(?:^|\.)(?:blocks|double_blocks)\.(\d+)\.", str(key))
+        if match:
+            max_block = max(max_block, int(match.group(1)))
+    if max_block >= 35:
+        return "14b"
+    if max_block >= 25:
+        return "5b"
+    return ""
+
+
+def wan_lora_info(lora_id) -> WanLoraInfo:
+    """Cheap Wan LoRA classifier from filename, safetensors metadata, and keys.
+
+    The filename is still the first signal, but local safetensors often carry
+    enough metadata or block-number keys to distinguish 5B from A14B even when
+    the downloaded filename is vague.
+    """
+    path = Path(str(lora_id or ""))
+    text = _wan_lora_text_hints(path)
+    size = _wan_lora_size_from_text(text)
+    role = _wan_role_from_text(text)
+    tensors = 0
+    if path.suffix.lower() == ".safetensors" and path.is_file():
+        try:
+            import json as _json
+            import struct as _struct
+
+            with open(path, "rb") as handle:
+                header_len = _struct.unpack("<Q", handle.read(8))[0]
+                header = _json.loads(handle.read(header_len))
+            metadata = header.get("__metadata__", {}) or {}
+            keys = [key for key in header if key != "__metadata__"]
+            tensors = len(keys)
+            text = _wan_lora_text_hints(path, metadata)
+            size = _wan_lora_size_from_text(text) or _wan_lora_size_from_keys(keys) or size
+            role = _wan_role_from_text(text) or role
+        except Exception as exc:
+            return WanLoraInfo(False, size, role, tensors, f"{type(exc).__name__}: {exc}")
+    return WanLoraInfo(True, size, role, tensors)
 
 
 def wan_model_header_info(path) -> "WanHeaderInfo":
@@ -500,12 +568,12 @@ def wan_selectable_transformers(candidates, *, runtime_mode, want_role=None, pee
 
 
 def wan_lora_matches(lora_id, *, size_class="") -> bool:
-    """Best-effort LoRA compatibility by filename (A14B/14B vs 5B)."""
-    n = Path(str(lora_id or "")).name.lower()
+    """Best-effort LoRA compatibility by filename plus local safetensors hints."""
+    info = wan_lora_info(lora_id)
     if not size_class:
         return True
-    has14 = "a14b" in n or "14b" in n
-    has5 = "5b" in n or "ti2v" in n
+    has14 = info.size_class == "14b"
+    has5 = info.size_class == "5b"
     if size_class == "14b":
         return not (has5 and not has14)
     if size_class == "5b":
@@ -513,6 +581,18 @@ def wan_lora_matches(lora_id, *, size_class="") -> bool:
     return True
 
 
-def wan_selectable_loras(candidates, *, runtime_mode):
+def wan_lora_stage_matches(lora_id, *, stage="") -> bool:
+    wanted = str(stage or "").strip().lower()
+    if wanted not in {"high", "low"}:
+        return True
+    role = wan_lora_info(lora_id).role
+    return role in {"", wanted}
+
+
+def wan_selectable_loras(candidates, *, runtime_mode, stage=""):
     sc = wan_runtime_size_class(runtime_mode)
-    return [str(c) for c in (candidates or ()) if c and wan_lora_matches(c, size_class=sc)]
+    return [
+        str(c)
+        for c in (candidates or ())
+        if c and wan_lora_matches(c, size_class=sc) and wan_lora_stage_matches(c, stage=stage)
+    ]

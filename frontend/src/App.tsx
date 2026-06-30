@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type {
+  CSSProperties,
+  ChangeEvent as ReactChangeEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  ReactNode,
+} from 'react'
 import {
   Boxes,
   Brush,
@@ -29,12 +35,21 @@ import type { LucideIcon } from 'lucide-react'
 import {
   fetchProData,
   fetchProBootstrap,
+  fetchProCapabilities,
+  fetchProDownloads,
   fetchProLogs,
   fetchProRuntime,
   fetchProSettings,
+  formatApiError,
   generateProOutput,
   getFallbackBootstrap,
   getFallbackRuntime,
+  ProApiError,
+  reportProClientError,
+  reportProClientEvent,
+  requestProRestart,
+  streamProRuntime,
+  stopProGeneration,
 } from './api'
 import type {
   AspectRatioOption,
@@ -42,11 +57,16 @@ import type {
   EngineId,
   EngineSummary,
   GenerationSettings,
+  GenerationProgressEvent,
+  ProCapabilitiesStatus,
   ProDataStatus,
+  ProDownloadsStatus,
   ProLogStatus,
   ProModelOption,
   ProBootstrap,
   ProMode,
+  ProReadinessItem,
+  ProReadinessStatus,
   PromptInsight,
   ProRuntimeStatus,
   ProSettingsStatus,
@@ -71,6 +91,21 @@ interface DragState {
   size: number
 }
 
+interface ToolLaneAction {
+  label: string
+  onClick?: () => void
+  disabled?: boolean
+}
+
+interface ToolLaneCard {
+  id: string
+  title: string
+  summary: string
+  stats: string[]
+  actions: ToolLaneAction[]
+  note?: string
+}
+
 interface LayoutPreferences {
   leftPanelWidth: number
   rightPanelWidth: number
@@ -85,6 +120,8 @@ const DEFAULT_LAYOUT_PREFERENCES: LayoutPreferences = {
   bottomDockVisible: true,
 }
 
+const PRO_APP_ICON = '/app-icon.png'
+
 const LAYOUT_STORAGE_KEY = 'aiwf.pro.layout.v1'
 
 const MODE_TABS: IconItem<ProMode>[] = [
@@ -98,6 +135,7 @@ const MODE_TABS: IconItem<ProMode>[] = [
 const RAIL_ITEMS: IconItem<string>[] = [
   { id: 'create', label: 'Create', icon: Sparkles },
   { id: 'models', label: 'Models', icon: Boxes },
+  { id: 'tools', label: 'Tools', icon: Wand2 },
   { id: 'data', label: 'Data', icon: Database },
   { id: 'monitor', label: 'Monitor', icon: Monitor },
   { id: 'logs', label: 'Logs', icon: FileImage },
@@ -106,14 +144,68 @@ const RAIL_ITEMS: IconItem<string>[] = [
 
 const RAIL_IDS = new Set(RAIL_ITEMS.map((item) => item.id))
 
+const SANA_QUANTIZATION_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'fp8_layerwise', label: 'FP8 layerwise' },
+  { value: 'bnb_int8', label: 'BNB 8-bit' },
+  { value: 'bnb_nf4', label: 'BNB NF4' },
+  { value: 'bnb_fp4', label: 'BNB FP4' },
+  { value: 'bf16', label: 'BF16' },
+]
+
+const SANA_VAE_TILING_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'off', label: 'Off' },
+  { value: 'always', label: 'Always' },
+]
+
+const EMPTY_READINESS: ProReadinessStatus = {
+  counts: {
+    working: 0,
+    'metadata-only': 0,
+    'blocked-cleanly': 0,
+    'broken-runtime': 0,
+    'unsupported-no-route': 0,
+  },
+  families: [],
+  working: [],
+  needsWork: [],
+  metadataOnlyCount: 0,
+  total: 0,
+  error: '',
+}
+
+const EMPTY_CAPABILITIES: ProCapabilitiesStatus = {
+  gradioTabs: [],
+  tools: [],
+  counts: {
+    gradioTabs: 0,
+    reactRails: RAIL_ITEMS.length,
+    checkpoints: 0,
+    blockedCheckpoints: 0,
+    loras: 0,
+    controlnet: 0,
+    sam: 0,
+    reactor: 0,
+    enhance: 0,
+    sanaVideo: 0,
+    wan: 0,
+  },
+  readiness: EMPTY_READINESS,
+  notes: ['Capabilities are loading.'],
+}
+
 function App() {
   const fallbackBootstrap = useMemo(() => getFallbackBootstrap(), [])
   const fallbackRuntime = useMemo(() => getFallbackRuntime(), [])
   const initialLayout = useMemo(() => readLayoutPreferences(), [])
   const [bootstrap, setBootstrap] = useState<ProBootstrap>(fallbackBootstrap)
   const [runtime, setRuntime] = useState<ProRuntimeStatus>(fallbackRuntime)
+  const [runtimeStreamConnected, setRuntimeStreamConnected] = useState(false)
   const [settings, setSettings] = useState<GenerationSettings>(fallbackBootstrap.defaults)
   const [dataStatus, setDataStatus] = useState<ProDataStatus | null>(null)
+  const [downloadsStatus, setDownloadsStatus] = useState<ProDownloadsStatus | null>(null)
+  const [capabilitiesStatus, setCapabilitiesStatus] = useState<ProCapabilitiesStatus | null>(null)
   const [logStatus, setLogStatus] = useState<ProLogStatus | null>(null)
   const [settingsStatus, setSettingsStatus] = useState<ProSettingsStatus | null>(null)
   const [promptInsight, setPromptInsight] = useState<PromptInsight>({
@@ -127,6 +219,10 @@ function App() {
     suggestions: ['Use this for lightweight prompt help; it does not start backend inference.'],
   })
   const [promptInsightBusy, setPromptInsightBusy] = useState(false)
+  const [generationProgress, setGenerationProgress] = useState<GenerationProgressEvent[]>([])
+  const [generationTimings, setGenerationTimings] = useState<Record<string, number>>({})
+  const [generationReceiptPath, setGenerationReceiptPath] = useState('')
+  const [generationError, setGenerationError] = useState('')
   const [activeMode, setActiveMode] = useState<ProMode>('image')
   const [activeRail, setActiveRail] = useState(readInitialRail)
   const [preview, setPreview] = useState<RecentOutput | null>(
@@ -135,6 +231,8 @@ function App() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [statusMessage, setStatusMessage] = useState('Ready.')
   const [isGenerating, setIsGenerating] = useState(false)
+  const [backendConnected, setBackendConnected] = useState(false)
+  const [backendRecovering, setBackendRecovering] = useState(false)
   const [engineFilter, setEngineFilter] = useState<EngineId>('all')
   const [leftPanelWidth, setLeftPanelWidth] = useState(initialLayout.leftPanelWidth)
   const [rightPanelWidth, setRightPanelWidth] = useState(initialLayout.rightPanelWidth)
@@ -149,6 +247,35 @@ function App() {
   const [segmentationMode, setSegmentationMode] = useState('Auto mask')
   const [reactorEnabled, setReactorEnabled] = useState(false)
   const [reactorStrength, setReactorStrength] = useState(0.8)
+  const generationAbortRef = useRef<AbortController | null>(null)
+  const runtimeErrorLoggedRef = useRef(false)
+  const auxiliaryErrorLoggedRef = useRef<Record<string, boolean>>({})
+  const runtimeJobActive = isRuntimeJobActive(runtime.job)
+  const generationActive = isGenerating || runtime.state.toLowerCase() === 'running' || runtimeJobActive
+
+  const setDisconnectedRuntime = useCallback((message: string) => {
+    setRuntime({
+      ...fallbackRuntime,
+      state: backendRecovering ? 'Recovering' : 'Disconnected',
+      backend: 'Backend unreachable',
+      device: 'Waiting for runtime',
+      job: { ...fallbackRuntime.job, message },
+      resources: fallbackRuntime.resources.map((metric) => ({ ...metric })),
+      loadedModel: { ...fallbackRuntime.loadedModel },
+    })
+  }, [backendRecovering, fallbackRuntime])
+
+  const markBackendDisconnected = useCallback((message: string) => {
+    setBackendConnected(false)
+    setRuntimeStreamConnected(false)
+    setDisconnectedRuntime(message)
+    setCapabilitiesStatus(null)
+    setDataStatus(null)
+    setDownloadsStatus(null)
+    setLogStatus(null)
+    setSettingsStatus(null)
+    setStatusMessage(message)
+  }, [setDisconnectedRuntime])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -156,63 +283,212 @@ function App() {
       .then((nextBootstrap) => {
         setBootstrap(nextBootstrap)
         setPreview((currentPreview) => currentPreview ?? nextBootstrap.recentOutputs[0] ?? null)
-        setSettings((current) => mergeBootstrapDefaults(current, nextBootstrap))
+        setSettings((current) =>
+          settingsMatch(current, fallbackBootstrap.defaults)
+            ? nextBootstrap.defaults
+            : mergeBootstrapDefaults(current, nextBootstrap),
+        )
+        setBackendConnected(true)
+        setBackendRecovering(false)
         setStatusMessage('Connected to /api/pro/bootstrap.')
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
           return
         }
+        reportProClientError({
+          kind: 'api',
+          message: formatApiError(error),
+          source: 'bootstrap',
+          context: { route: '/api/pro/bootstrap' },
+        })
         setStatusMessage('Using the local workspace view while the backend finishes starting.')
       })
 
     return () => controller.abort()
-  }, [])
+  }, [fallbackBootstrap.defaults])
 
   useEffect(() => {
-    const controller = new AbortController()
+    return streamProRuntime(
+      (nextRuntime) => {
+        setRuntime(nextRuntime)
+        setBackendConnected(true)
+        if (backendRecovering) {
+          setBackendRecovering(false)
+          setStatusMessage('Backend reconnected.')
+        }
+      },
+      (connected) => {
+        setRuntimeStreamConnected(connected)
+      },
+    )
+  }, [backendRecovering])
+
+  useEffect(() => {
+    let disposed = false
+    let requestController: AbortController | null = null
+    let requestTimeoutId: number | null = null
+    let inFlight = false
+    const intervalMs = generationActive ? 1000 : runtimeStreamConnected ? 7000 : 5000
     const refreshRuntime = () => {
-      fetchProRuntime(controller.signal)
-        .then(setRuntime)
+      if (disposed || inFlight) {
+        return
+      }
+      inFlight = true
+      const activeController = new AbortController()
+      let timedOut = false
+      requestController = activeController
+      requestTimeoutId = window.setTimeout(() => {
+        timedOut = true
+        activeController.abort()
+      }, 4000)
+      fetchProRuntime(activeController.signal)
+        .then((nextRuntime) => {
+          if (!disposed) {
+            runtimeErrorLoggedRef.current = false
+            setBackendConnected(true)
+            setBackendRecovering(false)
+            setRuntime(nextRuntime)
+          }
+        })
         .catch((error: unknown) => {
-          if (!isAbortError(error)) {
-            setStatusMessage('Runtime details are refreshing. The workspace is still available.')
+          if (!disposed && (timedOut || !isAbortError(error))) {
+            if (!runtimeErrorLoggedRef.current) {
+              runtimeErrorLoggedRef.current = true
+              reportProClientError({
+                kind: 'api',
+                message: timedOut ? 'Runtime refresh timed out after 4 seconds.' : formatApiError(error),
+                source: 'runtime-refresh',
+                context: { route: '/api/pro/runtime', timedOut },
+              })
+            }
+            markBackendDisconnected(
+              timedOut
+                ? 'Backend communication timed out. Pro is holding your place and waiting to reconnect.'
+                : 'Backend communication broke. Pro is waiting for the local runtime to come back.',
+            )
+          }
+        })
+        .finally(() => {
+          if (requestTimeoutId !== null) {
+            window.clearTimeout(requestTimeoutId)
+            requestTimeoutId = null
+          }
+          inFlight = false
+          if (requestController === activeController) {
+            requestController = null
           }
         })
     }
 
     refreshRuntime()
-    const intervalId = window.setInterval(refreshRuntime, 10000)
+    const intervalId = window.setInterval(refreshRuntime, intervalMs)
     return () => {
-      controller.abort()
+      disposed = true
+      requestController?.abort()
+      if (requestTimeoutId !== null) {
+        window.clearTimeout(requestTimeoutId)
+      }
       window.clearInterval(intervalId)
+    }
+  }, [generationActive, markBackendDisconnected, runtimeStreamConnected])
+
+  useEffect(() => {
+    const onError = (event: ErrorEvent) => {
+      reportProClientError({
+        kind: 'window-error',
+        message: event.message || 'Unhandled browser error',
+        stack: event.error instanceof Error ? event.error.stack : undefined,
+        source: event.filename ? `${event.filename}:${event.lineno}:${event.colno}` : 'window',
+      })
+    }
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      reportProClientError({
+        kind: 'unhandledrejection',
+        message: formatApiError(event.reason),
+        stack: event.reason instanceof Error ? event.reason.stack : undefined,
+        source: 'promise',
+      })
+    }
+    window.addEventListener('error', onError)
+    window.addEventListener('unhandledrejection', onUnhandledRejection)
+    return () => {
+      window.removeEventListener('error', onError)
+      window.removeEventListener('unhandledrejection', onUnhandledRejection)
     }
   }, [])
 
   useEffect(() => {
     const controller = new AbortController()
+    const runWorkspaceFetch = <T,>(
+      key: string,
+      fetcher: (signal?: AbortSignal) => Promise<T>,
+      setter: (value: T | null) => void,
+      timeoutMs: number,
+      route: string,
+      emptyMessage: string,
+    ) => {
+      const requestController = new AbortController()
+      const timeoutId = window.setTimeout(() => requestController.abort(), timeoutMs)
+      const abortRelay = () => requestController.abort()
+      controller.signal.addEventListener('abort', abortRelay, { once: true })
+      void fetcher(requestController.signal)
+        .then((value) => {
+          auxiliaryErrorLoggedRef.current[key] = false
+          setter(value)
+        })
+        .catch((error: unknown) => {
+          if (!isAbortError(error)) {
+            setter(null)
+          } else if (!controller.signal.aborted) {
+            setter(null)
+          }
+          if (controller.signal.aborted) {
+            return
+          }
+          if (!auxiliaryErrorLoggedRef.current[key]) {
+            auxiliaryErrorLoggedRef.current[key] = true
+            reportProClientError({
+              kind: 'api',
+              message: isAbortError(error) ? `${route} timed out after ${timeoutMs} ms.` : formatApiError(error),
+              source: key,
+              context: { route, timeoutMs },
+            })
+          }
+          setStatusMessage(emptyMessage)
+        })
+        .finally(() => {
+          window.clearTimeout(timeoutId)
+          controller.signal.removeEventListener('abort', abortRelay)
+        })
+    }
     const refreshWorkspaceData = () => {
-      void fetchProData(controller.signal)
-        .then(setDataStatus)
-        .catch((error: unknown) => {
-          if (!isAbortError(error)) {
-            setDataStatus(null)
-          }
-        })
-      void fetchProLogs(controller.signal)
-        .then(setLogStatus)
-        .catch((error: unknown) => {
-          if (!isAbortError(error)) {
-            setLogStatus(null)
-          }
-        })
-      void fetchProSettings(controller.signal)
-        .then(setSettingsStatus)
-        .catch((error: unknown) => {
-          if (!isAbortError(error)) {
-            setSettingsStatus(null)
-          }
-        })
+      runWorkspaceFetch('data', fetchProData, setDataStatus, 6000, '/api/pro/data', 'Workspace data is temporarily unavailable.')
+      runWorkspaceFetch(
+        'downloads',
+        fetchProDownloads,
+        setDownloadsStatus,
+        6000,
+        '/api/pro/downloads',
+        'Download catalog refresh failed. Pro is keeping the current session alive.',
+      )
+      runWorkspaceFetch(
+        'capabilities',
+        fetchProCapabilities,
+        setCapabilitiesStatus,
+        12000,
+        '/api/pro/capabilities',
+        'Capability scan is taking too long. Pro will retry without blocking the rest of the workspace.',
+      )
+      runWorkspaceFetch('logs', fetchProLogs, setLogStatus, 6000, '/api/pro/logs', 'Runtime logs are temporarily unavailable.')
+      runWorkspaceFetch(
+        'settings',
+        fetchProSettings,
+        setSettingsStatus,
+        6000,
+        '/api/pro/settings',
+        'Settings data is temporarily unavailable until the backend replies again.',
+      )
     }
 
     refreshWorkspaceData()
@@ -222,6 +498,24 @@ function App() {
       window.clearInterval(intervalId)
     }
   }, [])
+
+  const handleRecoverBackend = useCallback(async () => {
+    setBackendRecovering(true)
+    setStatusMessage('Restart requested. Waiting for the Pro backend to come back on the same port.')
+    markBackendDisconnected('Restart requested. Waiting for the Pro backend to come back on the same port.')
+    try {
+      await requestProRestart()
+    } catch (error) {
+      setBackendRecovering(false)
+      setStatusMessage(`Backend restart request failed: ${formatApiError(error)}`)
+      reportProClientError({
+        kind: 'api',
+        message: formatApiError(error),
+        source: 'restart',
+        context: { route: '/api/pro/restart' },
+      })
+    }
+  }, [markBackendDisconnected])
 
   useEffect(() => {
     if (!dragState) {
@@ -313,7 +607,10 @@ function App() {
     )
   }, [bootstrap.models, filteredModels, settings.modelId])
 
-  const recentOutputs = useMemo(() => bootstrap.recentOutputs.slice(0, 8), [bootstrap.recentOutputs])
+  const recentOutputs = useMemo(() => {
+    const source = dataStatus?.recentOutputs.length ? dataStatus.recentOutputs : bootstrap.recentOutputs
+    return source.slice(0, 8)
+  }, [bootstrap.recentOutputs, dataStatus])
 
   const activeRatio = useMemo(
     () =>
@@ -325,12 +622,26 @@ function App() {
   const handleModeSelect = useCallback((mode: ProMode) => {
     setActiveMode(mode)
     if (isCreationMode(mode)) {
-      setSettings((current) => ({ ...current, mode }))
+      if (mode === 'video') {
+        const sanaModel = bootstrap.models.find((model) => model.engineId === 'sana_video')
+        setEngineFilter('sana_video')
+        setSettings((current) => ({
+          ...current,
+          mode,
+          modelId: sanaModel?.id ?? current.modelId,
+          aspectRatioId: 'sana-480p',
+          width: 832,
+          height: 480,
+          batchSize: 1,
+        }))
+      } else {
+        setSettings((current) => ({ ...current, mode }))
+      }
       setActiveRail('create')
     } else {
       setActiveRail(mode)
     }
-  }, [])
+  }, [bootstrap.models])
 
   const handleRailSelect = useCallback((id: string) => {
     setActiveRail(id)
@@ -341,6 +652,8 @@ function App() {
       setActiveMode('models')
     } else if (id === 'data') {
       setActiveMode('data')
+    } else if (id === 'tools') {
+      setActiveMode('image')
     } else if (id === 'create') {
       setActiveMode('image')
       setSettings((current) => ({ ...current, mode: 'image' }))
@@ -372,33 +685,158 @@ function App() {
     [bootstrap.models],
   )
 
+  const handleModelSelect = useCallback(
+    (modelId: string) => {
+      const model = bootstrap.models.find((item) => item.id === modelId)
+      setSettings((current) => ({
+        ...current,
+        modelId,
+      }))
+      if (model?.engineId) {
+        setEngineFilter(model.engineId)
+      }
+      setStatusMessage(
+        model
+          ? `${model.name} selected. Runtime loads it when generation starts.`
+          : `${modelId} selected. Runtime loads it when generation starts.`,
+      )
+    },
+    [bootstrap.models],
+  )
+
   const handleGenerate = useCallback(async () => {
+    if (generationAbortRef.current) {
+      if (generationActive) {
+        setStatusMessage('Generation is already running.')
+        return
+      }
+      generationAbortRef.current = null
+    }
+    if (generationActive) {
+      setStatusMessage('Generation is already running in the backend.')
+      return
+    }
     if (!settings.prompt.trim()) {
       setStatusMessage('Enter a prompt before generating.')
       return
     }
 
     const controller = new AbortController()
+    generationAbortRef.current = controller
     setIsGenerating(true)
+    setGenerationProgress([])
+    setGenerationTimings({})
+    setGenerationReceiptPath('')
+    setGenerationError('')
     setStatusMessage('Submitting to /api/pro/generate...')
+    reportProClientEvent({
+      action: 'pro-generate-submit',
+      detail: `${settings.mode} ${settings.width}x${settings.height}`,
+      context: {
+        mode: settings.mode,
+        modelId: settings.modelId,
+        steps: settings.steps,
+      },
+    })
     try {
       const result = await generateProOutput(settings, controller.signal)
+      setGenerationProgress(result.progress)
+      setGenerationTimings(result.timings)
+      setGenerationReceiptPath(result.receiptPath ?? '')
       const sessionOutputs =
         result.recentOutputs.length > 0
           ? result.recentOutputs
           : result.output
             ? [result.output]
             : []
-      if (sessionOutputs.length > 0) {
-        setPreview(sessionOutputs[sessionOutputs.length - 1])
+      const stampedOutputs = sessionOutputs.map((item) => ({
+        ...item,
+        modelName: item.modelName || selectedModel?.name || settings.modelId,
+      }))
+      if (stampedOutputs.length > 0) {
+        setPreview(stampedOutputs[stampedOutputs.length - 1])
+        setBootstrap((current) => ({
+          ...current,
+          recentOutputs: mergeRecentOutputs(stampedOutputs, current.recentOutputs),
+        }))
+        setDataStatus((current) =>
+          current
+            ? {
+                ...current,
+                counts: {
+                  ...current.counts,
+                  recentOutputs: Math.max(
+                    current.counts.recentOutputs,
+                    mergeRecentOutputs(stampedOutputs, current.recentOutputs).length,
+                  ),
+                },
+                recentOutputs: mergeRecentOutputs(stampedOutputs, current.recentOutputs),
+              }
+            : current,
+        )
       }
       setStatusMessage(result.message || `Generation ${result.status}.`)
-    } catch {
-      setStatusMessage('Generation did not start. Check the backend connection and try again.')
+      setGenerationError('')
+    } catch (error: unknown) {
+      if (isGenerationCancelResult(error)) {
+        setGenerationError('')
+        setStatusMessage('Generation stop requested.')
+      } else {
+        const nextMessage = `Generation failed: ${formatApiError(error)}`
+        setGenerationError(nextMessage)
+        setStatusMessage(nextMessage)
+        reportProClientError({
+          kind: 'generation',
+          message: nextMessage,
+          stack: error instanceof Error ? error.stack : undefined,
+          source: 'handleGenerate',
+          context: {
+            mode: settings.mode,
+            modelId: settings.modelId,
+            route: '/api/pro/generate',
+          },
+        })
+      }
     } finally {
+      if (generationAbortRef.current === controller) {
+        generationAbortRef.current = null
+      }
       setIsGenerating(false)
+      void fetchProRuntime().then(setRuntime).catch(() => undefined)
+      void fetchProLogs().then(setLogStatus).catch(() => undefined)
     }
-  }, [settings])
+  }, [generationActive, selectedModel?.name, settings])
+
+  const handleStopGenerate = useCallback(() => {
+    const controller = generationAbortRef.current
+    if (!controller && !generationActive) {
+      setStatusMessage('No active generation to stop.')
+      return
+    }
+    setStatusMessage('Stopping generation...')
+    reportProClientEvent({
+      action: 'pro-generate-stop',
+      detail: 'Stop requested',
+      context: { runtimeState: runtime.state, jobId: runtime.job.id },
+    })
+    void stopProGeneration()
+      .then((result) => {
+        setStatusMessage(result.videoJobId ? 'Stop requested for active video job.' : 'Stop requested for active generation.')
+        void fetchProRuntime().then(setRuntime).catch(() => undefined)
+        void fetchProLogs().then(setLogStatus).catch(() => undefined)
+      })
+      .catch((error: unknown) => {
+        const nextMessage = `Stop requested locally; backend interrupt failed: ${formatApiError(error)}`
+        setStatusMessage(nextMessage)
+        reportProClientError({
+          kind: 'generation-stop',
+          message: nextMessage,
+          source: 'handleStopGenerate',
+          context: { route: '/api/pro/interrupt' },
+        })
+      })
+    controller?.abort()
+  }, [generationActive, runtime.job.id, runtime.state])
 
   const handlePromptAnalyze = useCallback(async () => {
     setPromptInsightBusy(true)
@@ -449,6 +887,7 @@ function App() {
 
   const startBottomDrag = useCallback(
     (event: ReactMouseEvent<HTMLButtonElement>) => {
+      event.preventDefault()
       setDragState({
         target: 'bottom',
         origin: event.clientY,
@@ -457,6 +896,13 @@ function App() {
     },
     [bottomDockHeight],
   )
+
+  const workspaceStyle = activeRail === 'models'
+    ? undefined
+    : ({
+        '--left-panel-width': `${leftPanelWidth}px`,
+        '--right-panel-width': `${rightPanelWidth}px`,
+      } as CSSProperties)
 
   return (
     <div className="aiwf-pro-shell theme-preset-1" data-mode={activeMode}>
@@ -467,7 +913,7 @@ function App() {
           aria-label="AIWF Studio home"
           onClick={() => handleRailSelect('create')}
         >
-          <span className="pro-logo-mark">A</span>
+          <img className="pro-logo-image" src={PRO_APP_ICON} alt="" />
         </button>
         <nav className="pro-rail-nav">
           {RAIL_ITEMS.map((item) => (
@@ -513,6 +959,8 @@ function App() {
               handleRailSelect('models')
             } else if (action === 'open-data') {
               handleRailSelect('data')
+            } else if (action === 'open-tools') {
+              handleRailSelect('tools')
             } else if (action === 'open-monitor') {
               handleRailSelect('monitor')
             } else if (action === 'open-settings') {
@@ -525,6 +973,14 @@ function App() {
         <TopBar
           bootstrap={bootstrap}
           runtime={runtime}
+          isGenerating={generationActive}
+          statusMessage={statusMessage}
+          generationError={generationError}
+          selectedModelName={selectedModel?.name ?? settings.modelId}
+          generationProgress={generationProgress}
+          backendConnected={backendConnected}
+          backendRecovering={backendRecovering}
+          onRecoverBackend={handleRecoverBackend}
           onOpenSettings={() => handleRailSelect('settings')}
         />
         <ModeTabs activeMode={activeMode} onSelect={handleModeSelect} />
@@ -532,27 +988,17 @@ function App() {
         <section
           className="pro-workspace"
           aria-label="AIWF Pro workspace"
-          style={
-            activeRail === 'models'
-              ? undefined
-              : {
-                  gridTemplateColumns: `${leftPanelWidth}px 8px minmax(0, 1fr) 8px ${rightPanelWidth}px`,
-                }
-          }
+          style={workspaceStyle}
         >
           {activeRail === 'models' ? (
             <ModelsWorkspace
               engineFilter={engineFilter}
               engines={bootstrap.engines}
               models={bootstrap.models}
+              downloadsStatus={downloadsStatus}
               selectedModelId={settings.modelId}
               onEngineFilterChange={handleEngineFilterChange}
-              onModelSelect={(modelId) =>
-                setSettings((current) => ({
-                  ...current,
-                  modelId,
-                }))
-              }
+              onModelSelect={handleModelSelect}
             />
           ) : activeRail === 'data' ? (
             <>
@@ -575,6 +1021,43 @@ function App() {
                 dataStatus={dataStatus}
                 recentOutputs={recentOutputs}
                 selectedModelName={selectedModel?.name ?? settings.modelId}
+              />
+              <ResizeHandle
+                axis="vertical"
+                label="Resize right panel"
+                onMouseDown={() => startHorizontalDrag('right')}
+              />
+            </>
+          ) : activeRail === 'tools' ? (
+            <>
+              <ToolsControlPanel
+                capabilitiesStatus={capabilitiesStatus}
+                runtime={runtime}
+                onOpenCreate={() => handleRailSelect('create')}
+                onOpenVideo={() => {
+                  handleRailSelect('create')
+                  handleModeSelect('video')
+                }}
+                onOpenData={() => handleRailSelect('data')}
+                onOpenSegmentation={() => setActiveModal('segmentation')}
+                onOpenReactor={() => setActiveModal('reactor')}
+              />
+              <ResizeHandle
+                axis="vertical"
+                label="Resize left panel"
+                onMouseDown={() => startHorizontalDrag('left')}
+              />
+              <ToolsWorkspace
+                capabilitiesStatus={capabilitiesStatus}
+                runtime={runtime}
+                onOpenCreate={() => handleRailSelect('create')}
+                onOpenVideo={() => {
+                  handleRailSelect('create')
+                  handleModeSelect('video')
+                }}
+                onOpenData={() => handleRailSelect('data')}
+                onOpenSegmentation={() => setActiveModal('segmentation')}
+                onOpenReactor={() => setActiveModal('reactor')}
               />
               <ResizeHandle
                 axis="vertical"
@@ -624,8 +1107,10 @@ function App() {
                 runtime={runtime}
                 logStatus={logStatus}
                 statusMessage={statusMessage}
+                generationError={generationError}
                 recentOutputs={recentOutputs}
                 selectedModelName={selectedModel?.name ?? settings.modelId}
+                generationProgress={generationProgress}
               />
               <ResizeHandle
                 axis="vertical"
@@ -684,15 +1169,20 @@ function App() {
                 selectedModelName={selectedModel?.name ?? settings.modelId}
                 activeRatio={activeRatio}
                 showAdvanced={showAdvanced}
-                isGenerating={isGenerating}
+                isGenerating={generationActive}
                 recentOutputs={recentOutputs}
                 promptInsight={promptInsight}
                 promptInsightBusy={promptInsightBusy}
+                generationProgress={generationProgress}
+                generationTimings={generationTimings}
+                generationReceiptPath={generationReceiptPath}
                 onSettingsChange={setSettings}
                 onEngineFilterChange={handleEngineFilterChange}
+                onModelSelect={handleModelSelect}
                 onRatioSelect={handleRatioSelect}
                 onPreviewSelect={setPreview}
                 onGenerate={handleGenerate}
+                onStopGenerate={handleStopGenerate}
                 onToggleAdvanced={() => setShowAdvanced((value) => !value)}
                 onOpenSegmentation={() => setActiveModal('segmentation')}
                 onOpenHires={() => setActiveModal('hires')}
@@ -723,6 +1213,7 @@ function App() {
                   height={bottomDockVisible ? bottomDockHeight : 0}
                   recentOutputs={recentOutputs}
                   statusMessage={statusMessage}
+                  generationError={generationError}
                   selectedModelName={selectedModel?.name ?? settings.modelId}
                   onPreviewSelect={setPreview}
                   onResizeStart={startBottomDrag}
@@ -833,13 +1324,44 @@ function MenuBar({
 function TopBar({
   bootstrap,
   runtime,
+  isGenerating,
+  statusMessage,
+  generationError,
+  selectedModelName,
+  generationProgress,
+  backendConnected,
+  backendRecovering,
+  onRecoverBackend,
   onOpenSettings,
 }: {
   bootstrap: ProBootstrap
   runtime: ProRuntimeStatus
+  isGenerating: boolean
+  statusMessage: string
+  generationError: string
+  selectedModelName: string
+  generationProgress: GenerationProgressEvent[]
+  backendConnected: boolean
+  backendRecovering: boolean
+  onRecoverBackend: () => void
   onOpenSettings: () => void
 }) {
-  const vram = runtime.resources.find((metric) => metric.label.toLowerCase() === 'vram')
+  const latestProgress = generationProgress[generationProgress.length - 1]
+  const runtimeJob = runtime.job
+  const activeError = generationError || runtimeJob.error
+  const runtimeJobActive = isRuntimeJobActive(runtimeJob)
+  const progressMessage = activeError || latestProgress?.message || runtimeJob.message || statusMessage
+  const progressPercent = runtimeJobActive
+    ? clampPercent(runtimeJob.progress)
+    : latestProgress
+      ? clampPercent(Math.round(latestProgress.progress * 100))
+      : clampPercent(runtimeJob.progress)
+  const progressStep = runtimeJobActive && runtimeJob.totalSteps
+    ? `${runtimeJob.step}/${runtimeJob.totalSteps}`
+    : latestProgress?.total
+      ? `${latestProgress.step}/${latestProgress.total}`
+      : ''
+  const active = isGenerating || runtime.state.toLowerCase() === 'running' || runtimeJobActive
 
   return (
     <header className="pro-topbar">
@@ -847,13 +1369,35 @@ function TopBar({
         <h1>{bootstrap.workspaceName || 'AIWF Studio'}</h1>
         <span>Local generation workspace</span>
       </div>
+      <div className="pro-generation-strip" data-active={active} data-error={Boolean(activeError)}>
+        <div className="pro-generation-copy">
+          <span>{activeError ? 'Generation error' : active ? 'Generating' : 'Generation info'}</span>
+          <strong>{progressMessage}</strong>
+        </div>
+        <div className="pro-generation-meter" aria-label={`Generation progress ${progressPercent}%`}>
+          <span style={{ width: `${progressPercent}%` }} />
+        </div>
+        <div className="pro-generation-meta">
+          {progressStep ? <span>{progressStep}</span> : null}
+          <span>{selectedModelName}</span>
+        </div>
+      </div>
       <div className="pro-topbar-status">
         <div className="pro-engine-status" data-state={runtime.state.toLowerCase()}>
           <span className="pro-status-dot" aria-hidden="true" />
           <span>Local Engine</span>
           <strong>{runtime.state}</strong>
         </div>
-        {vram ? <MiniMetric metric={vram} /> : null}
+        {!backendConnected || backendRecovering ? (
+          <button
+            type="button"
+            className="pro-icon-button"
+            aria-label="Restart backend"
+            onClick={onRecoverBackend}
+          >
+            <RefreshCcw size={18} aria-hidden="true" />
+          </button>
+        ) : null}
         <button
           type="button"
           className="pro-icon-button"
@@ -914,11 +1458,16 @@ function PromptPanel({
   recentOutputs,
   promptInsight,
   promptInsightBusy,
+  generationProgress,
+  generationTimings,
+  generationReceiptPath,
   onSettingsChange,
   onEngineFilterChange,
+  onModelSelect,
   onRatioSelect,
   onPreviewSelect,
   onGenerate,
+  onStopGenerate,
   onToggleAdvanced,
   onOpenSegmentation,
   onOpenHires,
@@ -938,11 +1487,16 @@ function PromptPanel({
   recentOutputs: RecentOutput[]
   promptInsight: PromptInsight
   promptInsightBusy: boolean
+  generationProgress: GenerationProgressEvent[]
+  generationTimings: Record<string, number>
+  generationReceiptPath: string
   onSettingsChange: (value: GenerationSettings | ((current: GenerationSettings) => GenerationSettings)) => void
   onEngineFilterChange: (value: EngineId) => void
+  onModelSelect: (modelId: string) => void
   onRatioSelect: (ratio: AspectRatioOption) => void
   onPreviewSelect: (value: RecentOutput) => void
   onGenerate: () => void
+  onStopGenerate: () => void
   onToggleAdvanced: () => void
   onOpenSegmentation: () => void
   onOpenHires: () => void
@@ -950,6 +1504,34 @@ function PromptPanel({
   onPromptAnalyze: () => void
   bottomDockVisible: boolean
 }) {
+  const handlePromptKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter' || !event.shiftKey || event.nativeEvent.isComposing) {
+      return
+    }
+    event.preventDefault()
+    onGenerate()
+  }
+  const handleVideoSourceChange = (event: ReactChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => {
+      const value = typeof reader.result === 'string' ? reader.result : ''
+      if (!value) {
+        return
+      }
+      onSettingsChange((current) => ({
+        ...current,
+        sourceImageDataUrl: value,
+        sourceImageName: file.name,
+      }))
+    }
+    reader.readAsDataURL(file)
+  }
+
   return (
     <aside className="pro-prompt-panel" aria-label="Prompt and generation settings">
       <PanelHeader title="Prompt" actionLabel="Prompt tools" icon={PanelLeft} />
@@ -962,6 +1544,8 @@ function PromptPanel({
           value={settings.prompt}
           maxLength={1500}
           rows={5}
+          aria-keyshortcuts="Shift+Enter"
+          onKeyDown={handlePromptKeyDown}
           onChange={(event) =>
             onSettingsChange((current) => ({ ...current, prompt: event.target.value }))
           }
@@ -988,20 +1572,76 @@ function PromptPanel({
         <small>{settings.negativePrompt.length} / 1500</small>
       </label>
 
+      {settings.mode === 'video' ? (
+        <section className="pro-video-source-card" aria-label="Video source image">
+          <div className="pro-video-source-copy">
+            <FileImage size={17} aria-hidden="true" />
+            <div>
+              <strong>Source image</strong>
+              <span>{settings.sourceImageName || 'Optional first frame for image-to-video.'}</span>
+            </div>
+          </div>
+          {settings.sourceImageDataUrl ? (
+            <img className="pro-video-source-preview" src={settings.sourceImageDataUrl} alt="" />
+          ) : (
+            <div className="pro-video-source-empty">No image selected</div>
+          )}
+          <div className="pro-video-source-actions">
+            <label className="pro-secondary-button" htmlFor="pro-video-source-input">
+              <FileImage size={15} aria-hidden="true" />
+              <span>Upload image</span>
+            </label>
+            <input
+              id="pro-video-source-input"
+              className="pro-file-input-hidden"
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              onChange={handleVideoSourceChange}
+            />
+            {settings.sourceImageDataUrl ? (
+              <button
+                type="button"
+                className="pro-secondary-button ghost"
+                onClick={() =>
+                  onSettingsChange((current) => ({
+                    ...current,
+                    sourceImageDataUrl: '',
+                    sourceImageName: '',
+                  }))
+                }
+              >
+                Clear
+              </button>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      <div className="pro-prompt-actions" aria-label="Prompt actions">
+        <button
+          type="button"
+          className={isGenerating ? 'pro-generate-button pro-generate-button-stop' : 'pro-generate-button'}
+          onClick={isGenerating ? onStopGenerate : onGenerate}
+        >
+          {isGenerating ? <X size={18} aria-hidden="true" /> : <Sparkles size={18} aria-hidden="true" />}
+          <span>{isGenerating ? 'Stop' : settings.mode === 'video' ? 'Generate video' : 'Generate image'}</span>
+        </button>
+        <button
+          type="button"
+          className="pro-secondary-button"
+          disabled={promptInsightBusy}
+          onClick={onPromptAnalyze}
+        >
+          {promptInsightBusy ? 'Analyzing...' : 'Analyze prompt'}
+        </button>
+      </div>
+
       <section className="pro-prompt-insight-card" aria-label="Prompt helper">
         <div className="pro-prompt-insight-header">
           <div>
             <strong>Prompt helper</strong>
             <span>Small Transformers.js model, lazy browser load</span>
           </div>
-          <button
-            type="button"
-            className="pro-secondary-button"
-            disabled={promptInsightBusy}
-            onClick={onPromptAnalyze}
-          >
-            {promptInsightBusy ? 'Analyzing...' : 'Analyze prompt'}
-          </button>
         </div>
         <div className="pro-prompt-insight-meter" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={promptInsight.progress}>
           <span style={{ width: `${promptInsight.progress}%` }} />
@@ -1053,13 +1693,11 @@ function PromptPanel({
         <div className="pro-select-row">
           <select
             value={settings.modelId}
-            onChange={(event) =>
-              onSettingsChange((current) => ({ ...current, modelId: event.target.value }))
-            }
+            onChange={(event) => onModelSelect(event.target.value)}
           >
             {filteredModels.map((model) => (
               <option key={model.id} value={model.id}>
-                {model.name}
+                {formatModelOptionLabel(model)}
               </option>
             ))}
           </select>
@@ -1095,12 +1733,12 @@ function PromptPanel({
       </fieldset>
 
       <div className="pro-settings-block">
-        <div className="pro-section-label">Image settings</div>
+        <div className="pro-section-label">{settings.mode === 'video' ? 'Sana video settings' : 'Image settings'}</div>
         <RangeField
           label="Steps"
           tooltip="Steps control how long the model refines the image. Raise this slowly and only when the current model clearly benefits."
           min={1}
-          max={80}
+          max={settings.mode === 'video' ? 100 : 80}
           step={1}
           value={settings.steps}
           onChange={(value) => onSettingsChange((current) => ({ ...current, steps: value }))}
@@ -1114,24 +1752,83 @@ function PromptPanel({
           value={settings.cfgScale}
           onChange={(value) => onSettingsChange((current) => ({ ...current, cfgScale: value }))}
         />
-        <label className="pro-field pro-compact-field">
-          <FieldLabel
-            label="Sampler"
-            tooltip="Sampler changes the route the denoiser takes through the same request. Change this one variable at a time so you can see what it actually did."
-          />
-          <select
-            value={settings.sampler}
-            onChange={(event) =>
-              onSettingsChange((current) => ({ ...current, sampler: event.target.value }))
-            }
-          >
-            {bootstrap.samplers.map((sampler) => (
-              <option key={sampler} value={sampler}>
-                {sampler}
-              </option>
-            ))}
-          </select>
-        </label>
+        {settings.mode === 'video' ? (
+          <>
+            <RangeField
+              label="Frames"
+              tooltip="Frame count controls video duration and denoise work. Keep smoke tests short, then increase after timing receipts look sane."
+              min={1}
+              max={257}
+              step={1}
+              value={settings.frames}
+              onChange={(value) => onSettingsChange((current) => ({ ...current, frames: value }))}
+            />
+            <RangeField
+              label="FPS"
+              tooltip="FPS changes playback duration without changing denoise frame count. Use it as a delivery setting after the motion looks right."
+              min={1}
+              max={60}
+              step={1}
+              value={settings.fps}
+              onChange={(value) => onSettingsChange((current) => ({ ...current, fps: value }))}
+            />
+            <label className="pro-field pro-compact-field">
+              <FieldLabel
+                label="Quantization"
+                tooltip="Auto uses the fastest safe Sana path AIWF can load. FP8 and BNB modes are explicit override paths for VRAM pressure."
+              />
+              <select
+                value={settings.sanaQuantization}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({ ...current, sanaQuantization: event.target.value }))
+                }
+              >
+                {SANA_QUANTIZATION_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="pro-field pro-compact-field">
+              <FieldLabel
+                label="VAE tiling"
+                tooltip="Auto keeps decode fast, then retries with tiling only after an out-of-memory error. Always is slower but safer."
+              />
+              <select
+                value={settings.sanaVaeTiling}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({ ...current, sanaVaeTiling: event.target.value }))
+                }
+              >
+                {SANA_VAE_TILING_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        ) : (
+          <label className="pro-field pro-compact-field">
+            <FieldLabel
+              label="Sampler"
+              tooltip="Sampler changes the route the denoiser takes through the same request. Change this one variable at a time so you can see what it actually did."
+            />
+            <select
+              value={settings.sampler}
+              onChange={(event) =>
+                onSettingsChange((current) => ({ ...current, sampler: event.target.value }))
+              }
+            >
+              {bootstrap.samplers.map((sampler) => (
+                <option key={sampler} value={sampler}>
+                  {sampler}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="pro-field pro-compact-field">
           <FieldLabel
             label="Seed"
@@ -1184,25 +1881,71 @@ function PromptPanel({
             }
           />
         </label>
-        <label className="pro-field pro-compact-field">
-          <FieldLabel
-            label="Batch"
-            tooltip="Batch controls are front-and-center because they can change every run. Use them deliberately and keep receipts when you compare outputs."
-          />
-          <input
-            type="number"
-            min={1}
-            max={8}
-            value={settings.batchSize}
-            onChange={(event) =>
-              onSettingsChange((current) => ({
-                ...current,
-                batchSize: Number(event.target.value),
-              }))
-            }
-          />
-        </label>
+        {settings.mode === 'video' ? (
+          <div className="pro-video-toggle-grid">
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={settings.useSageAttention}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({ ...current, useSageAttention: event.target.checked }))
+                }
+              />
+              <span>Sage attention</span>
+            </label>
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={settings.offloadTextEncoderAfterEncode}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({
+                    ...current,
+                    offloadTextEncoderAfterEncode: event.target.checked,
+                  }))
+                }
+              />
+              <span>Free text encoder</span>
+            </label>
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={settings.generateAudio}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({ ...current, generateAudio: event.target.checked }))
+                }
+              />
+              <span>Add audio</span>
+            </label>
+          </div>
+        ) : (
+          <label className="pro-field pro-compact-field">
+            <FieldLabel
+              label="Batch"
+              tooltip="Batch controls are front-and-center because they can change every run. Use them deliberately and keep receipts when you compare outputs."
+            />
+            <input
+              type="number"
+              min={1}
+              max={8}
+              value={settings.batchSize}
+              onChange={(event) =>
+                onSettingsChange((current) => ({
+                  ...current,
+                  batchSize: Number(event.target.value),
+                }))
+              }
+            />
+          </label>
+        )}
       </div>
+
+      {settings.mode === 'video' ? (
+        <SanaStageReceipt
+          events={generationProgress}
+          timings={generationTimings}
+          receiptPath={generationReceiptPath}
+        />
+      ) : null}
 
       <div className="pro-tool-launchers">
         <button type="button" className="pro-tool-button" onClick={onOpenSegmentation}>
@@ -1220,15 +1963,6 @@ function PromptPanel({
       </div>
 
       <div className="pro-panel-actions">
-        <button
-          type="button"
-          className="pro-generate-button"
-          onClick={onGenerate}
-          disabled={isGenerating}
-        >
-          <Sparkles size={18} aria-hidden="true" />
-          <span>{isGenerating ? 'Generating...' : 'Generate'}</span>
-        </button>
         <button
           type="button"
           className="pro-icon-button pro-sliders-button"
@@ -1274,7 +2008,7 @@ function PromptPanel({
               onClick={() => onPreviewSelect(item)}
               title={item.prompt}
             >
-              <img src={item.thumbnailUrl || item.url} alt={item.prompt} />
+              <OutputMedia item={item} />
               <span>{item.modelName ?? item.mode}</span>
             </button>
           ))}
@@ -1284,10 +2018,85 @@ function PromptPanel({
   )
 }
 
+function OutputMedia({ item }: { item: RecentOutput }) {
+  const mediaUrl = item.thumbnailUrl || item.url
+  const outputUrl = item.url.split('?', 1)[0].toLowerCase()
+  const thumbnailUrl = item.thumbnailUrl.split('?', 1)[0].toLowerCase()
+  const isVideo = item.mode === 'video' || isVideoUrl(outputUrl)
+  const poster = item.thumbnailUrl && item.thumbnailUrl !== item.url && !isVideoUrl(thumbnailUrl) ? item.thumbnailUrl : undefined
+  if (isVideo) {
+    return (
+      <video
+        src={item.url}
+        poster={poster}
+        muted
+        playsInline
+        preload="metadata"
+        aria-label={item.prompt}
+      />
+    )
+  }
+  return <img src={mediaUrl} alt={item.prompt} />
+}
+
+function isVideoUrl(value: string): boolean {
+  return value.endsWith('.mp4') || value.endsWith('.webm') || value.endsWith('.mov')
+}
+
+function SanaStageReceipt({
+  events,
+  timings,
+  receiptPath,
+}: {
+  events: GenerationProgressEvent[]
+  timings: Record<string, number>
+  receiptPath: string
+}) {
+  const latest = events.length > 0 ? events[events.length - 1] : null
+  const timingRows = Object.entries(timings).filter(([, value]) => Number.isFinite(value))
+  return (
+    <section className="pro-sana-receipt" aria-label="Sana stage receipt">
+      <div className="pro-sana-receipt-head">
+        <div>
+          <strong>Sana stages</strong>
+          <span>{latest ? latest.message : 'No stage receipt yet.'}</span>
+        </div>
+        <small>{latest ? `${Math.round(latest.progress * 100)}%` : 'idle'}</small>
+      </div>
+      <div className="pro-sana-meter" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={latest ? Math.round(latest.progress * 100) : 0}>
+        <span style={{ width: `${latest ? Math.round(latest.progress * 100) : 0}%` }} />
+      </div>
+      {events.length > 0 ? (
+        <div className="pro-sana-stage-list">
+          {events.slice(-8).map((event, index) => (
+            <div key={`${event.stage}-${index}-${event.seconds}`} className="pro-sana-stage-row">
+              <span>{event.stage}</span>
+              <strong>{event.total ? `${event.step}/${event.total}` : `${Math.round(event.progress * 100)}%`}</strong>
+              <small>{event.seconds.toFixed(2)}s</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {timingRows.length > 0 ? (
+        <div className="pro-sana-timing-grid">
+          {timingRows.map(([key, value]) => (
+            <span key={key}>
+              <strong>{key}</strong>
+              <small>{value.toFixed(2)}s</small>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {receiptPath ? <div className="pro-sana-receipt-path" title={receiptPath}>{receiptPath}</div> : null}
+    </section>
+  )
+}
+
 function ModelsWorkspace({
   engineFilter,
   engines,
   models,
+  downloadsStatus,
   selectedModelId,
   onEngineFilterChange,
   onModelSelect,
@@ -1295,12 +2104,14 @@ function ModelsWorkspace({
   engineFilter: EngineId
   engines: EngineSummary[]
   models: ProModelOption[]
+  downloadsStatus: ProDownloadsStatus | null
   selectedModelId: string
   onEngineFilterChange: (value: EngineId) => void
   onModelSelect: (modelId: string) => void
 }) {
   const visibleModels = models.filter((model) => matchesEngineFilter(model, engineFilter))
   const groupedModels = groupModelsByEngine(visibleModels, engines)
+  const downloadSummary = summarizeDownloads(downloadsStatus, engineFilter)
 
   return (
     <section className="pro-models-workspace" aria-label="Model inventory">
@@ -1327,6 +2138,30 @@ function ModelsWorkspace({
         </label>
       </div>
 
+      <section className="pro-download-status-card" aria-label="Download catalog status">
+        <div>
+          <strong>Download catalog</strong>
+          <span>{downloadSummary.subtitle}</span>
+        </div>
+        <div className="pro-download-stat-row">
+          <StatTile label="Catalog" value={`${downloadSummary.total}`} hint="known entries" />
+          <StatTile label="Installed" value={`${downloadSummary.installed}`} hint="ready locally" />
+          <StatTile label="Route" value={`${downloadSummary.routeTotal}`} hint={downloadSummary.routeLabel} />
+        </div>
+        <div className="pro-download-chip-row">
+          {downloadSummary.items.map((item) => (
+            <span
+              key={item.key}
+              className={item.installed ? 'pro-download-chip pro-download-chip-ready' : 'pro-download-chip'}
+              title={item.destination}
+            >
+              <strong>{item.title}</strong>
+              <small>{item.installed ? 'Installed' : item.category}</small>
+            </span>
+          ))}
+        </div>
+      </section>
+
       <div className="pro-model-groups">
         {groupedModels.length > 0 ? (
           groupedModels.map((group) => (
@@ -1352,7 +2187,7 @@ function ModelsWorkspace({
                       <strong>{model.name}</strong>
                       <div className="pro-model-card-meta">
                         <span>{model.architecture ?? 'Unknown architecture'}</span>
-                        <small>{model.id}</small>
+                        <small>{model.assetSummary && !model.name.includes(model.assetSummary) ? model.assetSummary : 'Local asset'}</small>
                       </div>
                     </button>
                   )
@@ -1499,7 +2334,7 @@ function DataWorkspace({
           <div className="pro-output-list">
             {outputs.map((item) => (
               <article key={item.id} className="pro-output-row">
-                <img src={item.thumbnailUrl || item.url} alt={item.prompt} />
+                <OutputMedia item={item} />
                 <div>
                   <strong>{item.modelName ?? item.mode}</strong>
                   <span>{truncateText(item.prompt, 140)}</span>
@@ -1509,6 +2344,251 @@ function DataWorkspace({
             ))}
           </div>
         </InfoCard>
+      </div>
+    </section>
+  )
+}
+
+function ToolsControlPanel({
+  capabilitiesStatus,
+  runtime,
+  onOpenCreate,
+  onOpenVideo,
+  onOpenData,
+  onOpenSegmentation,
+  onOpenReactor,
+}: {
+  capabilitiesStatus: ProCapabilitiesStatus | null
+  runtime: ProRuntimeStatus
+  onOpenCreate: () => void
+  onOpenVideo: () => void
+  onOpenData: () => void
+  onOpenSegmentation: () => void
+  onOpenReactor: () => void
+}) {
+  const status = capabilitiesStatus ?? EMPTY_CAPABILITIES
+  const readyCount = status.readiness.counts.working ?? 0
+  const pendingCount = status.readiness.counts['metadata-only'] ?? 0
+  const blockedCount =
+    (status.readiness.counts['blocked-cleanly'] ?? 0) +
+    (status.readiness.counts['broken-runtime'] ?? 0) +
+    (status.readiness.counts['unsupported-no-route'] ?? 0)
+  return (
+    <aside className="pro-prompt-panel" aria-label="Tool controls">
+      <PanelHeader title="Tools" actionLabel="Tool bench" icon={Wand2} />
+      <div className="pro-workspace-stack">
+        <InfoCard title="Tonight QA" subtitle="Open the main lanes first. The detailed coverage check is in the workspace drawer.">
+          <div className="pro-stat-grid">
+            <StatTile label="Models" value={`${status.counts.checkpoints}`} hint="base checkpoints" />
+            <StatTile label="LoRAs" value={`${status.counts.loras}`} hint="local adapters" />
+            <StatTile label="Ready" value={`${readyCount}`} hint="smoked routes" />
+            <StatTile label="Blocked" value={`${blockedCount}`} hint="needs wiring" />
+          </div>
+          <div className="pro-inline-controls pro-wrap-controls">
+            <button type="button" className="pro-primary-button" onClick={onOpenCreate}>Create</button>
+            <button type="button" className="pro-secondary-button" onClick={onOpenVideo}>Sana Video</button>
+            <button type="button" className="pro-secondary-button" onClick={onOpenData}>Data</button>
+            <button type="button" className="pro-secondary-button" onClick={onOpenSegmentation}>Segment</button>
+            <button type="button" className="pro-secondary-button" onClick={onOpenReactor}>ReActor</button>
+          </div>
+        </InfoCard>
+        <InfoCard title="Asset counts" subtitle="Read-only checks. This panel does not load a model.">
+          <dl className="pro-runtime-list">
+            <MetricRow label="ControlNet" value={`${status.counts.controlnet}`} />
+            <MetricRow label="SAM" value={`${status.counts.sam}`} />
+            <MetricRow label="ReActor" value={`${status.counts.reactor}`} />
+            <MetricRow label="Enhance" value={`${status.counts.enhance}`} />
+            <MetricRow label="Sana Video" value={`${status.counts.sanaVideo}`} />
+            <MetricRow label="Wan" value={`${status.counts.wan}`} />
+            <MetricRow label="Pending smoke" value={`${pendingCount}`} />
+            <MetricRow label="Runtime" value={runtime.backend} />
+          </dl>
+        </InfoCard>
+      </div>
+    </aside>
+  )
+}
+
+function ToolsWorkspace({
+  capabilitiesStatus,
+  runtime,
+  onOpenCreate,
+  onOpenVideo,
+  onOpenData,
+  onOpenSegmentation,
+  onOpenReactor,
+}: {
+  capabilitiesStatus: ProCapabilitiesStatus | null
+  runtime: ProRuntimeStatus
+  onOpenCreate: () => void
+  onOpenVideo: () => void
+  onOpenData: () => void
+  onOpenSegmentation: () => void
+  onOpenReactor: () => void
+}) {
+  const status = capabilitiesStatus ?? EMPTY_CAPABILITIES
+  const readiness = status.readiness
+  const readyCount = readiness.counts.working ?? 0
+  const metadataOnlyCount = readiness.counts['metadata-only'] ?? readiness.metadataOnlyCount
+  const blockedCount = countBlockedReadiness(readiness.counts)
+  const needsWorkCount = Math.max(0, readiness.total - readyCount)
+  const readinessFamilies = readiness.families.slice(0, 6)
+  const readinessIssues = readiness.needsWork.slice(0, 5)
+  const lanes: ToolLaneCard[] = [
+    {
+      id: 'create',
+      title: 'Create',
+      summary: 'Image generation, inpaint, prompt help, and model selection.',
+      stats: [`${status.counts.checkpoints} checkpoints`, `${status.counts.loras} LoRAs`],
+      actions: [{ label: 'Open Create', onClick: onOpenCreate }],
+    },
+    {
+      id: 'image',
+      title: 'Image Tools',
+      summary: 'ControlNet, SAM, Enhance, and ReActor checks grouped together.',
+      stats: [
+        `${status.counts.controlnet} ControlNet`,
+        `${status.counts.sam} SAM`,
+        `${status.counts.enhance} enhance`,
+        `${status.counts.reactor} ReActor`,
+      ],
+      actions: [
+        { label: 'Segment', onClick: onOpenSegmentation },
+        { label: 'ReActor', onClick: onOpenReactor },
+      ],
+    },
+    {
+      id: 'video',
+      title: 'Video Tools',
+      summary: 'Sana generation is wired in React; Wan/LTX and post stages remain visible for Gradio routes.',
+      stats: [`${status.counts.sanaVideo} Sana`, `${status.counts.wan} Wan models`],
+      note: status.counts.sanaVideo > 0 ? 'Sana snapshot detected.' : 'Sana snapshot not detected yet.',
+      actions: [{ label: 'Open Sana', onClick: onOpenVideo }],
+    },
+    {
+      id: 'data',
+      title: 'Data',
+      summary: 'Library, PNG Info, history, receipts, and logs for QA work.',
+      stats: [`${status.counts.gradioTabs} existing tabs`, `${status.counts.reactRails} React rails`],
+      actions: [{ label: 'Open Data', onClick: onOpenData }],
+    },
+  ]
+
+  return (
+    <section className="pro-workspace-surface" aria-label="Tools workspace">
+      <WorkspaceHeader
+        eyebrow="Tools"
+        title="Tool bench"
+        description="Four QA lanes for the current Studio surface. React controls stay up front; raw coverage stays in one drawer."
+      />
+      <div className="pro-workspace-grid">
+        <InfoCard title="Current surface" subtitle="Inventory only. This view does not load models or start generation.">
+          <div className="pro-stat-grid">
+            <StatTile label="Backend" value={runtime.backend} hint="active route" />
+            <StatTile label="Device" value={runtime.device} hint="local machine" />
+            <StatTile label="Models" value={`${status.counts.checkpoints}`} hint="base checkpoints" />
+            <StatTile label="Tool paths" value={`${status.tools.length}`} hint="mapped checks" />
+          </div>
+        </InfoCard>
+        <InfoCard title="Release readiness" subtitle="Pipeline ledger from local metadata and existing smoke receipts.">
+          <div className="pro-stat-grid">
+            <StatTile label="Ready" value={`${readyCount}`} hint="smoked routes" />
+            <StatTile label="Pending" value={`${metadataOnlyCount}`} hint="metadata only" />
+            <StatTile label="Blocked" value={`${blockedCount}`} hint="route gaps" />
+            <StatTile label="Total" value={`${readiness.total}`} hint="ledger rows" />
+          </div>
+          {readiness.error ? (
+            <div className="pro-readiness-alert">{readiness.error}</div>
+          ) : null}
+          <div className="pro-readiness-layout">
+            <div className="pro-readiness-section">
+              <strong>Families</strong>
+              <div className="pro-readiness-family-list">
+                {readinessFamilies.length > 0 ? (
+                  readinessFamilies.map((family) => (
+                    <div key={family.family} className="pro-readiness-family-row">
+                      <span>{formatReadinessLabel(family.family)}</span>
+                      <small>{family.total} assets</small>
+                      <em>
+                        {family.counts.working ?? 0} ready / {family.counts['metadata-only'] ?? 0} pending /{' '}
+                        {countBlockedReadiness(family.counts)} blocked
+                      </em>
+                    </div>
+                  ))
+                ) : (
+                  <span className="pro-readiness-empty">No readiness rows loaded.</span>
+                )}
+              </div>
+            </div>
+            <div className="pro-readiness-section">
+              <strong>Needs work</strong>
+              <div className="pro-readiness-issue-list">
+                {readinessIssues.length > 0 ? (
+                  readinessIssues.map((item) => (
+                    <div key={`${item.status}-${item.id}`} className="pro-readiness-issue">
+                      <div>
+                        <strong>{item.label || item.id}</strong>
+                        <span>{formatReadinessDetail(item)}</span>
+                      </div>
+                      <small className={`pro-readiness-status pro-readiness-status-${readinessStatusTone(item.status)}`}>
+                        {formatReadinessLabel(item.status)}
+                      </small>
+                    </div>
+                  ))
+                ) : (
+                  <span className="pro-readiness-empty">
+                    {needsWorkCount > 0 ? `${needsWorkCount} rows need work.` : 'No needs-work rows loaded.'}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        </InfoCard>
+        <div className="pro-simple-tool-grid">
+          {lanes.map((lane) => (
+            <article key={lane.id} className="pro-simple-tool-card">
+              <div className="pro-simple-tool-head">
+                <span>{lane.id}</span>
+                <strong>{lane.title}</strong>
+              </div>
+              <p>{lane.summary}</p>
+              <div className="pro-tool-mini-grid">
+                {lane.stats.map((stat) => (
+                  <span key={stat}>{stat}</span>
+                ))}
+              </div>
+              {lane.note ? <small className="pro-tool-note">{lane.note}</small> : null}
+              <div className="pro-simple-tool-actions">
+                {lane.actions.map((action, index) => (
+                  <button
+                    key={action.label}
+                    type="button"
+                    className={index === 0 ? 'pro-primary-button' : 'pro-secondary-button'}
+                    onClick={action.onClick}
+                    disabled={action.disabled}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+        <details className="pro-tool-detail-toggle">
+          <summary>
+            <span>Show coverage comparison</span>
+            <small>{status.counts.gradioTabs} existing tabs / {status.tools.length} mapped paths</small>
+          </summary>
+          <div className="pro-tab-list">
+            {status.gradioTabs.map((tab) => (
+              <div key={tab.id} className="pro-tab-row">
+                <span>{tab.group}</span>
+                <strong>{tab.label}</strong>
+                <small>{tab.tab ?? tab.summary}</small>
+              </div>
+            ))}
+          </div>
+        </details>
       </div>
     </section>
   )
@@ -1674,23 +2754,36 @@ function LogsWorkspace({
   runtime,
   logStatus,
   statusMessage,
+  generationError,
   recentOutputs,
   selectedModelName,
+  generationProgress,
 }: {
   runtime: ProRuntimeStatus
   logStatus: ProLogStatus | null
   statusMessage: string
+  generationError: string
   recentOutputs: RecentOutput[]
   selectedModelName: string
+  generationProgress: GenerationProgressEvent[]
 }) {
-  const logRows = logStatus?.events.length
+  const currentErrorRows = generationError
+    ? [{
+        id: 'current-generation-error',
+        title: 'Current generation error',
+        detail: generationError,
+        meta: runtime.state,
+      }]
+    : []
+  const backendRows = logStatus?.events.length
     ? logStatus.events.map((event) => ({
         id: event.id,
         title: event.title,
         detail: event.detail,
         meta: event.time || event.source,
       }))
-    : buildLogRows(runtime, statusMessage, selectedModelName, recentOutputs)
+    : buildLogRows(runtime, statusMessage, selectedModelName, recentOutputs, generationProgress)
+  const logRows = [...currentErrorRows, ...backendRows]
   const summary = summarizeRecentOutputs(recentOutputs)
   return (
     <section className="pro-workspace-surface" aria-label="Runtime logs">
@@ -1952,6 +3045,60 @@ function CanvasPreview({
   onToggleBottomDock: () => void
 }) {
   const aspectRatio = `${Math.max(1, width)} / ${Math.max(1, height)}`
+  const previewStageRef = useRef<HTMLDivElement>(null)
+  const [previewFrameSize, setPreviewFrameSize] = useState({ width: 0, height: 0 })
+  const previewIsVideo = preview?.mode === 'video'
+  useEffect(() => {
+    const stage = previewStageRef.current
+    if (!stage) {
+      return
+    }
+
+    const updateFrameSize = () => {
+      const style = getComputedStyle(stage)
+      const horizontalPadding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
+      const verticalPadding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
+      const availableWidth = Math.max(1, stage.clientWidth - horizontalPadding)
+      const availableHeight = Math.max(1, stage.clientHeight - verticalPadding)
+      const targetAspect = Math.max(1, width) / Math.max(1, height)
+      let nextWidth = Math.min(availableWidth, 1040)
+      let nextHeight = nextWidth / targetAspect
+
+      if (nextHeight > availableHeight) {
+        nextHeight = availableHeight
+        nextWidth = nextHeight * targetAspect
+      }
+
+      setPreviewFrameSize((current) =>
+        Math.abs(current.width - nextWidth) < 1 && Math.abs(current.height - nextHeight) < 1
+          ? current
+          : { width: nextWidth, height: nextHeight },
+      )
+    }
+
+    updateFrameSize()
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateFrameSize)
+      return () => window.removeEventListener('resize', updateFrameSize)
+    }
+
+    const observer = new ResizeObserver(updateFrameSize)
+    observer.observe(stage)
+    return () => observer.disconnect()
+  }, [height, width])
+
+  const outputFrameStyle = useMemo<CSSProperties>(() => {
+    if (previewFrameSize.width <= 0 || previewFrameSize.height <= 0) {
+      return { aspectRatio }
+    }
+    return {
+      aspectRatio,
+      width: `${previewFrameSize.width}px`,
+      height: `${previewFrameSize.height}px`,
+    }
+  }, [aspectRatio, previewFrameSize.height, previewFrameSize.width])
+
   return (
     <section className="pro-canvas" aria-label="Canvas and output preview">
       <div className="pro-canvas-header">
@@ -1986,9 +3133,11 @@ function CanvasPreview({
         </div>
       </div>
 
-      <div className="pro-preview-stage">
-        <div className="pro-output-frame" style={{ aspectRatio }}>
-          {preview ? (
+      <div className="pro-preview-stage" ref={previewStageRef}>
+        <div className="pro-output-frame" style={outputFrameStyle}>
+          {previewIsVideo ? (
+            <video src={preview.url} controls playsInline />
+          ) : preview ? (
             <img src={preview.url} alt={preview.prompt} />
           ) : (
             <div className="pro-empty-preview pro-stage-empty">
@@ -2014,6 +3163,7 @@ function BottomDock({
   height,
   recentOutputs,
   statusMessage,
+  generationError,
   selectedModelName,
   onPreviewSelect,
   onResizeStart,
@@ -2023,6 +3173,7 @@ function BottomDock({
   height: number
   recentOutputs: RecentOutput[]
   statusMessage: string
+  generationError: string
   selectedModelName: string
   onPreviewSelect: (value: RecentOutput) => void
   onResizeStart: (event: ReactMouseEvent<HTMLButtonElement>) => void
@@ -2046,9 +3197,9 @@ function BottomDock({
         </button>
       </div>
       <div className="pro-bottom-body">
-        <div className="pro-bottom-status-card">
-          <span>Status</span>
-          <strong>{statusMessage}</strong>
+        <div className="pro-bottom-status-card" data-error={Boolean(generationError)}>
+          <span>{generationError ? 'Generation error' : 'Status'}</span>
+          <strong>{generationError || statusMessage}</strong>
         </div>
         <div className="pro-bottom-gallery">
           {recentOutputs.map((item) => (
@@ -2059,7 +3210,7 @@ function BottomDock({
               onClick={() => onPreviewSelect(item)}
               title={item.prompt}
             >
-              <img src={item.thumbnailUrl || item.url} alt={item.prompt} />
+              <OutputMedia item={item} />
             </button>
           ))}
         </div>
@@ -2075,6 +3226,7 @@ function RuntimePanel({
   runtime: ProRuntimeStatus
   selectedModelName: string
 }) {
+  const loadedModelName = runtime.loadedModel.loaded ? runtime.loadedModel.name : 'No model loaded'
   return (
     <aside className="pro-status-panel" aria-label="Runtime status">
       <div className="pro-status-heading">
@@ -2118,8 +3270,8 @@ function RuntimePanel({
       <div className="pro-loaded-model">
         <span className="pro-section-label">Loaded model</span>
         <div className="pro-loaded-model-title">
-          <strong>{runtime.loadedModel.name || selectedModelName}</strong>
-          <span>{runtime.loadedModel.loaded ? 'Loaded' : 'Not loaded'}</span>
+          <strong>{loadedModelName}</strong>
+          <span>{runtime.loadedModel.loaded ? 'Loaded' : 'Loads on generate'}</span>
         </div>
         <div className="pro-loaded-model-banner">
           <Cpu size={14} aria-hidden="true" />
@@ -2127,6 +3279,7 @@ function RuntimePanel({
           <small>{runtime.attention}</small>
         </div>
         <dl className="pro-runtime-list">
+          <MetricRow label="Selected model" value={selectedModelName} />
           <MetricRow label="Type" value={runtime.loadedModel.type} />
           <MetricRow label="Base model" value={runtime.loadedModel.baseModel} />
           <MetricRow label="Size on disk" value={runtime.loadedModel.sizeOnDisk} />
@@ -2135,7 +3288,7 @@ function RuntimePanel({
           <MetricRow label="Text encoder" value={runtime.loadedModel.textEncoder} />
           <MetricRow label="UNet" value={runtime.loadedModel.unet} />
         </dl>
-        <button type="button" className="pro-unload-button">Unload model</button>
+        <button type="button" className="pro-unload-button" disabled>Unload model</button>
       </div>
 
       <div className="pro-queue-row">
@@ -2169,6 +3322,8 @@ function matchesEngineFilter(model: ProModelOption, filter: EngineId): boolean {
       return architecture.includes('flux') && !architecture.includes('flux2') && !architecture.includes('klein')
     case 'flux2':
       return architecture.includes('flux2') || architecture.includes('flux.2') || architecture.includes('klein')
+    case 'sana_video':
+      return architecture.includes('sana') && architecture.includes('video')
     case 'sd15':
       return architecture.includes('sd15') || architecture.includes('sd1.5') || architecture.includes('stable diffusion 1.5')
     case 'sdxl':
@@ -2180,6 +3335,13 @@ function matchesEngineFilter(model: ProModelOption, filter: EngineId): boolean {
     default:
       return true
   }
+}
+
+function formatModelOptionLabel(model: ProModelOption): string {
+  if (model.assetSummary && !model.name.includes(model.assetSummary)) {
+    return `${model.name} (${model.assetSummary})`
+  }
+  return model.name
 }
 
 function groupModelsByEngine(models: ProModelOption[], engines: EngineSummary[]) {
@@ -2203,6 +3365,36 @@ function groupModelsByEngine(models: ProModelOption[], engines: EngineSummary[])
     }
   }
   return Array.from(groups.values()).sort((left, right) => left.label.localeCompare(right.label))
+}
+
+function summarizeDownloads(downloadsStatus: ProDownloadsStatus | null, engineFilter: EngineId) {
+  const routeLabel = engineFilter === 'all' ? 'all engines' : engineFilter
+  if (!downloadsStatus) {
+    return {
+      subtitle: 'Waiting for /api/pro/downloads.',
+      total: 0,
+      installed: 0,
+      routeTotal: 0,
+      routeLabel,
+      items: [] as ProDownloadsStatus['catalog'],
+    }
+  }
+  const routeItems = downloadsStatus.catalog.filter(
+    (item) => engineFilter === 'all' || item.engineId === engineFilter,
+  )
+  const items = routeItems
+    .slice()
+    .sort((left, right) => Number(right.installed) - Number(left.installed) || left.title.localeCompare(right.title))
+    .slice(0, 8)
+
+  return {
+    subtitle: 'Local install state from the guarded model download service.',
+    total: downloadsStatus.counts.catalog,
+    installed: downloadsStatus.counts.installed,
+    routeTotal: routeItems.length,
+    routeLabel,
+    items,
+  }
 }
 
 function PanelHeader({
@@ -2360,24 +3552,6 @@ function ToolModal({
   )
 }
 
-function MiniMetric({ metric }: { metric: ResourceMetric }) {
-  return (
-    <div className="pro-mini-metric">
-      <span>{metric.label}</span>
-      <strong>{metric.value}</strong>
-      <div
-        className={`pro-meter pro-meter-${metric.tone}`}
-        role="meter"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={metric.percent}
-      >
-        <span style={{ width: `${metric.percent}%` }} />
-      </div>
-    </div>
-  )
-}
-
 function ResourceBar({ metric }: { metric: ResourceMetric }) {
   return (
     <div className="pro-resource-meter">
@@ -2405,6 +3579,39 @@ function MetricRow({ label, value }: { label: string; value: string }) {
       <dt>{label}</dt>
       <dd>{value}</dd>
     </div>
+  )
+}
+
+function countBlockedReadiness(counts: ProReadinessStatus['counts']): number {
+  return (
+    (counts['blocked-cleanly'] ?? 0) +
+    (counts['broken-runtime'] ?? 0) +
+    (counts['unsupported-no-route'] ?? 0)
+  )
+}
+
+function formatReadinessLabel(value: string): string {
+  return value
+    .split(/[-_./]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+function readinessStatusTone(status: string): string {
+  if (status === 'working') {
+    return 'ready'
+  }
+  if (status === 'metadata-only') {
+    return 'pending'
+  }
+  return 'blocked'
+}
+
+function formatReadinessDetail(item: ProReadinessItem): string {
+  return truncateText(
+    item.suggestedAction || item.reason || item.smokeCommand || item.route || 'No readiness note.',
+    116,
   )
 }
 
@@ -2466,6 +3673,23 @@ function summarizeRecentOutputs(recentOutputs: RecentOutput[]) {
     uniqueModels,
     latestCreatedAt: formatDisplayDate(recentOutputs[0]?.createdAt || ''),
   }
+}
+
+function mergeRecentOutputs(nextOutputs: RecentOutput[], currentOutputs: RecentOutput[]) {
+  const seen = new Set<string>()
+  const merged: RecentOutput[] = []
+  for (const item of [...nextOutputs, ...currentOutputs]) {
+    const key = item.path || item.id || item.url
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    merged.push(item)
+    if (merged.length >= 8) {
+      break
+    }
+  }
+  return merged
 }
 
 function buildOutputModelBuckets(recentOutputs: RecentOutput[], fallbackModelName: string) {
@@ -2542,7 +3766,14 @@ function buildLogRows(
   statusMessage: string,
   selectedModelName: string,
   recentOutputs: RecentOutput[],
+  generationProgress: GenerationProgressEvent[],
 ) {
+  const progressRows = generationProgress.slice(-6).reverse().map((event, index) => ({
+    id: `generation-progress-${index}-${event.stage}-${event.step}`,
+    title: event.stage || 'Generation progress',
+    detail: event.message || `${Math.round(event.progress * 100)}%`,
+    meta: event.total ? `${event.step}/${event.total} steps` : `${Math.round(event.progress * 100)}%`,
+  }))
   const runtimeRows = runtime.resources.map((metric, index) => ({
     id: `metric-${metric.label}-${index}`,
     title: `${metric.label} monitor`,
@@ -2564,14 +3795,33 @@ function buildLogRows(
       meta: runtime.backend,
     },
     {
+      id: 'runtime-job',
+      title: runtime.job.state === 'idle' ? 'Generation job' : `Generation ${runtime.job.state}`,
+      detail: runtime.job.message || 'No active generation job.',
+      meta: runtime.job.totalSteps ? `${runtime.job.step}/${runtime.job.totalSteps} steps` : `${runtime.job.progress}%`,
+    },
+    {
       id: 'queue',
       title: 'Queue depth',
       detail: `${runtime.queueCount} tasks waiting`,
       meta: runtime.device,
     },
+    ...progressRows,
     ...runtimeRows,
     ...outputRows,
   ]
+}
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function isRuntimeJobActive(job: ProRuntimeStatus['job']): boolean {
+  const state = job.state.toLowerCase()
+  return state !== 'idle' && state !== 'completed' && state !== 'failed' && state !== 'cancelled' && state !== 'canceled'
 }
 
 function mergeBootstrapDefaults(
@@ -2595,12 +3845,37 @@ function mergeBootstrapDefaults(
   }
 }
 
+function settingsMatch(current: GenerationSettings, expected: GenerationSettings): boolean {
+  return (
+    current.mode === expected.mode &&
+    current.prompt === expected.prompt &&
+    current.negativePrompt === expected.negativePrompt &&
+    current.modelId === expected.modelId &&
+    current.aspectRatioId === expected.aspectRatioId &&
+    current.width === expected.width &&
+    current.height === expected.height &&
+    current.steps === expected.steps &&
+    current.cfgScale === expected.cfgScale &&
+    current.sampler === expected.sampler &&
+    current.scheduler === expected.scheduler &&
+    current.seed === expected.seed &&
+    current.batchSize === expected.batchSize &&
+    current.batchCount === expected.batchCount &&
+    current.sourceImageDataUrl === expected.sourceImageDataUrl &&
+    current.sourceImageName === expected.sourceImageName
+  )
+}
+
 function isCreationMode(mode: ProMode): mode is CreationMode {
   return mode === 'image' || mode === 'video' || mode === 'inpaint'
 }
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function isGenerationCancelResult(error: unknown): boolean {
+  return isAbortError(error) || (error instanceof ProApiError && error.status === 499)
 }
 
 function readInitialRail(): string {
@@ -2660,6 +3935,7 @@ const MENU_BAR_ITEMS: Array<{
     items: [
       { id: 'toggle-dock', label: 'Output dock' },
       { id: 'open-models', label: 'Model inventory' },
+      { id: 'open-tools', label: 'Tools' },
       { id: 'open-data', label: 'Data view' },
       { id: 'open-monitor', label: 'Monitor' },
     ],
