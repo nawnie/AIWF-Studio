@@ -1,11 +1,20 @@
 # AIWF Studio
 
+[![Windows](https://img.shields.io/badge/Windows-local--first-0078D4?logo=windows11&logoColor=white)](#quick-start)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![React](https://img.shields.io/badge/React-Pro%20UI-61DAFB?logo=react&logoColor=black)](frontend/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-Pro%20frontend-3178C6?logo=typescript&logoColor=white)](frontend/)
+[![Vite](https://img.shields.io/badge/Vite-build-646CFF?logo=vite&logoColor=white)](frontend/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Pro%20API-009688?logo=fastapi&logoColor=white)](#what-works-on-main)
+[![Gradio](https://img.shields.io/badge/Gradio-Lab%20UI-F97316?logo=gradio&logoColor=white)](#aiwf-studio-gradio-lab)
+[![Diffusers](https://img.shields.io/badge/Diffusers-local%20pipelines-FFD21E?logo=huggingface&logoColor=black)](#image-generation)
 [![NVIDIA RTX / VFX SDK](https://img.shields.io/badge/NVIDIA%20RTX-VFX%20SDK-76B900?logo=nvidia&logoColor=white)](https://docs.nvidia.com/maxine/vfx/index.html)
 
-Local-first creative AI workspace for Windows and NVIDIA GPUs, focused on image generation, inpainting, video, and video-audio post-processing.
+Local-first creative AI workspace for Windows and NVIDIA GPUs, focused on image generation, inpainting, video generation, and video-audio post-processing.
 
 AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. The project keeps the wiring explicit: typed requests, predictable model folders, isolated engines, and no legacy global `shared` state.
+
+Built around local model folders and explicit routes for Stable Diffusion, SDXL, SD3.5, Flux, Wan, LTX, RIFE, MMAudio, React, FastAPI, Gradio, Diffusers, and NVIDIA RTX workflows.
 
 This `main` branch is the stable sharing branch. It only advertises features intended for normal local use. Experimental work lives on `dev`.
 
@@ -218,160 +227,3 @@ No hard links or junctions are required. To reuse an existing A1111, ComfyUI, or
 - conservative route selection so users cannot mix 5B, 14B FP8/safetensors, and GGUF settings by accident
 
 Wan optimization work is still active. FP8, resident high/low mode, streamed block offload, SageAttention, and similar accelerator paths must stay benchmark-gated.
-
-Recent local receipts:
-
-- [Wan post-driver benchmark, June 20 2026](docs/benchmark-reports/wan-post-driver-20260620.md)
-- [Fluxtrait Flux.2 Klein / Z-Image settings check](docs/benchmark-reports/fluxtrait-settings-check-20260620.md)
-
-### Library, History, And API
-
-- generated-output history and searchable library
-- saved workspace settings
-- launch settings for GPU, network, and runtime behavior
-- Tailscale-friendly remote access information
-- native `/api/v1`
-- A1111-style `/sdapi/v1` compatibility adapter
-
-## Pipeline Setup Notes
-
-### Wan GGUF Video Setup
-
-For the stable Video tab, use a matched pair:
-
-```text
-models/wan/GGUF/
-  ...high...gguf
-  ...low...gguf
-```
-
-You also need local Wan shared components under:
-
-```text
-models/wan/Diffusers/Wan2.2-TI2V-5B-Diffusers/
-```
-
-The Video tab keeps 5B safetensors, 14B FP8/safetensors, and GGUF high/low pairs as separate runtime routes. The UI filters settings based on that route so a user cannot accidentally send GGUF options into a safetensors backend or vice versa.
-
-### LTX 2.3 Video Setup
-
-LTX 2.3 is optional and runs in `engines/ltx/.venv`, not the main Studio venv. Install or repair the engine from **Settings -> Engines & pipelines**, or run:
-
-```powershell
-.\scripts\bootstrap_ltx.ps1 -Enable
-```
-
-The default LTX route expects:
-
-```text
-models/ltx/checkpoints/ltx-2.3-22b-distilled-1.1.safetensors
-models/ltx/upscalers/ltx-2.3-spatial-upscaler-x2-1.1.safetensors
-models/ltx/text_encoder/gemma-3-12b-it-qat-q4_0-unquantized/
-```
-
-Use the Models tab's **Video LTX 2.3** quick-start bundle to download those assets when Hugging Face access is configured.
-
-### Flux Image Setup
-
-The current Flux route is text-to-image only. It supports Flux transformer files in `.gguf` or `.safetensors` form, plus local split text/VAE assets:
-
-```text
-models/flux/GGUF/          flux transformer .gguf files
-models/flux/UNet/          flux transformer .safetensors files
-models/flux/Textencoder/   clip_l.safetensors and t5xxl_fp16.safetensors
-models/flux/VAE/           ae.safetensors
-```
-
-Distilled/4-step Flux models without a guidance block run with CFG forced to `0.0`. Full Flux-dev style models with guidance tensors can use the CFG control. Flux LoRA, ControlNet, img2img, and inpaint are intentionally blocked until those paths are wired and tested.
-
-### Video Audio Setup
-
-The near-term audio path is VAP: video audio post-processing. AIWF generates or accepts a video first, then an optional local audio backend creates audio and muxes it back into the MP4.
-
-The first video-conditioned backend is MMAudio. It is isolated under:
-
-```text
-engines/audio/
-```
-
-Bootstrap script:
-
-```powershell
-scripts/bootstrap_mmaudio.ps1
-```
-
-MMAudio is optional and soft-fails when not installed so the visual video output is preserved.
-
-Important license note: MMAudio code is MIT licensed, but the released checkpoints are CC-BY-NC 4.0, so this route should be treated as non-commercial unless you have separate permission.
-
-## Remote Access
-
-Use Tailscale when possible. If you launch with network listening enabled, add authentication before using AIWF outside a trusted local network.
-
-## Project Structure
-
-- `main` is the stable runtime branch for users.
-- `dev` keeps broader experiments and active research work.
-- `frontend/` is the React/TypeScript/Vite source for the Pro UI. Build it with `npm install && npm run build` to populate `frontend/dist`, which `webui_pro.py` serves.
-- `docs/`, `tests/`, and `scripts/` are part of the public maintainability story.
-- Runtime data such as models, outputs, local configs, and agent notes are ignored.
-
-Useful project docs:
-
-| Area | Docs |
-| --- | --- |
-| Architecture | [`ARCHITECTURE.md`](ARCHITECTURE.md), [`docs/ENGINE_ISOLATION.md`](docs/ENGINE_ISOLATION.md) |
-| Contribution | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/MAINTAINER_NOTES.md`](docs/MAINTAINER_NOTES.md) |
-| Dependencies and attribution | [`docs/DEPENDENCY_POLICY.md`](docs/DEPENDENCY_POLICY.md), [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md) |
-| Features and QA | [`docs/FEATURES.md`](docs/FEATURES.md), [`docs/IMAGE_MATURITY_MATRIX.md`](docs/IMAGE_MATURITY_MATRIX.md), [`docs/qa/README.md`](docs/qa/README.md) |
-| Paths | [`docs/PATH_CONFIGURATION.md`](docs/PATH_CONFIGURATION.md) |
-
-## License And Third-party Status
-
-This is a practical release checklist, not legal advice.
-
-- AIWF Studio's own code is licensed under the **AIWF Non-Commercial Attribution License v1.0** in `LICENSE`.
-- Non-commercial use, study, modification, and sharing are allowed with attribution.
-- Commercial use requires separate written permission from the project owner. Contact: https://github.com/nawnie
-- Model weights, generated outputs, NVIDIA SDK binaries, MMAudio checkout files, and large engine repos are local-only and ignored by git.
-- Users are responsible for the licenses of checkpoints, LoRAs, VAEs, ControlNet models, SAM weights, Wan files, and audio models they install.
-- Stable Diffusion 3.5 model weights are released under Stability AI's Community License and may require Hugging Face gate acceptance before download.
-- NVIDIA Video Effects / VFX SDK support is optional. AIWF does not vendor or redistribute NVIDIA SDK binaries or models.
-- MMAudio checkpoints are CC-BY-NC 4.0. Do not present MMAudio-backed audio as commercial-safe without separate permission.
-- InsightFace code is MIT, but InsightFace-trained models and the inswapper face-swap model require separate license care for non-local or commercial use. Face swapping must only be used with consent and applicable-law compliance.
-- Segment Anything is Apache-2.0. AIWF's segment/inpaint path is clean-room integration, with attribution kept in `docs/ATTRIBUTION.md`.
-
-Keep optional restricted components clearly marked as local/user-installed.
-
-## Attention Acceleration
-
-AIWF uses PyTorch SDPA as the stable attention baseline. Wan video now prefers Diffusers' per-module SAGE backend when SageAttention 2.2 is installed and callable, then falls back to AIWF's SageAttention SDPA patch, then plain Torch SDPA.
-
-Current rule for `main`: keep SageAttention optional and benchmark-gated. Wan must still run when SageAttention is missing, and any speed claim needs matched local receipts. Flash-attn and xFormers are optional experiment lanes, not default requirements for the RTX 4070 Ti SUPER setup.
-
-## WIP And Help Wanted
-
-These areas exist as work-in-progress or need more hardware coverage before they should be treated as stable:
-
-- Pro UI feature parity with Studio
-- Wan FP8 high/low video speed path
-- Wan resident / streamed offload modes
-- training engines, with Chat and Training tabs hidden by default in Studio
-- Ollama or llama.cpp chat workspace
-- Face Swap tab
-- workflow authoring
-- model conversion and quantization tools
-- plugin system
-- richer generated-audio controls and model installers
-- AMD, Intel, Linux, and lower-VRAM validation
-- installer polish and first-run onboarding
-
-## Credits
-
-AIWF Studio is clean-room code. It draws from established local AI tooling around Stable Diffusion, Diffusers, ControlNet, Segment Anything, GroundingDINO, Real-ESRGAN, GFPGAN, CodeFormer, Wan, ComfyUI-GGUF, and the AUTOMATIC1111 web UI.
-
-Optional video post-processing can use NVIDIA Video Effects / VFX SDK components for RTX VSR-style upscale, cleanup, AI green screen, and relighting when the user installs the NVIDIA SDK locally. See `docs/ATTRIBUTION.md` for third-party credits and source links.
-
-## Contributing
-
-AIWF Studio needs focused help from people who work on local creative AI, Windows/NVIDIA workflows, Python services, frontend rebuilds, model runtime tooling, and install flows for normal PC users. Open an issue with a narrow repro or send a PR that includes the check you ran.
