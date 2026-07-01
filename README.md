@@ -16,23 +16,43 @@ This `main` branch is the stable sharing branch. It only advertises features int
 
 New users should start with **AIWF Studio Pro**. It is the cleaner React app and the steadier path for normal local use. Use **AIWF Studio Gradio Lab** for the broader beta workspace where pipeline experiments land first.
 
-| App | Launcher | Status | Best for |
-| --- | --- | --- | --- |
-| <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="28"> **AIWF Studio Pro** | `AIWF Studio Pro.bat` or `python launch_pro.py` | Stable UI track | Create, Models, Data, Monitor, Logs, and Settings |
-| <img src="static/icons/aiwf-studio-gradio-lab.png" alt="AIWF Studio Gradio Lab icon" width="28"> **AIWF Studio Gradio Lab** | `AIWF Studio Gradio Lab.bat` or `python launch_gradio.py` | Beta / broadest surface | Image, inpaint, ControlNet, enhance, segment, and video testing |
-| **Modern Gradio** | `python webui_modern.py` | Experimental shell | Layout testing against the shared backend |
-
-All UI tracks read and write the same model folders, output history, and settings. Switching between them is safe.
-
-## Screenshots
+Both app tracks read and write the same model folders, output history, and settings. Switching between them is safe.
 
 ### AIWF Studio Pro
+
+<p align="center">
+  <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="96">
+</p>
+
+**Stable UI track.** Best for Create, Models, Data, Monitor, Logs, and Settings.
+
+```bat
+AIWF Studio Pro.bat
+```
+
+```powershell
+python launch_pro.py
+```
 
 <p align="center">
   <img src="docs/assets/aiwf-studio-pro-sana-sprint.png" alt="AIWF Studio Pro image generation workspace" width="100%">
 </p>
 
 ### AIWF Studio Gradio Lab
+
+<p align="center">
+  <img src="static/icons/aiwf-studio-gradio-lab.png" alt="AIWF Studio Gradio Lab icon" width="96">
+</p>
+
+**Beta workspace.** Best for image, inpaint, ControlNet, enhance, segment, and video testing.
+
+```bat
+AIWF Studio Gradio Lab.bat
+```
+
+```powershell
+python launch_gradio.py
+```
 
 <p align="center">
   <img src="docs/assets/aiwf-studio-gradio-lab-continuous.png" alt="AIWF Studio Gradio Lab continuous image workspace" width="100%">
@@ -76,7 +96,6 @@ Older compatibility entry points still work:
 ```powershell
 python launch.py        # Gradio Studio
 webui.bat               # Gradio Studio
-python webui_modern.py  # Modern Gradio shell
 python webui_pro.py     # Pro API/React app, build frontend/ first
 ```
 
@@ -337,7 +356,7 @@ These areas exist as work-in-progress or need more hardware coverage before they
 - Pro UI feature parity with Studio
 - Wan FP8 high/low video speed path
 - Wan resident / streamed offload modes
-- training engines, with Chat and Training tabs hidden by default in Studio/Modern
+- training engines, with Chat and Training tabs hidden by default in Studio
 - Ollama or llama.cpp chat workspace
 - Face Swap tab
 - workflow authoring
