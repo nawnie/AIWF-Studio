@@ -14,19 +14,30 @@ For the multi-pipeline LoRA design direction, see [`docs/LORA_PIPELINE_STRATEGY.
 
 ## Which App Should I Use?
 
-If you are new or hit friction, start with **AIWF Studio Pro**. It is the production-oriented React app and the calmer path through the project.
+If you are new or hit friction, start with **AIWF Studio Pro**. It is the stable, clean-looking React app and the calmer path through the project.
 
-Use **AIWF Studio Gradio Lab** when you want the full Gradio workspace, WIP features, or the newest pipeline tests. Gradio gets work-in-progress features first; Pro gets them after the Python and Gradio path is proven.
+Use **AIWF Studio Gradio Lab** when you want the beta, bleeding-edge workspace with the newest pipeline tests. Gradio gets experimental features first; Pro gets them after the Python and Gradio path is proven.
+
+The installer creates both Desktop shortcuts:
+
+| Shortcut | Use it for |
+| --- | --- |
+| <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="32"> **AIWF Studio Pro** | Stable clean build |
+| <img src="static/icons/aiwf-studio-gradio-lab.png" alt="AIWF Studio Gradio Lab icon" width="32"> **AIWF Studio Gradio Lab** | Beta bleeding-edge build |
+
+![AIWF Studio Pro image generation workspace](docs/assets/aiwf-studio-pro-sana-sprint.png)
+
+![AIWF Studio Gradio Lab continuous image workspace](docs/assets/aiwf-studio-gradio-lab-continuous.png)
 
 ## UI Rebuild
 
 AIWF Studio ships three interchangeable web UIs on top of the same backend:
 
-- **Studio / Gradio Lab** (`AIWF Studio Gradio Lab.bat`, `python launch_gradio.py`, `aiwf/app.py`) - the original Gradio-based tabbed workspace. Still the broadest surface for image, inpaint, ControlNet, enhance, segment, and video.
+- **Studio / Gradio Lab** (`AIWF Studio Gradio Lab.bat`, `python launch_gradio.py`, `aiwf/app.py`) - the beta bleeding-edge Gradio workspace. Still the broadest surface for image, inpaint, ControlNet, enhance, segment, and video.
 - **Modern** (`webui_modern.py`, `aiwf/app_modern.py`) - a restyled Gradio shell (`aiwf/web/modern/`) with the same backend, aimed at a cleaner layout pass.
-- **Pro** (`AIWF Studio Pro.bat`, `python launch_pro.py`, `aiwf/app_pro.py`) - a from-scratch FastAPI + React/TypeScript/Vite frontend (`frontend/`) talking to a dedicated `aiwf/web/pro_api.py` API. This is the active UI rebuild track and the long-term direction for the project; it covers the Create, Models, Data, Monitor, Logs, and Settings workspaces, including runtime monitoring and a lazy browser-side prompt helper. It needs a frontend build (`cd frontend && npm install && npm run build`) before Pro will serve it.
+- **Pro** (`AIWF Studio Pro.bat`, `python launch_pro.py`, `aiwf/app_pro.py`) - the stable clean-looking FastAPI + React/TypeScript/Vite frontend (`frontend/`) talking to a dedicated `aiwf/web/pro_api.py` API. This is the active UI rebuild track and the long-term direction for the project; it covers the Create, Models, Data, Monitor, Logs, and Settings workspaces, including runtime monitoring and a lazy browser-side prompt helper. It needs a frontend build (`cd frontend && npm install && npm run build`) before Pro will serve it.
 
-All three read and write the same model folders, history, and settings, so switching between them is safe. Use Pro for the steadier React path, and use Studio when you want the Gradio development surface.
+All three read and write the same model folders, history, and settings, so switching between them is safe. Use Pro for the steadier React path, and use Studio when you want the beta Gradio surface.
 
 ## Release Gate
 
@@ -151,8 +162,8 @@ Install AIWF Studio.bat
 
 Choose **Express**. It checks or installs Git, uv, Python 3.10, and Node.js LTS; prepares the AIWF runtime; builds the Pro frontend; and creates two Desktop shortcuts:
 
-- **AIWF Studio Pro** - production-oriented React app
-- **AIWF Studio Gradio Lab** - Gradio workspace for WIP features and full pipeline testing
+- <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="24"> **AIWF Studio Pro** - stable clean React app
+- <img src="static/icons/aiwf-studio-gradio-lab.png" alt="AIWF Studio Gradio Lab icon" width="24"> **AIWF Studio Gradio Lab** - beta bleeding-edge Gradio workspace
 
 Manual launchers:
 
