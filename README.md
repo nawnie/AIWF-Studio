@@ -3,43 +3,42 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![NVIDIA RTX / VFX SDK](https://img.shields.io/badge/NVIDIA%20RTX-VFX%20SDK-76B900?logo=nvidia&logoColor=white)](https://docs.nvidia.com/maxine/vfx/index.html)
 
-Local-first image, inpainting, video, and video-audio tooling for Windows and NVIDIA GPUs.
+Local-first creative AI workspace for Windows and NVIDIA GPUs, focused on image generation, inpainting, video, and video-audio post-processing.
 
-AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. The goal is a local creative workstation with explicit wiring, typed requests, predictable model folders, and no legacy global `shared` state.
+AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. The project keeps the wiring explicit: typed requests, predictable model folders, isolated engines, and no legacy global `shared` state.
 
 This `main` branch is the stable sharing branch. It only advertises features intended for normal local use. Experimental work lives on `dev`.
 
-For a complete GitHub-facing inventory, see [`docs/FEATURES.md`](docs/FEATURES.md).
-For the multi-pipeline LoRA design direction, see [`docs/LORA_PIPELINE_STRATEGY.md`](docs/LORA_PIPELINE_STRATEGY.md).
+- Full feature inventory: [`docs/FEATURES.md`](docs/FEATURES.md)
+- LoRA pipeline direction: [`docs/LORA_PIPELINE_STRATEGY.md`](docs/LORA_PIPELINE_STRATEGY.md)
 
-## Which App Should I Use?
+## Start Here
 
-If you are new or hit friction, start with **AIWF Studio Pro**. It is the stable, clean-looking React app and the calmer path through the project.
+New users should start with **AIWF Studio Pro**. It is the cleaner React app and the steadier path for normal local use. Use **AIWF Studio Gradio Lab** for the broader beta workspace where pipeline experiments land first.
 
-Use **AIWF Studio Gradio Lab** when you want the beta, bleeding-edge workspace with the newest pipeline tests. Gradio gets experimental features first; Pro gets them after the Python and Gradio path is proven.
+| App | Launcher | Status | Best for |
+| --- | --- | --- | --- |
+| <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="28"> **AIWF Studio Pro** | `AIWF Studio Pro.bat` or `python launch_pro.py` | Stable UI track | Create, Models, Data, Monitor, Logs, and Settings |
+| <img src="static/icons/aiwf-studio-gradio-lab.png" alt="AIWF Studio Gradio Lab icon" width="28"> **AIWF Studio Gradio Lab** | `AIWF Studio Gradio Lab.bat` or `python launch_gradio.py` | Beta / broadest surface | Image, inpaint, ControlNet, enhance, segment, and video testing |
+| **Modern Gradio** | `python webui_modern.py` | Experimental shell | Layout testing against the shared backend |
 
-The installer creates both Desktop shortcuts:
+All UI tracks read and write the same model folders, output history, and settings. Switching between them is safe.
 
-| Shortcut | Use it for |
-| --- | --- |
-| <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="32"> **AIWF Studio Pro** | Stable clean build |
-| <img src="static/icons/aiwf-studio-gradio-lab.png" alt="AIWF Studio Gradio Lab icon" width="32"> **AIWF Studio Gradio Lab** | Beta bleeding-edge build |
+## Screenshots
 
-![AIWF Studio Pro image generation workspace](docs/assets/aiwf-studio-pro-sana-sprint.png)
+### AIWF Studio Pro
 
-![AIWF Studio Gradio Lab continuous image workspace](docs/assets/aiwf-studio-gradio-lab-continuous.png)
+<p align="center">
+  <img src="docs/assets/aiwf-studio-pro-sana-sprint.png" alt="AIWF Studio Pro image generation workspace" width="100%">
+</p>
 
-## UI Rebuild
+### AIWF Studio Gradio Lab
 
-AIWF Studio ships three interchangeable web UIs on top of the same backend:
+<p align="center">
+  <img src="docs/assets/aiwf-studio-gradio-lab-continuous.png" alt="AIWF Studio Gradio Lab continuous image workspace" width="100%">
+</p>
 
-- **Studio / Gradio Lab** (`AIWF Studio Gradio Lab.bat`, `python launch_gradio.py`, `aiwf/app.py`) - the beta bleeding-edge Gradio workspace. Still the broadest surface for image, inpaint, ControlNet, enhance, segment, and video.
-- **Modern** (`webui_modern.py`, `aiwf/app_modern.py`) - a restyled Gradio shell (`aiwf/web/modern/`) with the same backend, aimed at a cleaner layout pass.
-- **Pro** (`AIWF Studio Pro.bat`, `python launch_pro.py`, `aiwf/app_pro.py`) - the stable clean-looking FastAPI + React/TypeScript/Vite frontend (`frontend/`) talking to a dedicated `aiwf/web/pro_api.py` API. This is the active UI rebuild track and the long-term direction for the project; it covers the Create, Models, Data, Monitor, Logs, and Settings workspaces, including runtime monitoring and a lazy browser-side prompt helper. It needs a frontend build (`cd frontend && npm install && npm run build`) before Pro will serve it.
-
-All three read and write the same model folders, history, and settings, so switching between them is safe. Use Pro for the steadier React path, and use Studio when you want the beta Gradio surface.
-
-## Release Gate
+## Release Focus
 
 Current focus: image generation, inpainting, video generation, and video-audio post-processing must be reliable before the project takes on more feature work.
 
@@ -48,122 +47,15 @@ Current focus: image generation, inpainting, video generation, and video-audio p
 - Benchmark claims need timing receipts from this repo, not upstream marketing numbers.
 - Optional engines, model weights, SDKs, and generated outputs stay local and are not committed.
 
-## What Works On Main
-
-### Image Generation
-
-- txt2img, img2img, and inpaint
-- Stable Diffusion 1.5, SDXL, SD3.5, and Flux txt2img checkpoint loading through Diffusers
-- sampler, scheduler, steps, CFG, seed, size, VAE, clip skip, and hires fix controls
-- live preview, interrupt, continuous generation, and job history
-- prompt styles, wildcards, prompt files, dynamic prompt syntax, and Compel support
-- LoRA selection, keyword expansion, saved aliases/strengths, and runtime adapter loading for supported Diffusers image families
-- PNG metadata and PNG Info import back into the Image tab
-
-### Pro UI And Monitoring
-
-- FastAPI + React/TypeScript/Vite app shell with left-rail navigation
-- Create, Models, Data, Monitor, Logs, and Settings workspaces
-- preset 1 cream/navy/coral visual direction, with dark planned as preset 2
-- scroll-safe panels, popup tool windows, and resizable workspace columns
-- runtime monitor for backend state, queue health, logs, resources, and recent receipts
-- browser-side Transformers.js prompt helper loaded only when **Analyze prompt** is clicked
-- Pro API endpoints for runtime, bootstrap, generation, data, logs, and settings
-
-### Inpaint And Masking
-
-- inpaint image/mask editor flow
-- keep-original / last-result source handling
-- SAM-assisted mask presets when SAM models are installed locally
-- outpaint canvas expansion
-
-### ControlNet
-
-- single ControlNet unit in the Image advanced panel
-- local ControlNet model selection
-- built-in lightweight preprocessors where available
-
-### Models
-
-- local checkpoint, LoRA, VAE, ControlNet, SAM, and enhancement model scanning
-- SD3.5 Diffusers-folder checkpoints are supported in `models/Stable-diffusion/`
-- Flux split-model txt2img is supported from `models/flux/GGUF/` or `models/flux/UNet/` with local CLIP-L, T5-XXL, and `ae.safetensors`
-- model aliases and trigger-word helpers
-- curated download entries for common local model folders
-- import helpers for model folders from another local install
-
-### LoRA Status
-
-- SD/SDXL/SD3.5-style runtime LoRA loading is wired through Diffusers adapter APIs.
-- Studio includes LoRA prompt insertion, LoRA stack composition, trigger-word helpers, aliases, and saved default strengths.
-- Model Manager includes LoRA metadata controls and a LoRA fuse worker for supported Diffusers exports.
-- Wan supports stage LoRAs for supported 5B and high/low transformer routes, with runtime-aware filtering.
-- Flux/new transformer-image LoRA and ONNX LoRA are intentionally blocked until their pipeline-specific appliers are implemented and tested.
-
-### Enhance
-
-- image upscale
-- GFPGAN / CodeFormer-style restoration when models are installed
-- old-photo restore pipeline
-- tiled upscale controls for local VRAM limits
-
-### Segment
-
-- SAM mask generation when SAM weights are installed
-- text-guided boxes through GroundingDINO when the optional dependency is available
-
-### Image Lab
-
-- maturity matrix tracking each image route against the AUTOMATIC1111 parity baseline (`docs/IMAGE_MATURITY_MATRIX.md`)
-- XYZ plot runner, batch img2img/inpaint runner, and loopback runner
-- native `GET /api/v1/image/maturity` endpoint
-
-### Video
-
-- Wan image-to-video through three explicit local routes: 5B safetensors, 14B FP8/safetensors, or matched GGUF High Noise + Low Noise transformer pairs
-- optional LTX 2.3 text/image-to-video through an isolated worker engine
-- optional RIFE post-processing to write 30 FPS or 60 FPS output after generation
-- optional ReActor post-processing from the first key frame, an uploaded image, or a saved face model
-- optional NVIDIA RTX VSR / Video Effects SDK upscale post-processing when the SDK is installed
-- optional generated audio muxing after video when a supported local audio backend is installed
-- optional video-conditioned audio post-processing through MMAudio, installed in an isolated engine venv
-- standalone RIFE frame interpolation tab for existing videos
-- standalone Audio tab for generating music or sound effects after a video
-- local Wan component folder support for tokenizer, text encoder, scheduler, and VAE
-- conservative route selection so users cannot mix 5B, 14B FP8/safetensors, and GGUF settings by accident
-
-Wan optimization work is still active. FP8, resident high/low mode, streamed block offload, SageAttention, and similar accelerator paths must stay benchmark-gated.
-
-Recent local receipts:
-
-- [Wan post-driver benchmark, June 20 2026](docs/benchmark-reports/wan-post-driver-20260620.md)
-- [Fluxtrait Flux.2 Klein / Z-Image settings check](docs/benchmark-reports/fluxtrait-settings-check-20260620.md)
-
-### Library, History, And Settings
-
-- generated-output history
-- library search over saved outputs
-- saved workspace settings
-- launch settings for GPU/network/runtime behavior
-- Tailscale-friendly remote access information
-
-### API
-
-- native `/api/v1`
-- A1111-style `/sdapi/v1` compatibility adapter
-
 ## Quick Start
 
-On Windows, use the simple installer:
+On Windows, use the installer:
 
 ```bat
 Install AIWF Studio.bat
 ```
 
-Choose **Express**. It checks or installs Git, uv, Python 3.10, and Node.js LTS; prepares the AIWF runtime; builds the Pro frontend; and creates two Desktop shortcuts:
-
-- <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="24"> **AIWF Studio Pro** - stable clean React app
-- <img src="static/icons/aiwf-studio-gradio-lab.png" alt="AIWF Studio Gradio Lab icon" width="24"> **AIWF Studio Gradio Lab** - beta bleeding-edge Gradio workspace
+Choose **Express**. It checks or installs Git, uv, Python 3.10, and Node.js LTS; prepares the AIWF runtime; builds the Pro frontend; and creates Desktop shortcuts for Pro and Gradio Lab.
 
 Manual launchers:
 
@@ -184,8 +76,8 @@ Older compatibility entry points still work:
 ```powershell
 python launch.py        # Gradio Studio
 webui.bat               # Gradio Studio
-python webui_modern.py   # Modern Gradio shell
-python webui_pro.py      # Pro API/React app (build frontend/ first)
+python webui_modern.py  # Modern Gradio shell
+python webui_pro.py     # Pro API/React app, build frontend/ first
 ```
 
 Optional local speed/settings logging:
@@ -194,11 +86,11 @@ Optional local speed/settings logging:
 python launch.py --genlog
 ```
 
-`--genlog` writes JSONL entries to `outputs/genlog/generation-log.jsonl` for
-SD, SDXL, and Wan runs. It records timings, runtime route/pipeline, settings,
-models, and LoRAs, but not prompt text. The flag is off by default.
+`--genlog` writes JSONL entries to `outputs/genlog/generation-log.jsonl` for SD, SDXL, and Wan runs. It records timings, runtime route/pipeline, settings, models, and LoRAs, but not prompt text. The flag is off by default.
 
-AIWF Studio creates and uses local runtime folders:
+## Runtime Folders
+
+AIWF Studio creates and uses these local runtime folders:
 
 ```text
 models/
@@ -229,12 +121,102 @@ models/insightface/        ReActor inswapper ONNX models
 models/reactor/faces/      saved ReActor face models
 ```
 
-No hard links or junctions are required. To reuse an existing A1111, ComfyUI,
-or shared model library, open **Settings -> Model paths** and add the folders as
-extra scan roots. Optional SDK/app paths, such as NVIDIA VideoFX executables,
-live under **Settings -> Engines & pipelines -> External tool paths**.
+No hard links or junctions are required. To reuse an existing A1111, ComfyUI, or shared model library, open **Settings -> Model paths** and add the folders as extra scan roots. Optional SDK/app paths, such as NVIDIA VideoFX executables, live under **Settings -> Engines & pipelines -> External tool paths**.
 
-## Wan GGUF Video Setup
+## What Works On Main
+
+### Image Generation
+
+- txt2img, img2img, and inpaint
+- Stable Diffusion 1.5, SDXL, SD3.5, and Flux txt2img checkpoint loading through Diffusers
+- sampler, scheduler, steps, CFG, seed, size, VAE, clip skip, and hires fix controls
+- live preview, interrupt, continuous generation, and job history
+- prompt styles, wildcards, prompt files, dynamic prompt syntax, and Compel support
+- LoRA selection, keyword expansion, saved aliases/strengths, and runtime adapter loading for supported Diffusers image families
+- PNG metadata and PNG Info import back into the Image tab
+
+### UI And Monitoring
+
+- FastAPI + React/TypeScript/Vite Pro app with left-rail navigation
+- Create, Models, Data, Monitor, Logs, and Settings workspaces
+- scroll-safe panels, popup tool windows, and resizable workspace columns
+- runtime monitor for backend state, queue health, logs, resources, and recent receipts
+- browser-side Transformers.js prompt helper loaded only when **Analyze prompt** is clicked
+- Pro API endpoints for runtime, bootstrap, generation, data, logs, and settings
+
+### Inpaint, Masking, And Segment
+
+- inpaint image/mask editor flow
+- keep-original / last-result source handling
+- SAM-assisted mask presets when SAM models are installed locally
+- outpaint canvas expansion
+- SAM mask generation when SAM weights are installed
+- text-guided boxes through GroundingDINO when the optional dependency is available
+
+### ControlNet
+
+- single ControlNet unit in the Image advanced panel
+- local ControlNet model selection
+- built-in lightweight preprocessors where available
+
+### Models And LoRA
+
+- local checkpoint, LoRA, VAE, ControlNet, SAM, and enhancement model scanning
+- SD3.5 Diffusers-folder checkpoints are supported in `models/Stable-diffusion/`
+- Flux split-model txt2img is supported from `models/flux/GGUF/` or `models/flux/UNet/` with local CLIP-L, T5-XXL, and `ae.safetensors`
+- model aliases and trigger-word helpers
+- curated download entries for common local model folders
+- import helpers for model folders from another local install
+- SD/SDXL/SD3.5-style runtime LoRA loading through Diffusers adapter APIs
+- Wan stage LoRAs for supported 5B and high/low transformer routes, with runtime-aware filtering
+- Flux/new transformer-image LoRA and ONNX LoRA are intentionally blocked until their pipeline-specific appliers are implemented and tested
+
+### Enhance
+
+- image upscale
+- GFPGAN / CodeFormer-style restoration when models are installed
+- old-photo restore pipeline
+- tiled upscale controls for local VRAM limits
+
+### Image Lab
+
+- maturity matrix tracking each image route against the AUTOMATIC1111 parity baseline: [`docs/IMAGE_MATURITY_MATRIX.md`](docs/IMAGE_MATURITY_MATRIX.md)
+- XYZ plot runner, batch img2img/inpaint runner, and loopback runner
+- native `GET /api/v1/image/maturity` endpoint
+
+### Video
+
+- Wan image-to-video through three explicit local routes: 5B safetensors, 14B FP8/safetensors, or matched GGUF High Noise + Low Noise transformer pairs
+- optional LTX 2.3 text/image-to-video through an isolated worker engine
+- optional RIFE post-processing to write 30 FPS or 60 FPS output after generation
+- optional ReActor post-processing from the first key frame, an uploaded image, or a saved face model
+- optional NVIDIA RTX VSR / Video Effects SDK upscale post-processing when the SDK is installed
+- optional generated audio muxing after video when a supported local audio backend is installed
+- optional video-conditioned audio post-processing through MMAudio, installed in an isolated engine venv
+- standalone RIFE frame interpolation tab for existing videos
+- standalone Audio tab for generating music or sound effects after a video
+- local Wan component folder support for tokenizer, text encoder, scheduler, and VAE
+- conservative route selection so users cannot mix 5B, 14B FP8/safetensors, and GGUF settings by accident
+
+Wan optimization work is still active. FP8, resident high/low mode, streamed block offload, SageAttention, and similar accelerator paths must stay benchmark-gated.
+
+Recent local receipts:
+
+- [Wan post-driver benchmark, June 20 2026](docs/benchmark-reports/wan-post-driver-20260620.md)
+- [Fluxtrait Flux.2 Klein / Z-Image settings check](docs/benchmark-reports/fluxtrait-settings-check-20260620.md)
+
+### Library, History, And API
+
+- generated-output history and searchable library
+- saved workspace settings
+- launch settings for GPU, network, and runtime behavior
+- Tailscale-friendly remote access information
+- native `/api/v1`
+- A1111-style `/sdapi/v1` compatibility adapter
+
+## Pipeline Setup Notes
+
+### Wan GGUF Video Setup
 
 For the stable Video tab, use a matched pair:
 
@@ -250,12 +232,11 @@ You also need local Wan shared components under:
 models/wan/Diffusers/Wan2.2-TI2V-5B-Diffusers/
 ```
 
-The Video tab keeps 5B safetensors, 14B FP8/safetensors, and GGUF high/low pairs as separate runtime routes. The UI should filter settings based on that route so a user cannot accidentally send GGUF options into a safetensors backend or vice versa.
+The Video tab keeps 5B safetensors, 14B FP8/safetensors, and GGUF high/low pairs as separate runtime routes. The UI filters settings based on that route so a user cannot accidentally send GGUF options into a safetensors backend or vice versa.
 
-## LTX 2.3 Video Setup
+### LTX 2.3 Video Setup
 
-LTX 2.3 is optional and runs in `engines/ltx/.venv`, not the main Studio venv.
-Install or repair the engine from **Settings -> Engines & pipelines**, or run:
+LTX 2.3 is optional and runs in `engines/ltx/.venv`, not the main Studio venv. Install or repair the engine from **Settings -> Engines & pipelines**, or run:
 
 ```powershell
 .\scripts\bootstrap_ltx.ps1 -Enable
@@ -269,10 +250,9 @@ models/ltx/upscalers/ltx-2.3-spatial-upscaler-x2-1.1.safetensors
 models/ltx/text_encoder/gemma-3-12b-it-qat-q4_0-unquantized/
 ```
 
-Use the Models tab's **Video LTX 2.3** quick-start bundle to download those
-assets when Hugging Face access is configured.
+Use the Models tab's **Video LTX 2.3** quick-start bundle to download those assets when Hugging Face access is configured.
 
-## Flux Image Setup
+### Flux Image Setup
 
 The current Flux route is text-to-image only. It supports Flux transformer files in `.gguf` or `.safetensors` form, plus local split text/VAE assets:
 
@@ -285,7 +265,7 @@ models/flux/VAE/           ae.safetensors
 
 Distilled/4-step Flux models without a guidance block run with CFG forced to `0.0`. Full Flux-dev style models with guidance tensors can use the CFG control. Flux LoRA, ControlNet, img2img, and inpaint are intentionally blocked until those paths are wired and tested.
 
-## Video Audio Setup
+### Video Audio Setup
 
 The near-term audio path is VAP: video audio post-processing. AIWF generates or accepts a video first, then an optional local audio backend creates audio and muxes it back into the MP4.
 
@@ -309,26 +289,23 @@ Important license note: MMAudio code is MIT licensed, but the released checkpoin
 
 Use Tailscale when possible. If you launch with network listening enabled, add authentication before using AIWF outside a trusted local network.
 
-## Project Shape
+## Project Structure
 
 - `main` is the stable runtime branch for users.
 - `dev` keeps broader experiments and active research work.
-- `frontend/` is the React/TypeScript/Vite source for the Pro UI; build it with `npm install && npm run build` to populate `frontend/dist`, which `webui_pro.py` serves.
+- `frontend/` is the React/TypeScript/Vite source for the Pro UI. Build it with `npm install && npm run build` to populate `frontend/dist`, which `webui_pro.py` serves.
 - `docs/`, `tests/`, and `scripts/` are part of the public maintainability story.
-- runtime data such as models, outputs, local configs, and agent notes are ignored.
+- Runtime data such as models, outputs, local configs, and agent notes are ignored.
 
 Useful project docs:
 
-- `ARCHITECTURE.md`
-- `CONTRIBUTING.md`
-- `docs/ATTRIBUTION.md`
-- `docs/DEPENDENCY_POLICY.md`
-- `docs/ENGINE_ISOLATION.md`
-- `docs/FEATURES.md`
-- `docs/IMAGE_MATURITY_MATRIX.md`
-- `docs/MAINTAINER_NOTES.md`
-- `docs/PATH_CONFIGURATION.md`
-- `docs/qa/README.md`
+| Area | Docs |
+| --- | --- |
+| Architecture | [`ARCHITECTURE.md`](ARCHITECTURE.md), [`docs/ENGINE_ISOLATION.md`](docs/ENGINE_ISOLATION.md) |
+| Contribution | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/MAINTAINER_NOTES.md`](docs/MAINTAINER_NOTES.md) |
+| Dependencies and attribution | [`docs/DEPENDENCY_POLICY.md`](docs/DEPENDENCY_POLICY.md), [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md) |
+| Features and QA | [`docs/FEATURES.md`](docs/FEATURES.md), [`docs/IMAGE_MATURITY_MATRIX.md`](docs/IMAGE_MATURITY_MATRIX.md), [`docs/qa/README.md`](docs/qa/README.md) |
+| Paths | [`docs/PATH_CONFIGURATION.md`](docs/PATH_CONFIGURATION.md) |
 
 ## License And Third-party Status
 
@@ -343,7 +320,7 @@ This is a practical release checklist, not legal advice.
 - NVIDIA Video Effects / VFX SDK support is optional. AIWF does not vendor or redistribute NVIDIA SDK binaries or models.
 - MMAudio checkpoints are CC-BY-NC 4.0. Do not present MMAudio-backed audio as commercial-safe without separate permission.
 - InsightFace code is MIT, but InsightFace-trained models and the inswapper face-swap model require separate license care for non-local or commercial use. Face swapping must only be used with consent and applicable-law compliance.
-- Segment Anything is Apache-2.0; AIWF's segment/inpaint path is clean-room integration, with attribution kept in `docs/ATTRIBUTION.md`.
+- Segment Anything is Apache-2.0. AIWF's segment/inpaint path is clean-room integration, with attribution kept in `docs/ATTRIBUTION.md`.
 
 Keep optional restricted components clearly marked as local/user-installed.
 
@@ -357,10 +334,10 @@ Current rule for `main`: keep SageAttention optional and benchmark-gated. Wan mu
 
 These areas exist as work-in-progress or need more hardware coverage before they should be treated as stable:
 
-- Pro UI (React/Vite frontend) feature parity with Studio
+- Pro UI feature parity with Studio
 - Wan FP8 high/low video speed path
 - Wan resident / streamed offload modes
-- training engines (Chat and Training tabs are hidden by default in Studio/Modern)
+- training engines, with Chat and Training tabs hidden by default in Studio/Modern
 - Ollama or llama.cpp chat workspace
 - Face Swap tab
 - workflow authoring
