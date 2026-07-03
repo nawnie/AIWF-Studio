@@ -153,6 +153,26 @@ No hard links or junctions are required. To reuse an existing A1111, ComfyUI, or
 
 ## What Works On Main
 
+This table is the quick truth source for model-family support on `main`.
+
+| Area | Works now | Not ready yet |
+| --- | --- | --- |
+| SD 1.5 | txt2img, img2img, inpaint, ControlNet, hires fix, clip skip, VAE choice, PNG Info, LoRA through Diffusers adapters | Full A1111 extension parity |
+| SDXL | txt2img, img2img, inpaint, ControlNet, hires/refiner path, VAE safety settings, LoRA through Diffusers adapters | Treating the SDXL refiner as a standalone base model is blocked |
+| SD3.5 | local Diffusers-folder checkpoints and basic generation route | Broad ControlNet, LoRA, and A1111-style extension parity |
+| Flux | split local model folders from `models/flux/GGUF/` or `models/flux/UNet/`, local CLIP-L/T5/AE components, txt2img, Flux Fill as the inpaint-only route | Flux LoRA, Flux ControlNet, generic Flux img2img, and selecting Flux Fill as txt2img are blocked |
+| Flux.2 Klein | local quantized/split-model routing and prompt-encoder handling work is present | Runtime speed and memory still need more receipts across 4B and 9B assets |
+| Z-Image / Z-Turbo | safetensors or Diffusers-style routes are the target path; prompt encoder BNB loading is wired when available | Z-Turbo is not optimized yet. Z-Image GGUF is blocked on Windows because the fused GGUF CUDA kernels are Linux-only |
+| Qwen Image | image-family routing and local asset discovery are present | Needs more smoke receipts before it should be advertised as release-ready |
+| Sana image | local generation path has been tested during Pro work | Performance and settings need more receipts before strong speed claims |
+| Image quant formats | FP16/BF16 safetensors, FP8 where the family loader supports it, BNB/NF4 where a route explicitly supports it, GGUF for supported Flux/Wan-style routes | FP4/NVFP4 is not a normal runtime path on this RTX 40-series target. Treat it as storage or conversion research unless a family-specific loader says otherwise |
+| Wan video | image-to-video with 5B safetensors, 14B FP8/safetensors, and matched high/low GGUF pairs; VAE/component checks; runtime filtering; optional RIFE, ReActor, VSR, and audio post steps | Mixed 5B/14B/GGUF routes, unpaired high/low models, and unverified resident/streamed offload modes are blocked |
+| LTX video | optional isolated LTX 2.3 worker, LTX 2B Diffusers smoke path, FP8 checkpoint handling, Gemma text encoder conversion tooling | Native Gemma GGUF hidden-state backend and NVFP4 runtime execution are not ready |
+| Sana video | Pro-visible route and quantization options exist | Treat as experimental until more receipts cover model loading, memory, and output quality |
+| Audio/video-audio | Audio tab, optional MMAudio engine, generated-audio muxing after video | MMAudio checkpoints are non-commercial; broader audio workstation features are WIP |
+| LLM/chat | model inventory, dataset/config builders, Ollama client tests, and hidden/gated chat workspace scaffolding | No promoted Pro chat worker yet. llama.cpp/GGUF chat serving is a future lane, not a release feature |
+| Training | Kohya, ED2, and LLM training scaffolds are isolated and opt-in | Training is hidden/gated and must not be auto-started |
+
 ### Image Generation
 
 - txt2img, img2img, and inpaint
