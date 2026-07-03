@@ -1,6 +1,7 @@
 @echo off
 setlocal EnableExtensions
-set "AIWF_ROOT=%~dp0"
+rem This script lives in scripts\studio_v5_overlay\; the repo root is two levels up.
+set "AIWF_ROOT=%~dp0..\..\"
 cd /d "%AIWF_ROOT%"
 if not defined PYTHON set "PYTHON=python"
 if not defined VENV_DIR set "VENV_DIR=%AIWF_ROOT%venv"

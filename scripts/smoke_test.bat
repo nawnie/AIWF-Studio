@@ -1,11 +1,13 @@
 @echo off
 setlocal enabledelayedexpansion
 
-cd /d "%~dp0"
+rem This script lives in scripts\; run from the repo root one level up.
+cd /d "%~dp0.."
 
 set "PY=venv\Scripts\python.exe"
 set "SCRIPT=scripts\smoke_backend.py"
-set "LOG=smoke_test.log"
+if not exist "logs" mkdir "logs"
+set "LOG=logs\smoke_test.log"
 
 if not exist "%PY%" (
     echo Could not find %PY% - run this from the AIWF_Studio folder with the venv set up.

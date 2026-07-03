@@ -12,9 +12,9 @@
 
 Local-first creative AI workspace for Windows and NVIDIA GPUs, focused on image generation, inpainting, video generation, and video-audio post-processing.
 
-AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. The project keeps the wiring explicit: typed requests, predictable model folders, isolated engines, and no legacy global `shared` state.
+Engineered by [AI Embedded Systems](https://www.ai-embedded-systems.com).
 
-Built around local model folders and explicit routes for Stable Diffusion, SDXL, SD3.5, Flux, Wan, LTX, RIFE, MMAudio, React, FastAPI, Gradio, Diffusers, and NVIDIA RTX workflows.
+AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. The goal is a local creative workstation with explicit wiring, typed requests, predictable model folders, and no legacy global `shared` state.
 
 This `main` branch is the stable sharing branch. It only advertises features intended for normal local use. Experimental work lives on `dev`.
 
@@ -227,3 +227,96 @@ No hard links or junctions are required. To reuse an existing A1111, ComfyUI, or
 - conservative route selection so users cannot mix 5B, 14B FP8/safetensors, and GGUF settings by accident
 
 Wan optimization work is still active. FP8, resident high/low mode, streamed block offload, SageAttention, and similar accelerator paths must stay benchmark-gated.
+
+The near-term audio path is VAP: video audio post-processing. AIWF generates or accepts a video first, then an optional local audio backend creates audio and muxes it back into the MP4.
+
+The first video-conditioned backend is MMAudio. It is isolated under:
+
+```text
+engines/audio/
+```
+
+Bootstrap script:
+
+```powershell
+scripts/bootstrap_mmaudio.ps1
+```
+
+MMAudio is optional and soft-fails when not installed so the visual video output is preserved.
+
+Important license note: MMAudio code is MIT licensed, but the released checkpoints are CC-BY-NC 4.0, so this route should be treated as non-commercial unless you have separate permission.
+
+## Remote Access
+
+Use Tailscale when possible. If you launch with network listening enabled, add authentication before using AIWF outside a trusted local network.
+
+## Project Shape
+
+- `main` is the stable runtime branch for users.
+- `dev` keeps broader experiments and active research work.
+- `frontend/` is the React/TypeScript/Vite source for the Pro UI; build it with `npm install && npm run build` to populate `frontend/dist`, which `webui_pro.py` serves.
+- `docs/`, `tests/`, and `scripts/` are part of the public maintainability story.
+- runtime data such as models, outputs, local configs, and agent notes are ignored.
+
+Useful project docs:
+
+- `docs/ARCHITECTURE.md`
+- `CONTRIBUTING.md`
+- `docs/ATTRIBUTION.md`
+- `docs/DEPENDENCY_POLICY.md`
+- `docs/ENGINE_ISOLATION.md`
+- `docs/FEATURES.md`
+- `docs/IMAGE_MATURITY_MATRIX.md`
+- `docs/MAINTAINER_NOTES.md`
+- `docs/PATH_CONFIGURATION.md`
+- `docs/qa/README.md`
+
+## License And Third-party Status
+
+This is a practical release checklist, not legal advice.
+
+- AIWF Studio's own code is licensed under the **AIWF Non-Commercial Attribution License v1.0** in `LICENSE`.
+- Non-commercial use, study, modification, and sharing are allowed with attribution.
+- Commercial use requires separate written permission from the project owner. Contact: https://github.com/nawnie
+- Model weights, generated outputs, NVIDIA SDK binaries, MMAudio checkout files, and large engine repos are local-only and ignored by git.
+- Users are responsible for the licenses of checkpoints, LoRAs, VAEs, ControlNet models, SAM weights, Wan files, and audio models they install.
+- Stable Diffusion 3.5 model weights are released under Stability AI's Community License and may require Hugging Face gate acceptance before download.
+- NVIDIA Video Effects / VFX SDK support is optional. AIWF does not vendor or redistribute NVIDIA SDK binaries or models.
+- MMAudio checkpoints are CC-BY-NC 4.0. Do not present MMAudio-backed audio as commercial-safe without separate permission.
+- InsightFace code is MIT, but InsightFace-trained models and the inswapper face-swap model require separate license care for non-local or commercial use. Face swapping must only be used with consent and applicable-law compliance.
+- Segment Anything is Apache-2.0; AIWF's segment/inpaint path is clean-room integration, with attribution kept in `docs/ATTRIBUTION.md`.
+
+Keep optional restricted components clearly marked as local/user-installed.
+
+## Attention Acceleration
+
+AIWF uses PyTorch SDPA as the stable attention baseline. Wan video now prefers Diffusers' per-module SAGE backend when SageAttention 2.2 is installed and callable, then falls back to AIWF's SageAttention SDPA patch, then plain Torch SDPA.
+
+Current rule for `main`: keep SageAttention optional and benchmark-gated. Wan must still run when SageAttention is missing, and any speed claim needs matched local receipts. Flash-attn and xFormers are optional experiment lanes, not default requirements for the RTX 4070 Ti SUPER setup.
+
+## WIP And Help Wanted
+
+These areas exist as work-in-progress or need more hardware coverage before they should be treated as stable:
+
+- Pro UI (React/Vite frontend) feature parity with Studio
+- Wan FP8 high/low video speed path
+- Wan resident / streamed offload modes
+- training engines (Chat and Training tabs are hidden by default in Studio/Modern)
+- Ollama or llama.cpp chat workspace
+- Face Swap tab
+- workflow authoring
+- model conversion and quantization tools
+- plugin system
+- richer generated-audio controls and model installers
+- AMD, Intel, Linux, and lower-VRAM validation
+- installer polish and first-run onboarding
+
+## Credits
+
+AIWF Studio is clean-room code. It draws from established local AI tooling around Stable Diffusion, Diffusers, ControlNet, Segment Anything, GroundingDINO, Real-ESRGAN, GFPGAN, CodeFormer, Wan, ComfyUI-GGUF, and the AUTOMATIC1111 web UI.
+
+Optional video post-processing can use NVIDIA Video Effects / VFX SDK components for RTX VSR-style upscale, cleanup, AI green screen, and relighting when the user installs the NVIDIA SDK locally. See `docs/ATTRIBUTION.md` for third-party credits and source links.
+
+## Contributing
+
+AIWF Studio needs focused help from people who work on local creative AI, Windows/NVIDIA workflows, Python services, frontend rebuilds, model runtime tooling, and install flows for normal PC users. Open an issue with a narrow repro or send a PR that includes the check you ran.

@@ -114,7 +114,7 @@ Current engine boundaries:
 
 Useful starting docs:
 
-- `ARCHITECTURE.md`
+- `docs/ARCHITECTURE.md`
 - `docs/ENGINE_ISOLATION.md`
 - `docs/WORKER_PROTOCOL.md`
 - `docs/FEATURES.md`
