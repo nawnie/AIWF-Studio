@@ -171,7 +171,8 @@ function Install-DefaultBaseModel {
         return
     }
     Invoke-External "Install default SD 1.5 base model" $VenvPython @(
-        "scripts\ensure_default_sd15.py"
+        "-c",
+        "import runpy; runpy.run_path(r'scripts\ensure_default_sd15.py', run_name='__main__')"
     )
 }
 
