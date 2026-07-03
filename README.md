@@ -76,6 +76,17 @@ Current focus: image generation, inpainting, video generation, and video-audio p
 - Benchmark claims need timing receipts from this repo, not upstream marketing numbers.
 - Optional engines, model weights, SDKs, and generated outputs stay local and are not committed.
 
+## 2026-07-03 Release State
+
+This pass moved `main` toward a Pro-first local install. The public branch now has a cleaned root layout, a current support matrix, and an installer path that was tested from a fresh GitHub clone on `C:\AIWF_Studio_install_test`.
+
+- Pro UI: FastAPI plus React/Vite starts from the clean install, serves the built frontend, and answers Pro bootstrap, runtime, capabilities, settings, logs, and data API requests.
+- Pipeline routing: SDXL refiner checkpoints are kept out of the base-model picker, Flux Fill is treated as an inpaint-only route, Flux.2 Klein and Z-Image prompt-encoder handling has better VRAM checks, and Windows Z-Image GGUF is blocked with a clear reason instead of hanging.
+- Installer: Express install creates the Python 3.10 venv, installs CUDA PyTorch and runtime requirements, adds the default SD 1.5 fp16 model, runs `npm ci`, builds Pro, and creates Desktop shortcuts.
+- Requirements: `bitsandbytes` is now listed for the quantized transformer and text-encoder routes that need it.
+- Validation receipt: the fresh install reported `torch 2.6.0+cu124`, CUDA 12.4 available, `diffusers 0.38.0`, `transformers 4.57.6`, and `fastapi 0.139.0`.
+- Known gap: NVIDIA VideoFX SDK is optional and was not installed on the validation machine, so VSR remains disabled until the user installs the SDK.
+
 ## Quick Start
 
 On Windows, use the installer:
