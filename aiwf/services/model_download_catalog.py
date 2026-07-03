@@ -47,6 +47,61 @@ QUICK_START_BUNDLES: dict[str, list[str]] = {
 }
 
 # ---------------------------------------------------------------------------
+# CivitAI browse links — pre-filtered to base models AIWF's routes support, so
+# users land on compatible checkpoints/LoRAs instead of the unfiltered feed.
+# ---------------------------------------------------------------------------
+CIVITAI_BROWSE_LINKS: list[dict[str, str]] = [
+    {
+        "label": "SD 1.5 checkpoints",
+        "url": "https://civitai.com/models?types=Checkpoint&baseModels=SD%201.5&sort=Highest%20Rated",
+        "note": "Fastest route; works with inpaint, ControlNet, hires fix, and LoRAs.",
+        "engine": "sd15",
+    },
+    {
+        "label": "SDXL checkpoints",
+        "url": "https://civitai.com/models?types=Checkpoint&baseModels=SDXL%201.0&sort=Highest%20Rated",
+        "note": "Includes Pony/Illustrious merges; SDXL inpaint variants also work in the Inpaint tab.",
+        "engine": "sdxl",
+    },
+    {
+        "label": "SDXL inpaint checkpoints",
+        "url": "https://civitai.com/models?types=Checkpoint&baseModels=SDXL%201.0&query=inpaint",
+        "note": "Purpose-built inpaint UNets (9-channel); best seams for masked edits.",
+        "engine": "sdxl",
+    },
+    {
+        "label": "Flux.1 D checkpoints",
+        "url": "https://civitai.com/models?types=Checkpoint&baseModels=Flux.1%20D&sort=Highest%20Rated",
+        "note": "Pick GGUF Q4/Q5 or FP8 files for 16 GB GPUs; full BF16 files need offload.",
+        "engine": "flux",
+    },
+    {
+        "label": "SD 1.5 LoRAs",
+        "url": "https://civitai.com/models?types=LORA&baseModels=SD%201.5&sort=Highest%20Rated",
+        "note": "Drop into models/Loras; applied via the prompt LoRA syntax.",
+        "engine": "sd15",
+    },
+    {
+        "label": "SDXL LoRAs",
+        "url": "https://civitai.com/models?types=LORA&baseModels=SDXL%201.0&sort=Highest%20Rated",
+        "note": "Match the LoRA base to your checkpoint family (SDXL vs Pony).",
+        "engine": "sdxl",
+    },
+    {
+        "label": "Wan 2.2 video LoRAs",
+        "url": "https://civitai.com/models?types=LORA&baseModels=Wan%20Video%2014B%20t2v&sort=Highest%20Rated",
+        "note": "Motion/style LoRAs for the Wan high/low pair (LightX2V speed LoRAs included).",
+        "engine": "wan",
+    },
+    {
+        "label": "Embeddings (negative/quality)",
+        "url": "https://civitai.com/models?types=TextualInversion&sort=Highest%20Rated",
+        "note": "EasyNegative-style embeddings; referenced by name in the negative prompt.",
+        "engine": "sd15",
+    },
+]
+
+# ---------------------------------------------------------------------------
 # Full catalog
 # ---------------------------------------------------------------------------
 MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [

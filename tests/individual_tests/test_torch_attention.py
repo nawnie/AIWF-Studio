@@ -5,7 +5,11 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
-from aiwf.infrastructure.torch.attention import apply_attention_optimizations, apply_image_pipeline_optimizations
+from aiwf.infrastructure.torch.attention import (
+    apply_attention_optimizations,
+    apply_image_pipeline_optimizations,
+    attention_call_context,
+)
 
 
 class _TinyConv(nn.Module):
@@ -131,3 +135,14 @@ def test_attention_backend_sage_uses_sdpa_processor():
 
     assert result == "sage_sdpa"
     assert pipe.unet.processor is not None
+
+
+def test_attention_call_context_keeps_unet_pipelines_on_torch_sdpa():
+    pipe = _AttentionPipe()
+    original = torch.nn.functional.scaled_dot_product_attention
+
+    with attention_call_context(_flags(attention_backend="sage_sdpa"), pipe=pipe) as backend:
+        assert backend == "sdpa"
+        assert torch.nn.functional.scaled_dot_product_attention is original
+
+    assert torch.nn.functional.scaled_dot_product_attention is original

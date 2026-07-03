@@ -71,18 +71,20 @@ def test_gradio_allowed_paths_only_exposes_outputs(tmp_path):
     assert _gradio_allowed_paths(flags) == [str((tmp_path / "outputs").resolve())]
 
 
-def test_pro_app_window_prefers_edge_app_mode(monkeypatch, tmp_path):
-    edge = tmp_path / "msedge.exe"
+def test_pro_app_window_prefers_chrome_app_mode(monkeypatch, tmp_path):
+    chrome = tmp_path / "chrome.exe"
 
     def fake_which(name: str):
-        return str(edge) if name == "msedge" else None
+        return str(chrome) if name == "chrome" else None
 
     monkeypatch.setattr(app_pro.shutil, "which", fake_which)
+    profile_dir = tmp_path / "profile"
 
-    assert app_pro._browser_app_command("http://127.0.0.1:7860") == [
-        str(edge),
+    assert app_pro._browser_app_command("http://127.0.0.1:7860", profile_dir=profile_dir) == [
+        str(chrome),
+        f"--user-data-dir={profile_dir}",
         "--new-window",
-        "--start-fullscreen",
+        "--start-maximized",
         "--app=http://127.0.0.1:7860",
     ]
 

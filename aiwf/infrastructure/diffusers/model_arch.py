@@ -20,6 +20,7 @@ ARCH_SDXL = "sdxl"
 ARCH_SDXL_INPAINT = "sdxl_inpaint"
 ARCH_SD35 = "sd35"
 ARCH_FLUX = "flux"
+ARCH_FLUX_FILL = "flux_fill"
 ARCH_FLUX_KONTEXT = "flux_kontext"
 ARCH_FLUX2_KLEIN = "flux2_klein"
 ARCH_Z_IMAGE = "z_image"
@@ -27,6 +28,7 @@ ARCH_QWEN_IMAGE = "qwen_image"
 ARCH_QWEN_IMAGE_NUNCHAKU = "qwen_image_nunchaku"
 ARCH_SANA = "sana"
 ARCH_SANA_VIDEO = "sana_video"
+ARCH_UNKNOWN = "unknown"
 
 _QWEN_NUNCHAKU_MARKERS = ("nunchaku", "svdq-int4", "lightningv", "4steps")
 
@@ -53,8 +55,15 @@ def _architecture_from_name(filename: str) -> str | None:
         return ARCH_FLUX2_KLEIN
     if "kontext" in lower:
         return ARCH_FLUX_KONTEXT
+    if "flux" in lower and "fill" in lower:
+        return ARCH_FLUX_FILL
     if "flux" in lower:
         return ARCH_FLUX
+    if "hunyuan" in lower:
+        # Hunyuan (3D/video/image) checkpoints are not runnable in AIWF's
+        # image routes; classifying them as unknown keeps them out of the
+        # selectable model pickers instead of silently failing as SD 1.5.
+        return ARCH_UNKNOWN
     return None
 
 
@@ -140,6 +149,12 @@ def _metadata_architecture_for_checkpoint(path: Path) -> str | None:
 
 def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: str = "") -> str:
     """Classify checkpoint architecture from state-dict key shapes."""
+    name_arch = _architecture_from_name(filename)
+    if name_arch:
+        return name_arch
+    if not shapes:
+        return ARCH_UNKNOWN
+
     unet_in = shapes.get(UNET_INPUT_KEY)
     has_sdxl = SDXL_OPENCLIP_KEY in shapes or SDXL_BASE_KEY in shapes
     lower = filename.lower().replace("_", "-")
@@ -147,10 +162,6 @@ def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: st
         SD3_JOINT_BLOCK_MARKER in key or key.startswith(SD3_DIFFUSERS_BLOCK_MARKER)
         for key in shapes
     )
-
-    name_arch = _architecture_from_name(filename)
-    if name_arch:
-        return name_arch
 
     has_flux_blocks = any(
         key.startswith(
@@ -166,6 +177,13 @@ def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: st
         for key in shapes
     )
     if has_flux_blocks:
+        # Flux Fill (inpaint/outpaint) widens the image input projection to
+        # take the masked-image + mask channels: img_in is [3072, 384] instead
+        # of the base model's [3072, 64].
+        for img_in_key in ("img_in.weight", "model.diffusion_model.img_in.weight", "x_embedder.weight"):
+            shape = shapes.get(img_in_key)
+            if shape and len(shape) >= 2 and int(shape[1]) == 384:
+                return ARCH_FLUX_FILL
         return ARCH_FLUX
 
     if has_sd3 or "sd3.5" in lower or "sd35" in lower or "stable-diffusion-3.5" in lower:
@@ -175,14 +193,15 @@ def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: st
         if has_sdxl:
             return ARCH_SDXL_INPAINT
         return ARCH_INPAINT
+    if unet_in and len(unet_in) >= 2 and unet_in[1] == 4:
+        return ARCH_SD15
 
     if has_sdxl:
         return ARCH_SDXL
 
-    lower = filename.lower()
     if "inpaint" in lower:
         return ARCH_INPAINT
-    return ARCH_SD15
+    return ARCH_UNKNOWN
 
 
 def looks_like_lora_weights(path: Path | str) -> bool:
@@ -199,6 +218,19 @@ def looks_like_lora_weights(path: Path | str) -> bool:
         or ".lora_B." in key
         or ".lora_a." in key
         or ".lora_b." in key
+        for key in shapes
+    )
+
+
+def looks_like_controlnet_weights(path: Path | str) -> bool:
+    """True when a file contains ControlNet weights, not a base checkpoint."""
+    shapes = _shapes_for_checkpoint(Path(path))
+    if not shapes:
+        return False
+    return any(
+        key.startswith("controlnet_")
+        or key.startswith("control_model.")
+        or key.startswith("controlnet.")
         for key in shapes
     )
 
@@ -222,13 +254,15 @@ def detect_checkpoint_architecture(path: Path | str) -> str:
     name_arch = _architecture_from_name(resolved.name)
     if name_arch:
         return name_arch
+    if "sd15" in normalized or "sd1.5" in normalized or "v1-5" in normalized or "stable-diffusion-v1-5" in normalized:
+        return ARCH_SD15
     if "inpaint" in lower and "xl" in lower.replace("_", " "):
         return ARCH_SDXL_INPAINT
     if "inpaint" in lower:
         return ARCH_INPAINT
     if "xl" in lower or "sdxl" in lower:
         return ARCH_SDXL
-    return ARCH_SD15
+    return ARCH_UNKNOWN
 
 
 def architecture_label(architecture: str) -> str:
@@ -237,6 +271,7 @@ def architecture_label(architecture: str) -> str:
         ARCH_SDXL_INPAINT: "SDXL inpaint",
         ARCH_SD35: "SD3.5",
         ARCH_FLUX: "Flux",
+        ARCH_FLUX_FILL: "Flux Fill (inpaint)",
         ARCH_FLUX_KONTEXT: "Flux Kontext",
         ARCH_FLUX2_KLEIN: "Flux.2 Klein",
         ARCH_Z_IMAGE: "Z-Image",
@@ -244,13 +279,18 @@ def architecture_label(architecture: str) -> str:
         ARCH_QWEN_IMAGE_NUNCHAKU: "Qwen Image Nunchaku",
         ARCH_SANA: "Sana",
         ARCH_SANA_VIDEO: "Sana Video",
+        ARCH_UNKNOWN: "unknown",
         ARCH_INPAINT: "inpaint",
         ARCH_SD15: "SD1.5",
     }.get(architecture, architecture)
 
 
 def is_inpaint_architecture(architecture: str) -> bool:
-    return architecture in {ARCH_INPAINT, ARCH_SDXL_INPAINT}
+    return architecture in {ARCH_INPAINT, ARCH_SDXL_INPAINT, ARCH_FLUX_FILL}
+
+
+def is_flux_fill_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() == ARCH_FLUX_FILL
 
 
 def is_sdxl_architecture(architecture: str) -> bool:

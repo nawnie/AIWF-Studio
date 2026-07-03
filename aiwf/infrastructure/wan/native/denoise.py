@@ -539,37 +539,72 @@ def _run_native_wan_denoise_impl(
     pipe._num_timesteps = len(timesteps)
 
     num_channels_latents = pipe.vae.config.z_dim
-    image_tensor = pipe.video_processor.preprocess(image, height=height, width=width).to(
-        device, dtype=torch.float32
-    )
-    last_image_tensor = None
-    if last_image is not None:
-        last_image_tensor = pipe.video_processor.preprocess(last_image, height=height, width=width).to(
-            device, dtype=torch.float32
-        )
-
-    _raise_if_cancelled("before_latents")
-    with _component_on_device(getattr(pipe, "vae", None), device, label="vae_encode"):
-        latents_outputs = pipe.prepare_latents(
-            image_tensor,
-            batch_size * num_videos_per_prompt,
-            num_channels_latents,
-            height,
-            width,
-            num_frames,
-            torch.float32,
-            device,
-            generator,
-            latents,
-            last_image_tensor,
-        )
-    _raise_if_cancelled("after_latents")
     expand_timesteps = bool(getattr(pipe.config, "expand_timesteps", False))
     first_frame_mask = None
-    if expand_timesteps:
-        latents, condition, first_frame_mask = latents_outputs
+    if image is None:
+        # Text-to-video on the TI2V-5B route: pure-noise latents, no image
+        # conditioning. An all-ones mask makes every step denoise the full
+        # latent (the (1-mask)*condition term vanishes), which is exactly the
+        # transformer's t2v training regime.
+        if not expand_timesteps:
+            raise ValueError(
+                "Text-to-video needs the TI2V-5B pipeline (expand_timesteps); "
+                "the dual 14B pair is image-to-video only."
+            )
+        _raise_if_cancelled("before_latents")
+        vae_scale_spatial = int(getattr(pipe, "vae_scale_factor_spatial", 8) or 8)
+        vae_scale_temporal = int(getattr(pipe, "vae_scale_factor_temporal", 4) or 4)
+        latent_frames = (int(num_frames) - 1) // vae_scale_temporal + 1
+        latent_height = int(height) // vae_scale_spatial
+        latent_width = int(width) // vae_scale_spatial
+        shape = (
+            batch_size * num_videos_per_prompt,
+            num_channels_latents,
+            latent_frames,
+            latent_height,
+            latent_width,
+        )
+        if latents is None:
+            latents = torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
+        else:
+            latents = latents.to(device=device, dtype=torch.float32)
+        condition = torch.zeros_like(latents)
+        first_frame_mask = torch.ones(
+            (1, 1, latent_frames, latent_height, latent_width),
+            device=device,
+            dtype=latents.dtype,
+        )
+        _raise_if_cancelled("after_latents")
     else:
-        latents, condition = latents_outputs
+        image_tensor = pipe.video_processor.preprocess(image, height=height, width=width).to(
+            device, dtype=torch.float32
+        )
+        last_image_tensor = None
+        if last_image is not None:
+            last_image_tensor = pipe.video_processor.preprocess(last_image, height=height, width=width).to(
+                device, dtype=torch.float32
+            )
+
+        _raise_if_cancelled("before_latents")
+        with _component_on_device(getattr(pipe, "vae", None), device, label="vae_encode"):
+            latents_outputs = pipe.prepare_latents(
+                image_tensor,
+                batch_size * num_videos_per_prompt,
+                num_channels_latents,
+                height,
+                width,
+                num_frames,
+                torch.float32,
+                device,
+                generator,
+                latents,
+                last_image_tensor,
+            )
+        _raise_if_cancelled("after_latents")
+        if expand_timesteps:
+            latents, condition, first_frame_mask = latents_outputs
+        else:
+            latents, condition = latents_outputs
 
     boundary_ratio = getattr(pipe.config, "boundary_ratio", None)
     boundary_timestep = (

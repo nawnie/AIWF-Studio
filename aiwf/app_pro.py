@@ -40,36 +40,64 @@ def _pro_autolaunch_enabled(argv: list[str]) -> bool:
     return "--no-autolaunch" not in argv
 
 
-def _browser_app_command(url: str) -> list[str] | None:
+def _browser_app_command(url: str, *, profile_dir: Path | None = None) -> list[str] | None:
     candidates = [
-        "msedge",
         "chrome",
-        "msedge.exe",
         "chrome.exe",
+        "msedge",
+        "msedge.exe",
     ]
     for name in candidates:
         executable = shutil.which(name)
         if executable:
-            return [executable, "--new-window", "--start-fullscreen", f"--app={url}"]
+            command = [executable]
+            if profile_dir is not None:
+                command.append(f"--user-data-dir={profile_dir}")
+            command.extend(["--new-window", "--start-maximized", f"--app={url}"])
+            return command
 
     known_paths = [
-        Path(os.environ.get("ProgramFiles", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
-        Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
         Path(os.environ.get("ProgramFiles", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
         Path(os.environ.get("ProgramFiles(x86)", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
         Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("ProgramFiles", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
     ]
     for path in known_paths:
         if path.is_file():
-            return [str(path), "--new-window", "--start-fullscreen", f"--app={url}"]
+            command = [str(path)]
+            if profile_dir is not None:
+                command.append(f"--user-data-dir={profile_dir}")
+            command.extend(["--new-window", "--start-maximized", f"--app={url}"])
+            return command
     return None
 
 
-def _open_app_window(url: str) -> bool:
-    command = _browser_app_command(url)
+def _monitor_app_window(proc: subprocess.Popen) -> None:
+    proc.wait()
+    logger.info("AIWF Studio Pro app window closed; stopping the backend process.")
+    os._exit(0)
+
+
+def _open_app_window(
+    url: str,
+    *,
+    profile_dir: Path | None = None,
+    shutdown_on_close: bool = False,
+) -> bool:
+    if profile_dir is not None:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+    command = _browser_app_command(url, profile_dir=profile_dir)
     if command is not None:
         try:
-            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if shutdown_on_close:
+                threading.Thread(
+                    target=_monitor_app_window,
+                    args=(proc,),
+                    name="aiwf-pro-window-monitor",
+                    daemon=True,
+                ).start()
             return True
         except OSError as exc:
             logger.warning("Could not open Pro app window: %s", exc)
@@ -99,14 +127,29 @@ def _existing_pro_runtime(url: str) -> bool:
     return isinstance(payload, dict) and "status" in payload and "backend" in payload
 
 
-def _open_app_window_when_ready(url: str) -> None:
+def _open_app_window_when_ready(
+    url: str,
+    *,
+    profile_dir: Path | None = None,
+    shutdown_on_close: bool = False,
+) -> None:
     if not _wait_for_http(url):
         logger.warning("AIWF Studio Pro did not answer before the app window timeout.")
-    _open_app_window(url)
+    _open_app_window(url, profile_dir=profile_dir, shutdown_on_close=shutdown_on_close)
 
 
-def _schedule_app_window_open(url: str) -> None:
-    threading.Thread(target=_open_app_window_when_ready, args=(url,), name="aiwf-pro-autolaunch", daemon=True).start()
+def _schedule_app_window_open(
+    url: str,
+    *,
+    profile_dir: Path | None = None,
+    shutdown_on_close: bool = False,
+) -> None:
+    threading.Thread(
+        target=_open_app_window_when_ready,
+        kwargs={"url": url, "profile_dir": profile_dir, "shutdown_on_close": shutdown_on_close},
+        name="aiwf-pro-autolaunch",
+        daemon=True,
+    ).start()
 
 
 def _frontend_dist() -> Path:
@@ -223,6 +266,7 @@ def run() -> None:
     middleware = _api_security_middleware(flags)
     app = create_app(ctx, middleware=middleware)
     frontend_ready = (_frontend_dist() / "index.html").is_file()
+    browser_profile_dir = Path(flags.data_dir) / "_local" / "pro-browser-profile"
     _log_security_warnings(flags)
 
     _startup_message("AIWF Studio Pro is ready.")
@@ -231,7 +275,11 @@ def run() -> None:
         if flags.autolaunch:
             @app.on_event("startup")
             def open_pro_app_window() -> None:
-                _schedule_app_window_open(local_url)
+                _schedule_app_window_open(
+                    local_url,
+                    profile_dir=browser_profile_dir,
+                    shutdown_on_close=True,
+                )
     else:
         _startup_message(f"API ready at {local_url}/api/pro")
         _startup_message("React frontend build not found at frontend/dist; run the frontend build to serve it here.")

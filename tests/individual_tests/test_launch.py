@@ -64,6 +64,7 @@ def test_launch_settings_argv_includes_pipeline_and_engine_flags():
     settings = LaunchSettings(
         inference_backend="onnx",
         onnx_provider="cuda",
+        cuda_malloc=True,
         cuda_graphs=True,
         torchao=True,
         fp8_quant=True,
@@ -78,6 +79,7 @@ def test_launch_settings_argv_includes_pipeline_and_engine_flags():
     assert "onnx" in argv
     assert "--onnx-provider" in argv
     assert "cuda" in argv
+    assert "--cuda-malloc" in argv
     assert "--cuda-graphs" in argv
     assert "--torchao" in argv
     assert "--fp8-quant" in argv
@@ -162,6 +164,24 @@ def test_merge_launch_settings_respects_explicit_genlog_cli(tmp_path: Path):
     merged = merge_launch_settings(cli, saved, explicit={"--genlog"})
 
     assert merged.genlog is False
+
+
+def test_merge_launch_settings_respects_explicit_no_autolaunch_cli(tmp_path: Path):
+    cli = RuntimeFlags(data_dir=tmp_path, autolaunch=False)
+    saved = LaunchSettings(autolaunch=True)
+
+    merged = merge_launch_settings(cli, saved, explicit={"--no-autolaunch"})
+
+    assert merged.autolaunch is False
+
+
+def test_merge_launch_settings_respects_explicit_cuda_malloc_cli(tmp_path: Path):
+    cli = RuntimeFlags(data_dir=tmp_path, cuda_malloc=True)
+    saved = LaunchSettings(cuda_malloc=False)
+
+    merged = merge_launch_settings(cli, saved, explicit={"--cuda-malloc"})
+
+    assert merged.cuda_malloc is True
 
 
 def test_merge_launch_settings_applies_extra_model_dirs(tmp_path: Path):

@@ -12,6 +12,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_QWEN_IMAGE_NUNCHAKU,
     ARCH_SANA,
     ARCH_SANA_VIDEO,
+    ARCH_SDXL,
     ARCH_Z_IMAGE,
     detect_checkpoint_architecture,
 )
@@ -90,6 +91,51 @@ def test_runtime_family_presets_are_sane_first_run_defaults():
     z_image = resolve_model_preset({}, "Z-Image-Turbo", ARCH_Z_IMAGE)
     assert z_image["steps"] == 8
     assert z_image["sampler"] == "euler"
+
+
+def test_classic_sdxl_presets_ignore_unsafe_stale_smoke_settings():
+    preset = resolve_model_preset(
+        {
+            "cyberrealisticPony_v125": {
+                "steps": 2,
+                "cfg_scale": 1.0,
+                "sampler": "euler_a",
+                "scheduler": "automatic",
+                "width": 512,
+                "height": 512,
+            }
+        },
+        "cyberrealisticPony_v125",
+        ARCH_SDXL,
+    )
+
+    assert preset["steps"] == 28
+    assert preset["cfg_scale"] == 6.0
+    assert preset["sampler"] == "dpmpp_2m"
+    assert preset["width"] == 1024
+    assert preset["height"] == 1024
+
+
+def test_distilled_sdxl_presets_keep_low_step_settings():
+    preset = resolve_model_preset(
+        {
+            "RealVisXL_V5.0_Lightning_fp16": {
+                "steps": 2,
+                "cfg_scale": 1.0,
+                "sampler": "euler_a",
+                "scheduler": "automatic",
+                "width": 512,
+                "height": 512,
+            }
+        },
+        "RealVisXL_V5.0_Lightning_fp16",
+        ARCH_SDXL,
+    )
+
+    assert preset["steps"] == 2
+    assert preset["cfg_scale"] == 1.0
+    assert preset["width"] == 512
+    assert preset["height"] == 512
 
 
 def test_sana_sprint_allows_manual_non_default_steps():
@@ -256,6 +302,38 @@ def test_prompt_embedding_cache_is_bounded_and_keeps_recent_entries():
 
     assert list(cache) == ["first", "third"]
     assert "second" not in cache
+
+
+def test_flux2_large_text_encoder_uses_bnb_nf4_prompt_encoder(monkeypatch, tmp_path):
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend.devices = SimpleNamespace(device=lambda: torch.device("cuda"))
+    monkeypatch.setattr(
+        "aiwf.infrastructure.diffusers.backend.asset_size_bytes",
+        lambda _path: int(15.3 * 1024**3),
+    )
+
+    kwargs, precision = backend._flux2_text_encoder_load_kwargs(tmp_path, torch.bfloat16)
+
+    assert precision == "bnb_nf4"
+    assert kwargs["device_map"] == {"": 0}
+    quantization_config = kwargs["quantization_config"]
+    assert quantization_config.load_in_4bit is True
+    assert quantization_config.bnb_4bit_quant_type == "nf4"
+
+
+def test_flux2_small_text_encoder_keeps_full_precision(monkeypatch, tmp_path):
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend.devices = SimpleNamespace(device=lambda: torch.device("cuda"))
+    monkeypatch.setattr(
+        "aiwf.infrastructure.diffusers.backend.asset_size_bytes",
+        lambda _path: int(7.5 * 1024**3),
+    )
+
+    kwargs, precision = backend._flux2_text_encoder_load_kwargs(tmp_path, torch.bfloat16)
+
+    assert precision == "bf16/fp16"
+    assert "quantization_config" not in kwargs
+    assert "device_map" not in kwargs
 
 
 def test_text_encoder_gpu_swap_moves_denoisers_aside_for_prompt_encode():

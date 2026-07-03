@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 
 import launch
@@ -30,11 +31,18 @@ def main() -> None:
         else str(launch.ROOT) + os.pathsep + env["PYTHONPATH"]
     )
 
-    os.execvpe(
-        launch.python(),
-        [launch.python(), str(launch.ROOT / "webui_pro.py"), *pro_argv],
-        env,
-    )
+    command = [launch.python(), str(launch.ROOT / "webui_pro.py"), *pro_argv]
+    if os.name == "nt":
+        print("[AIWF Pro] Opening backend terminal. Close the Pro app window to stop the backend.")
+        proc = subprocess.Popen(
+            command,
+            cwd=str(launch.ROOT),
+            env=env,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+        raise SystemExit(proc.wait())
+
+    os.execvpe(launch.python(), command, env)
 
 
 if __name__ == "__main__":

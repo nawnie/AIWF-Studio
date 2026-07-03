@@ -48,6 +48,13 @@ from diffusers import (
     StableDiffusionXLPipeline,
 )
 from diffusers.utils import logging as diffusers_logging
+
+# FluxFillPipeline needs diffusers >= 0.32; imported defensively so older or
+# stubbed diffusers builds (unit tests) keep every non-Fill route working.
+try:
+    from diffusers import FluxFillPipeline
+except ImportError:  # pragma: no cover - depends on installed diffusers
+    FluxFillPipeline = None
 from PIL import Image
 from safetensors.torch import load_file
 
@@ -115,6 +122,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
     is_inpaint_architecture,
     is_flux2_klein_architecture,
     is_flux_architecture,
+    is_flux_fill_architecture,
     is_flux_kontext_architecture,
     is_qwen_image_architecture,
     is_qwen_nunchaku_architecture,
@@ -348,6 +356,7 @@ def _add_cached_single_file_config(load_kwargs: dict, pipeline_cls) -> None:
 class DiffusersBackend:
     _QWEN_NUNCHAKU_SENTINEL = object()
     _PROMPT_EMBED_CACHE_LIMIT = 32
+    _FLUX2_TEXT_ENCODER_BNB_THRESHOLD_GB = 10.0
 
     def __init__(self, flags: RuntimeFlags, devices: DeviceManager) -> None:
         self.flags = flags
@@ -684,10 +693,37 @@ class DiffusersBackend:
                 architecture=architecture,
                 checkpoint=checkpoint,
             )
-        if device.type != "cuda" or self.flags.lowvram or self.flags.medvram:
+        prefer_offload = self._wants_offload(architecture, checkpoint=checkpoint)
+        if device.type != "cuda" or self.flags.lowvram or self.flags.medvram or prefer_offload:
+            # Keep the LM text encoder OUT of the offload hook graph. Model CPU
+            # offload onloads every hooked module to the GPU when its forward
+            # runs — for Flux.2 Klein 9B that's a ~16 GB Qwen3-8B text encoder,
+            # an instant OOM on 16 GB cards. The prompt-encode path manages the
+            # text encoder manually (GPU swap when it fits, CPU otherwise).
+            text_encoder = getattr(pipe, "text_encoder", None)
+            if device.type == "cuda" and text_encoder is not None and hasattr(text_encoder, "to"):
+                pipe.text_encoder = None
+                try:
+                    pipe = self._place_pipeline(
+                        pipe,
+                        prefer_offload=prefer_offload,
+                        architecture=architecture,
+                        checkpoint=checkpoint,
+                    )
+                finally:
+                    pipe.text_encoder = text_encoder
+                    try:
+                        text_encoder.to("cpu")
+                    except Exception:
+                        logger.debug("Could not park %s text encoder on CPU", architecture, exc_info=True)
+                logger.info(
+                    "%s text encoder excluded from CPU-offload hooks; it stays in system RAM.",
+                    architecture,
+                )
+                return pipe
             return self._place_pipeline(
                 pipe,
-                prefer_offload=self._wants_offload(architecture, checkpoint=checkpoint),
+                prefer_offload=prefer_offload,
                 architecture=architecture,
                 checkpoint=checkpoint,
             )
@@ -1510,6 +1546,49 @@ class DiffusersBackend:
         active = getattr(self, "_active", None)
         return str(getattr(active, "id", "") or getattr(active, "path", "") or "")
 
+    def _flux2_text_encoder_load_kwargs(self, component_dir: Path, dtype: torch.dtype) -> tuple[dict[str, object], str]:
+        kwargs: dict[str, object] = {
+            "dtype": dtype,
+            "local_files_only": True,
+        }
+        if self.devices.device().type != "cuda":
+            return kwargs, "bf16/fp16 CPU"
+        text_encoder_gb = asset_size_bytes(component_dir / "text_encoder") / (1024.0**3)
+        if text_encoder_gb < self._FLUX2_TEXT_ENCODER_BNB_THRESHOLD_GB:
+            return kwargs, "bf16/fp16"
+        try:
+            from transformers import BitsAndBytesConfig
+        except ImportError as exc:
+            logger.warning(
+                "Flux.2 Klein text encoder is %.1f GB, but bitsandbytes quantization is unavailable: %s",
+                text_encoder_gb,
+                exc,
+            )
+            return kwargs, "bf16/fp16 CPU"
+
+        compute_dtype = normalize_bnb_4bit_compute_dtype(dtype)
+        device = self.devices.device()
+        cuda_index = device.index if device.index is not None else 0
+        kwargs.update(
+            {
+                "dtype": compute_dtype,
+                "device_map": {"": cuda_index},
+                "quantization_config": BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=compute_dtype,
+                    bnb_4bit_use_double_quant=True,
+                ),
+            }
+        )
+        logger.info(
+            "Flux.2 Klein text encoder %.1f GB exceeds %.1f GB; loading Qwen encoder as bnb NF4 on cuda:%s.",
+            text_encoder_gb,
+            self._FLUX2_TEXT_ENCODER_BNB_THRESHOLD_GB,
+            cuda_index,
+        )
+        return kwargs, "bnb_nf4"
+
     def _encode_flux_prompt(
         self,
         prompt: str,
@@ -1679,6 +1758,21 @@ class DiffusersBackend:
                     logger.warning("Failed to restore Flux transformer to GPU after encode", exc_info=True)
             logger.info("Flux fast encode: transformer restored in %.2fs", time.perf_counter() - swap_t0)
 
+    @staticmethod
+    def _module_param_bytes(module) -> int:
+        """Actual storage bytes of a module's parameters (GGUF/quantized aware)."""
+        total = 0
+        try:
+            for param in module.parameters():
+                nbytes = getattr(param, "nbytes", None)
+                if nbytes is None:
+                    nbytes = param.numel() * param.element_size()
+                total += int(nbytes)
+        except Exception:
+            logger.debug("Could not measure module parameter bytes", exc_info=True)
+            return 0
+        return total
+
     def _encode_with_text_encoder_gpu_swap(
         self,
         pipe,
@@ -1699,6 +1793,52 @@ class DiffusersBackend:
             or (isinstance(text_encoder_device, torch.device) and text_encoder_device.type == "cuda")
         ):
             return encode(text_encoder_device if isinstance(text_encoder_device, torch.device) else device)
+
+        # Offload hooks (accelerate) own module placement — a manual .to() here
+        # would fight them and produce device-mismatch errors mid-denoise.
+        if self._offload_active or getattr(text_encoder, "_hf_hook", None) is not None:
+            logger.info("%s text encoder encodes on CPU (CPU offload active).", architecture)
+            return encode(fallback_device)
+
+        # Headroom check: only swap the text encoder onto the GPU if it can
+        # actually fit once the denoiser is parked. Flux.2 Klein 9B ships a
+        # ~16 GB Qwen3-8B encoder that can never fit a 16 GB card — attempting
+        # the move used to raise CUDA OOM before the CPU fallback kicked in.
+        text_encoder_has_parameters = hasattr(text_encoder, "parameters")
+        te_bytes = self._module_param_bytes(text_encoder) if text_encoder_has_parameters else 0
+        denoiser_bytes = 0
+        for attr in ("transformer", "unet"):
+            denoiser = getattr(pipe, attr, None)
+            if denoiser is not None and hasattr(denoiser, "parameters"):
+                try:
+                    if next(denoiser.parameters()).device.type == "cuda":
+                        denoiser_bytes += self._module_param_bytes(denoiser)
+                except StopIteration:
+                    pass
+                except Exception:
+                    logger.debug("Could not size %s for encode headroom check", attr, exc_info=True)
+        reserve_bytes = int(1.5 * 1024**3)
+        free_bytes = 0
+        try:
+            free_bytes, _total = torch.cuda.mem_get_info(device)
+        except Exception:
+            logger.debug("Could not query CUDA free memory for encode swap", exc_info=True)
+        if free_bytes <= 0:
+            try:
+                total_vram_gb = float(self.devices.total_vram_gb())
+            except Exception:
+                total_vram_gb = 0.0
+            if total_vram_gb > 0:
+                free_bytes = int(total_vram_gb * 1024**3)
+        if (text_encoder_has_parameters and te_bytes <= 0) or free_bytes <= 0 or te_bytes + reserve_bytes > free_bytes + denoiser_bytes:
+            logger.info(
+                "%s text encoder (%.1f GB) exceeds GPU headroom (%.1f GB free + %.1f GB parkable); encoding on CPU.",
+                architecture,
+                te_bytes / 1024**3,
+                free_bytes / 1024**3,
+                denoiser_bytes / 1024**3,
+            )
+            return encode(fallback_device)
 
         denoisers_to_restore: list[tuple[str, object]] = []
         seen_denoisers: set[int] = set()
@@ -2553,16 +2693,37 @@ class DiffusersBackend:
                 family="Flux.2 Klein",
             )
 
+            # VAE and text encoder must never inherit FP8 storage — there is no
+            # FP8 matmul path for them; keep them in bf16/fp16.
+            aux_dtype = self._gguf_compute_dtype(dtype)
+            text_encoder_kwargs, text_encoder_precision = self._flux2_text_encoder_load_kwargs(
+                component_dir,
+                aux_dtype,
+            )
             vae = AutoencoderKLFlux2.from_pretrained(
                 str(component_dir / "vae"),
-                torch_dtype=dtype,
+                torch_dtype=aux_dtype,
                 local_files_only=True,
             )
-            text_encoder = Qwen3ForCausalLM.from_pretrained(
-                str(component_dir / "text_encoder"),
-                dtype=dtype,
-                local_files_only=True,
-            )
+            try:
+                text_encoder = Qwen3ForCausalLM.from_pretrained(
+                    str(component_dir / "text_encoder"),
+                    **text_encoder_kwargs,
+                )
+            except Exception:
+                if text_encoder_precision != "bnb_nf4":
+                    raise
+                logger.warning(
+                    "Flux.2 Klein bnb NF4 text encoder load failed; falling back to full precision CPU encode.",
+                    exc_info=True,
+                )
+                text_encoder_precision = "bf16/fp16 CPU"
+                text_encoder = Qwen3ForCausalLM.from_pretrained(
+                    str(component_dir / "text_encoder"),
+                    dtype=aux_dtype,
+                    local_files_only=True,
+                )
+            text_encoder._aiwf_precision = text_encoder_precision
             tokenizer = Qwen2TokenizerFast.from_pretrained(str(component_dir / "tokenizer"), local_files_only=True)
             scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
                 str(component_dir / "scheduler"),
@@ -2651,14 +2812,15 @@ class DiffusersBackend:
                 path.name,
             )
 
+            aux_dtype = self._gguf_compute_dtype(dtype)
             vae = AutoencoderKL.from_pretrained(
                 str(component_dir / "vae"),
-                torch_dtype=dtype,
+                torch_dtype=aux_dtype,
                 local_files_only=True,
             )
             text_encoder = AutoModel.from_pretrained(
                 str(component_dir / "text_encoder"),
-                dtype=dtype,
+                dtype=aux_dtype,
                 local_files_only=True,
             )
             tokenizer = AutoTokenizer.from_pretrained(str(component_dir / "tokenizer"), local_files_only=True)
@@ -2955,6 +3117,24 @@ class DiffusersBackend:
         self._img2img = None
         return checkpoint
 
+    @staticmethod
+    def _checkpoint_load_hint(exc: Exception) -> str:
+        message = f"{type(exc).__name__}: {exc}".lower()
+        if "gatedrepoerror" in message or "cannot access gated repo" in message or "access to model" in message:
+            return (
+                "This checkpoint needs gated Hugging Face config files. Authenticate with an HF token that has access "
+                "to the model, or provide a complete local diffusers config/pipeline folder for this checkpoint."
+            )
+        if "401 client error" in message or "unauthorized" in message:
+            return (
+                "The model config request was unauthorized. Check Hugging Face login/access or use a complete local "
+                "config cache for this checkpoint."
+            )
+        return (
+            "This usually means the file uses a quantization or key layout that isn't supported for this architecture "
+            "yet, for example a non-standard FP8 export. Try a different checkpoint, or report this one with its name."
+        )
+
     def load_checkpoint(self, checkpoint_id: str | None = None) -> Checkpoint:
         checkpoint = self._resolve_checkpoint(checkpoint_id)
         if is_flux_kontext_architecture(checkpoint.architecture):
@@ -3012,6 +3192,7 @@ class DiffusersBackend:
             _add_cached_single_file_config(load_kwargs, pipeline_cls)
         if pipeline_cls is StableDiffusionPipeline:
             load_kwargs["requires_safety_checker"] = False
+            load_kwargs["low_cpu_mem_usage"] = False
         # AIWF loads local single-file checkpoints with app-level controls around
         # requests and file selection. Diffusers' optional safety checker needs
         # extra model assets and is disabled here so backend selection stays
@@ -3050,11 +3231,10 @@ class DiffusersBackend:
                 type(exc).__name__,
                 exc,
             )
+            hint = self._checkpoint_load_hint(exc)
             raise ModelNotFoundError(
                 f"'{checkpoint.title}' failed to load ({type(exc).__name__}: {exc}). "
-                "This usually means the file uses a quantization or key layout that "
-                "isn't supported for this architecture yet (e.g. a non-standard FP8 "
-                "export). Try a different checkpoint, or report this one with its name."
+                f"{hint}"
             ) from exc
         self._remember_base_scheduler_config(pipe)
         self._apply_fp8_storage(pipe)
@@ -3087,6 +3267,11 @@ class DiffusersBackend:
         if self._inpaint_active and self._inpaint_active.path != checkpoint.path:
             self._inpaint = None
             self._inpaint_active = None
+
+        if is_flux_fill_architecture(checkpoint.architecture):
+            # Flux.1-Fill is a dedicated inpaint transformer (384-channel image
+            # input); it gets its own pipeline instead of the from_pipe blend.
+            return self._load_flux_fill_pipeline(checkpoint)
 
         if is_flux_architecture(checkpoint.architecture):
             # Flux inpaint reuses the loaded txt2img pipeline's components via
@@ -3137,6 +3322,8 @@ class DiffusersBackend:
         elif path.is_dir():
             pipe = pipeline_cls.from_pretrained(checkpoint.path, **load_kwargs)
         else:
+            if pipeline_cls is StableDiffusionInpaintPipeline:
+                load_kwargs["low_cpu_mem_usage"] = False
             pipe = pipeline_cls.from_single_file(checkpoint.path, **load_kwargs)
         self._remember_base_scheduler_config(pipe)
         self._apply_fp8_storage(pipe)
@@ -3174,6 +3361,87 @@ class DiffusersBackend:
         pipe._aiwf_flux_components = getattr(self._txt2img, "_aiwf_flux_components", None)
         pipe._aiwf_flux_guidance_embeds = getattr(self._txt2img, "_aiwf_flux_guidance_embeds", False)
         pipe._aiwf_cast_vae_decode_dtype = getattr(self._txt2img, "_aiwf_cast_vae_decode_dtype", False)
+        self._inpaint = pipe
+        self._inpaint_active = checkpoint
+        return pipe
+
+    def _load_flux_fill_pipeline(self, checkpoint: Checkpoint) -> FluxFillPipeline:
+        """Build a FluxFillPipeline from a standalone Flux.1-Fill transformer.
+
+        Mirrors ``_load_flux_checkpoint`` (single-file transformer + shared
+        CLIP-L/T5 components) but with the Fill transformer's 384-channel
+        image input and the dedicated fill pipeline. Registered as the inpaint
+        pipeline, never as txt2img — Fill cannot generate from scratch.
+        """
+        if FluxFillPipeline is None:
+            raise ModelNotFoundError("Flux Fill needs diffusers >= 0.32 with FluxFillPipeline. Update diffusers.")
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload(keep_flux_encoders=True)
+
+        path = Path(checkpoint.path)
+        if path.suffix.lower() not in {".gguf", ".safetensors"}:
+            raise ModelNotFoundError("Flux Fill expects a .gguf or .safetensors transformer file.")
+        component_paths = self._resolve_flux_component_paths()
+        guidance_embeds = self._flux_transformer_has_guidance(path)
+        dtype = self._dtype_for_architecture(ARCH_FLUX)
+        if path.suffix.lower() == ".gguf":
+            dtype = self._gguf_compute_dtype(dtype)
+        elif path.suffix.lower() == ".safetensors":
+            bnb_report = inspect_bnb_4bit_safetensors(path)
+            if bnb_report.is_bnb_4bit:
+                dtype = normalize_bnb_4bit_compute_dtype(dtype)
+
+        transformer_config = dict(_FLUX_TRANSFORMER_CONFIG_BASE)
+        transformer_config["in_channels"] = 384
+        transformer_config["out_channels"] = 64
+        transformer_config["guidance_embeds"] = guidance_embeds
+
+        config_root = self._flux_config_cache_root()
+        transformer_config_dir = self._write_temp_config(config_root, "transformer_fill", transformer_config)
+        vae_config_dir = self._write_temp_config(config_root, "vae", _FLUX_VAE_CONFIG)
+        transformer = self._load_dit_transformer_single_file(
+            FluxTransformer2DModel,
+            path,
+            config_dir=transformer_config_dir,
+            dtype=dtype,
+            family="Flux Fill",
+        )
+        vae = AutoencoderKL.from_single_file(
+            str(component_paths["vae"]),
+            config=vae_config_dir,
+            torch_dtype=dtype,
+            local_files_only=True,
+        )
+
+        pipe = FluxFillPipeline(
+            scheduler=FlowMatchEulerDiscreteScheduler(shift=3.0),
+            vae=vae,
+            text_encoder=None,
+            tokenizer=None,
+            text_encoder_2=None,
+            tokenizer_2=None,
+            transformer=transformer,
+        )
+        pipe._aiwf_flux_guidance_embeds = guidance_embeds
+        pipe._aiwf_flux_components = {key: str(value) for key, value in component_paths.items()}
+        if getattr(transformer, "_aiwf_bnb_original_layout", False):
+            pipe._aiwf_cast_vae_decode_dtype = True
+        pipe.set_progress_bar_config(disable=True)
+        self._remember_base_scheduler_config(pipe)
+        apply_attention_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=self._compile_allowed_for_architecture(ARCH_FLUX),
+        )
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(ARCH_FLUX),
+            architecture=ARCH_FLUX,
+        )
+        self._tune_vae_memory(pipe, ARCH_FLUX, checkpoint)
+        self._load_flux_prompt_models(component_paths)
+
         self._inpaint = pipe
         self._inpaint_active = checkpoint
         return pipe
@@ -3232,7 +3500,7 @@ class DiffusersBackend:
             vae.decode = original_decode
 
     def _call_pipe(self, pipe, **kwargs):
-        with attention_call_context(getattr(self, "flags", None)):
+        with attention_call_context(getattr(self, "flags", None), pipe=pipe):
             with self._vae_decode_dtype_context(pipe):
                 return pipe(**kwargs)
 
@@ -3599,13 +3867,18 @@ class DiffusersBackend:
         guidance_scale = float(request.cfg_scale) if guidance_embeds else 0.0
         if not guidance_embeds and request.cfg_scale != 0:
             logger.info("Flux distilled transformer has no guidance block; CFG/guidance is forced to 0.0.")
+        strength_kwargs: dict[str, float] = {}
+        if FluxFillPipeline is None or not isinstance(pipe, FluxFillPipeline):
+            # FluxFillPipeline is a purpose-built inpaint model: it always fully
+            # regenerates the masked region and takes no strength argument.
+            strength_kwargs["strength"] = strength
         return self._call_pipe(
             pipe,
             prompt_embeds=prompt_embeds,
             pooled_prompt_embeds=pooled_prompt_embeds,
             image=image,
             mask_image=mask_image,
-            strength=strength,
+            **strength_kwargs,
             num_inference_steps=steps,
             guidance_scale=guidance_scale,
             num_images_per_prompt=1,
@@ -4153,6 +4426,11 @@ class DiffusersBackend:
 
         parsed = parse_extra_networks(request.prompt)
         is_flux_checkpoint = is_flux_architecture(checkpoint.architecture)
+        is_flux_fill_checkpoint = is_flux_fill_architecture(checkpoint.architecture)
+        if is_flux_fill_checkpoint and request.mode != GenerationMode.INPAINT:
+            raise ValueError(
+                "Flux Fill is an inpaint-only checkpoint. Use the Inpaint tab, or pick a regular Flux model for txt2img."
+            )
         is_flux_kontext_checkpoint = is_flux_kontext_architecture(checkpoint.architecture)
         is_flux2_checkpoint = is_flux2_klein_architecture(checkpoint.architecture)
         is_z_image_checkpoint = is_z_image_architecture(checkpoint.architecture)
@@ -4495,7 +4773,7 @@ class DiffusersBackend:
                     )
                     batch_images = output.images
 
-                elif is_flux_checkpoint and request.mode == GenerationMode.INPAINT:
+                elif (is_flux_checkpoint or is_flux_fill_checkpoint) and request.mode == GenerationMode.INPAINT:
                     assert mask_images is not None and init_images is not None
                     orig = init_images[0].convert("RGB")
                     raw_mask = mask_images[0]

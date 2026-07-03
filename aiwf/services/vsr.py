@@ -95,37 +95,78 @@ class VsrService:
         self.vsr_model = None
 
     def upscale_image(self, img: Image.Image, options: VsrOptions) -> Image.Image:
-        """Upscales a single PIL Image natively using PyTorch tensors, mirroring ComfyUI."""
-        import torch
-        import numpy as np
-        from PIL import Image
+        """Upscale a single PIL image through the NVIDIA VideoFX SDK.
 
-        # 1. Convert PIL Image to a batch tensor: Shape (Batch=1, Channels, Height, Width)
-        # ComfyUI natively represents images as [B, H, W, C] normalized to 0.0 - 1.0
-        img_np = np.array(img).astype(np.float32) / 255.0
-        img_tensor = torch.from_numpy(img_np).unsqueeze(0)  # Shape: [1, H, W, C]
-        
-        # Move tensor to the appropriate execution device (GPU)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        img_tensor = img_tensor.to(device)
-        
-        # 2. Replicate frames if the VSR model expects a temporal sequence (e.g., minimum 3 frames)
-        # Many video models require a temporal window to calculate optical flow or attention
-        temporal_window = 3 
-        vsr_input = img_tensor.repeat(temporal_window, 1, 1, 1)  # Shape: [3, H, W, C]
-        
-        # 3. Run the VSR processing pipeline directly in memory
-        with torch.inference_mode():
-            # Replace this placeholder with your model's forward pass
-            # e.g., upscaled_sequence = self.vsr_model(vsr_input)
-            upscaled_sequence = vsr_input  
-            
-        # 4. Extract the primary upscaled frame (usually the middle or first frame)
-        target_frame = upscaled_sequence[0].cpu()
-        
-        # 5. Convert back to a standard PIL Image
-        output_np = (target_frame.numpy() * 255.0).clip(0, 255).astype(np.uint8)
-        return Image.fromarray(output_np)
+        The SDK sample apps accept image files directly (png/jpg in -> out),
+        so the image path reuses the exact same binary, models, and effect
+        modes as the video path — no separate model stack to maintain.
+        """
+        import shutil
+        import tempfile
+
+        from PIL import Image as PILImage
+
+        info = self.install_info()
+        selected_effect = options.effect if options.effect in {"SuperRes", "Cleanup", "Upscale"} else "SuperRes"
+        if selected_effect in {"SuperRes", "Cleanup"} and (not info.available or info.app_path is None):
+            raise VsrUnavailable(self.folder_help())
+        if selected_effect == "Upscale" and (not info.upscale_available or info.upscale_app_path is None):
+            raise VsrUnavailable(self.folder_help())
+
+        mode = max(0, min(19, int(options.mode)))
+        scale = self._valid_scale(float(options.scale))
+        if selected_effect == "Cleanup" or mode in VSR_CLEANUP_SAME_RES_MODES:
+            scale = 1.0
+        target_height = max(1, int(round(img.height * scale)))
+
+        work_dir = Path(tempfile.mkdtemp(prefix="aiwf_vsr_img_"))
+        try:
+            src = work_dir / "input.png"
+            dest = work_dir / "output.png"
+            img.convert("RGB").save(src, format="PNG")
+            command = self._command(
+                info,
+                src,
+                dest,
+                effect=selected_effect,
+                target_height=target_height,
+                mode=mode,
+                strength=float(options.strength),
+                codec=options.codec,
+            )
+            self._run_sdk_command(command, info, label="NVIDIA VideoFX image upscale", dest=dest)
+            result = PILImage.open(dest)
+            result.load()
+            return result
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    def upscale_image_file(
+        self,
+        input_path: str | Path,
+        options: VsrOptions,
+        *,
+        output_path: str | Path | None = None,
+    ) -> Path:
+        """Upscale an image file on disk via the SDK; returns the output path."""
+        from PIL import Image as PILImage
+
+        src = Path(input_path)
+        if not src.is_file():
+            raise VsrUnavailable(f"Image not found: {src}")
+        with PILImage.open(src) as img:
+            img.load()
+            result = self.upscale_image(img, options)
+        if output_path is None:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            sub = getattr(self.settings, "vsr_output_subdir", "vsr-videos")
+            root = self.flags.resolved_output_dir() / sub
+            root.mkdir(parents=True, exist_ok=True)
+            output_path = root / f"{src.stem}_vsr_{stamp}.png"
+        dest = Path(output_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        result.save(dest, format="PNG")
+        return dest
 
     def install_info(self) -> VsrInstallInfo:
         app_path = self._resolve_app_path()
@@ -800,6 +841,7 @@ class VsrService:
             r"C:\Program Files\NVIDIA Corporation\NVIDIA Video Effects",
             r"C:\Program Files\NVIDIA Corporation\NVIDIA VFX SDK",
             str(Path(anchor) / "VideoFX") if anchor else "",
+            str(Path(anchor) / "sdks" / "nvidia" / "VideoFX") if anchor else "",
             str(self.flags.data_dir.parent / "VideoFX"),
             str(Path(anchor) / "sdks" / "nvidia" / "nvidia-vfx-sdk-samples") if anchor else "",
             str(Path(anchor) / "sdks" / "nvidia" / "nvidia-vfx-sdk") if anchor else "",

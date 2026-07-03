@@ -102,11 +102,12 @@ def _load_user_settings(settings: UserSettings, settings_path: Path) -> None:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
         if data.get("show_progress_every_n_steps", 1) == 0:
             data["enable_live_preview"] = False
-            data["show_progress_every_n_steps"] = 1
+            data["show_progress_every_n_steps"] = 5
         loaded = UserSettings.model_validate(data)
         for name in UserSettings.model_fields:
             setattr(settings, name, getattr(loaded, name))
         settings.apply_token_env()
+        settings.apply_video_perf_env()
     except (json.JSONDecodeError, ValueError):
         pass
 

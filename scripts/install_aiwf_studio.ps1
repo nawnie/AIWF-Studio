@@ -217,6 +217,66 @@ function Install-DesktopShortcuts {
         -Description "AIWF Studio Gradio Lab for WIP features"
 }
 
+function Install-NvidiaVideoFx {
+    Write-Section "NVIDIA VideoFX (VSR) SDK"
+    $enginesDir = Join-Path $Root "engines"
+    $sdkLink = Join-Path $enginesDir "nvidia-vfx-sdk"
+    $samplesLink = Join-Path $enginesDir "nvidia-vfx-sdk-samples"
+    $anchor = (Get-Item $Root).PSDrive.Root
+
+    $sdkCandidates = @(
+        "$env:ProgramFiles\NVIDIA Corporation\NVIDIA Video Effects",
+        (Join-Path $anchor "VideoFX"),
+        (Join-Path $anchor "sdks\nvidia\VideoFX")
+    )
+    $samplesCandidates = @(
+        (Join-Path $anchor "sdks\nvidia\nvidia-vfx-sdk-samples")
+    )
+
+    $sdkRoot = $sdkCandidates | Where-Object { Test-Path (Join-Path $_ "bin\NVVideoEffects.dll") } | Select-Object -First 1
+    $samplesRoot = $samplesCandidates | Where-Object {
+        Test-Path (Join-Path $_ "build\apps\VideoEffectsApp\Release\VideoEffectsApp.exe")
+    } | Select-Object -First 1
+
+    if (-not $sdkRoot) {
+        Write-Host "NVIDIA Video Effects SDK runtime was not found."
+        Write-Host "VSR upscaling stays disabled until the SDK is installed:"
+        Write-Host "  1. Download the NVIDIA Video Effects SDK (Maxine VideoFX) for your GPU generation."
+        Write-Host "  2. Install it, then run features\install_feature.ps1 for nvvfxvideosuperres and nvvfxupscale."
+        Write-Host "  3. Re-run this installer; it links the SDK into engines\ automatically."
+        return
+    }
+
+    if ($DryRun) {
+        Write-Host "[dry-run] Would link $sdkLink -> $sdkRoot"
+        if ($samplesRoot) { Write-Host "[dry-run] Would link $samplesLink -> $samplesRoot" }
+        return
+    }
+
+    New-Item -ItemType Directory -Force $enginesDir | Out-Null
+    if (-not (Test-Path $sdkLink)) {
+        New-Item -ItemType Junction -Path $sdkLink -Target $sdkRoot | Out-Null
+        Write-Host "Linked VideoFX SDK: $sdkLink -> $sdkRoot"
+    } else {
+        Write-Host "VideoFX SDK link already present: $sdkLink"
+    }
+    if ($samplesRoot -and -not (Test-Path $samplesLink)) {
+        New-Item -ItemType Junction -Path $samplesLink -Target $samplesRoot | Out-Null
+        Write-Host "Linked VideoFX sample apps: $samplesLink -> $samplesRoot"
+    } elseif (-not $samplesRoot) {
+        Write-Host "Built VideoFX sample apps (VideoEffectsApp.exe) were not found."
+        Write-Host "Build NVIDIA-Maxine/VFX-SDK-Samples once, or set AIWF_VSR_VIDEO_EFFECTS_APP to a built binary."
+    }
+
+    $modelsDir = Join-Path $sdkRoot "bin\models"
+    if (Test-Path $modelsDir) {
+        $modelCount = (Get-ChildItem $modelsDir -ErrorAction SilentlyContinue | Measure-Object).Count
+        Write-Host "VideoFX feature models detected: $modelCount package(s)."
+    } else {
+        Write-Host "No VideoFX feature models found yet. Run features\install_feature.ps1 in the SDK to install VSR models."
+    }
+}
+
 function Read-InstallerMode {
     Write-Host "AIWF Studio installer"
     Write-Host ""
@@ -272,6 +332,7 @@ if (-not $SkipPrerequisites) {
 Ensure-PythonVenv
 Prepare-AiwfRuntime
 Install-DefaultBaseModel
+Install-NvidiaVideoFx
 Build-ProFrontend
 Install-DesktopShortcuts
 

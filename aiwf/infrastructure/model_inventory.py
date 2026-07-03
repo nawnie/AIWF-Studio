@@ -245,6 +245,8 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
             return "ltx/checkpoints"
         return "misc"
     if family == "checkpoint":
+        if architecture == "unknown":
+            return "models to sort"
         return "Stable-diffusion"
     if family == "vae":
         if architecture == ARCH_FLUX:

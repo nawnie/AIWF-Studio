@@ -58,9 +58,11 @@ def _configure_logging(data_dir: Path) -> None:
     root.addHandler(console)
 
     try:
-        data_dir.mkdir(parents=True, exist_ok=True)
+        # Runtime logs live under logs/ so the repo root stays user-facing.
+        log_dir = data_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
         file_handler = RotatingFileHandler(
-            data_dir / "aiwf.log",
+            log_dir / "aiwf.log",
             maxBytes=2 * 1024 * 1024,
             backupCount=3,
             encoding="utf-8",
@@ -267,9 +269,14 @@ def _parse_cli() -> RuntimeFlags:
         help="Disable page-locked CPU cache for Wan high/low PCIe swaps",
     )
     parser.add_argument(
+        "--cuda-malloc",
+        action="store_true",
+        help="Enable cudaMallocAsync allocator. Off by default because some Diffusers VAE decode paths can trip PyTorch allocator asserts.",
+    )
+    parser.add_argument(
         "--no-cuda-malloc",
         action="store_true",
-        help="Disable cudaMallocAsync allocator (PYTORCH_CUDA_ALLOC_CONF)",
+        help="Keep cudaMallocAsync allocator disabled (PYTORCH_CUDA_ALLOC_CONF)",
     )
     parser.add_argument("--cuda-graphs", action="store_true", help="Enable experimental CUDA Graph replay")
     parser.add_argument("--torchao", action="store_true", help="Enable experimental TorchAO int8 quantization")
@@ -327,7 +334,7 @@ def _parse_cli() -> RuntimeFlags:
         opt_split_attention=args.opt_split_attention,
         async_offload=not args.no_async_offload,
         pinned_memory=not args.no_pinned_memory,
-        cuda_malloc=not args.no_cuda_malloc,
+        cuda_malloc=args.cuda_malloc and not args.no_cuda_malloc,
         cuda_graphs=args.cuda_graphs,
         torchao=args.torchao,
         fp8_quant=args.fp8_quant,

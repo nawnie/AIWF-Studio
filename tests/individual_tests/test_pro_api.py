@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 from aiwf.app_pro import create_app
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
@@ -31,6 +31,7 @@ class _Generation:
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
         self.submitted = []
+        self.submitted_kwargs = []
         self._recent = []
         self._active = None
 
@@ -48,6 +49,16 @@ class _Generation:
     def list_samplers(self):
         return [SamplerInfo(id="euler_a", label="Euler a")]
 
+    def get_model_preset(self, checkpoint_id=None):
+        return {
+            "steps": 28,
+            "cfg_scale": 6.0,
+            "sampler": "dpmpp_2m",
+            "scheduler": "automatic",
+            "width": 1024,
+            "height": 1024,
+        }
+
     def list_loras(self):
         return [SimpleNamespace(id="style-a", title="Style A")]
 
@@ -60,8 +71,9 @@ class _Generation:
     def recent_jobs(self, _limit=20):
         return list(self._recent)
 
-    def submit(self, request: GenerationRequest):
+    def submit(self, request: GenerationRequest, **_kwargs):
         self.submitted.append(request)
+        self.submitted_kwargs.append(_kwargs)
         image = Image.new("RGB", (16, 16), "blue")
         artifact_path = self.output_dir / "txt2img-images" / "generated.png"
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +172,7 @@ def _ctx(tmp_path: Path):
     )
     wan = SimpleNamespace(
         list_local_models=lambda: ["wan-a.safetensors"],
+        list_local_models_labeled=lambda: [("Wan 2.2 Fast 5B", "wan-a.safetensors")],
         list_local_loras=lambda: ["wan-lora.safetensors"],
         available=lambda: True,
     )
@@ -196,8 +209,11 @@ def test_bootstrap_returns_catalog_defaults_runtime_and_recent_images(tmp_path):
     assert data["checkpoints"][0]["id"] == "model-a"
     assert data["checkpoints"][0]["engineId"] == "sdxl"
     assert data["checkpoints"][0]["engineLabel"] == "Stable Diffusion XL"
-    assert {"sdxl", "sana_video"}.issubset({item["id"] for item in data["engines"]})
+    assert data["checkpoints"][0]["generationPreset"]["sampler"] == "dpmpp_2m"
+    assert data["checkpoints"][0]["generationPreset"]["width"] == 1024
+    assert {"sdxl", "sana_video", "wan"}.issubset({item["id"] for item in data["engines"]})
     assert any(item["engineId"] == "sana_video" for item in data["checkpoints"])
+    assert any(item["engineId"] == "wan" and item["kind"] == "video" for item in data["checkpoints"])
     assert "path" not in data["checkpoints"][0]
     assert data["samplers"][0]["supportsKarras"] is False
     assert data["recentImages"][0]["dataUrl"].startswith("data:image/png;base64,")
@@ -223,6 +239,76 @@ def test_bootstrap_hides_blocked_selectable_checkpoints(tmp_path):
     assert data["counts"]["blockedCheckpoints"] == 1
     assert data["blockedCheckpoints"][0]["status"] == "broken-runtime"
     assert "missing the expected CLIP text model" in data["blockedCheckpoints"][0]["reason"]
+
+
+def test_bootstrap_hides_qwen_nunchaku_when_runtime_assets_are_missing(tmp_path):
+    ctx = _ctx(tmp_path)
+    qwen = Checkpoint(
+        id="qwen-nunchaku",
+        title="Qwen Nunchaku Lightning",
+        filename="svdq-int4_r32-qwen-image-lightningv1.0-4steps.safetensors",
+        path=str(tmp_path / "models" / "qwen-image" / "Nunchaku" / "svdq-int4_r32-qwen-image-lightningv1.0-4steps.safetensors"),
+        architecture="qwen_image_nunchaku",
+    )
+    ctx.settings.last_checkpoint_id = "qwen-nunchaku"
+    ctx.generation.list_checkpoints = lambda: [qwen, *_Generation(ctx.generation.output_dir).list_checkpoints()]
+    client = _client(ctx)
+
+    response = client.get("/api/pro/bootstrap")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "qwen-nunchaku" not in {item["id"] for item in data["checkpoints"]}
+    assert data["settings"]["checkpointId"] == "model-a"
+    blocked = next(item for item in data["blockedCheckpoints"] if item["id"] == "qwen-nunchaku")
+    assert blocked["status"] == "blocked-cleanly"
+    assert "Qwen Nunchaku is missing required files" in blocked["reason"]
+    assert "base" in blocked["suggestedAction"].lower()
+
+
+def test_bootstrap_hides_sd35_large_without_gated_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(pro_api, "_sd35_large_access_available", lambda: False)
+    ctx = _ctx(tmp_path)
+    sd35 = Checkpoint(
+        id="sd35-large",
+        title="SD3.5 Large FP8",
+        filename="sd3.5_large_fp8_scaled.safetensors",
+        path=str(tmp_path / "models" / "sd3.5_large_fp8_scaled.safetensors"),
+        architecture="sd35",
+    )
+    ctx.settings.last_checkpoint_id = "sd35-large"
+    ctx.generation.list_checkpoints = lambda: [sd35, *_Generation(ctx.generation.output_dir).list_checkpoints()]
+    client = _client(ctx)
+
+    response = client.get("/api/pro/bootstrap")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "sd35-large" not in {item["id"] for item in data["checkpoints"]}
+    assert data["settings"]["checkpointId"] == "model-a"
+    blocked = next(item for item in data["blockedCheckpoints"] if item["id"] == "sd35-large")
+    assert blocked["status"] == "blocked-cleanly"
+    assert "gated Stability AI config files" in blocked["reason"]
+
+
+def test_bootstrap_allows_sd35_large_when_hf_auth_is_available(tmp_path, monkeypatch):
+    monkeypatch.setattr(pro_api, "_sd35_large_access_available", lambda: True)
+    ctx = _ctx(tmp_path)
+    sd35 = Checkpoint(
+        id="sd35-large",
+        title="SD3.5 Large FP8",
+        filename="sd3.5_large_fp8_scaled.safetensors",
+        path=str(tmp_path / "models" / "sd3.5_large_fp8_scaled.safetensors"),
+        architecture="sd35",
+    )
+    ctx.generation.list_checkpoints = lambda: [sd35, *_Generation(ctx.generation.output_dir).list_checkpoints()]
+    client = _client(ctx)
+
+    response = client.get("/api/pro/bootstrap")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "sd35-large" in {item["id"] for item in data["checkpoints"]}
 
 
 def test_runtime_does_not_submit_generation(tmp_path):
@@ -417,6 +503,11 @@ def test_generate_maps_payload_and_returns_first_image(tmp_path):
             "seed": 99,
             "batchSize": 2,
             "batchCount": 1,
+            "enableHires": True,
+            "hiresScale": 1.5,
+            "hiresSteps": 8,
+            "hiresDenoise": 0.25,
+            "hiresUpscaler": "bicubic",
         },
     )
 
@@ -428,7 +519,11 @@ def test_generate_maps_payload_and_returns_first_image(tmp_path):
     assert request.checkpoint_id == "model-a"
     assert request.sampler == "euler_a"
     assert request.scheduler == "karras"
-    assert request.enable_hr is False
+    assert request.enable_hr is True
+    assert request.hr_scale == 1.5
+    assert request.hr_steps == 8
+    assert request.hr_denoising_strength == 0.25
+    assert request.hr_upscaler == "bicubic"
     assert request.controlnet_units == []
     data = response.json()
     assert data["image"].startswith("data:image/png;base64,")
@@ -439,6 +534,50 @@ def test_generate_maps_payload_and_returns_first_image(tmp_path):
     assert data["job"]["state"] == "completed"
     assert data["seeds"] == [1234]
     assert data["artifacts"][0]["path"].endswith("generated.png")
+
+
+def test_generate_inpaint_sends_init_and_mask_images(tmp_path):
+    ctx = _ctx(tmp_path)
+    inpaint = Checkpoint(
+        id="sd15-inpaint",
+        title="SD 1.5 Inpaint",
+        filename="realisticVisionV60-inpainting15.safetensors",
+        path=str(tmp_path / "models" / "Stable-diffusion" / "realisticVisionV60-inpainting15.safetensors"),
+        architecture="inpaint",
+    )
+    ctx.generation.list_checkpoints = lambda: [inpaint]
+    client = _client(ctx)
+    source = Image.new("RGB", (8, 8), "red")
+    mask = Image.new("L", (8, 8), 255)
+    source_buffer = io.BytesIO()
+    mask_buffer = io.BytesIO()
+    source.save(source_buffer, format="PNG")
+    mask.save(mask_buffer, format="PNG")
+
+    response = client.post(
+        "/api/pro/generate",
+        json={
+            "prompt": "repair the jacket",
+            "mode": "inpaint",
+            "model_id": "sd15-inpaint",
+            "init_image_data_url": f"data:image/png;base64,{base64.b64encode(source_buffer.getvalue()).decode('ascii')}",
+            "mask_image_data_url": f"data:image/png;base64,{base64.b64encode(mask_buffer.getvalue()).decode('ascii')}",
+            "denoising_strength": 0.55,
+            "mask_blur": 6,
+        },
+    )
+
+    assert response.status_code == 200
+    request = ctx.generation.submitted[0]
+    assert request.mode == GenerationMode.INPAINT
+    assert request.checkpoint_id == "sd15-inpaint"
+    assert request.denoising_strength == 0.55
+    assert request.mask_blur == 6
+    kwargs = ctx.generation.submitted_kwargs[0]
+    assert len(kwargs["init_images"]) == 1
+    assert len(kwargs["mask_images"]) == 1
+    assert kwargs["init_images"][0].mode == "RGB"
+    assert kwargs["mask_images"][0].mode == "L"
 
 
 def test_generate_rejects_blocked_selectable_checkpoint(tmp_path):
@@ -462,6 +601,27 @@ def test_generate_rejects_blocked_selectable_checkpoint(tmp_path):
     assert "checkpoint keys do not match" in detail["reason"]
 
 
+def test_generate_rejects_runtime_blocked_qwen_nunchaku_checkpoint(tmp_path):
+    ctx = _ctx(tmp_path)
+    blocked = Checkpoint(
+        id="qwen-nunchaku",
+        title="Qwen Nunchaku Lightning",
+        filename="svdq-int4_r32-qwen-image-lightningv1.0-4steps.safetensors",
+        path=str(tmp_path / "models" / "qwen-image" / "Nunchaku" / "svdq-int4_r32-qwen-image-lightningv1.0-4steps.safetensors"),
+        architecture="qwen_image_nunchaku",
+    )
+    ctx.generation.list_checkpoints = lambda: [blocked, *_Generation(ctx.generation.output_dir).list_checkpoints()]
+    client = _client(ctx)
+
+    response = client.post("/api/pro/generate", json={"prompt": "cat", "mode": "image", "model_id": "qwen-nunchaku"})
+
+    assert response.status_code == 422
+    assert ctx.generation.submitted == []
+    detail = response.json()["detail"]
+    assert detail["status"] == "blocked-cleanly"
+    assert "Qwen Nunchaku is missing required files" in detail["reason"]
+
+
 def test_generate_rejects_unbounded_batch(tmp_path):
     client = _client(_ctx(tmp_path))
 
@@ -479,7 +639,7 @@ def test_generate_image_failure_returns_failure_metadata(tmp_path):
     failure_index.parent.mkdir(parents=True)
     failure_index.write_text(json.dumps({"status": "failed", "error": {"message": "image failed"}}) + "\n", encoding="utf-8")
 
-    def fail_submit(request: GenerationRequest):
+    def fail_submit(request: GenerationRequest, **_kwargs):
         job = JobRecord(request=request, state=JobState.FAILED, error="image failed")
         ctx.generation._recent.insert(0, job)
         raise RuntimeError("image failed")
@@ -575,6 +735,65 @@ def test_generate_sana_video_allows_text_to_video_without_source_image(tmp_path)
     assert request.source_image_path is None
     assert request.wants_image_to_video is False
     assert response.json()["output"]["mode"] == "video"
+
+
+def test_generate_image_rejects_sana_video_model(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/generate",
+        json={
+            "prompt": "cat",
+            "mode": "image",
+            "model_id": str(ctx.sana_video.default_model_path()),
+        },
+    )
+
+    assert response.status_code == 422
+    assert ctx.generation.submitted == []
+    detail = response.json()["detail"]
+    assert detail["message"] == "Video models are only available from the Video tab."
+
+
+def test_generate_image_rejects_wan_video_model(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/generate",
+        json={
+            "prompt": "cat",
+            "mode": "image",
+            "model_id": "wan-a.safetensors",
+        },
+    )
+
+    assert response.status_code == 422
+    assert ctx.generation.submitted == []
+    assert response.json()["detail"]["message"] == "Video models are only available from the Video tab."
+
+
+def test_generate_video_rejects_image_checkpoint(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/generate",
+        json={
+            "prompt": "slow camera move",
+            "mode": "video",
+            "model_id": "model-a",
+            "width": 832,
+            "height": 480,
+            "frames": 9,
+        },
+    )
+
+    assert response.status_code == 422
+    assert ctx.sana_video.submitted == []
+    detail = response.json()["detail"]
+    assert "Choose a Wan or Sana Video model" in detail["message"]
 
 
 def test_generate_sana_video_rejects_source_path_outside_outputs(tmp_path):
@@ -680,6 +899,59 @@ def test_data_endpoint_returns_output_receipts_and_counts(tmp_path):
     assert data["recentOutputs"][0]["url"].startswith("data:image/png;base64,")
 
 
+def test_data_endpoint_reads_png_settings_for_output_dock(tmp_path):
+    ctx = _ctx(tmp_path)
+    output_path = tmp_path / "outputs" / "txt2img-images" / "with-settings.png"
+    output_path.parent.mkdir(parents=True)
+    infotext = (
+        "a beautiful woman\n"
+        "Negative prompt: back towards camera\n"
+        "Steps: 7, Sampler: Euler a, CFG scale: 4.5, Seed: 42, Size: 512x768, "
+        "Model: test-model, Schedule type: Karras"
+    )
+    pnginfo = PngImagePlugin.PngInfo()
+    pnginfo.add_text("parameters", infotext)
+    Image.new("RGB", (512, 768), "blue").save(output_path, pnginfo=pnginfo)
+    client = _client(ctx)
+
+    response = client.get("/api/pro/data")
+
+    assert response.status_code == 200
+    output = response.json()["recentOutputs"][0]
+    assert output["prompt"] == "a beautiful woman"
+    assert output["negativePrompt"] == "back towards camera"
+    assert output["steps"] == 7
+    assert output["cfgScale"] == 4.5
+    assert output["seed"] == 42
+    assert output["sampler"] == "Euler a"
+    assert output["scheduler"] == "Karras"
+    assert output["modelName"] == "test-model"
+    assert output["width"] == 512
+    assert output["height"] == 768
+
+
+def test_data_endpoint_reads_sidecar_settings_for_output_dock(tmp_path):
+    ctx = _ctx(tmp_path)
+    output_path = tmp_path / "outputs" / "txt2img-images" / "sidecar.jpg"
+    output_path.parent.mkdir(parents=True)
+    Image.new("RGB", (320, 320), "green").save(output_path, format="JPEG")
+    output_path.with_suffix(".txt").write_text(
+        "sidecar prompt\nSteps: 3, Sampler: UniPC, CFG scale: 2.25, Seed: 99, Size: 320x320, Model: sidecar-model",
+        encoding="utf-8",
+    )
+    client = _client(ctx)
+
+    response = client.get("/api/pro/data")
+
+    assert response.status_code == 200
+    output = response.json()["recentOutputs"][0]
+    assert output["prompt"] == "sidecar prompt"
+    assert output["steps"] == 3
+    assert output["cfgScale"] == 2.25
+    assert output["seed"] == 99
+    assert output["modelName"] == "sidecar-model"
+
+
 def test_logs_endpoint_returns_runtime_files_and_events(tmp_path):
     ctx = _ctx(tmp_path)
     output_dir = tmp_path / "outputs"
@@ -752,7 +1024,138 @@ def test_settings_endpoint_returns_paths_defaults_and_runtime_flags(tmp_path):
     assert data["paths"]["outputs"].endswith("outputs")
     assert data["generationDefaults"]["width"] == 640
     assert data["ui"]["galleryColumns"] == 2
+    assert data["output"]["imageFormat"] == "png"
+    assert data["video"]["wanOffload"] == "balanced"
+    assert data["runtime"]["port"] == 7860
     assert data["runtime"]["backend"] == "diffusers"
+
+
+def test_settings_endpoint_updates_generation_and_ui_defaults(tmp_path):
+    ctx = _ctx(tmp_path)
+    saved = []
+    ctx.save_settings = lambda: saved.append(True)
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/settings",
+        json={
+            "generationDefaults": {
+                "modelId": "model-a",
+                "negativePrompt": "low quality",
+                "sampler": "euler_a",
+                "scheduler": "automatic",
+                "steps": 28,
+                "cfgScale": 6.5,
+                "width": 768,
+                "height": 1024,
+            },
+            "ui": {
+                "galleryColumns": 4,
+                "galleryHeight": 360,
+                "livePreview": False,
+                "showProgressEveryNSteps": 3,
+                "livePreviewDecoder": "vae",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["generationDefaults"]["width"] == 768
+    assert data["generationDefaults"]["height"] == 1024
+    assert data["generationDefaults"]["steps"] == 28
+    assert data["ui"]["galleryColumns"] == 4
+    assert data["ui"]["livePreview"] is False
+    assert data["ui"]["showProgressEveryNSteps"] == 3
+    assert ctx.settings.default_width == 768
+    assert ctx.settings.default_height == 1024
+    assert ctx.settings.enable_live_preview is False
+    assert saved == [True]
+
+
+def test_settings_endpoint_updates_output_video_and_launch_profile(tmp_path):
+    ctx = _ctx(tmp_path)
+    saved_settings = []
+    saved_launch = []
+    ctx.save_settings = lambda: saved_settings.append(True)
+    ctx.save_launch_settings = lambda launch: saved_launch.append(launch)
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/settings",
+        json={
+            "output": {
+                "imageFormat": "webp",
+                "imageQuality": 82,
+                "embedMetadata": False,
+                "saveSidecarTxt": True,
+                "saveGrid": True,
+                "filenamePattern": "[model_name]-[seed]-[seq]",
+                "saveBeforeHires": True,
+                "saveInterrupted": True,
+                "metadataIncludeModelHash": False,
+                "metadataIncludeVaeHash": False,
+                "metadataIncludeLoraHashes": False,
+                "metadataIncludeAppVersion": False,
+                "metadataIncludeOptimizationProfile": False,
+                "optimizationProfileId": "manual_break_glass",
+            },
+            "video": {
+                "wanHigh": "high.safetensors",
+                "wanLow": "low.safetensors",
+                "wanVae": "vae.safetensors",
+                "wanTextEncoder": "umt5.safetensors",
+                "wanOffload": "sequential",
+                "wanSampler": "heun",
+                "wanFlowShift": 9.5,
+                "wanRuntimeMode": "high_low",
+            },
+            "runtime": {
+                "port": 7899,
+                "listen": True,
+                "api": True,
+                "genlog": True,
+                "backend": "onnx",
+                "onnxProvider": "cuda",
+                "attention": "sdpa",
+                "medvram": True,
+                "lowvram": True,
+                "asyncOffload": False,
+                "pinnedMemory": False,
+                "cudaMalloc": True,
+                "torchCompile": True,
+                "channelsLast": True,
+                "apiRateLimitPerMinute": 120,
+                "modelsDir": str(tmp_path / "models-custom"),
+                "checkpointDir": str(tmp_path / "checkpoints-custom"),
+                "outputDir": str(tmp_path / "outputs-custom"),
+                "extraModelDirs": str(tmp_path / "extra-models"),
+                "extraCheckpointDirs": str(tmp_path / "extra-checkpoints"),
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["output"]["imageFormat"] == "webp"
+    assert data["output"]["saveSidecarTxt"] is True
+    assert data["output"]["metadataIncludeModelHash"] is False
+    assert data["video"]["wanOffload"] == "sequential"
+    assert data["video"]["wanRuntimeMode"] == "high_low"
+    assert data["runtime"]["port"] == 7899
+    assert data["runtime"]["backend"] == "onnx"
+    assert data["runtime"]["onnxProvider"] == "cuda"
+    assert data["runtime"]["attention"] == "sdpa"
+    assert data["runtime"]["medvram"] is True
+    assert data["runtime"]["asyncOffload"] is False
+    assert ctx.settings.image_format == "webp"
+    assert ctx.settings.last_wan_high == "high.safetensors"
+    assert ctx.flags.port == 7899
+    assert ctx.flags.inference_backend == "onnx"
+    assert ctx.flags.attention_backend == "sdpa"
+    assert saved_launch and saved_launch[0].port == 7899
+    assert saved_launch[0].models_dir.endswith("models-custom")
+    assert saved_settings == [True]
 
 
 def test_downloads_endpoint_reports_catalog_install_state(tmp_path):
@@ -849,6 +1252,61 @@ def test_capabilities_endpoint_reports_pipeline_readiness(tmp_path, monkeypatch)
     llm_tool = next(item for item in data["tools"] if item["id"] == "llm-vl")
     assert llm_tool["status"] == "not-wired"
     assert llm_tool["count"] == 1
+
+
+def test_capabilities_endpoint_uses_cached_readiness_snapshot(tmp_path, monkeypatch):
+    snapshot = tmp_path / "_local" / "logs" / "pipeline_readiness_current_inventory.json"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_text(
+        json.dumps(
+            {
+                "summary": {"working": 1, "metadata-only": 0, "blocked-cleanly": 0, "broken-runtime": 1, "unsupported-no-route": 0},
+                "records": [
+                    {
+                        "id": "flux2-klein-ready",
+                        "family": "image",
+                        "asset_type": "checkpoint",
+                        "path": str(tmp_path / "flux2.safetensors"),
+                        "status": "working",
+                        "route": "flux2-klein",
+                        "reason": "Warm smoke exists.",
+                    },
+                    {
+                        "id": "qwen-needs-base",
+                        "family": "image",
+                        "asset_type": "checkpoint",
+                        "path": str(tmp_path / "qwen.safetensors"),
+                        "status": "broken-runtime",
+                        "route": "qwen-image",
+                        "reason": "Base shards are missing.",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def broken_collect(*args, **kwargs):
+        raise AssertionError("live readiness collection should not block capabilities when a snapshot exists")
+
+    monkeypatch.setattr(pro_api, "collect_pipeline_readiness", broken_collect)
+    ctx = _ctx(tmp_path)
+    ctx._pro_capability_refresh_at = 10**12
+    client = _client(ctx)
+
+    response = client.get("/api/pro/capabilities")
+
+    assert response.status_code == 200
+    data = response.json()
+    readiness = data["readiness"]
+    assert readiness["counts"]["working"] == 1
+    assert readiness["counts"]["broken-runtime"] == 1
+    assert readiness["total"] == 2
+    assert readiness["error"] == ""
+    assert "pipeline_readiness_current_inventory.json" in readiness["source"]
+    assert any("cached readiness ledger" in note for note in data["notes"])
+    assert readiness["working"][0]["id"] == "flux2-klein-ready"
+    assert readiness["needsWork"][0]["id"] == "qwen-needs-base"
 
 
 def test_capabilities_endpoint_keeps_working_when_readiness_fails(tmp_path, monkeypatch):

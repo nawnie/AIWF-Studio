@@ -47,6 +47,7 @@ def test_saving_output_defaults_preserve_legacy_behavior():
     assert s.filename_pattern == "[datetime]"
     assert s.save_before_hires is False
     assert s.save_interrupted is False
+    assert s.show_progress_every_n_steps == 5
     assert s.live_preview_decoder == "vae"
     assert s.live_preview_title_progress is True
     assert s.metadata_include_model_hash is True

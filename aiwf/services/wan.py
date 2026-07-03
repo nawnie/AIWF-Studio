@@ -685,8 +685,16 @@ class WanService:
         errors: list[str] = []
         warnings: list[str] = []
 
-        if not image_present:
-            errors.append("Upload a source image to animate.")
+        requires_image = (
+            request.requires_dual_transformers()
+            if callable(getattr(request, "requires_dual_transformers", None))
+            else True
+        )
+        if not image_present and requires_image:
+            # Only the dual 14B pair is I2V-only. The TI2V-5B transformer is
+            # trained for both text- and image-to-video, so no source image
+            # simply means text-to-video on the 5B route.
+            errors.append("Upload a source image to animate, or switch to the Fast 5B route for text-to-video.")
         if not self.available():
             errors.append("Wan video is unavailable: update `diffusers` (>=0.35) and install `ftfy`, then restart.")
 
@@ -1474,8 +1482,15 @@ class WanService:
             }
         )
 
-        if image is None:
-            exc = WanUnavailable("Upload a source image to animate.")
+        requires_dual = (
+            request.requires_dual_transformers()
+            if callable(getattr(request, "requires_dual_transformers", None))
+            else True
+        )
+        if image is None and requires_dual:
+            exc = WanUnavailable(
+                "Upload a source image to animate. Text-to-video is available on the Fast 5B route."
+            )
             self._archive_failed_generation(request, exc, stage="wan_preflight")
             raise exc
         if not self.available():

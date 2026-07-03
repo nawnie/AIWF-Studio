@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -12,15 +14,41 @@ class PerfLaunchFlags:
 
     async_offload: bool = True
     pinned_memory: bool = True
-    cuda_malloc: bool = True
+    cuda_malloc: bool = False
+
+
+def _arg_value(args: list[str], flag: str) -> str | None:
+    prefix = f"{flag}="
+    for index, arg in enumerate(args):
+        if arg.startswith(prefix):
+            return arg[len(prefix):]
+        if arg == flag and index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+def _saved_cuda_malloc(args: list[str]) -> bool | None:
+    data_dir = Path(_arg_value(args, "--data-dir") or Path(__file__).resolve().parents[2])
+    try:
+        payload = json.loads((data_dir / "launch.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = payload.get("cuda_malloc")
+    return value if isinstance(value, bool) else None
 
 
 def parse_perf_argv(argv: list[str] | None = None) -> PerfLaunchFlags:
     args = argv if argv is not None else sys.argv[1:]
+    if "--no-cuda-malloc" in args:
+        cuda_malloc = False
+    elif "--cuda-malloc" in args:
+        cuda_malloc = True
+    else:
+        cuda_malloc = bool(_saved_cuda_malloc(args))
     return PerfLaunchFlags(
         async_offload="--no-async-offload" not in args,
         pinned_memory="--no-pinned-memory" not in args,
-        cuda_malloc="--no-cuda-malloc" not in args,
+        cuda_malloc=cuda_malloc,
     )
 
 

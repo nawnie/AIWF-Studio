@@ -69,6 +69,42 @@ QWEN_NUNCHAKU_LIGHTNING_PRESET: dict[str, Any] = {
 # like prompts, seed, or batch size when the user just switches models.
 PRESET_FIELDS: tuple[str, ...] = ("steps", "cfg_scale", "sampler", "scheduler", "width", "height", "clip_skip")
 
+_DISTILLED_MARKERS = ("lightning", "turbo", "lcm", "hyper", "tcd")
+
+
+def _checkpoint_looks_distilled(checkpoint_id: str | None) -> bool:
+    text = (checkpoint_id or "").lower()
+    return any(marker in text for marker in _DISTILLED_MARKERS)
+
+
+def _safe_last_used_preset(
+    last_used: dict[str, Any],
+    *,
+    checkpoint_id: str | None,
+    architecture: str | None,
+) -> dict[str, Any]:
+    """Return remembered fields only when they are safe for the model family.
+
+    Normal SDXL checkpoints are trained around 1024px. A short smoke run at
+    512px/Euler/low-CFG can technically complete while producing corrupted
+    output, so those values should not become the next model-selection default.
+    Distilled SDXL/Lightning-style checkpoints keep their low-step defaults.
+    """
+    fields = {k: v for k, v in last_used.items() if k in PRESET_FIELDS}
+    if architecture not in {ARCH_SDXL, ARCH_SDXL_INPAINT} or _checkpoint_looks_distilled(checkpoint_id):
+        return fields
+
+    try:
+        short_edge = min(int(fields.get("width", 0) or 0), int(fields.get("height", 0) or 0))
+        steps = int(fields.get("steps", 0) or 0)
+        cfg_scale = float(fields.get("cfg_scale", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return {}
+
+    if short_edge < 768 or steps < 12 or cfg_scale < 2.0:
+        return {}
+    return fields
+
 
 def resolve_model_preset(
     model_settings: dict[str, dict[str, Any]],
@@ -88,7 +124,13 @@ def resolve_model_preset(
     if checkpoint_id:
         last_used = model_settings.get(checkpoint_id)
         if last_used:
-            preset.update({k: v for k, v in last_used.items() if k in PRESET_FIELDS})
+            preset.update(
+                _safe_last_used_preset(
+                    last_used,
+                    checkpoint_id=checkpoint_id,
+                    architecture=architecture,
+                )
+            )
     return preset
 
 

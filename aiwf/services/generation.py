@@ -1052,7 +1052,7 @@ class GenerationService:
                     nonlocal latest_preview
                     if preview is not None:
                         latest_preview = preview
-                    self.queue.update_progress(job.id, step, total, message, preview)
+                    self.queue.update_progress(job.id, step, total, message, preview if preview is not None else latest_preview)
                     self.events.publish(JobProgressed(job.id, step, total, message))
                     _print_generation_progress(job.id, step, total, message)
                     logger.info(
@@ -1065,7 +1065,9 @@ class GenerationService:
 
                 on_progress(0, max(1, int(job.request.steps)), self._loading_model_message(active))
                 _gen_t0 = time.perf_counter()
-                preview_every = 1 if job.request.save_interrupted else 0
+                preview_every = self.settings.live_preview_interval()
+                if job.request.save_interrupted and preview_every == 0:
+                    preview_every = 1
                 try:
                     result = self.backend.generate(
                         job.request,
@@ -1228,7 +1230,7 @@ class GenerationService:
                     nonlocal latest_preview
                     if preview is not None:
                         latest_preview = preview
-                    self.queue.update_progress(job.id, step, total, message, preview)
+                    self.queue.update_progress(job.id, step, total, message, preview if preview is not None else latest_preview)
                     self.events.publish(JobProgressed(job.id, step, total, message))
                     _print_generation_progress(job.id, step, total, message)
                     logger.info(

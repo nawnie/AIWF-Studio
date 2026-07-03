@@ -19,32 +19,36 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from aiwf.core.config.launch import LaunchSettings, save_launch_settings
 from aiwf.core.domain.errors import GenerationCancelledError
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest, JobRecord, JobState
 from aiwf.core.domain.models import SCHEDULE_TYPES, normalize_schedule_id_for_sampler
 from aiwf.core.domain.sana_video import SanaVideoRequest
-from aiwf.core.infotext import normalize_sampler
+from aiwf.core.infotext import normalize_sampler, parse_infotext
 from aiwf.infrastructure.diffusers.model_blocks import (
     is_non_selectable_image_asset_path,
     known_broken_selectable_image_asset,
 )
-from aiwf.services.model_download_catalog import QUICK_START_BUNDLES
+from aiwf.infrastructure.diffusers.model_arch import is_qwen_nunchaku_architecture, is_sd3_architecture
+from aiwf.services.model_download_catalog import CIVITAI_BROWSE_LINKS, QUICK_START_BUNDLES
 from aiwf.services.pipeline_readiness import (
     READINESS_STATUSES,
     PipelineReadinessRecord,
     collect_pipeline_readiness,
     readiness_summary,
 )
+from aiwf.services.qwen_nunchaku import QwenNunchakuService
 
 _RECENT_IMAGE_LIMIT = 8
 _RECENT_SCAN_LIMIT = 400
 _RECENT_MAX_SIDE = 512
 _RECENT_MAX_BYTES = 2 * 1024 * 1024
+_RECENT_INFOTEXT_MAX_CHARS = 20_000
 _MAX_PRO_BATCH_IMAGES = 4
 _PRO_SOURCE_IMAGE_MAX_BYTES = 15 * 1024 * 1024
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -53,8 +57,24 @@ _LOG_ROW_LIMIT = 80
 _PRO_SANA_VIDEO_BACKEND_ENABLED = 1
 _PRO_RESTART_EXIT_CODE = 75
 _CAPABILITY_CACHE_TTL_SECONDS = 30.0
+_CAPABILITY_BACKGROUND_REFRESH_SECONDS = 300.0
+_READINESS_SNAPSHOT_FILENAMES = (
+    "pipeline_readiness_current_inventory.json",
+    "pipeline_readiness_with_downloads_latest.json",
+    "pipeline_readiness_latest.json",
+)
 _SANA_VIDEO_SERVICES: dict[int, Any] = {}
+_WAN_SERVICES: dict[int, Any] = {}
+_VSR_SERVICES: dict[int, Any] = {}
+_RIFE_SERVICES: dict[int, Any] = {}
+_AUDIO_SERVICES: dict[int, Any] = {}
+_VIDEO_LAB_UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024
+_VIDEO_LAB_UPLOAD_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 _NVIDIA_SMI_CACHE: tuple[float, tuple[float, float] | None] = (0.0, None)
+_JOB_PREVIEW_CACHE: dict[tuple[str, int, int], str] = {}
+_JOB_PREVIEW_CACHE_LOCK = threading.Lock()
+_JOB_PREVIEW_CACHE_LIMIT = 32
+_SD35_LARGE_ACCESS_CACHE: tuple[float, bool] = (0.0, False)
 _PRO_VIDEO_JOBS: dict[int, dict[str, Any]] = {}
 _PRO_VIDEO_JOBS_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
@@ -80,12 +100,16 @@ _GRADIO_TOOL_TABS = [
 _ENGINE_LABELS = {
     "all": "All engines",
     "flux": "Flux",
+    "flux_fill": "Flux Fill (inpaint)",
     "flux2": "Flux 2",
     "sana_video": "Sana Video",
+    "wan": "Wan Video",
     "sd15": "Stable Diffusion 1.5",
     "sdxl": "Stable Diffusion XL",
     "sd35": "Stable Diffusion 3.5",
     "zimage": "Z-Image",
+    "qwen": "Qwen Image",
+    "sana": "Sana",
     "unknown": "Other",
 }
 
@@ -124,8 +148,40 @@ class ProGeneratePayload(BaseModel):
     width: int = Field(default=512, ge=64, le=2048)
     height: int = Field(default=512, ge=64, le=2048)
     seed: int = -1
+    clip_skip: int = Field(default=1, ge=1, le=12, validation_alias=AliasChoices("clipSkip", "clip_skip"))
     batch_size: int = Field(default=1, ge=1, le=4, alias="batchSize")
     batch_count: int = Field(default=1, ge=1, le=4, alias="batchCount")
+    enable_hr: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("enableHr", "enable_hr", "enableHires", "enable_hires"),
+    )
+    hr_scale: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=4.0,
+        validation_alias=AliasChoices("hrScale", "hr_scale", "hiresScale", "hires_scale"),
+    )
+    hr_steps: int = Field(
+        default=20,
+        ge=1,
+        le=150,
+        validation_alias=AliasChoices("hrSteps", "hr_steps", "hiresSteps", "hires_steps"),
+    )
+    hr_denoising_strength: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "hrDenoisingStrength",
+            "hr_denoising_strength",
+            "hiresDenoise",
+            "hires_denoise",
+        ),
+    )
+    hr_upscaler: str = Field(
+        default="lanczos",
+        validation_alias=AliasChoices("hrUpscaler", "hr_upscaler", "hiresUpscaler", "hires_upscaler"),
+    )
     frames: int = Field(default=81, ge=1, le=257)
     fps: float = Field(default=16.0, ge=1.0, le=60.0)
     source_image_path: str | None = Field(
@@ -157,12 +213,59 @@ class ProGeneratePayload(BaseModel):
         validation_alias=AliasChoices("useSageAttention", "use_sage_attention"),
     )
     generate_audio: bool = Field(default=False, validation_alias=AliasChoices("generateAudio", "generate_audio"))
+    init_image_data_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("initImageDataUrl", "init_image_data_url", "initImage"),
+    )
+    mask_image_data_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("maskImageDataUrl", "mask_image_data_url", "maskImage"),
+    )
+    denoising_strength: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("denoisingStrength", "denoising_strength"),
+    )
+    mask_blur: int = Field(
+        default=4,
+        ge=0,
+        le=64,
+        validation_alias=AliasChoices("maskBlur", "mask_blur"),
+    )
+    inpaint_only_masked: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("inpaintOnlyMasked", "inpaint_only_masked"),
+    )
+    inpaint_masked_padding: int = Field(
+        default=32,
+        ge=0,
+        le=256,
+        validation_alias=AliasChoices("inpaintMaskedPadding", "inpaint_masked_padding"),
+    )
+    inpaint_mask_content: str = Field(
+        default="original",
+        validation_alias=AliasChoices("inpaintMaskContent", "inpaint_mask_content"),
+    )
 
     @model_validator(mode="after")
     def total_batch_must_be_bounded(self):
         if self.batch_size * self.batch_count > _MAX_PRO_BATCH_IMAGES:
             raise ValueError(f"batchSize * batchCount must be <= {_MAX_PRO_BATCH_IMAGES}")
         return self
+
+
+class ProSettingsUpdatePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    generation_defaults: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("generationDefaults", "generation_defaults"),
+    )
+    ui: dict[str, Any] = Field(default_factory=dict)
+    output: dict[str, Any] = Field(default_factory=dict)
+    video: dict[str, Any] = Field(default_factory=dict)
+    runtime: dict[str, Any] = Field(default_factory=dict)
 
 
 def _dump_model(item: Any) -> dict[str, Any]:
@@ -177,22 +280,44 @@ def _dump_model(item: Any) -> dict[str, Any]:
     }
 
 
-def _checkpoint_payload(item: Any) -> dict[str, Any]:
+def _checkpoint_payload(ctx: Any, item: Any) -> dict[str, Any]:
     data = _dump_model(item)
+    checkpoint_id = str(data.get("id") or "")
     engine_id = _engine_id_for_architecture(str(data.get("architecture", "unknown")))
+    size_bytes = int(data.get("size_bytes") or data.get("sizeBytes") or 0)
+    # Rough resident-VRAM estimate: weights that live on the GPU plus a
+    # working margin for activations/VAE. Large LM text encoders are kept in
+    # system RAM by the backend, so they are intentionally not counted.
+    est_vram_gb = round(size_bytes / 1024**3 + 2.5, 1) if size_bytes > 0 else 0.0
     return {
-        "id": data.get("id", ""),
+        "id": checkpoint_id,
         "title": data.get("title", data.get("id", "")),
         "filename": data.get("filename", ""),
         "hash": data.get("hash"),
         "kind": data.get("kind", "checkpoint"),
         "architecture": data.get("architecture", "unknown"),
-        "sizeBytes": int(data.get("size_bytes") or data.get("sizeBytes") or 0),
+        "sizeBytes": size_bytes,
         "fileCount": int(data.get("file_count") or data.get("fileCount") or 0),
         "assetSummary": data.get("asset_summary") or data.get("assetSummary") or "",
         "engineId": engine_id,
         "engineLabel": _ENGINE_LABELS.get(engine_id, _ENGINE_LABELS["unknown"]),
+        "estVramGb": est_vram_gb,
+        "heavyFor12Gb": bool(est_vram_gb > 12.0),
+        "generationPreset": _generation_preset_payload(ctx, checkpoint_id),
     }
+
+
+def _generation_preset_payload(ctx: Any, checkpoint_id: str) -> dict[str, Any]:
+    if not checkpoint_id:
+        return {}
+    get_model_preset = getattr(getattr(ctx, "generation", None), "get_model_preset", None)
+    if not callable(get_model_preset):
+        return {}
+    try:
+        preset = get_model_preset(checkpoint_id)
+    except Exception:
+        return {}
+    return dict(preset) if isinstance(preset, dict) else {}
 
 
 def _blocked_checkpoint_detail(item: Any) -> dict[str, str] | None:
@@ -216,12 +341,114 @@ def _blocked_checkpoint_detail(item: Any) -> dict[str, str] | None:
     return None
 
 
+def _runtime_checkpoint_block(ctx: Any, item: Any) -> dict[str, str] | None:
+    data = _dump_model(item)
+    architecture = str(data.get("architecture") or "")
+    path = str(data.get("path") or data.get("filename") or "")
+    if not path:
+        return None
+    if is_qwen_nunchaku_architecture(architecture):
+        try:
+            status = QwenNunchakuService(getattr(ctx, "flags", None)).status(path)
+        except Exception as exc:
+            return {
+                "status": "blocked-cleanly",
+                "reason": f"Qwen Nunchaku readiness check failed: {exc}",
+                "suggestedAction": "Check the Qwen Nunchaku runtime and local base assets before generating.",
+            }
+        if not status.ready:
+            details = "; ".join(status.messages) if status.messages else "runtime or base assets are missing"
+            return {
+                "status": "blocked-cleanly",
+                "reason": f"Qwen Nunchaku is missing required files: {details}",
+                "suggestedAction": "Install the Qwen Nunchaku sidecar runtime and finish the local Qwen-Image diffusers base snapshot.",
+            }
+    if (
+        is_sd3_architecture(architecture)
+        and "large" in path.lower()
+        and not _sd35_large_access_available()
+    ):
+        return {
+            "status": "blocked-cleanly",
+            "reason": "SD3.5 Large single-file checkpoints need gated Stability AI config files unless those files are cached locally.",
+            "suggestedAction": "Sign in to Hugging Face with SD3.5 Large access, or provide a local diffusers pipeline folder for this model.",
+        }
+    return None
+
+
+def _huggingface_token() -> str:
+    try:
+        from huggingface_hub import get_token
+
+        return str(get_token() or "")
+    except Exception:
+        return str(os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or "")
+
+
+def _sd35_large_access_available() -> bool:
+    if _sd35_large_config_cached():
+        return True
+    token = _huggingface_token()
+    if not token:
+        return False
+    global _SD35_LARGE_ACCESS_CACHE
+    now = time.monotonic()
+    cached_at, cached_value = _SD35_LARGE_ACCESS_CACHE
+    if now - cached_at < 300.0:
+        return cached_value
+    try:
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            "https://huggingface.co/stabilityai/stable-diffusion-3.5-large/resolve/main/SD3.5L_example_workflow.json",
+            headers={"Authorization": f"Bearer {token}"},
+            method="HEAD",
+        )
+        with urllib.request.urlopen(request, timeout=2.5) as response:
+            ok = 200 <= int(getattr(response, "status", 0) or 0) < 400
+    except urllib.error.HTTPError as exc:
+        ok = False if int(getattr(exc, "code", 0) or 0) in {401, 403, 404} else False
+    except Exception:
+        ok = False
+    _SD35_LARGE_ACCESS_CACHE = (now, ok)
+    return ok
+
+
+def _sd35_large_config_cached() -> bool:
+    try:
+        from huggingface_hub.constants import HUGGINGFACE_HUB_CACHE
+    except Exception:
+        HUGGINGFACE_HUB_CACHE = os.environ.get("HUGGINGFACE_HUB_CACHE") or ""
+
+    cache_roots = [
+        Path(HUGGINGFACE_HUB_CACHE) if HUGGINGFACE_HUB_CACHE else None,
+        Path(os.environ["HF_HOME"]) / "hub" if os.environ.get("HF_HOME") else None,
+        Path.home() / ".cache" / "huggingface" / "hub",
+    ]
+    for root in cache_roots:
+        if root is None:
+            continue
+        repo_dir = root / "models--stabilityai--stable-diffusion-3.5-large"
+        if not repo_dir.is_dir():
+            continue
+        if any((repo_dir / "snapshots").glob("*/SD3.5L_example_workflow.json")):
+            return True
+    return False
+
+
 def _selectable_checkpoint_payloads(ctx: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     selectable: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
     for item in _safe_list(ctx.generation.list_checkpoints):
-        payload = _checkpoint_payload(item)
-        block = _blocked_checkpoint_detail(item)
+        payload = _checkpoint_payload(ctx, item)
+        block = _blocked_checkpoint_detail(item) or _runtime_checkpoint_block(ctx, item)
+        if block is None and payload.get("engineId") == "unknown":
+            block = {
+                "status": "blocked-cleanly",
+                "reason": "This file is not a supported image/video checkpoint architecture.",
+                "suggestedAction": "If this is a base model AIWF should support, report the filename; auxiliary weights belong in their tool-specific folders.",
+            }
         if block is None:
             selectable.append(payload)
         else:
@@ -243,10 +470,20 @@ def _engine_id_for_architecture(architecture: str) -> str:
     normalized = (architecture or "").strip().lower()
     if normalized == "flux":
         return "flux"
+    if normalized == "flux_fill":
+        return "flux_fill"
+    if normalized in {"flux_kontext", "flux-kontext"}:
+        return "flux"
     if normalized in {"flux2_klein", "flux2", "flux.2"}:
         return "flux2"
     if normalized in {"sana_video", "sana-video", "sanavideo"}:
         return "sana_video"
+    if normalized in {"wan", "wan22", "wan2.2", "wan_video"}:
+        return "wan"
+    if normalized == "sana":
+        return "sana"
+    if normalized in {"qwen_image", "qwen_image_nunchaku"}:
+        return "qwen"
     if normalized == "z_image":
         return "zimage"
     if normalized in {"sd15", "sd1.5", "sd1", "inpaint"}:
@@ -263,7 +500,7 @@ def _engine_summaries(checkpoints: list[dict[str, Any]]) -> list[dict[str, Any]]
     for checkpoint in checkpoints:
         engine_id = str(checkpoint.get("engineId") or "unknown")
         counts[engine_id] = counts.get(engine_id, 0) + 1
-    order = ["flux", "flux2", "sana_video", "sd15", "sdxl", "sd35", "zimage", "unknown"]
+    order = ["flux", "flux2", "sana_video", "wan", "sd15", "sdxl", "sd35", "zimage", "qwen", "sana", "unknown"]
     return [
         {
             "id": engine_id,
@@ -313,6 +550,95 @@ def _artifact_payload(item: Any) -> dict[str, str]:
     return {"path": str(path), "infotext": str(infotext or "")}
 
 
+def _clean_optional_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _optional_int(value: Any, *, minimum: int = 1) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= minimum else None
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed
+
+
+def _settings_from_infotext(infotext: str) -> dict[str, Any]:
+    text = _clean_optional_text(infotext)
+    if not text:
+        return {}
+    try:
+        params = parse_infotext(text)
+    except Exception:
+        logger.debug("Could not parse output infotext for Pro dock.", exc_info=True)
+        return {}
+
+    settings: dict[str, Any] = {}
+    prompt = _clean_optional_text(params.get("Prompt"))
+    if prompt:
+        settings["prompt"] = prompt
+    negative_prompt = _clean_optional_text(params.get("Negative prompt"))
+    if negative_prompt:
+        settings["negativePrompt"] = negative_prompt
+    steps = _optional_int(params.get("Steps"))
+    if steps is not None:
+        settings["steps"] = steps
+    cfg_scale = _optional_float(params.get("CFG scale"))
+    if cfg_scale is not None:
+        settings["cfgScale"] = cfg_scale
+    seed = _optional_int(params.get("Seed"), minimum=0)
+    if seed is not None:
+        settings["seed"] = seed
+    sampler = _clean_optional_text(params.get("Sampler"))
+    if sampler:
+        settings["sampler"] = sampler
+    scheduler = _clean_optional_text(params.get("Schedule type"))
+    if scheduler:
+        settings["scheduler"] = scheduler
+    model_name = _clean_optional_text(params.get("Model"))
+    if model_name:
+        settings["modelName"] = model_name
+    width = _optional_int(params.get("Size-1") or params.get("Hires resize-1"))
+    height = _optional_int(params.get("Size-2") or params.get("Hires resize-2"))
+    if width is not None:
+        settings["width"] = width
+    if height is not None:
+        settings["height"] = height
+    return settings
+
+
+def _read_output_infotext(path: Path, fallback: Any = "") -> str:
+    text = _clean_optional_text(fallback)
+    if text:
+        return text[:_RECENT_INFOTEXT_MAX_CHARS]
+    try:
+        with Image.open(path) as image:
+            image_text = getattr(image, "text", None) or {}
+            text = _clean_optional_text(image_text.get("parameters"))
+            if not text:
+                image_info = getattr(image, "info", None) or {}
+                text = _clean_optional_text(image_info.get("parameters"))
+    except Exception:
+        text = ""
+    if text:
+        return text[:_RECENT_INFOTEXT_MAX_CHARS]
+
+    sidecar = path.with_suffix(".txt")
+    try:
+        if sidecar.is_file():
+            return sidecar.read_text(encoding="utf-8", errors="replace")[:_RECENT_INFOTEXT_MAX_CHARS].strip()
+    except OSError:
+        return ""
+    return ""
+
+
 def _image_to_data_url(
     image: Image.Image,
     *,
@@ -359,9 +685,9 @@ def _job_state_value(job: Any) -> str:
     return str(getattr(state, "value", state) or "").lower()
 
 
-def _job_status(job: JobRecord | None) -> dict[str, Any]:
+def _job_status(job: JobRecord | None, *, include_preview: bool = True) -> dict[str, Any]:
     if job is None:
-        return {"state": "idle", "progress": 0, "message": ""}
+        return {"state": "idle", "progress": 0, "message": "", "previewUrl": ""}
     progress = getattr(job, "progress", None)
     state = getattr(job, "state", JobState.QUEUED)
     state_value = getattr(state, "value", str(state))
@@ -374,7 +700,30 @@ def _job_status(job: JobRecord | None) -> dict[str, Any]:
         "message": progress.message if progress else (getattr(job, "error", None) or ""),
         "hasResult": getattr(job, "result", None) is not None,
         "error": getattr(job, "error", None),
+        "previewUrl": _job_preview_data_url(job) if (progress and include_preview) else "",
     }
+
+
+def _job_preview_data_url(job: JobRecord) -> str:
+    progress = getattr(job, "progress", None)
+    image = getattr(progress, "current_image", None)
+    if image is None:
+        return ""
+    key = (
+        str(getattr(job, "id", "")),
+        int(getattr(progress, "step", 0) or 0),
+        int(getattr(progress, "total_steps", 0) or 0),
+    )
+    with _JOB_PREVIEW_CACHE_LOCK:
+        cached = _JOB_PREVIEW_CACHE.get(key)
+    if cached is not None:
+        return cached
+    data_url = _image_to_data_url(image, max_side=384, max_bytes=768 * 1024) or ""
+    with _JOB_PREVIEW_CACHE_LOCK:
+        _JOB_PREVIEW_CACHE[key] = data_url
+        while len(_JOB_PREVIEW_CACHE) > _JOB_PREVIEW_CACHE_LIMIT:
+            _JOB_PREVIEW_CACHE.pop(next(iter(_JOB_PREVIEW_CACHE)))
+    return data_url
 
 
 def _pro_video_job_start(ctx: Any, request: Any) -> str:
@@ -624,6 +973,68 @@ def _sana_video_service(ctx: Any):
     return service
 
 
+def _wan_service(ctx: Any):
+    service = getattr(ctx, "wan", None)
+    if service is not None:
+        return service
+    key = id(ctx)
+    service = _WAN_SERVICES.get(key)
+    if service is None:
+        from aiwf.services.wan import WanService
+
+        service = WanService(
+            getattr(ctx, "flags", None),
+            getattr(ctx, "settings", None),
+            unload_image_models=getattr(getattr(getattr(ctx, "generation", None), "backend", None), "unload", None),
+            supervisor=getattr(ctx, "supervisor", None),
+            failure_archive=getattr(ctx, "failure_archive", None),
+            genlog=getattr(ctx, "genlog", None),
+        )
+        _WAN_SERVICES[key] = service
+    return service
+
+
+def _wan_model_payloads(ctx: Any) -> list[dict[str, Any]]:
+    try:
+        service = _wan_service(ctx)
+        labeled = service.list_local_models_labeled()
+    except Exception:
+        return []
+    payloads: list[dict[str, Any]] = []
+    for display, identifier in labeled:
+        payloads.append(
+            {
+                "id": identifier,
+                "title": display,
+                "filename": identifier.rsplit("/", 1)[-1],
+                "hash": None,
+                "kind": "video",
+                "architecture": "wan",
+                "engineId": "wan",
+                "engineLabel": _ENGINE_LABELS.get("wan", "Wan Video"),
+                "backend": "Diffusers",
+                "status": "Ready",
+            }
+        )
+    return payloads
+
+
+def _wan_model_ids(ctx: Any) -> set[str]:
+    return {str(item.get("id") or "") for item in _wan_model_payloads(ctx)}
+
+
+def _video_model_ids(ctx: Any) -> set[str]:
+    ids = _wan_model_ids(ctx)
+    try:
+        sana_model = _sana_video_model_payload(ctx)
+    except Exception:
+        sana_model = {}
+    sana_id = str(sana_model.get("id") or "")
+    if sana_id:
+        ids.add(sana_id)
+    return ids
+
+
 def _sana_video_model_payload(ctx: Any) -> dict[str, Any]:
     if not _pro_sana_video_backend_enabled():
         return {
@@ -693,7 +1104,33 @@ def _recent_paths_from_disk(root: Path, *, limit: int) -> list[Path]:
     return [item[2] for item in sorted(heap, reverse=True)]
 
 
+_RECENT_IMAGES_CACHE: dict[int, tuple[tuple[Any, ...], list[dict[str, Any]]]] = {}
+_RECENT_IMAGES_CACHE_LOCK = threading.Lock()
+
+
 def _recent_output_images(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT) -> list[dict[str, Any]]:
+    """Recent outputs with an identity cache.
+
+    Encoding up to 8 images to base64 on every poll is the single most
+    expensive part of the workspace refresh; the job list only changes when a
+    generation finishes, so the encoded payload is reused until it does.
+    """
+    signature: tuple[Any, ...] = tuple(
+        (str(getattr(job, "id", "")), str(getattr(getattr(job, "state", None), "value", "")))
+        for job in _safe_recent_jobs(ctx, limit * 2)
+    ) + (int(limit),)
+    cache_key = id(ctx)
+    with _RECENT_IMAGES_CACHE_LOCK:
+        cached = _RECENT_IMAGES_CACHE.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+    images = _recent_output_images_uncached(ctx, limit=limit)
+    with _RECENT_IMAGES_CACHE_LOCK:
+        _RECENT_IMAGES_CACHE[cache_key] = (signature, images)
+    return images
+
+
+def _recent_output_images_uncached(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT) -> list[dict[str, Any]]:
     root = _safe_output_root(ctx)
     seen_paths: set[str] = set()
     images: list[dict[str, Any]] = []
@@ -703,6 +1140,7 @@ def _recent_output_images(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT) -> list
             images.append(payload)
 
     for job in _safe_recent_jobs(ctx, limit * 2):
+        request = getattr(job, "request", None)
         result = getattr(job, "result", None)
         if getattr(job, "state", None) != JobState.COMPLETED or result is None:
             continue
@@ -717,17 +1155,31 @@ def _recent_output_images(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT) -> list
                     pass
             data_url = _image_to_data_url(image, max_side=_RECENT_MAX_SIDE, max_bytes=_RECENT_MAX_BYTES)
             if data_url:
+                infotext = (
+                    (getattr(result, "infotexts", []) or [""])[index]
+                    if index < len(getattr(result, "infotexts", []) or [])
+                    else artifact.get("infotext", "")
+                )
                 add_image(
                     {
                         "source": "memory",
                         "dataUrl": data_url,
                         "path": artifact_path,
+                        "prompt": str(getattr(request, "prompt", "") or ""),
+                        "negativePrompt": str(getattr(request, "negative_prompt", "") or ""),
+                        "steps": int(getattr(request, "steps", 0) or 0) or None,
+                        "cfgScale": (
+                            float(getattr(request, "cfg_scale"))
+                            if getattr(request, "cfg_scale", None) is not None
+                            else None
+                        ),
+                        "sampler": str(getattr(request, "sampler", "") or ""),
+                        "scheduler": str(getattr(request, "scheduler", "") or ""),
                         "seed": (getattr(result, "seeds", []) or [None])[index]
                         if index < len(getattr(result, "seeds", []) or [])
                         else None,
-                        "infotext": (getattr(result, "infotexts", []) or [""])[index]
-                        if index < len(getattr(result, "infotexts", []) or [])
-                        else artifact.get("infotext", ""),
+                        "modelName": str(getattr(request, "checkpoint_id", "") or ""),
+                        "infotext": infotext,
                     }
                 )
             if len(images) >= limit:
@@ -745,12 +1197,14 @@ def _recent_output_images(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT) -> list
             seen_paths.add(resolved_path)
             data_url = _image_path_to_data_url(path)
             if data_url:
+                infotext = _read_output_infotext(path, artifact_data["infotext"])
                 add_image(
                     {
                         "source": "artifact",
                         "dataUrl": data_url,
                         "path": str(path),
-                        "infotext": artifact_data["infotext"],
+                        "infotext": infotext,
+                        **_settings_from_infotext(infotext),
                     }
                 )
             if len(images) >= limit:
@@ -768,7 +1222,16 @@ def _recent_output_images(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT) -> list
         data_url = _image_path_to_data_url(path)
         if not data_url:
             continue
-        add_image({"source": "disk", "dataUrl": data_url, "path": str(path), "infotext": ""})
+        infotext = _read_output_infotext(path)
+        add_image(
+            {
+                "source": "disk",
+                "dataUrl": data_url,
+                "path": str(path),
+                "infotext": infotext,
+                **_settings_from_infotext(infotext),
+            }
+        )
         if len(images) >= limit:
             break
     return images
@@ -835,6 +1298,22 @@ def _sana_log_root(ctx: Any) -> Path | None:
         return (Path(data_dir) / "_local" / "logs").resolve()
     except OSError:
         return None
+
+
+def _readiness_snapshot_paths(ctx: Any) -> list[Path]:
+    root = _sana_log_root(ctx)
+    if root is None:
+        return []
+    paths = [root / filename for filename in _READINESS_SNAPSHOT_FILENAMES]
+    paths = [path for path in paths if path.is_file()]
+
+    def modified(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    return sorted(paths, key=modified, reverse=True)
 
 
 def _sana_receipt_paths(ctx: Any, *, limit: int = 8) -> list[Path]:
@@ -995,19 +1474,27 @@ def _recent_output_payload(ctx: Any) -> list[dict[str, Any]]:
                         width, height = image.size
             except OSError:
                 pass
+        width = width or _optional_int(item.get("width")) or 0
+        height = height or _optional_int(item.get("height")) or 0
         outputs.append(
             {
                 "id": f"recent-{index}-{path or item.get('source', 'memory')}",
                 "url": item.get("dataUrl"),
                 "thumbnailUrl": item.get("dataUrl"),
                 "path": path,
-                "prompt": str(item.get("infotext") or "Local output"),
+                "prompt": str(item.get("prompt") or item.get("infotext") or "Local output"),
+                "negativePrompt": item.get("negativePrompt"),
+                "infotext": str(item.get("infotext") or ""),
                 "width": width,
                 "height": height,
                 "createdAt": created_at,
                 "mode": "image",
                 "seed": item.get("seed"),
-                "modelName": None,
+                "steps": item.get("steps"),
+                "cfgScale": item.get("cfgScale"),
+                "sampler": item.get("sampler"),
+                "scheduler": item.get("scheduler"),
+                "modelName": item.get("modelName"),
                 "status": "available",
                 "source": item.get("source", "output"),
             }
@@ -1083,6 +1570,7 @@ def _download_payload(ctx: Any) -> dict[str, Any]:
                 "destination": destination,
                 "engineId": engine_id,
                 "engineLabel": _ENGINE_LABELS.get(engine_id, _ENGINE_LABELS["unknown"]),
+                "hfUrl": _catalog_entry_hf_url(item),
             }
         )
 
@@ -1090,12 +1578,27 @@ def _download_payload(ctx: Any) -> dict[str, Any]:
         "categories": categories,
         "bundles": QUICK_START_BUNDLES,
         "catalog": catalog,
+        "civitaiLinks": list(CIVITAI_BROWSE_LINKS),
         "counts": {
             "categories": len(categories),
             "catalog": len(catalog),
             "installed": installed_count,
         },
     }
+
+
+def _catalog_entry_hf_url(item: Any) -> str:
+    """Human-visitable download page for a catalog entry (HF repo or direct URL)."""
+    repo_id = str(getattr(item, "repo_id", "") or "").strip()
+    if repo_id:
+        filename = str(getattr(item, "filename", "") or "").strip()
+        if filename and not getattr(item, "snapshot", False):
+            return f"https://huggingface.co/{repo_id}/blob/main/{filename}"
+        return f"https://huggingface.co/{repo_id}"
+    url = str(getattr(item, "url", "") or "").strip()
+    if url.startswith("https://huggingface.co/"):
+        return url.replace("/resolve/", "/blob/", 1)
+    return url
 
 
 def _settings_payload(ctx: Any) -> dict[str, Any]:
@@ -1117,16 +1620,339 @@ def _settings_payload(ctx: Any) -> dict[str, Any]:
             "galleryColumns": getattr(settings, "gallery_columns", 2),
             "galleryHeight": getattr(settings, "gallery_height", 480),
             "livePreview": getattr(settings, "enable_live_preview", True),
+            "showProgressEveryNSteps": int(getattr(settings, "show_progress_every_n_steps", 5)),
+            "livePreviewDecoder": getattr(settings, "live_preview_decoder", "vae"),
             "hiddenTabs": list(getattr(settings, "hidden_tabs", []) or []),
         },
+        "output": {
+            "imageFormat": getattr(settings, "image_format", "png"),
+            "imageQuality": int(getattr(settings, "image_quality", 95)),
+            "embedMetadata": bool(getattr(settings, "embed_metadata", True)),
+            "saveGrid": bool(getattr(settings, "save_grid", False)),
+            "saveSidecarTxt": bool(getattr(settings, "save_sidecar_txt", False)),
+            "filenamePattern": getattr(settings, "filename_pattern", "[datetime]"),
+            "saveBeforeHires": bool(getattr(settings, "save_before_hires", False)),
+            "saveInterrupted": bool(getattr(settings, "save_interrupted", False)),
+            "metadataIncludeModelHash": bool(getattr(settings, "metadata_include_model_hash", True)),
+            "metadataIncludeVaeHash": bool(getattr(settings, "metadata_include_vae_hash", True)),
+            "metadataIncludeLoraHashes": bool(getattr(settings, "metadata_include_lora_hashes", True)),
+            "metadataIncludeAppVersion": bool(getattr(settings, "metadata_include_app_version", True)),
+            "metadataIncludeOptimizationProfile": bool(getattr(settings, "metadata_include_optimization_profile", True)),
+            "optimizationProfileId": getattr(settings, "optimization_profile_id", "balanced_sdpa_fp16"),
+        },
+        "video": {
+            "wanHigh": getattr(settings, "last_wan_high", ""),
+            "wanLow": getattr(settings, "last_wan_low", ""),
+            "wanVae": getattr(settings, "last_wan_vae", ""),
+            "wanTextEncoder": getattr(settings, "last_wan_text_encoder", ""),
+            "wanOffload": getattr(settings, "last_wan_offload", "balanced"),
+            "wanSampler": getattr(settings, "last_wan_sampler", "unipc"),
+            "wanFlowShift": float(getattr(settings, "last_wan_flow_shift", 5.0)),
+            "wanRuntimeMode": getattr(settings, "last_wan_runtime_mode", "fast_5b"),
+            "ltxDtype": getattr(settings, "ltx_dtype", "bf16"),
+            "ltxCpuOffload": getattr(settings, "ltx_cpu_offload", "auto"),
+            "wanGroupOffloadStream": bool(getattr(settings, "wan_group_offload_stream", True)),
+            "wanGroupOffloadBlocks": int(getattr(settings, "wan_group_offload_blocks", 4)),
+            "ggufCudaKernels": bool(getattr(settings, "gguf_cuda_kernels", False)),
+        },
         "runtime": {
+            "port": int(getattr(flags, "port", 7860)) if flags is not None else 7860,
             "listen": bool(getattr(flags, "listen", False)),
+            "share": bool(getattr(flags, "share", False)),
+            "autolaunch": bool(getattr(flags, "autolaunch", False)),
             "api": bool(getattr(flags, "api", False)),
             "genlog": bool(getattr(flags, "genlog", False)),
             "backend": getattr(flags, "inference_backend", "unknown") if flags is not None else "unknown",
+            "onnxProvider": getattr(flags, "onnx_provider", "auto") if flags is not None else "auto",
             "attention": getattr(flags, "attention_backend", "unknown") if flags is not None else "unknown",
+            "xformers": bool(getattr(flags, "xformers", False)),
+            "optSdpAttention": bool(getattr(flags, "opt_sdp_attention", False)),
+            "optSplitAttention": bool(getattr(flags, "opt_split_attention", False)),
+            "asyncOffload": bool(getattr(flags, "async_offload", True)),
+            "pinnedMemory": bool(getattr(flags, "pinned_memory", True)),
+            "cudaMalloc": bool(getattr(flags, "cuda_malloc", False)),
+            "medvram": bool(getattr(flags, "medvram", False)),
+            "lowvram": bool(getattr(flags, "lowvram", False)),
+            "noHalf": bool(getattr(flags, "no_half", False)),
+            "fp8": bool(getattr(flags, "fp8", False)),
+            "fluxFp8": bool(getattr(flags, "fluxfp8", False)),
+            "directml": bool(getattr(flags, "directml", False)),
+            "cpu": bool(getattr(flags, "cpu", False)),
+            "cudaGraphs": bool(getattr(flags, "cuda_graphs", False)),
+            "torchao": bool(getattr(flags, "torchao", False)),
+            "fp8Quant": bool(getattr(flags, "fp8_quant", False)),
+            "torchCompile": bool(getattr(flags, "torch_compile", False)),
+            "channelsLast": bool(getattr(flags, "channels_last", False)),
+            "nvenc": bool(getattr(flags, "nvenc", False)),
+            "hevc": bool(getattr(flags, "hevc", False)),
+            "blockPrivateDownloadUrls": bool(getattr(flags, "block_private_download_urls", True)),
+            "apiCorsOrigins": getattr(flags, "api_cors_origins", "") if flags is not None else "",
+            "apiRateLimitPerMinute": int(getattr(flags, "api_rate_limit_per_minute", 0)) if flags is not None else 0,
+            "theme": getattr(flags, "theme", "dark") if flags is not None else "dark",
+            "modelsDir": str(getattr(flags, "models_dir", "") or "") if flags is not None else "",
+            "checkpointDir": str(getattr(flags, "ckpt_dir", "") or "") if flags is not None else "",
+            "outputDir": str(getattr(flags, "output_dir", "") or "") if flags is not None else "",
+            "extraModelDirs": "\n".join(str(path) for path in flags.resolved_extra_model_dirs()) if flags is not None else "",
+            "extraCheckpointDirs": "\n".join(str(path) for path in flags.resolved_extra_ckpt_dirs()) if flags is not None else "",
         },
     }
+
+
+def _bool_setting(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _int_setting(value: Any, *, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, int(value)))
+
+
+def _float_setting(value: Any, *, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, float(value)))
+
+
+_MISSING_SETTING = object()
+
+
+def _payload_value(payload: dict[str, Any], camel: str, snake: str | None = None) -> Any:
+    if camel in payload:
+        return payload[camel]
+    if snake and snake in payload:
+        return payload[snake]
+    return _MISSING_SETTING
+
+
+def _choice_setting(value: Any, *, allowed: set[str], default: str) -> str:
+    normalized = str(value or default).strip().lower().replace("-", "_")
+    return normalized if normalized in allowed else default
+
+
+def _text_setting(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _save_launch_profile(ctx: Any, launch: LaunchSettings) -> None:
+    save_launch = getattr(ctx, "save_launch_settings", None)
+    if callable(save_launch):
+        save_launch(launch)
+        return
+    launch_path = getattr(ctx, "launch_settings_path", None)
+    if launch_path:
+        save_launch_settings(Path(launch_path), launch)
+
+
+def _copy_runtime_flags(target: Any, source: Any) -> None:
+    for field_name in type(source).model_fields:
+        setattr(target, field_name, getattr(source, field_name))
+
+
+def _apply_settings_update(ctx: Any, payload: ProSettingsUpdatePayload) -> dict[str, Any]:
+    settings = getattr(ctx, "settings", None)
+    if settings is None:
+        raise HTTPException(status_code=500, detail="Settings are not available in this runtime.")
+
+    generation = payload.generation_defaults or {}
+    ui = payload.ui or {}
+    output = payload.output or {}
+    video = payload.video or {}
+    runtime = payload.runtime or {}
+    try:
+        model_id = generation.get("checkpointId") or generation.get("checkpoint_id") or generation.get("modelId") or generation.get("model_id")
+        if model_id is not None:
+            setattr(settings, "last_checkpoint_id", str(model_id or ""))
+        if "negativePrompt" in generation or "negative_prompt" in generation:
+            setattr(settings, "default_negative_prompt", str(generation.get("negativePrompt") or generation.get("negative_prompt") or ""))
+        if "useDefaultNegative" in generation or "use_default_negative" in generation:
+            setattr(settings, "use_default_negative", _bool_setting(generation.get("useDefaultNegative", generation.get("use_default_negative"))))
+        if "sampler" in generation:
+            setattr(settings, "default_sampler", str(generation["sampler"] or "euler_a"))
+        if "scheduler" in generation:
+            setattr(settings, "default_scheduler", str(generation["scheduler"] or "automatic"))
+        if "steps" in generation:
+            setattr(settings, "default_steps", _int_setting(generation["steps"], minimum=1, maximum=150))
+        if "cfgScale" in generation or "cfg_scale" in generation:
+            setattr(settings, "default_cfg_scale", _float_setting(generation.get("cfgScale", generation.get("cfg_scale")), minimum=0.0, maximum=30.0))
+        if "width" in generation:
+            setattr(settings, "default_width", _int_setting(generation["width"], minimum=64, maximum=2048))
+        if "height" in generation:
+            setattr(settings, "default_height", _int_setting(generation["height"], minimum=64, maximum=2048))
+        if "clipSkip" in generation or "clip_skip" in generation:
+            setattr(settings, "default_clip_skip", _int_setting(generation.get("clipSkip", generation.get("clip_skip")), minimum=1, maximum=12))
+        if "saveImages" in generation or "save_images" in generation:
+            setattr(settings, "save_images", _bool_setting(generation.get("saveImages", generation.get("save_images"))))
+
+        if "galleryColumns" in ui or "gallery_columns" in ui:
+            setattr(settings, "gallery_columns", _int_setting(ui.get("galleryColumns", ui.get("gallery_columns")), minimum=1, maximum=8))
+        if "galleryHeight" in ui or "gallery_height" in ui:
+            setattr(settings, "gallery_height", _int_setting(ui.get("galleryHeight", ui.get("gallery_height")), minimum=160, maximum=1200))
+        if "livePreview" in ui or "live_preview" in ui:
+            setattr(settings, "enable_live_preview", _bool_setting(ui.get("livePreview", ui.get("live_preview"))))
+        if "showProgressEveryNSteps" in ui or "show_progress_every_n_steps" in ui:
+            setattr(settings, "show_progress_every_n_steps", _int_setting(ui.get("showProgressEveryNSteps", ui.get("show_progress_every_n_steps")), minimum=1, maximum=20))
+        if "livePreviewDecoder" in ui or "live_preview_decoder" in ui:
+            decoder = str(ui.get("livePreviewDecoder", ui.get("live_preview_decoder")) or "vae")
+            setattr(settings, "live_preview_decoder", decoder if decoder == "vae" else "vae")
+        if "accentPreset" in ui or "accent_preset" in ui:
+            setattr(settings, "accent_preset", str(ui.get("accentPreset", ui.get("accent_preset")) or "mint"))
+        if "hiddenTabs" in ui or "hidden_tabs" in ui:
+            raw_tabs = ui.get("hiddenTabs", ui.get("hidden_tabs")) or []
+            if isinstance(raw_tabs, list):
+                setattr(settings, "hidden_tabs", [str(item) for item in raw_tabs])
+
+        image_format = _payload_value(output, "imageFormat", "image_format")
+        if image_format is not _MISSING_SETTING:
+            setattr(settings, "image_format", _choice_setting(image_format, allowed={"png", "jpg", "jpeg", "webp"}, default="png"))
+        image_quality = _payload_value(output, "imageQuality", "image_quality")
+        if image_quality is not _MISSING_SETTING:
+            setattr(settings, "image_quality", _int_setting(image_quality, minimum=10, maximum=100))
+        for camel, snake, attr in (
+            ("embedMetadata", "embed_metadata", "embed_metadata"),
+            ("saveGrid", "save_grid", "save_grid"),
+            ("saveSidecarTxt", "save_sidecar_txt", "save_sidecar_txt"),
+            ("saveBeforeHires", "save_before_hires", "save_before_hires"),
+            ("saveInterrupted", "save_interrupted", "save_interrupted"),
+            ("metadataIncludeModelHash", "metadata_include_model_hash", "metadata_include_model_hash"),
+            ("metadataIncludeVaeHash", "metadata_include_vae_hash", "metadata_include_vae_hash"),
+            ("metadataIncludeLoraHashes", "metadata_include_lora_hashes", "metadata_include_lora_hashes"),
+            ("metadataIncludeAppVersion", "metadata_include_app_version", "metadata_include_app_version"),
+            (
+                "metadataIncludeOptimizationProfile",
+                "metadata_include_optimization_profile",
+                "metadata_include_optimization_profile",
+            ),
+        ):
+            value = _payload_value(output, camel, snake)
+            if value is not _MISSING_SETTING:
+                setattr(settings, attr, _bool_setting(value))
+        filename_pattern = _payload_value(output, "filenamePattern", "filename_pattern")
+        if filename_pattern is not _MISSING_SETTING:
+            setattr(settings, "filename_pattern", str(filename_pattern or "[datetime]"))
+        optimization_profile = _payload_value(output, "optimizationProfileId", "optimization_profile_id")
+        if optimization_profile is not _MISSING_SETTING:
+            setattr(settings, "optimization_profile_id", _text_setting(optimization_profile) or "balanced_sdpa_fp16")
+
+        for camel, snake, attr in (
+            ("wanHigh", "wan_high", "last_wan_high"),
+            ("wanLow", "wan_low", "last_wan_low"),
+            ("wanVae", "wan_vae", "last_wan_vae"),
+            ("wanTextEncoder", "wan_text_encoder", "last_wan_text_encoder"),
+        ):
+            value = _payload_value(video, camel, snake)
+            if value is not _MISSING_SETTING:
+                setattr(settings, attr, _text_setting(value))
+        wan_offload = _payload_value(video, "wanOffload", "wan_offload")
+        if wan_offload is not _MISSING_SETTING:
+            setattr(
+                settings,
+                "last_wan_offload",
+                _choice_setting(
+                    wan_offload,
+                    allowed={"sequential", "group", "streamed", "model", "balanced", "resident", "none"},
+                    default="balanced",
+                ),
+            )
+        wan_sampler = _payload_value(video, "wanSampler", "wan_sampler")
+        if wan_sampler is not _MISSING_SETTING:
+            setattr(settings, "last_wan_sampler", _choice_setting(wan_sampler, allowed={"unipc", "euler", "heun"}, default="unipc"))
+        wan_flow_shift = _payload_value(video, "wanFlowShift", "wan_flow_shift")
+        if wan_flow_shift is not _MISSING_SETTING:
+            setattr(settings, "last_wan_flow_shift", _float_setting(wan_flow_shift, minimum=0.0, maximum=20.0))
+        wan_runtime_mode = _payload_value(video, "wanRuntimeMode", "wan_runtime_mode")
+        if wan_runtime_mode is not _MISSING_SETTING:
+            setattr(settings, "last_wan_runtime_mode", _choice_setting(wan_runtime_mode, allowed={"fast_5b", "high_low"}, default="fast_5b"))
+        ltx_dtype = _payload_value(video, "ltxDtype", "ltx_dtype")
+        if ltx_dtype is not _MISSING_SETTING:
+            setattr(settings, "ltx_dtype", _choice_setting(ltx_dtype, allowed={"bf16", "fp16"}, default="bf16"))
+        ltx_cpu_offload = _payload_value(video, "ltxCpuOffload", "ltx_cpu_offload")
+        if ltx_cpu_offload is not _MISSING_SETTING:
+            setattr(settings, "ltx_cpu_offload", _choice_setting(ltx_cpu_offload, allowed={"auto", "model", "none"}, default="auto"))
+        wan_stream = _payload_value(video, "wanGroupOffloadStream", "wan_group_offload_stream")
+        if wan_stream is not _MISSING_SETTING:
+            setattr(settings, "wan_group_offload_stream", _bool_setting(wan_stream))
+        wan_blocks = _payload_value(video, "wanGroupOffloadBlocks", "wan_group_offload_blocks")
+        if wan_blocks is not _MISSING_SETTING:
+            setattr(settings, "wan_group_offload_blocks", _int_setting(wan_blocks, minimum=1, maximum=40))
+        gguf_kernels = _payload_value(video, "ggufCudaKernels", "gguf_cuda_kernels")
+        if gguf_kernels is not _MISSING_SETTING:
+            setattr(settings, "gguf_cuda_kernels", _bool_setting(gguf_kernels))
+        # Apply immediately so the next pipeline load honors the new values
+        # without an app restart.
+        apply_video_perf_env = getattr(settings, "apply_video_perf_env", None)
+        if callable(apply_video_perf_env):
+            apply_video_perf_env()
+
+        flags = getattr(ctx, "flags", None)
+        if runtime and flags is not None:
+            launch_data = LaunchSettings.from_runtime_flags(flags).model_dump()
+            port = _payload_value(runtime, "port")
+            if port is not _MISSING_SETTING:
+                launch_data["port"] = _int_setting(port, minimum=1024, maximum=65535)
+            api_rate = _payload_value(runtime, "apiRateLimitPerMinute", "api_rate_limit_per_minute")
+            if api_rate is not _MISSING_SETTING:
+                launch_data["api_rate_limit_per_minute"] = _int_setting(api_rate, minimum=0, maximum=6000)
+            for camel, snake, field in (
+                ("listen", None, "listen"),
+                ("share", None, "share"),
+                ("autolaunch", None, "autolaunch"),
+                ("api", None, "api"),
+                ("genlog", None, "genlog"),
+                ("xformers", None, "xformers"),
+                ("optSdpAttention", "opt_sdp_attention", "opt_sdp_attention"),
+                ("optSplitAttention", "opt_split_attention", "opt_split_attention"),
+                ("asyncOffload", "async_offload", "async_offload"),
+                ("pinnedMemory", "pinned_memory", "pinned_memory"),
+                ("cudaMalloc", "cuda_malloc", "cuda_malloc"),
+                ("medvram", None, "medvram"),
+                ("lowvram", None, "lowvram"),
+                ("noHalf", "no_half", "no_half"),
+                ("fp8", None, "fp8"),
+                ("fluxFp8", "fluxfp8", "fluxfp8"),
+                ("directml", None, "directml"),
+                ("cpu", None, "cpu"),
+                ("cudaGraphs", "cuda_graphs", "cuda_graphs"),
+                ("torchao", None, "torchao"),
+                ("fp8Quant", "fp8_quant", "fp8_quant"),
+                ("torchCompile", "torch_compile", "torch_compile"),
+                ("channelsLast", "channels_last", "channels_last"),
+                ("nvenc", None, "nvenc"),
+                ("hevc", None, "hevc"),
+                ("blockPrivateDownloadUrls", "block_private_download_urls", "block_private_download_urls"),
+            ):
+                value = _payload_value(runtime, camel, snake)
+                if value is not _MISSING_SETTING:
+                    launch_data[field] = _bool_setting(value)
+            for camel, snake, field in (
+                ("backend", "inference_backend", "inference_backend"),
+                ("onnxProvider", "onnx_provider", "onnx_provider"),
+                ("attention", "attention_backend", "attention_backend"),
+                ("theme", None, "theme"),
+                ("apiCorsOrigins", "api_cors_origins", "api_cors_origins"),
+                ("modelsDir", "models_dir", "models_dir"),
+                ("checkpointDir", "ckpt_dir", "ckpt_dir"),
+                ("outputDir", "output_dir", "output_dir"),
+                ("extraModelDirs", "extra_model_dirs", "extra_model_dirs"),
+                ("extraCheckpointDirs", "extra_ckpt_dirs", "extra_ckpt_dirs"),
+            ):
+                value = _payload_value(runtime, camel, snake)
+                if value is not _MISSING_SETTING:
+                    launch_data[field] = _text_setting(value)
+            launch = LaunchSettings.model_validate(launch_data)
+            _save_launch_profile(ctx, launch)
+            _copy_runtime_flags(flags, launch.to_runtime_flags(flags))
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=422, detail=f"Settings update is invalid: {exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save launch settings: {exc}") from exc
+
+    save_settings = getattr(ctx, "save_settings", None)
+    if callable(save_settings):
+        try:
+            save_settings()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not save settings: {exc}") from exc
+
+    return _settings_payload(ctx)
 
 
 def _safe_count(ctx: Any, attr: str, method: str) -> int:
@@ -1185,6 +2011,43 @@ def _readiness_record_payload(record: PipelineReadinessRecord) -> dict[str, Any]
     }
 
 
+def _readiness_record_from_mapping(value: Any) -> PipelineReadinessRecord | None:
+    if not isinstance(value, dict):
+        return None
+
+    def text(key: str) -> str:
+        item = value.get(key, "")
+        return "" if item is None else str(item)
+
+    record_id = text("id")
+    if not record_id:
+        return None
+    status = text("status") or "metadata-only"
+    if status not in READINESS_STATUSES:
+        status = "metadata-only"
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return PipelineReadinessRecord(
+        id=record_id,
+        family=text("family") or "unknown",
+        asset_type=text("asset_type") or text("assetType"),
+        path=text("path"),
+        status=status,
+        route=text("route"),
+        reason=text("reason"),
+        storage=text("storage"),
+        quantization=text("quantization"),
+        required_vae=text("required_vae") or text("requiredVae"),
+        required_text_encoder=text("required_text_encoder") or text("requiredTextEncoder"),
+        tokenizer=text("tokenizer"),
+        smoke_command=text("smoke_command") or text("smokeCommand"),
+        receipt_path=text("receipt_path") or text("receiptPath"),
+        suggested_action=text("suggested_action") or text("suggestedAction"),
+        metadata={str(key): "" if item is None else str(item) for key, item in metadata.items()},
+    )
+
+
 def _readiness_family_payload(records: list[PipelineReadinessRecord]) -> list[dict[str, Any]]:
     families: dict[str, dict[str, Any]] = {}
     for record in records:
@@ -1200,6 +2063,65 @@ def _readiness_family_payload(records: list[PipelineReadinessRecord]) -> list[di
         item["counts"][record.status] = item["counts"].get(record.status, 0) + 1
         item["total"] += 1
     return sorted(families.values(), key=lambda item: (-int(item["total"]), str(item["family"])))
+
+
+def _readiness_payload_from_records(
+    records: list[PipelineReadinessRecord],
+    *,
+    error: str = "",
+    source: str = "live",
+) -> dict[str, Any]:
+    counts = readiness_summary(records)
+    working = [record for record in records if record.status == "working"]
+    needs_work = [record for record in records if record.status in _READINESS_NEEDS_WORK_STATUSES]
+    needs_work.sort(
+        key=lambda record: (
+            _READINESS_SORT_ORDER.get(record.status, 99),
+            record.family,
+            record.asset_type,
+            record.id.lower(),
+        )
+    )
+    return {
+        "counts": counts,
+        "families": _readiness_family_payload(records),
+        "working": [_readiness_record_payload(record) for record in working[:8]],
+        "needsWork": [_readiness_record_payload(record) for record in needs_work[:10]],
+        "metadataOnlyCount": counts.get("metadata-only", 0),
+        "total": len(records),
+        "error": error,
+        "source": source,
+    }
+
+
+def _readiness_payload_from_snapshot(ctx: Any) -> dict[str, Any] | None:
+    for path in _readiness_snapshot_paths(ctx):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        raw_records = data.get("records") if isinstance(data, dict) else None
+        if not isinstance(raw_records, list):
+            continue
+        records = [
+            record
+            for record in (_readiness_record_from_mapping(row) for row in raw_records)
+            if record is not None
+        ]
+        if not records:
+            continue
+        try:
+            modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+        except OSError:
+            modified = ""
+        message = f"Using cached readiness ledger from {path.name}"
+        if modified:
+            message += f" ({modified})"
+        message += "; live refresh runs in the background."
+        payload = _readiness_payload_from_records(records, source=str(path))
+        payload["sourceMessage"] = message
+        return payload
+    return None
 
 
 def _readiness_payload(ctx: Any) -> dict[str, Any]:
@@ -1222,28 +2144,28 @@ def _readiness_payload(ctx: Any) -> dict[str, Any]:
             "metadataOnlyCount": 0,
             "total": 0,
             "error": str(exc),
+            "source": "live",
         }
 
-    counts = readiness_summary(records)
-    working = [record for record in records if record.status == "working"]
-    needs_work = [record for record in records if record.status in _READINESS_NEEDS_WORK_STATUSES]
-    needs_work.sort(
-        key=lambda record: (
-            _READINESS_SORT_ORDER.get(record.status, 99),
-            record.family,
-            record.asset_type,
-            record.id.lower(),
-        )
-    )
-    return {
-        "counts": counts,
-        "families": _readiness_family_payload(records),
-        "working": [_readiness_record_payload(record) for record in working[:8]],
-        "needsWork": [_readiness_record_payload(record) for record in needs_work[:10]],
-        "metadataOnlyCount": counts.get("metadata-only", 0),
-        "total": len(records),
-        "error": "",
-    }
+    return _readiness_payload_from_records(records)
+
+
+def _refresh_readiness_cache_in_background(ctx: Any) -> None:
+    if getattr(ctx, "_pro_capability_refresh_running", False):
+        return
+    setattr(ctx, "_pro_capability_refresh_running", True)
+
+    def _worker() -> None:
+        try:
+            payload = _readiness_payload(ctx)
+            setattr(ctx, "_pro_capability_cache", {"cached_at": time.monotonic(), "payload": payload})
+            setattr(ctx, "_pro_capability_refresh_at", time.monotonic())
+        except Exception:
+            logger.exception("Pro capability readiness refresh failed")
+        finally:
+            setattr(ctx, "_pro_capability_refresh_running", False)
+
+    threading.Thread(target=_worker, name="aiwf-pro-capability-refresh", daemon=True).start()
 
 
 def _cached_readiness_payload(ctx: Any) -> dict[str, Any]:
@@ -1254,6 +2176,13 @@ def _cached_readiness_payload(ctx: Any) -> dict[str, Any]:
         payload = cached.get("payload")
         if payload is not None and now - cached_at < _CAPABILITY_CACHE_TTL_SECONDS:
             return payload
+    snapshot_payload = _readiness_payload_from_snapshot(ctx)
+    if snapshot_payload is not None:
+        setattr(ctx, "_pro_capability_cache", {"cached_at": now, "payload": snapshot_payload})
+        last_refresh_at = float(getattr(ctx, "_pro_capability_refresh_at", 0.0) or 0.0)
+        if not _image_generation_running(ctx) and now - last_refresh_at > _CAPABILITY_BACKGROUND_REFRESH_SECONDS:
+            _refresh_readiness_cache_in_background(ctx)
+        return snapshot_payload
     payload = _readiness_payload(ctx)
     setattr(ctx, "_pro_capability_cache", {"cached_at": now, "payload": payload})
     return payload
@@ -1385,6 +2314,14 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "details": ["Library search", "PNG metadata import", "History receipts"],
         },
     ]
+    notes = [
+        "React Pro now shows Gradio parity and asset readiness.",
+        f"{len(blocked_checkpoints)} blocked model assets are hidden from the normal Generate picker.",
+        "Heavy tool execution stays in Gradio until each Pro request path is typed and smoke-tested.",
+    ]
+    source_message = str(readiness.get("sourceMessage") or "")
+    if source_message:
+        notes.append(source_message)
     return {
         "gradioTabs": _GRADIO_TOOL_TABS,
         "tools": tools,
@@ -1402,11 +2339,7 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "wan": wan_count,
         },
         "readiness": readiness,
-        "notes": [
-            "React Pro now shows Gradio parity and asset readiness.",
-            f"{len(blocked_checkpoints)} blocked model assets are hidden from the normal Generate picker.",
-            "Heavy tool execution stays in Gradio until each Pro request path is typed and smoke-tested.",
-        ],
+        "notes": notes,
     }
 
 
@@ -1447,7 +2380,7 @@ def _assert_checkpoint_selectable(ctx: Any, checkpoint_id: str | None) -> None:
     checkpoint = _resolve_checkpoint_for_generation_guard(ctx, checkpoint_id)
     if checkpoint is None:
         return
-    block = _blocked_checkpoint_detail(checkpoint)
+    block = _blocked_checkpoint_detail(checkpoint) or _runtime_checkpoint_block(ctx, checkpoint)
     if block is None:
         return
     data = _dump_model(checkpoint)
@@ -1462,6 +2395,40 @@ def _assert_checkpoint_selectable(ctx: Any, checkpoint_id: str | None) -> None:
             suggestedAction=block["suggestedAction"],
         ),
     )
+
+
+def _checkpoint_engine_id(ctx: Any, checkpoint_id: str | None) -> str:
+    if not checkpoint_id:
+        return "unknown"
+    if checkpoint_id in _video_model_ids(ctx):
+        return "wan" if checkpoint_id in _wan_model_ids(ctx) else "sana_video"
+    checkpoint = _resolve_checkpoint_for_generation_guard(ctx, checkpoint_id)
+    data = _dump_model(checkpoint) if checkpoint is not None else {}
+    return _engine_id_for_architecture(str(data.get("architecture", "unknown")))
+
+
+def _assert_image_route_checkpoint(ctx: Any, checkpoint_id: str | None) -> None:
+    if _checkpoint_engine_id(ctx, checkpoint_id) in {"sana_video", "wan"}:
+        raise HTTPException(
+            status_code=422,
+            detail=_pro_error_detail(
+                "Video models are only available from the Video tab.",
+                checkpointId=str(checkpoint_id or ""),
+            ),
+        )
+
+
+def _assert_video_route_checkpoint(ctx: Any, checkpoint_id: str | None) -> None:
+    if not checkpoint_id:
+        return
+    if _checkpoint_engine_id(ctx, checkpoint_id) not in {"sana_video", "wan"}:
+        raise HTTPException(
+            status_code=422,
+            detail=_pro_error_detail(
+                "Selected model is an image model. Choose a Wan or Sana Video model for video generation.",
+                checkpointId=str(checkpoint_id),
+            ),
+        )
 
 
 def _safe_list(callable_obj) -> list[Any]:
@@ -1499,11 +2466,45 @@ def _usage_metric(label: str, value: str, percent: float, tone: str = "neutral")
     }
 
 
+_NVML_HANDLE: Any = None
+_NVML_FAILED = False
+
+
+def _nvml_gpu_utilization() -> tuple[float, float] | None:
+    """In-process NVML query — microseconds instead of a subprocess spawn."""
+    global _NVML_HANDLE, _NVML_FAILED
+    if _NVML_FAILED:
+        return None
+    try:
+        import pynvml
+
+        if _NVML_HANDLE is None:
+            pynvml.nvmlInit()
+            _NVML_HANDLE = pynvml.nvmlDeviceGetHandleByIndex(0)
+        rates = pynvml.nvmlDeviceGetUtilizationRates(_NVML_HANDLE)
+        return (float(rates.gpu), float(rates.memory))
+    except Exception:
+        _NVML_FAILED = True
+        _NVML_HANDLE = None
+        return None
+
+
 def _nvidia_gpu_utilization() -> tuple[float, float] | None:
     global _NVIDIA_SMI_CACHE
     now = time.monotonic()
     cached_at, cached = _NVIDIA_SMI_CACHE
     if now - cached_at < 0.9:
+        return cached
+
+    nvml = _nvml_gpu_utilization()
+    if nvml is not None:
+        _NVIDIA_SMI_CACHE = (now, nvml)
+        return nvml
+
+    # Subprocess fallback only when NVML is unavailable. Spawning nvidia-smi
+    # every second on Windows is expensive and steals time from generation,
+    # so the fallback refreshes far less often.
+    if cached is not None and now - cached_at < 5.0:
         return cached
     try:
         completed = subprocess.run(
@@ -1600,6 +2601,15 @@ def _runtime_precision(flags: Any) -> str:
     return "FP16"
 
 
+def _runtime_text_encoder_label(backend: Any) -> str:
+    pipe = getattr(backend, "_txt2img", None) or getattr(backend, "_inpaint", None)
+    text_encoder = getattr(pipe, "text_encoder", None)
+    precision = str(getattr(text_encoder, "_aiwf_precision", "") or "").strip()
+    if precision:
+        return f"Runtime owned ({precision})"
+    return "Runtime owned"
+
+
 def _runtime_loaded_model(ctx: Any) -> dict[str, Any]:
     generation = getattr(ctx, "generation", None)
     backend = getattr(generation, "backend", None)
@@ -1633,7 +2643,7 @@ def _runtime_loaded_model(ctx: Any) -> dict[str, Any]:
         "sizeOnDisk": _format_file_size(str(data.get("path") or "")),
         "precision": _runtime_precision(getattr(ctx, "flags", None)),
         "vae": str(getattr(getattr(ctx, "flags", None), "vae_path", "") or ""),
-        "textEncoder": "Runtime owned",
+        "textEncoder": _runtime_text_encoder_label(backend),
         "unet": str(data.get("filename") or ""),
         "loaded": loaded,
     }
@@ -1668,7 +2678,9 @@ def _runtime_summary(ctx: Any) -> dict[str, Any]:
     elif video_job_running or video_job_terminal:
         job_status = video_job
     elif recent_terminal_image_job is not None:
-        job_status = _job_status(recent_terminal_image_job)
+        # Finished jobs never need the live-preview data URL; without this the
+        # runtime stream re-sends the last (up to ~768 KB) preview forever.
+        job_status = _job_status(recent_terminal_image_job, include_preview=False)
     elif video_job_completed:
         job_status = video_job
     else:
@@ -1712,21 +2724,60 @@ def _runtime_summary(ctx: Any) -> dict[str, Any]:
 
 
 async def _runtime_sse_events(ctx: Any, request: Request):
+    """Adaptive runtime stream.
+
+    - While a job runs, tick fast (0.4 s) so progress and live previews feel
+      immediate, but only send each preview frame ONCE per (job, step) — the
+      base64 preview is by far the heaviest part of the payload.
+    - While idle, tick slowly and skip emits entirely when nothing changed,
+      so an idle Pro tab costs almost nothing on either side.
+    """
+    last_preview_key: tuple[str, int] | None = None
+    last_idle_payload: str | None = None
     while True:
         if await request.is_disconnected():
             break
         payload = _runtime_summary(ctx)
-        yield f"event: runtime\ndata: {json.dumps(payload, default=str)}\n\n"
-        await asyncio.sleep(1.0)
+        running = str(payload.get("status") or "") == "running"
+        job = payload.get("job") or {}
+        preview_url = str(job.get("previewUrl") or "")
+        if preview_url:
+            preview_key = (str(job.get("id") or ""), int(job.get("step") or 0))
+            if preview_key == last_preview_key:
+                # Same decoded frame as the previous tick — drop the heavy
+                # data URL; the client keeps showing the frame it already has.
+                job = {**job, "previewUrl": ""}
+                payload = {**payload, "job": job}
+            else:
+                last_preview_key = preview_key
+
+        if running:
+            last_idle_payload = None
+            yield f"event: runtime\ndata: {json.dumps(payload, default=str)}\n\n"
+            await asyncio.sleep(0.4)
+            continue
+
+        serialized = json.dumps(payload, default=str)
+        if serialized != last_idle_payload:
+            last_idle_payload = serialized
+            yield f"event: runtime\ndata: {serialized}\n\n"
+        else:
+            # SSE comment keeps proxies/browsers from timing the stream out.
+            yield ": keepalive\n\n"
+        await asyncio.sleep(1.5)
 
 
 def _settings_defaults(ctx: Any) -> dict[str, Any]:
     settings = getattr(ctx, "settings", None)
+    checkpoint_id = getattr(settings, "last_checkpoint_id", None)
+    if not _is_checkpoint_id_selectable(ctx, checkpoint_id):
+        selectable, _blocked = _selectable_checkpoint_payloads(ctx)
+        checkpoint_id = selectable[0]["id"] if selectable else None
     return {
         "prompt": "",
         "negativePrompt": getattr(settings, "default_negative_prompt", "") or "",
         "useDefaultNegative": bool(getattr(settings, "use_default_negative", True)),
-        "checkpointId": getattr(settings, "last_checkpoint_id", None),
+        "checkpointId": checkpoint_id,
         "sampler": getattr(settings, "default_sampler", "euler_a"),
         "scheduler": getattr(settings, "default_scheduler", "automatic"),
         "steps": int(getattr(settings, "default_steps", 20)),
@@ -1734,17 +2785,31 @@ def _settings_defaults(ctx: Any) -> dict[str, Any]:
         "width": int(getattr(settings, "default_width", 512)),
         "height": int(getattr(settings, "default_height", 512)),
         "seed": -1,
+        "clipSkip": int(getattr(settings, "default_clip_skip", 1)),
         "batchSize": 1,
         "batchCount": 1,
         "saveImages": bool(getattr(settings, "save_images", True)),
     }
 
 
+def _is_checkpoint_id_selectable(ctx: Any, checkpoint_id: str | None) -> bool:
+    if not checkpoint_id:
+        return False
+    checkpoint = _resolve_checkpoint_for_generation_guard(ctx, str(checkpoint_id))
+    return (
+        checkpoint is not None
+        and _blocked_checkpoint_detail(checkpoint) is None
+        and _runtime_checkpoint_block(ctx, checkpoint) is None
+    )
+
+
 def _generation_mode_from_payload(payload: ProGeneratePayload) -> GenerationMode:
     normalized = (payload.mode or "image").strip().lower()
     if normalized in {"image", "txt2img"}:
         return GenerationMode.TXT2IMG
-    raise HTTPException(status_code=422, detail="React Pro generation currently supports image/txt2img mode.")
+    if normalized == "inpaint":
+        return GenerationMode.INPAINT
+    raise HTTPException(status_code=422, detail="React Pro generation currently supports image/txt2img and inpaint modes.")
 
 
 def _generation_request(ctx: Any, payload: ProGeneratePayload) -> GenerationRequest:
@@ -1763,9 +2828,19 @@ def _generation_request(ctx: Any, payload: ProGeneratePayload) -> GenerationRequ
             width=payload.width,
             height=payload.height,
             seed=payload.seed,
+            clip_skip=payload.clip_skip,
             batch_size=payload.batch_size,
             batch_count=payload.batch_count,
-            enable_hr=False,
+            enable_hr=payload.enable_hr,
+            hr_scale=payload.hr_scale,
+            hr_steps=payload.hr_steps,
+            hr_denoising_strength=payload.hr_denoising_strength,
+            hr_upscaler=payload.hr_upscaler,
+            denoising_strength=payload.denoising_strength,
+            mask_blur=payload.mask_blur,
+            inpaint_only_masked=payload.inpaint_only_masked,
+            inpaint_masked_padding=payload.inpaint_masked_padding,
+            inpaint_mask_content=payload.inpaint_mask_content,
             controlnet_units=[],
             sdxl_refiner_enabled=False,
         )
@@ -1784,6 +2859,7 @@ def _job_recent_output_payloads(job: Any) -> list[dict[str, Any]]:
     artifacts = [_artifact_payload(item) for item in (getattr(result, "artifacts", []) or [])]
     mode = str(getattr(getattr(result, "mode", None), "value", getattr(result, "mode", "txt2img")))
     prompt = str(getattr(request, "prompt", "") or "")
+    negative_prompt = str(getattr(request, "negative_prompt", "") or "")
     model_name = str(getattr(request, "checkpoint_id", "") or "")
     outputs: list[dict[str, Any]] = []
     for index, image in enumerate(images):
@@ -1806,12 +2882,23 @@ def _job_recent_output_payloads(job: Any) -> list[dict[str, Any]]:
                 "url": data_url,
                 "thumbnailUrl": data_url,
                 "path": path,
-                "prompt": infotexts[index] if index < len(infotexts) and infotexts[index] else prompt,
+                "prompt": prompt,
+                "negativePrompt": negative_prompt,
+                "infotext": infotexts[index] if index < len(infotexts) and infotexts[index] else "",
                 "width": width,
                 "height": height,
                 "createdAt": created_at,
                 "mode": mode,
                 "seed": seeds[index] if index < len(seeds) else None,
+                "steps": int(getattr(request, "steps", 0) or 0) or None,
+                "cfgScale": (
+                    float(getattr(request, "cfg_scale"))
+                    if getattr(request, "cfg_scale", None) is not None
+                    else None
+                ),
+                "clipSkip": int(getattr(request, "clip_skip", 1) or 1),
+                "sampler": str(getattr(request, "sampler", "") or ""),
+                "scheduler": str(getattr(request, "scheduler", "") or ""),
                 "modelName": model_name,
                 "status": "completed",
                 "source": "generation",
@@ -1839,6 +2926,76 @@ def _generate_response(job: Any) -> dict[str, Any]:
         "artifacts": [_artifact_payload(item) for item in (getattr(result, "artifacts", []) or [])],
         "message": f"Generated {len(recent_outputs)} image(s).",
     }
+
+
+def _decode_pro_image_data_url(data_url: str | None, label: str) -> Image.Image | None:
+    value = (data_url or "").strip()
+    if not value:
+        return None
+    if "," not in value or ";base64" not in value.partition(",")[0].lower():
+        raise HTTPException(status_code=422, detail=f"{label} must be a base64 image data URL.")
+    header, encoded = value.split(",", 1)
+    if not header.lower().startswith("data:image/"):
+        raise HTTPException(status_code=422, detail=f"{label} must be PNG, JPEG, or WebP.")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{label} data is not valid base64.") from exc
+    if len(raw) > _PRO_SOURCE_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"{label} is too large.")
+    try:
+        image = Image.open(io.BytesIO(raw))
+        image.load()
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail=f"{label} could not be opened.") from exc
+    return image
+
+
+def _assert_inpaint_checkpoint_supported(ctx: Any, payload: ProGeneratePayload) -> None:
+    checkpoint = _resolve_checkpoint_for_generation_guard(ctx, _checkpoint_id_from_payload(ctx, payload))
+    data = _dump_model(checkpoint) if checkpoint is not None else {}
+    engine_id = _engine_id_for_architecture(str(data.get("architecture", "unknown")))
+    if engine_id not in {"sd15", "sdxl", "flux_fill"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Inpainting is supported for SD 1.5, SDXL, and Flux Fill checkpoints.",
+        )
+
+
+def _run_pro_image_generation(
+    ctx: Any,
+    request: GenerationRequest,
+    init_images: list[Image.Image] | None = None,
+    mask_images: list[Image.Image] | None = None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    submit_streaming = getattr(ctx.generation, "submit_streaming", None)
+    if not callable(submit_streaming):
+        return ctx.generation.submit(request, init_images=init_images, mask_images=mask_images), []
+
+    progress: list[dict[str, Any]] = []
+    finished_job = None
+    started_at = time.perf_counter()
+    for item in submit_streaming(request, init_images=init_images, mask_images=mask_images):
+        kind = item[0] if item else ""
+        if kind == "done":
+            finished_job = item[1]
+        elif kind == "progress":
+            _, step, total, message, _preview = item
+            total_int = max(1, int(total or 1))
+            step_int = max(0, int(step or 0))
+            progress.append(
+                {
+                    "stage": "image",
+                    "progress": min(1.0, max(0.0, step_int / total_int)),
+                    "message": str(message or ""),
+                    "step": step_int,
+                    "total": total_int,
+                    "seconds": round(time.perf_counter() - started_at, 3),
+                }
+            )
+    if finished_job is None:
+        raise RuntimeError("Generation finished without returning a job record.")
+    return finished_job, progress
 
 
 def _sana_video_request_from_payload(ctx: Any, payload: ProGeneratePayload) -> SanaVideoRequest:
@@ -1883,12 +3040,19 @@ def _sana_video_output_payload(ctx: Any, result: Any, payload: ProGeneratePayloa
         "url": _output_asset_url(ctx, output_path),
         "thumbnailUrl": _output_asset_url(ctx, output_path),
         "path": output_path,
-        "prompt": str(getattr(result, "infotext", "") or payload.prompt),
+        "prompt": payload.prompt,
+        "negativePrompt": payload.negative_prompt,
+        "infotext": str(getattr(result, "infotext", "") or ""),
         "width": int(getattr(result, "width", payload.width) or payload.width),
         "height": int(getattr(result, "height", payload.height) or payload.height),
         "createdAt": created_at,
         "mode": "video",
         "seed": payload.seed,
+        "steps": payload.steps,
+        "cfgScale": payload.cfg_scale,
+        "clipSkip": payload.clip_skip,
+        "sampler": payload.sampler,
+        "scheduler": payload.scheduler,
         "modelName": payload.checkpoint_id or "SANA-Video 2B 480p",
         "status": "completed",
         "source": "sana-video",
@@ -1979,6 +3143,541 @@ def _generate_sana_video_response(ctx: Any, payload: ProGeneratePayload) -> dict
     }
 
 
+def _wan_video_request_from_payload(ctx: Any, payload: ProGeneratePayload):
+    from aiwf.core.domain.wan import WAN_RUNTIME_FAST_5B, WanI2VRequest
+
+    service = _wan_service(ctx)
+    settings = getattr(ctx, "settings", None)
+    sampler = str(getattr(settings, "last_wan_sampler", "") or "unipc").strip().lower()
+    if sampler not in {"unipc", "euler", "heun"}:
+        sampler = "unipc"
+    try:
+        flow_shift = float(getattr(settings, "last_wan_flow_shift", 5.0) or 5.0)
+    except (TypeError, ValueError):
+        flow_shift = 5.0
+    vae_id = None
+    try:
+        vae_id = service.preferred_vae(WAN_RUNTIME_FAST_5B)
+    except Exception:
+        vae_id = None
+    text_encoder = str(getattr(settings, "last_wan_text_encoder", "") or "").strip()
+    try:
+        return WanI2VRequest(
+            prompt=payload.prompt,
+            negative_prompt=payload.negative_prompt,
+            width=payload.width,
+            height=payload.height,
+            num_frames=min(max(int(payload.frames), 5), 257),
+            fps=max(1, int(round(payload.fps))),
+            steps=min(int(payload.steps), 100),
+            guidance_scale=min(max(float(payload.cfg_scale), 1.0), 20.0),
+            sampler=sampler,
+            flow_shift=flow_shift,
+            seed=payload.seed,
+            runtime_mode=WAN_RUNTIME_FAST_5B,
+            model_id=str(payload.checkpoint_id or ""),
+            offload=str(getattr(settings, "last_wan_offload", "balanced") or "balanced"),
+            vae_id=vae_id,
+            text_encoder_path=text_encoder,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+
+def _wan_video_output_payload(ctx: Any, result: Any, payload: ProGeneratePayload) -> dict[str, Any]:
+    output_path = str(getattr(result, "output_path", "") or "")
+    path = Path(output_path)
+    created_at = datetime.now(timezone.utc).isoformat()
+    if path.is_file():
+        try:
+            created_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+        except OSError:
+            pass
+    return {
+        "id": f"wan-video-{path.stem or 'output'}",
+        "url": _output_asset_url(ctx, output_path),
+        "thumbnailUrl": _output_asset_url(ctx, output_path),
+        "path": output_path,
+        "prompt": payload.prompt,
+        "negativePrompt": payload.negative_prompt,
+        "infotext": "",
+        "width": int(getattr(result, "width", payload.width) or payload.width),
+        "height": int(getattr(result, "height", payload.height) or payload.height),
+        "createdAt": created_at,
+        "mode": "video",
+        "seed": payload.seed,
+        "steps": payload.steps,
+        "cfgScale": payload.cfg_scale,
+        "clipSkip": payload.clip_skip,
+        "sampler": payload.sampler,
+        "scheduler": payload.scheduler,
+        "modelName": payload.checkpoint_id or "Wan 2.2",
+        "status": "completed",
+        "source": "wan-video",
+    }
+
+
+def _vsr_service(ctx: Any):
+    service = getattr(ctx, "vsr", None)
+    if service is not None:
+        return service
+    key = id(ctx)
+    service = _VSR_SERVICES.get(key)
+    if service is None:
+        from aiwf.services.vsr import VsrService
+
+        service = VsrService(
+            getattr(ctx, "flags", None),
+            getattr(ctx, "settings", None),
+            supervisor=getattr(ctx, "supervisor", None),
+        )
+        _VSR_SERVICES[key] = service
+    return service
+
+
+def _rife_service(ctx: Any):
+    service = getattr(ctx, "rife", None)
+    if service is not None:
+        return service
+    key = id(ctx)
+    service = _RIFE_SERVICES.get(key)
+    if service is None:
+        from aiwf.services.rife import RifeService
+
+        backend = getattr(getattr(ctx, "generation", None), "backend", None)
+        service = RifeService(
+            getattr(ctx, "flags", None),
+            getattr(ctx, "settings", None),
+            getattr(backend, "devices", None),
+            supervisor=getattr(ctx, "supervisor", None),
+        )
+        _RIFE_SERVICES[key] = service
+    return service
+
+
+def _audio_service(ctx: Any):
+    service = getattr(ctx, "audio", None)
+    if service is not None:
+        return service
+    key = id(ctx)
+    service = _AUDIO_SERVICES.get(key)
+    if service is None:
+        from aiwf.services.audio import AudioService
+
+        backend = getattr(getattr(ctx, "generation", None), "backend", None)
+        service = AudioService(
+            getattr(ctx, "flags", None),
+            getattr(ctx, "settings", None),
+            devices=getattr(backend, "devices", None),
+            supervisor=getattr(ctx, "supervisor", None),
+        )
+        _AUDIO_SERVICES[key] = service
+    return service
+
+
+class ProVideoLabRunPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    op: str
+    video_path: str = Field(default="", validation_alias=AliasChoices("videoPath", "video_path"))
+    # VSR / upscale
+    scale: float = Field(default=2.0, ge=1.0, le=4.0)
+    mode: int = Field(default=0, ge=0, le=19)
+    effect: str = "SuperRes"
+    strength: float = Field(default=0.4, ge=0.0, le=1.0)
+    # RIFE
+    multiplier: int = Field(default=2, ge=2, le=8)
+    target_fps: float | None = Field(
+        default=None, ge=1.0, le=240.0, validation_alias=AliasChoices("targetFps", "target_fps")
+    )
+    # Audio
+    audio_prompt: str = Field(default="", validation_alias=AliasChoices("audioPrompt", "audio_prompt"))
+    audio_model: str = Field(default="", validation_alias=AliasChoices("audioModel", "audio_model"))
+    # Extend (Wan i2v continuation)
+    prompt: str = ""
+    negative_prompt: str = Field(default="", validation_alias=AliasChoices("negativePrompt", "negative_prompt"))
+    frames: int = Field(default=81, ge=5, le=257)
+    steps: int = Field(default=8, ge=1, le=100)
+    cfg_scale: float = Field(default=5.0, ge=1.0, le=20.0, validation_alias=AliasChoices("cfgScale", "cfg_scale"))
+    seed: int = -1
+    checkpoint_id: str = Field(default="", validation_alias=AliasChoices("checkpointId", "checkpoint_id", "modelId"))
+
+
+class ProAutoMaskPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    image_data_url: str = Field(validation_alias=AliasChoices("imageDataUrl", "image_data_url", "image"))
+    prompt: str = ""
+    box_threshold: float = Field(default=0.3, ge=0.05, le=0.95, validation_alias=AliasChoices("boxThreshold", "box_threshold"))
+    dilation: int = Field(default=8, ge=0, le=128)
+    mask_blur: int = Field(default=4, ge=0, le=64, validation_alias=AliasChoices("maskBlur", "mask_blur"))
+    feather: int = Field(default=6, ge=0, le=64)
+
+
+class ProFaceSwapPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    target_image_data_url: str = Field(
+        validation_alias=AliasChoices("targetImageDataUrl", "target_image_data_url", "target")
+    )
+    source_image_data_url: str = Field(
+        validation_alias=AliasChoices("sourceImageDataUrl", "source_image_data_url", "source")
+    )
+
+
+class ProVsrImagePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    image_data_url: str = Field(validation_alias=AliasChoices("imageDataUrl", "image_data_url", "image"))
+    scale: float = Field(default=2.0, ge=1.0, le=4.0)
+    mode: int = Field(default=0, ge=0, le=19)
+    effect: str = "SuperRes"
+    strength: float = Field(default=0.4, ge=0.0, le=1.0)
+
+
+def _video_lab_upload_root(ctx: Any) -> Path:
+    flags = getattr(ctx, "flags", None)
+    root = flags.resolved_output_dir() / "video-lab" / "uploads"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _video_lab_resolve_source(ctx: Any, video_path: str) -> Path:
+    """Only accept sources inside the outputs tree so the API can't read arbitrary files."""
+    value = (video_path or "").strip()
+    if not value:
+        raise HTTPException(status_code=422, detail="Upload or pick a source video first.")
+    root = _safe_output_root(ctx)
+    if root is None:
+        raise HTTPException(status_code=500, detail="Output directory is not available.")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = root / value
+    try:
+        candidate = candidate.resolve()
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail=f"Video path could not be resolved: {exc}") from exc
+    if not _path_inside(candidate, root) or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Source video was not found under the outputs directory.")
+    return candidate
+
+
+def _video_lab_probe(path: Path) -> dict[str, Any]:
+    from aiwf.infrastructure.video import VideoProcessor
+
+    try:
+        info = VideoProcessor().probe(path)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Could not read video: {exc}") from exc
+    return {
+        "path": str(path),
+        "width": int(getattr(info, "width", 0) or 0),
+        "height": int(getattr(info, "height", 0) or 0),
+        "fps": float(getattr(info, "fps", 0.0) or 0.0),
+        "frameCount": int(getattr(info, "frame_count", 0) or 0),
+        "durationSeconds": float(getattr(info, "duration_seconds", 0.0) or 0.0),
+    }
+
+
+def _video_lab_output(ctx: Any, output_path: str | Path, message: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = {
+        "status": "completed",
+        "outputPath": str(output_path),
+        "url": _output_asset_url(ctx, output_path),
+        "message": message,
+        "probe": _video_lab_probe(Path(output_path)),
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _concat_videos_dropping_first_frame(first: Path, second: Path, dest: Path) -> None:
+    """Concatenate two clips, dropping the second clip's first frame.
+
+    The continuation clip starts from the exact last frame of the original
+    (it was the i2v conditioning image), so frame 0 is dropped to avoid a
+    visible stutter at the seam. Re-encodes to normalize codec/resolution.
+    """
+    from aiwf.infrastructure.video.processing import _resolve_ffmpeg
+
+    ffmpeg = _resolve_ffmpeg()
+    if ffmpeg is None:
+        raise HTTPException(status_code=500, detail="ffmpeg is required to stitch the extended video.")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(first),
+        "-i",
+        str(second),
+        "-filter_complex",
+        "[1:v]select=gte(n\\,1),setpts=PTS-STARTPTS[b];[0:v][b]concat=n=2:v=1:a=0[v]",
+        "-map",
+        "[v]",
+        "-c:v",
+        "libx264",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(dest),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, timeout=3600)
+    if completed.returncode != 0 or not dest.is_file() or dest.stat().st_size <= 0:
+        detail = (completed.stderr or completed.stdout or "").strip()[-800:]
+        raise HTTPException(status_code=500, detail=f"Video stitch failed: {detail}")
+
+
+def _video_lab_run_vsr(ctx: Any, src: Path, payload: ProVideoLabRunPayload) -> dict[str, Any]:
+    from aiwf.core.domain.vsr import VsrOptions
+    from aiwf.services.vsr import VsrUnavailable
+
+    try:
+        result = _vsr_service(ctx).upscale(
+            src,
+            VsrOptions(
+                scale=float(payload.scale),
+                mode=int(payload.mode),
+                strength=float(payload.strength),
+                effect=str(payload.effect or "SuperRes"),
+            ),
+        )
+    except VsrUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _video_lab_output(ctx, result.output_path, result.message, {"infotext": result.infotext})
+
+
+def _video_lab_run_rife(ctx: Any, src: Path, payload: ProVideoLabRunPayload) -> dict[str, Any]:
+    from aiwf.core.domain.rife import RifeOptions
+    from aiwf.services.rife import RifeUnavailable
+
+    service = _rife_service(ctx)
+    try:
+        result = service.interpolate(
+            src,
+            RifeOptions(
+                ckpt_name=service.default_checkpoint(),
+                multiplier=int(payload.multiplier),
+                target_fps=payload.target_fps,
+            ),
+        )
+    except RifeUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _video_lab_output(ctx, result.output_path, getattr(result, "message", "RIFE interpolation complete."), {
+        "infotext": getattr(result, "infotext", ""),
+    })
+
+
+def _video_lab_run_audio(ctx: Any, src: Path, payload: ProVideoLabRunPayload) -> dict[str, Any]:
+    from aiwf.core.domain.audio import AudioGenerationOptions
+    from aiwf.services.audio import AudioUnavailable
+
+    prompt = (payload.audio_prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="Enter an audio prompt describing the soundtrack.")
+    service = _audio_service(ctx)
+    video_audio_choices = [model_id for _, model_id in (service.video_audio_model_choices() or [])]
+    kind = "video_audio" if video_audio_choices else "music"
+    model_id = (payload.audio_model or "").strip() or (
+        video_audio_choices[0] if video_audio_choices else "facebook/musicgen-small"
+    )
+    options = AudioGenerationOptions(prompt=prompt, kind=kind, model_id=model_id)
+    try:
+        audio, muxed = service.generate_and_mux(src, options)
+    except AudioUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _video_lab_output(
+        ctx,
+        muxed.output_path,
+        f"Added {kind.replace('_', ' ')} audio -> {Path(muxed.output_path).name}",
+        {"audioPath": audio.output_path, "infotext": audio.infotext},
+    )
+
+
+def _video_lab_run_extend(ctx: Any, src: Path, payload: ProVideoLabRunPayload) -> dict[str, Any]:
+    """Extend a video: last frame -> Wan 5B i2v continuation -> stitch."""
+    from aiwf.core.domain.wan import WAN_RUNTIME_FAST_5B, WanI2VRequest
+    from aiwf.infrastructure.video.last_frame import extract_last_frame
+    from aiwf.services.wan import WanUnavailable
+
+    if not (payload.prompt or "").strip():
+        raise HTTPException(status_code=422, detail="Describe the motion for the extension prompt.")
+    checkpoint_id = (payload.checkpoint_id or "").strip()
+    if not checkpoint_id:
+        raise HTTPException(status_code=422, detail="Pick a Wan 5B model for the extension.")
+
+    probe = _video_lab_probe(src)
+    last_frame = extract_last_frame(src)
+    settings = getattr(ctx, "settings", None)
+    service = _wan_service(ctx)
+    sampler = str(getattr(settings, "last_wan_sampler", "") or "unipc").strip().lower()
+    if sampler not in {"unipc", "euler", "heun"}:
+        sampler = "unipc"
+    try:
+        vae_id = service.preferred_vae(WAN_RUNTIME_FAST_5B)
+    except Exception:
+        vae_id = None
+    try:
+        request = WanI2VRequest(
+            prompt=payload.prompt,
+            negative_prompt=payload.negative_prompt,
+            width=int(probe["width"]) or 480,
+            height=int(probe["height"]) or 480,
+            num_frames=min(max(int(payload.frames), 5), 257),
+            fps=max(1, int(round(probe["fps"] or 16))),
+            steps=min(int(payload.steps), 100),
+            guidance_scale=float(payload.cfg_scale),
+            sampler=sampler,
+            flow_shift=float(getattr(settings, "last_wan_flow_shift", 5.0) or 5.0),
+            seed=int(payload.seed),
+            runtime_mode=WAN_RUNTIME_FAST_5B,
+            model_id=checkpoint_id,
+            offload=str(getattr(settings, "last_wan_offload", "balanced") or "balanced"),
+            vae_id=vae_id,
+            text_encoder_path=str(getattr(settings, "last_wan_text_encoder", "") or "").strip(),
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+    try:
+        result = service.generate(request, last_frame)
+    except WanUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    continuation = Path(str(getattr(result, "output_path", "") or ""))
+    if not continuation.is_file():
+        raise HTTPException(status_code=500, detail="Wan continuation did not produce a video file.")
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    flags = getattr(ctx, "flags", None)
+    dest = flags.resolved_output_dir() / "video-lab" / f"{src.stem}_extended_{stamp}.mp4"
+    _concat_videos_dropping_first_frame(src, continuation, dest)
+    return _video_lab_output(
+        ctx,
+        dest,
+        f"Extended {src.name} by {request.normalized_frames()} generated frames.",
+        {"continuationPath": str(continuation)},
+    )
+
+
+def _video_lab_status_payload(ctx: Any) -> dict[str, Any]:
+    vsr = _vsr_service(ctx)
+    info = vsr.install_info()
+    rife = _rife_service(ctx)
+    try:
+        rife_checkpoints = rife.list_checkpoints()
+    except Exception:
+        rife_checkpoints = []
+    audio = _audio_service(ctx)
+    try:
+        video_audio_models = [model_id for _, model_id in (audio.video_audio_model_choices() or [])]
+    except Exception:
+        video_audio_models = []
+    return {
+        "vsr": {
+            "available": bool(info.available),
+            "upscaleAvailable": bool(info.upscale_available),
+            "denoiseAvailable": bool(info.denoise_available),
+            "sdkRoot": str(info.sdk_root or ""),
+            "modelCount": int(info.model_count),
+            "features": list(info.feature_names or ()),
+            "help": "" if info.available else vsr.folder_help(),
+        },
+        "rife": {
+            "available": bool(rife_checkpoints),
+            "checkpoints": rife_checkpoints,
+        },
+        "audio": {
+            "videoAudioModels": video_audio_models,
+        },
+        "extend": {
+            "available": True,
+            "note": "Uses the Wan TI2V-5B route: the clip's last frame becomes the i2v conditioning image.",
+        },
+    }
+
+
+def _generate_wan_video_response(ctx: Any, payload: ProGeneratePayload) -> dict[str, Any]:
+    request = _wan_video_request_from_payload(ctx, payload)
+    source_image = _decode_pro_image_data_url(payload.source_image_data_url, "Source image")
+    source_path = payload.source_image_path
+    if source_image is None and source_path:
+        try:
+            source_image = Image.open(source_path)
+            source_image.load()
+        except OSError as exc:
+            raise HTTPException(status_code=422, detail="Wan source image could not be opened.") from exc
+    if source_image is not None:
+        source_image = source_image.convert("RGB")
+    job_id = _pro_video_job_start(ctx, request)
+    progress: list[dict[str, Any]] = []
+    started_at = time.perf_counter()
+
+    def on_progress(step, total, steps_per_second=None, message=None) -> None:
+        total_int = max(1, int(total or 1))
+        step_int = max(0, int(step or 0))
+        message_text = str(message or "") or f"Video denoise {step_int}/{total_int}"
+        ratio = min(0.99, step_int / total_int)
+        _pro_video_job_update(ctx, job_id, progress=ratio, message=message_text, step=step_int, total=total_int)
+        progress.append(
+            {
+                "stage": "video",
+                "progress": ratio,
+                "message": message_text,
+                "step": step_int,
+                "total": total_int,
+                "seconds": round(time.perf_counter() - started_at, 3),
+            }
+        )
+
+    def should_cancel() -> bool:
+        return _pro_video_cancel_requested(ctx, job_id)
+
+    try:
+        result = _wan_service(ctx).generate(
+            request,
+            source_image,
+            on_progress=on_progress,
+            should_cancel=should_cancel,
+        )
+    except GenerationCancelledError as exc:
+        _pro_video_job_finish(ctx, job_id, "cancelled", message=str(exc))
+        raise HTTPException(status_code=499, detail=_pro_error_detail(str(exc), job=_pro_video_job_status(ctx))) from exc
+    except Exception as exc:
+        _pro_video_job_finish(ctx, job_id, "failed", message=str(exc), error=str(exc))
+        logger.exception(
+            "Pro Wan video generation failed: job=%s model=%s size=%sx%s frames=%s steps=%s",
+            job_id,
+            request.model_id or "default",
+            request.width,
+            request.height,
+            request.num_frames,
+            request.steps,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=_pro_error_detail(str(exc), job=_pro_video_job_status(ctx)),
+        ) from exc
+
+    output = _wan_video_output_payload(ctx, result, payload)
+    message = str(getattr(result, "message", "") or "Wan video complete.")
+    _pro_video_job_finish(ctx, job_id, "completed", message=message)
+    return {
+        "jobId": job_id,
+        "status": "completed",
+        "output": output,
+        "video": output["url"],
+        "recentOutputs": [output],
+        "progress": progress,
+        "timings": {},
+        "message": message,
+    }
+
+
 def build_router(ctx: Any) -> APIRouter:
     router = APIRouter(prefix="/api/pro")
 
@@ -2005,6 +3704,11 @@ def build_router(ctx: Any) -> APIRouter:
             sana_model = _sana_video_model_payload(ctx)
             if sana_model["id"] not in {str(item.get("id") or "") for item in checkpoints}:
                 checkpoints.append(sana_model)
+        existing_ids = {str(item.get("id") or "") for item in checkpoints}
+        for wan_model in _wan_model_payloads(ctx):
+            if wan_model["id"] not in existing_ids:
+                checkpoints.append(wan_model)
+                existing_ids.add(wan_model["id"])
         samplers = [_sampler_payload(item) for item in _safe_list(ctx.generation.list_samplers)]
         return {
             "runtime": _runtime_summary(ctx),
@@ -2041,6 +3745,10 @@ def build_router(ctx: Any) -> APIRouter:
     def settings():
         return _settings_payload(ctx)
 
+    @router.post("/settings")
+    def save_settings(payload: ProSettingsUpdatePayload):
+        return _apply_settings_update(ctx, payload)
+
     @router.get("/capabilities")
     def capabilities():
         return _capability_payload(ctx)
@@ -2056,16 +3764,33 @@ def build_router(ctx: Any) -> APIRouter:
 
     @router.post("/generate")
     def generate(payload: ProGeneratePayload):
-        if (payload.mode or "").strip().lower() in {"video", "sana", "sana_video"}:
+        if (payload.mode or "").strip().lower() in {"video", "sana", "sana_video", "wan"}:
             if _pro_video_job_running(ctx) or _image_generation_running(ctx) or _image_generation_pending(ctx):
                 raise HTTPException(status_code=409, detail="A generation job is already running. Stop it or wait for it to finish.")
+            normalized_mode = (payload.mode or "").strip().lower()
+            checkpoint_id = str(payload.checkpoint_id or "")
+            _assert_video_route_checkpoint(ctx, checkpoint_id or None)
+            if normalized_mode == "wan" or (checkpoint_id and checkpoint_id in _wan_model_ids(ctx)):
+                return _generate_wan_video_response(ctx, payload)
             return _generate_sana_video_response(ctx, payload)
         if _pro_video_job_running(ctx):
             raise HTTPException(status_code=409, detail="A Sana video job is already running. Stop it or wait for it to finish.")
         if _image_generation_running(ctx) or _image_generation_pending(ctx):
             raise HTTPException(status_code=409, detail="An image generation job is already running. Stop it or wait for it to finish.")
+        checkpoint_id = _checkpoint_id_from_payload(ctx, payload)
+        _assert_image_route_checkpoint(ctx, checkpoint_id)
+        _assert_checkpoint_selectable(ctx, checkpoint_id)
         request = _generation_request(ctx, payload)
-        _assert_checkpoint_selectable(ctx, request.checkpoint_id)
+        init_images: list[Image.Image] | None = None
+        mask_images: list[Image.Image] | None = None
+        if request.mode == GenerationMode.INPAINT:
+            _assert_inpaint_checkpoint_supported(ctx, payload)
+            init_image = _decode_pro_image_data_url(payload.init_image_data_url, "Init image")
+            mask_image = _decode_pro_image_data_url(payload.mask_image_data_url, "Mask image")
+            if init_image is None or mask_image is None:
+                raise HTTPException(status_code=422, detail="Inpainting requires both an init image and a mask image.")
+            init_images = [init_image.convert("RGB")]
+            mask_images = [mask_image.convert("L")]
         try:
             logger.info(
                 "Pro image generation started: model=%s size=%sx%s steps=%s batch=%s prompt=%r",
@@ -2076,7 +3801,7 @@ def build_router(ctx: Any) -> APIRouter:
                 request.batch_size,
                 request.prompt[:160],
             )
-            job = ctx.generation.submit(request)
+            job, progress = _run_pro_image_generation(ctx, request, init_images=init_images, mask_images=mask_images)
             logger.info(
                 "Pro image generation finished: job=%s state=%s message=%s",
                 job.id,
@@ -2099,7 +3824,153 @@ def build_router(ctx: Any) -> APIRouter:
                 status_code=500,
                 detail=_pro_error_detail(str(exc), failureLogPath=failure_log_path, job=_job_status(failed_job)),
             ) from exc
-        return _generate_response(job)
+        response = _generate_response(job)
+        if progress:
+            response["progress"] = progress
+        return response
+
+    @router.get("/video-lab/status")
+    def video_lab_status():
+        return _video_lab_status_payload(ctx)
+
+    @router.post("/video-lab/upload")
+    async def video_lab_upload(file: UploadFile = File(...)):
+        suffix = Path(file.filename or "upload.mp4").suffix.lower()
+        if suffix not in _VIDEO_LAB_UPLOAD_EXTENSIONS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unsupported video type '{suffix}'. Use mp4, mov, mkv, webm, or avi.",
+            )
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        safe_stem = "".join(
+            ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in Path(file.filename or "upload").stem
+        )[:64] or "upload"
+        dest = _video_lab_upload_root(ctx) / f"{safe_stem}_{stamp}{suffix}"
+        written = 0
+        try:
+            with dest.open("wb") as handle:
+                while True:
+                    chunk = await file.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > _VIDEO_LAB_UPLOAD_MAX_BYTES:
+                        raise HTTPException(status_code=413, detail="Video upload is larger than 2 GB.")
+                    handle.write(chunk)
+        except HTTPException:
+            dest.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(status_code=500, detail=f"Could not store the upload: {exc}") from exc
+        probe = _video_lab_probe(dest)
+        probe["url"] = _output_asset_url(ctx, dest)
+        return probe
+
+    @router.post("/video-lab/run")
+    def video_lab_run(payload: ProVideoLabRunPayload):
+        if _pro_video_job_running(ctx) or _image_generation_running(ctx) or _image_generation_pending(ctx):
+            raise HTTPException(status_code=409, detail="A generation job is already running. Stop it or wait for it to finish.")
+        src = _video_lab_resolve_source(ctx, payload.video_path)
+        op = (payload.op or "").strip().lower()
+        if op == "vsr":
+            return _video_lab_run_vsr(ctx, src, payload)
+        if op == "rife":
+            return _video_lab_run_rife(ctx, src, payload)
+        if op == "audio":
+            return _video_lab_run_audio(ctx, src, payload)
+        if op == "extend":
+            return _video_lab_run_extend(ctx, src, payload)
+        raise HTTPException(status_code=422, detail="op must be one of: vsr, rife, audio, extend.")
+
+    @router.post("/segment/auto-mask")
+    def segment_auto_mask(payload: ProAutoMaskPayload):
+        from aiwf.core.domain.segment import SegmentRequest
+
+        segment = getattr(ctx, "segment", None)
+        if segment is None:
+            raise HTTPException(status_code=503, detail="Segmentation service is not available in this runtime.")
+        prompt = (payload.prompt or "").strip()
+        if not prompt:
+            raise HTTPException(status_code=422, detail="Enter a SAM + DINO prompt (e.g. 'person', 'face').")
+        image = _decode_pro_image_data_url(payload.image_data_url, "Source image")
+        if image is None:
+            raise HTTPException(status_code=422, detail="Load an image into the inpaint canvas first.")
+        try:
+            mask, preview, _candidates, status = segment.segment(
+                image.convert("RGB"),
+                SegmentRequest(
+                    text_prompt=prompt,
+                    box_threshold=float(payload.box_threshold),
+                    dilation=int(payload.dilation),
+                    mask_blur=int(payload.mask_blur),
+                    feather=int(payload.feather),
+                ),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Auto mask failed: {exc}") from exc
+        return {
+            "status": status,
+            "mask": _image_to_data_url(mask.convert("RGB")),
+            "preview": _image_to_data_url(preview),
+        }
+
+    @router.post("/faceswap")
+    def faceswap(payload: ProFaceSwapPayload):
+        faceswap_service = getattr(ctx, "faceswap", None)
+        if faceswap_service is None:
+            raise HTTPException(status_code=503, detail="Face swap service is not available in this runtime.")
+        target = _decode_pro_image_data_url(payload.target_image_data_url, "Target image")
+        source = _decode_pro_image_data_url(payload.source_image_data_url, "Source face image")
+        if target is None or source is None:
+            raise HTTPException(status_code=422, detail="Provide both a target image and a source face image.")
+        try:
+            result = faceswap_service.swap(target.convert("RGB"), source.convert("RGB"))
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Face swap failed: {exc}") from exc
+        return {
+            "status": "completed",
+            "image": _image_to_data_url(result),
+            "width": result.width,
+            "height": result.height,
+            "message": "Face swap complete.",
+        }
+
+    @router.post("/vsr/image")
+    def vsr_image(payload: ProVsrImagePayload):
+        from aiwf.core.domain.vsr import VsrOptions
+        from aiwf.services.vsr import VsrUnavailable
+
+        image = _decode_pro_image_data_url(payload.image_data_url, "Source image")
+        if image is None:
+            raise HTTPException(status_code=422, detail="Provide a source image as a base64 data URL.")
+        try:
+            result = _vsr_service(ctx).upscale_image(
+                image.convert("RGB"),
+                VsrOptions(
+                    scale=float(payload.scale),
+                    mode=int(payload.mode),
+                    strength=float(payload.strength),
+                    effect=str(payload.effect or "SuperRes"),
+                ),
+            )
+        except VsrUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        flags = getattr(ctx, "flags", None)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        sub = getattr(getattr(ctx, "settings", None), "vsr_output_subdir", "vsr-videos")
+        dest = flags.resolved_output_dir() / sub / f"vsr_image_{stamp}.png"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        result.save(dest, format="PNG")
+        return {
+            "status": "completed",
+            "outputPath": str(dest),
+            "url": _output_asset_url(ctx, dest),
+            "width": result.width,
+            "height": result.height,
+            "image": _image_to_data_url(result),
+            "message": f"Upscaled to {result.width}x{result.height} via NVIDIA VSR.",
+        }
 
     @router.post("/interrupt")
     def interrupt():

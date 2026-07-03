@@ -32,7 +32,6 @@ type JsonRecord = Record<string, unknown>
 const API_BASE = (import.meta.env.VITE_AIWF_API_BASE ?? '').replace(/\/$/, '')
 
 const DEFAULT_ASPECT_RATIOS: AspectRatioOption[] = [
-  { id: 'sana-480p', label: 'Sana 480p', width: 832, height: 480 },
   { id: '1:1', label: '1:1', width: 1024, height: 1024 },
   { id: '3:2', label: '3:2', width: 1536, height: 1024 },
   { id: '16:9', label: '16:9', width: 1344, height: 768 },
@@ -53,6 +52,7 @@ const DEFAULT_MODELS: ProModelOption[] = [
   {
     id: 'models/sana-video/Diffusers/SANA-Video_2B_480p_diffusers',
     name: 'SANA-Video 2B 480p',
+    kind: 'video',
     architecture: 'sana_video',
     engineId: 'sana_video',
     engineLabel: 'Sana Video',
@@ -93,8 +93,14 @@ const DEFAULT_SETTINGS: GenerationSettings = {
   sampler: DEFAULT_SAMPLERS[0],
   scheduler: 'automatic',
   seed: -1,
+  clipSkip: 1,
   batchSize: 1,
   batchCount: 1,
+  enableHires: false,
+  hiresScale: 1.75,
+  hiresSteps: 20,
+  hiresDenoise: 0.3,
+  hiresUpscaler: 'lanczos',
   frames: 81,
   fps: 16,
   sourceImageDataUrl: '',
@@ -104,6 +110,20 @@ const DEFAULT_SETTINGS: GenerationSettings = {
   offloadTextEncoderAfterEncode: true,
   useSageAttention: true,
   generateAudio: false,
+  initImageDataUrl: '',
+  maskImageDataUrl: '',
+  denoisingStrength: 0.75,
+  maskBlur: 4,
+  inpaintOnlyMasked: false,
+  inpaintMaskedPadding: 32,
+  inpaintMaskContent: 'original',
+  inpaintMaskOpacity: 0.48,
+  autoMaskEnabled: false,
+  autoMaskPrompt: '',
+  autoMaskModel: 'sam+dino',
+  autoMaskBoxThreshold: 0.3,
+  autoMaskTextThreshold: 0.25,
+  saveImages: true,
 }
 
 const FALLBACK_RUNTIME: ProRuntimeStatus = {
@@ -117,6 +137,7 @@ const FALLBACK_RUNTIME: ProRuntimeStatus = {
     message: '',
     hasResult: false,
     error: '',
+    previewUrl: '',
   },
   backend: 'Waiting for API',
   device: 'Local runtime pending',
@@ -244,8 +265,16 @@ export function streamProRuntime(
   }
 
   const source = new EventSource(`${API_BASE}/api/pro/runtime/stream`)
+  let lastEventData = ''
   source.addEventListener('runtime', (event) => {
     try {
+      // Identical payloads (idle ticks) must not trigger a state update —
+      // every setRuntime re-renders the whole shell.
+      if (event.data === lastEventData) {
+        onConnectionChange?.(true)
+        return
+      }
+      lastEventData = event.data
       onRuntime(normalizeRuntime(JSON.parse(event.data) as unknown))
       onConnectionChange?.(true)
     } catch {
@@ -281,6 +310,122 @@ export async function fetchProSettings(signal?: AbortSignal): Promise<ProSetting
   return normalizeSettingsStatus(payload)
 }
 
+export async function saveProSettings(
+  settings: GenerationSettings,
+  ui: ProSettingsStatus['ui'] | null | undefined,
+  output: ProSettingsStatus['output'] | null | undefined,
+  video: ProSettingsStatus['video'] | null | undefined,
+  runtime: ProSettingsStatus['runtime'] | null | undefined,
+): Promise<ProSettingsStatus> {
+  const payload = await requestJson('/api/pro/settings', {
+    body: JSON.stringify({
+      generationDefaults: {
+        modelId: settings.modelId,
+        negativePrompt: settings.negativePrompt,
+        sampler: settings.sampler,
+        scheduler: settings.scheduler,
+        steps: settings.steps,
+        cfgScale: settings.cfgScale,
+        width: settings.width,
+        height: settings.height,
+        clipSkip: settings.clipSkip,
+        saveImages: settings.saveImages,
+      },
+      ui: ui
+        ? {
+            galleryColumns: ui.galleryColumns,
+            galleryHeight: ui.galleryHeight,
+            livePreview: ui.livePreview,
+            showProgressEveryNSteps: ui.showProgressEveryNSteps,
+            livePreviewDecoder: ui.livePreviewDecoder,
+            accentPreset: ui.accentPreset,
+            hiddenTabs: ui.hiddenTabs,
+          }
+        : {},
+      output: output
+        ? {
+            imageFormat: output.imageFormat,
+            imageQuality: output.imageQuality,
+            embedMetadata: output.embedMetadata,
+            saveGrid: output.saveGrid,
+            saveSidecarTxt: output.saveSidecarTxt,
+            filenamePattern: output.filenamePattern,
+            saveBeforeHires: output.saveBeforeHires,
+            saveInterrupted: output.saveInterrupted,
+            metadataIncludeModelHash: output.metadataIncludeModelHash,
+            metadataIncludeVaeHash: output.metadataIncludeVaeHash,
+            metadataIncludeLoraHashes: output.metadataIncludeLoraHashes,
+            metadataIncludeAppVersion: output.metadataIncludeAppVersion,
+            metadataIncludeOptimizationProfile: output.metadataIncludeOptimizationProfile,
+            optimizationProfileId: output.optimizationProfileId,
+          }
+        : {},
+      video: video
+        ? {
+            wanHigh: video.wanHigh,
+            wanLow: video.wanLow,
+            wanVae: video.wanVae,
+            wanTextEncoder: video.wanTextEncoder,
+            wanOffload: video.wanOffload,
+            wanSampler: video.wanSampler,
+            wanFlowShift: video.wanFlowShift,
+            wanRuntimeMode: video.wanRuntimeMode,
+            ltxDtype: video.ltxDtype,
+            ltxCpuOffload: video.ltxCpuOffload,
+            wanGroupOffloadStream: video.wanGroupOffloadStream,
+            wanGroupOffloadBlocks: video.wanGroupOffloadBlocks,
+            ggufCudaKernels: video.ggufCudaKernels,
+          }
+        : {},
+      runtime: runtime
+        ? {
+            port: runtime.port,
+            listen: runtime.listen,
+            share: runtime.share,
+            autolaunch: runtime.autolaunch,
+            api: runtime.api,
+            genlog: runtime.genlog,
+            backend: runtime.backend,
+            onnxProvider: runtime.onnxProvider,
+            attention: runtime.attention,
+            xformers: runtime.xformers,
+            optSdpAttention: runtime.optSdpAttention,
+            optSplitAttention: runtime.optSplitAttention,
+            asyncOffload: runtime.asyncOffload,
+            pinnedMemory: runtime.pinnedMemory,
+            cudaMalloc: runtime.cudaMalloc,
+            medvram: runtime.medvram,
+            lowvram: runtime.lowvram,
+            noHalf: runtime.noHalf,
+            fp8: runtime.fp8,
+            fluxFp8: runtime.fluxFp8,
+            directml: runtime.directml,
+            cpu: runtime.cpu,
+            cudaGraphs: runtime.cudaGraphs,
+            torchao: runtime.torchao,
+            fp8Quant: runtime.fp8Quant,
+            torchCompile: runtime.torchCompile,
+            channelsLast: runtime.channelsLast,
+            nvenc: runtime.nvenc,
+            hevc: runtime.hevc,
+            blockPrivateDownloadUrls: runtime.blockPrivateDownloadUrls,
+            apiCorsOrigins: runtime.apiCorsOrigins,
+            apiRateLimitPerMinute: runtime.apiRateLimitPerMinute,
+            theme: runtime.theme,
+            modelsDir: runtime.modelsDir,
+            checkpointDir: runtime.checkpointDir,
+            outputDir: runtime.outputDir,
+            extraModelDirs: runtime.extraModelDirs,
+            extraCheckpointDirs: runtime.extraCheckpointDirs,
+          }
+        : {},
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  })
+  return normalizeSettingsStatus(payload)
+}
+
 export async function fetchProCapabilities(signal?: AbortSignal): Promise<ProCapabilitiesStatus> {
   const payload = await requestJson('/api/pro/capabilities', { signal })
   return normalizeCapabilitiesStatus(payload)
@@ -297,6 +442,152 @@ export async function generateProOutput(
     signal,
   })
   return normalizeGenerateResult(payload, request)
+}
+
+export interface VideoLabProbe {
+  path: string
+  url?: string
+  width: number
+  height: number
+  fps: number
+  frameCount: number
+  durationSeconds: number
+}
+
+export interface VideoLabStatus {
+  vsr: {
+    available: boolean
+    upscaleAvailable: boolean
+    denoiseAvailable: boolean
+    sdkRoot: string
+    modelCount: number
+    features: string[]
+    help: string
+  }
+  rife: { available: boolean; checkpoints: string[] }
+  audio: { videoAudioModels: string[] }
+  extend: { available: boolean; note: string }
+}
+
+export interface VideoLabResult {
+  status: string
+  outputPath: string
+  url: string
+  message: string
+  probe: VideoLabProbe
+}
+
+export async function fetchVideoLabStatus(signal?: AbortSignal): Promise<VideoLabStatus> {
+  const payload = await requestJson('/api/pro/video-lab/status', { signal })
+  const record = asRecord(payload)
+  const vsr = readRecord(record, ['vsr'])
+  const rife = readRecord(record, ['rife'])
+  const audio = readRecord(record, ['audio'])
+  const extend = readRecord(record, ['extend'])
+  return {
+    vsr: {
+      available: readBoolean(vsr, ['available'], false),
+      upscaleAvailable: readBoolean(vsr, ['upscaleAvailable'], false),
+      denoiseAvailable: readBoolean(vsr, ['denoiseAvailable'], false),
+      sdkRoot: readString(vsr, ['sdkRoot'], ''),
+      modelCount: readNumber(vsr, ['modelCount'], 0),
+      features: readArray(vsr, ['features']).map((item) => `${item}`),
+      help: readString(vsr, ['help'], ''),
+    },
+    rife: {
+      available: readBoolean(rife, ['available'], false),
+      checkpoints: readArray(rife, ['checkpoints']).map((item) => `${item}`),
+    },
+    audio: {
+      videoAudioModels: readArray(audio, ['videoAudioModels']).map((item) => `${item}`),
+    },
+    extend: {
+      available: readBoolean(extend, ['available'], false),
+      note: readString(extend, ['note'], ''),
+    },
+  }
+}
+
+function normalizeVideoLabProbe(value: unknown): VideoLabProbe {
+  const record = asRecord(value)
+  return {
+    path: readString(record, ['path'], ''),
+    url: readString(record, ['url'], ''),
+    width: readNumber(record, ['width'], 0),
+    height: readNumber(record, ['height'], 0),
+    fps: readNumber(record, ['fps'], 0),
+    frameCount: readNumber(record, ['frameCount', 'frame_count'], 0),
+    durationSeconds: readNumber(record, ['durationSeconds', 'duration_seconds'], 0),
+  }
+}
+
+export async function uploadVideoLabFile(file: File): Promise<VideoLabProbe> {
+  const body = new FormData()
+  body.append('file', file)
+  const response = await fetch(`${API_BASE}/api/pro/video-lab/upload`, {
+    method: 'POST',
+    body,
+    cache: 'no-store',
+    headers: { Accept: 'application/json' },
+  })
+  const text = await response.text()
+  if (!response.ok) {
+    throw new ProApiError('/api/pro/video-lab/upload', response.status, formatResponseError(text, response.statusText))
+  }
+  return normalizeVideoLabProbe(text ? JSON.parse(text) : {})
+}
+
+export async function runVideoLab(payload: Record<string, unknown>, signal?: AbortSignal): Promise<VideoLabResult> {
+  const response = await requestJson('/api/pro/video-lab/run', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    headers: { 'Content-Type': 'application/json' },
+    signal,
+  })
+  const record = asRecord(response)
+  return {
+    status: readString(record, ['status'], 'completed'),
+    outputPath: readString(record, ['outputPath', 'output_path'], ''),
+    url: readString(record, ['url'], ''),
+    message: readString(record, ['message'], ''),
+    probe: normalizeVideoLabProbe(readUnknown(record, ['probe'])),
+  }
+}
+
+export async function generateAutoMask(
+  imageDataUrl: string,
+  prompt: string,
+  boxThreshold = 0.3,
+): Promise<{ mask: string; preview: string; status: string }> {
+  const payload = await requestJson('/api/pro/segment/auto-mask', {
+    method: 'POST',
+    body: JSON.stringify({ imageDataUrl, prompt, boxThreshold }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const record = asRecord(payload)
+  return {
+    mask: readString(record, ['mask'], ''),
+    preview: readString(record, ['preview'], ''),
+    status: readString(record, ['status'], ''),
+  }
+}
+
+export async function runFaceSwap(
+  targetImageDataUrl: string,
+  sourceImageDataUrl: string,
+): Promise<{ image: string; width: number; height: number; message: string }> {
+  const payload = await requestJson('/api/pro/faceswap', {
+    method: 'POST',
+    body: JSON.stringify({ targetImageDataUrl, sourceImageDataUrl }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const record = asRecord(payload)
+  return {
+    image: readString(record, ['image'], ''),
+    width: readNumber(record, ['width'], 0),
+    height: readNumber(record, ['height'], 0),
+    message: readString(record, ['message'], ''),
+  }
 }
 
 export async function stopProGeneration(): Promise<ProStopResult> {
@@ -448,8 +739,14 @@ function toGeneratePayload(request: ProGenerateRequest): JsonRecord {
     sampler: request.sampler,
     scheduler: request.scheduler,
     seed: request.seed,
+    clip_skip: request.clipSkip,
     batch_size: request.batchSize,
     batch_count: request.batchCount,
+    enable_hr: request.enableHires,
+    hr_scale: request.hiresScale,
+    hr_steps: request.hiresSteps,
+    hr_denoising_strength: request.hiresDenoise,
+    hr_upscaler: request.hiresUpscaler,
     frames: request.frames,
     fps: request.fps,
     source_image_data_url: request.sourceImageDataUrl,
@@ -459,6 +756,13 @@ function toGeneratePayload(request: ProGenerateRequest): JsonRecord {
     offload_text_encoder_after_encode: request.offloadTextEncoderAfterEncode,
     use_sage_attention: request.useSageAttention,
     generate_audio: request.generateAudio,
+    init_image_data_url: request.initImageDataUrl || undefined,
+    mask_image_data_url: request.maskImageDataUrl || undefined,
+    denoising_strength: request.denoisingStrength,
+    mask_blur: request.maskBlur,
+    inpaint_only_masked: request.inpaintOnlyMasked,
+    inpaint_masked_padding: request.inpaintMaskedPadding,
+    inpaint_mask_content: request.inpaintMaskContent,
   }
 }
 
@@ -552,11 +856,27 @@ function normalizeDownloadsStatus(value: unknown): ProDownloadsStatus {
   const categories = readArray(record, ['categories'])
     .map(normalizeDownloadCategory)
     .filter(isPresent)
+  const civitaiLinks = readArray(record, ['civitaiLinks', 'civitai_links'])
+    .map((item) => {
+      const link = asRecord(item)
+      const url = readString(link, ['url'], '')
+      if (!url) {
+        return null
+      }
+      return {
+        label: readString(link, ['label'], url),
+        url,
+        note: readString(link, ['note'], ''),
+        engine: readString(link, ['engine'], 'all'),
+      }
+    })
+    .filter(isPresent)
 
   return {
     categories,
     bundles,
     catalog,
+    civitaiLinks,
     counts: {
       categories: readNumber(counts, ['categories'], categories.length),
       catalog: readNumber(counts, ['catalog', 'items'], catalog.length),
@@ -583,6 +903,8 @@ function normalizeSettingsStatus(value: unknown): ProSettingsStatus {
   const fallback = getFallbackBootstrap()
   const paths = readRecord(record, ['paths'])
   const ui = readRecord(record, ['ui'])
+  const output = readRecord(record, ['output'])
+  const video = readRecord(record, ['video'])
   const runtime = readRecord(record, ['runtime'])
   return {
     paths: {
@@ -598,14 +920,80 @@ function normalizeSettingsStatus(value: unknown): ProSettingsStatus {
       galleryColumns: readNumber(ui, ['galleryColumns', 'gallery_columns'], 2),
       galleryHeight: readNumber(ui, ['galleryHeight', 'gallery_height'], 480),
       livePreview: readBoolean(ui, ['livePreview', 'live_preview'], true),
+      showProgressEveryNSteps: readNumber(ui, ['showProgressEveryNSteps', 'show_progress_every_n_steps'], 5),
+      livePreviewDecoder: readString(ui, ['livePreviewDecoder', 'live_preview_decoder'], 'vae'),
       hiddenTabs: readArray(ui, ['hiddenTabs', 'hidden_tabs']).map((item) => readLooseString(item, '')).filter(Boolean),
     },
+    output: {
+      imageFormat: readString(output, ['imageFormat', 'image_format'], 'png'),
+      imageQuality: readNumber(output, ['imageQuality', 'image_quality'], 95),
+      embedMetadata: readBoolean(output, ['embedMetadata', 'embed_metadata'], true),
+      saveGrid: readBoolean(output, ['saveGrid', 'save_grid'], false),
+      saveSidecarTxt: readBoolean(output, ['saveSidecarTxt', 'save_sidecar_txt'], false),
+      filenamePattern: readString(output, ['filenamePattern', 'filename_pattern'], '[datetime]'),
+      saveBeforeHires: readBoolean(output, ['saveBeforeHires', 'save_before_hires'], false),
+      saveInterrupted: readBoolean(output, ['saveInterrupted', 'save_interrupted'], false),
+      metadataIncludeModelHash: readBoolean(output, ['metadataIncludeModelHash', 'metadata_include_model_hash'], true),
+      metadataIncludeVaeHash: readBoolean(output, ['metadataIncludeVaeHash', 'metadata_include_vae_hash'], true),
+      metadataIncludeLoraHashes: readBoolean(output, ['metadataIncludeLoraHashes', 'metadata_include_lora_hashes'], true),
+      metadataIncludeAppVersion: readBoolean(output, ['metadataIncludeAppVersion', 'metadata_include_app_version'], true),
+      metadataIncludeOptimizationProfile: readBoolean(output, ['metadataIncludeOptimizationProfile', 'metadata_include_optimization_profile'], true),
+      optimizationProfileId: readString(output, ['optimizationProfileId', 'optimization_profile_id'], 'balanced_sdpa_fp16'),
+    },
+    video: {
+      wanHigh: readString(video, ['wanHigh', 'wan_high'], ''),
+      wanLow: readString(video, ['wanLow', 'wan_low'], ''),
+      wanVae: readString(video, ['wanVae', 'wan_vae'], ''),
+      wanTextEncoder: readString(video, ['wanTextEncoder', 'wan_text_encoder'], ''),
+      wanOffload: readString(video, ['wanOffload', 'wan_offload'], 'balanced'),
+      wanSampler: readString(video, ['wanSampler', 'wan_sampler'], 'unipc'),
+      wanFlowShift: readNumber(video, ['wanFlowShift', 'wan_flow_shift'], 5),
+      wanRuntimeMode: readString(video, ['wanRuntimeMode', 'wan_runtime_mode'], 'fast_5b'),
+      ltxDtype: readString(video, ['ltxDtype', 'ltx_dtype'], 'bf16'),
+      ltxCpuOffload: readString(video, ['ltxCpuOffload', 'ltx_cpu_offload'], 'auto'),
+      wanGroupOffloadStream: readBoolean(video, ['wanGroupOffloadStream', 'wan_group_offload_stream'], true),
+      wanGroupOffloadBlocks: readNumber(video, ['wanGroupOffloadBlocks', 'wan_group_offload_blocks'], 4),
+      ggufCudaKernels: readBoolean(video, ['ggufCudaKernels', 'gguf_cuda_kernels'], false),
+    },
     runtime: {
+      port: readNumber(runtime, ['port'], 7860),
       listen: readBoolean(runtime, ['listen'], false),
+      share: readBoolean(runtime, ['share'], false),
+      autolaunch: readBoolean(runtime, ['autolaunch'], false),
       api: readBoolean(runtime, ['api'], false),
       genlog: readBoolean(runtime, ['genlog'], false),
       backend: readString(runtime, ['backend'], 'unknown'),
+      onnxProvider: readString(runtime, ['onnxProvider', 'onnx_provider'], 'auto'),
       attention: readString(runtime, ['attention'], 'unknown'),
+      xformers: readBoolean(runtime, ['xformers'], false),
+      optSdpAttention: readBoolean(runtime, ['optSdpAttention', 'opt_sdp_attention'], false),
+      optSplitAttention: readBoolean(runtime, ['optSplitAttention', 'opt_split_attention'], false),
+      asyncOffload: readBoolean(runtime, ['asyncOffload', 'async_offload'], true),
+      pinnedMemory: readBoolean(runtime, ['pinnedMemory', 'pinned_memory'], true),
+      cudaMalloc: readBoolean(runtime, ['cudaMalloc', 'cuda_malloc'], false),
+      medvram: readBoolean(runtime, ['medvram'], false),
+      lowvram: readBoolean(runtime, ['lowvram'], false),
+      noHalf: readBoolean(runtime, ['noHalf', 'no_half'], false),
+      fp8: readBoolean(runtime, ['fp8'], false),
+      fluxFp8: readBoolean(runtime, ['fluxFp8', 'flux_fp8', 'fluxfp8'], false),
+      directml: readBoolean(runtime, ['directml'], false),
+      cpu: readBoolean(runtime, ['cpu'], false),
+      cudaGraphs: readBoolean(runtime, ['cudaGraphs', 'cuda_graphs'], false),
+      torchao: readBoolean(runtime, ['torchao'], false),
+      fp8Quant: readBoolean(runtime, ['fp8Quant', 'fp8_quant'], false),
+      torchCompile: readBoolean(runtime, ['torchCompile', 'torch_compile'], false),
+      channelsLast: readBoolean(runtime, ['channelsLast', 'channels_last'], false),
+      nvenc: readBoolean(runtime, ['nvenc'], false),
+      hevc: readBoolean(runtime, ['hevc'], false),
+      blockPrivateDownloadUrls: readBoolean(runtime, ['blockPrivateDownloadUrls', 'block_private_download_urls'], true),
+      apiCorsOrigins: readString(runtime, ['apiCorsOrigins', 'api_cors_origins'], ''),
+      apiRateLimitPerMinute: readNumber(runtime, ['apiRateLimitPerMinute', 'api_rate_limit_per_minute'], 0),
+      theme: readString(runtime, ['theme'], 'dark'),
+      modelsDir: readString(runtime, ['modelsDir', 'models_dir'], ''),
+      checkpointDir: readString(runtime, ['checkpointDir', 'checkpoint_dir', 'ckpt_dir'], ''),
+      outputDir: readString(runtime, ['outputDir', 'output_dir'], ''),
+      extraModelDirs: readString(runtime, ['extraModelDirs', 'extra_model_dirs'], ''),
+      extraCheckpointDirs: readString(runtime, ['extraCheckpointDirs', 'extra_checkpoint_dirs', 'extra_ckpt_dirs'], ''),
     },
   }
 }
@@ -777,6 +1165,7 @@ function normalizeDownloadCatalogItem(value: unknown) {
     destination: readString(record, ['destination', 'folder', 'path'], ''),
     engineId: normalizeEngineId(readUnknown(record, ['engineId', 'engine_id', 'engine'])),
     engineLabel: readOptionalString(record, ['engineLabel', 'engine_label']),
+    hfUrl: readOptionalString(record, ['hfUrl', 'hf_url']),
   }
 }
 
@@ -846,6 +1235,7 @@ function normalizeRuntimeJob(value: Record<string, unknown>, fallback: ProRuntim
     message: readString(value, ['message', 'detail'], fallback.message),
     hasResult: readBoolean(value, ['hasResult', 'has_result'], fallback.hasResult),
     error: readString(value, ['error'], fallback.error),
+    previewUrl: normalizeAssetUrl(readString(value, ['previewUrl', 'preview_url', 'dataUrl', 'data_url'], fallback.previewUrl)),
   }
 }
 
@@ -947,8 +1337,18 @@ function normalizeSettings(
     sampler: readString(record, ['sampler'], samplers[0] ?? fallback.sampler),
     scheduler: readString(record, ['scheduler'], fallback.scheduler),
     seed: readNumber(record, ['seed'], fallback.seed),
+    clipSkip: readNumber(record, ['clip_skip', 'clipSkip'], fallback.clipSkip),
     batchSize: readNumber(record, ['batch_size', 'batchSize'], fallback.batchSize),
     batchCount: readNumber(record, ['batch_count', 'batchCount'], fallback.batchCount),
+    enableHires: readBoolean(record, ['enable_hr', 'enableHr', 'enableHires', 'enable_hires'], fallback.enableHires),
+    hiresScale: readNumber(record, ['hr_scale', 'hrScale', 'hiresScale', 'hires_scale'], fallback.hiresScale),
+    hiresSteps: readNumber(record, ['hr_steps', 'hrSteps', 'hiresSteps', 'hires_steps'], fallback.hiresSteps),
+    hiresDenoise: readNumber(
+      record,
+      ['hr_denoising_strength', 'hrDenoisingStrength', 'hiresDenoise', 'hires_denoise'],
+      fallback.hiresDenoise,
+    ),
+    hiresUpscaler: readString(record, ['hr_upscaler', 'hrUpscaler', 'hiresUpscaler', 'hires_upscaler'], fallback.hiresUpscaler),
     frames: readNumber(record, ['frames'], fallback.frames),
     fps: readNumber(record, ['fps'], fallback.fps),
     sourceImageDataUrl: readString(record, ['source_image_data_url', 'sourceImageDataUrl'], fallback.sourceImageDataUrl),
@@ -962,6 +1362,20 @@ function normalizeSettings(
     ),
     useSageAttention: readBoolean(record, ['use_sage_attention', 'useSageAttention'], fallback.useSageAttention),
     generateAudio: readBoolean(record, ['generate_audio', 'generateAudio'], fallback.generateAudio),
+    initImageDataUrl: readString(record, ['init_image_data_url', 'initImageDataUrl'], fallback.initImageDataUrl),
+    maskImageDataUrl: readString(record, ['mask_image_data_url', 'maskImageDataUrl'], fallback.maskImageDataUrl),
+    denoisingStrength: readNumber(record, ['denoising_strength', 'denoisingStrength'], fallback.denoisingStrength),
+    maskBlur: readNumber(record, ['mask_blur', 'maskBlur'], fallback.maskBlur),
+    inpaintOnlyMasked: readBoolean(record, ['inpaint_only_masked', 'inpaintOnlyMasked'], fallback.inpaintOnlyMasked),
+    inpaintMaskedPadding: readNumber(record, ['inpaint_masked_padding', 'inpaintMaskedPadding'], fallback.inpaintMaskedPadding),
+    inpaintMaskContent: readString(record, ['inpaint_mask_content', 'inpaintMaskContent'], fallback.inpaintMaskContent),
+    inpaintMaskOpacity: readNumber(record, ['inpaint_mask_opacity', 'inpaintMaskOpacity'], fallback.inpaintMaskOpacity),
+    autoMaskEnabled: readBoolean(record, ['auto_mask_enabled', 'autoMaskEnabled'], fallback.autoMaskEnabled),
+    autoMaskPrompt: readString(record, ['auto_mask_prompt', 'autoMaskPrompt'], fallback.autoMaskPrompt),
+    autoMaskModel: readString(record, ['auto_mask_model', 'autoMaskModel'], fallback.autoMaskModel),
+    autoMaskBoxThreshold: readNumber(record, ['auto_mask_box_threshold', 'autoMaskBoxThreshold'], fallback.autoMaskBoxThreshold),
+    autoMaskTextThreshold: readNumber(record, ['auto_mask_text_threshold', 'autoMaskTextThreshold'], fallback.autoMaskTextThreshold),
+    saveImages: readBoolean(record, ['save_images', 'saveImages'], fallback.saveImages),
   }
 }
 
@@ -1010,13 +1424,43 @@ function normalizeModel(value: unknown): ProModelOption | null {
     sizeBytes: readNumber(record, ['sizeBytes', 'size_bytes'], 0),
     fileCount: readNumber(record, ['fileCount', 'file_count'], 0),
     assetSummary: readOptionalString(record, ['assetSummary', 'asset_summary']),
+    kind: readOptionalString(record, ['kind']),
     engineId: normalizeEngineId(readUnknown(record, ['engineId', 'engine_id', 'engine'])),
     engineLabel: readOptionalString(record, ['engineLabel', 'engine_label']),
     backend: readOptionalString(record, ['backend']),
     status: readOptionalString(record, ['status', 'state']),
     reason: readOptionalString(record, ['reason']),
     suggestedAction: readOptionalString(record, ['suggestedAction', 'suggested_action']),
+    estVramGb: readNumber(record, ['estVramGb', 'est_vram_gb'], 0),
+    heavyFor12Gb: Boolean(readUnknown(record, ['heavyFor12Gb', 'heavy_for_12gb'])),
+    generationPreset: normalizeModelPreset(readRecord(record, ['generationPreset', 'generation_preset'])),
   }
+}
+
+function normalizeModelPreset(record: JsonRecord): Partial<GenerationSettings> | undefined {
+  const preset: Partial<GenerationSettings> = {}
+  if ('steps' in record) {
+    preset.steps = readNumber(record, ['steps'], 0)
+  }
+  if ('cfg_scale' in record || 'cfgScale' in record) {
+    preset.cfgScale = readNumber(record, ['cfg_scale', 'cfgScale'], 0)
+  }
+  if ('sampler' in record) {
+    preset.sampler = readString(record, ['sampler'], '')
+  }
+  if ('scheduler' in record) {
+    preset.scheduler = readString(record, ['scheduler'], '')
+  }
+  if ('clip_skip' in record || 'clipSkip' in record) {
+    preset.clipSkip = readNumber(record, ['clip_skip', 'clipSkip'], 1)
+  }
+  if ('width' in record) {
+    preset.width = readNumber(record, ['width'], 0)
+  }
+  if ('height' in record) {
+    preset.height = readNumber(record, ['height'], 0)
+  }
+  return Object.keys(preset).length > 0 ? preset : undefined
 }
 
 function normalizeEngineSummary(value: unknown): EngineSummary | null {
@@ -1072,11 +1516,18 @@ function normalizeRecentOutput(
     thumbnailUrl,
     path: readOptionalString(record, ['path', 'file']),
     prompt: readString(record, ['prompt'], defaults.prompt),
+    negativePrompt: readOptionalString(record, ['negativePrompt', 'negative_prompt']),
+    infotext: readOptionalString(record, ['infotext', 'infoText', 'metadata']),
     width: readNumber(record, ['width'], defaults.width),
     height: readNumber(record, ['height'], defaults.height),
     createdAt: readString(record, ['created_at', 'createdAt', 'time', 'age'], 'now'),
     mode: normalizeCreationMode(readUnknown(record, ['mode']), defaults.mode),
     seed: readOptionalNumber(record, ['seed']),
+    steps: readOptionalNumber(record, ['steps']),
+    cfgScale: readOptionalNumber(record, ['cfgScale', 'cfg_scale']),
+    clipSkip: readOptionalNumber(record, ['clipSkip', 'clip_skip']),
+    sampler: readOptionalString(record, ['sampler', 'samplerName', 'sampler_name']),
+    scheduler: readOptionalString(record, ['scheduler', 'schedule']),
     modelName: readOptionalString(record, ['model_name', 'modelName', 'model']),
     status: readOptionalString(record, ['status', 'state']),
     source: readOptionalString(record, ['source']),
@@ -1253,10 +1704,13 @@ function normalizeEngineId(value: unknown): ProModelOption['engineId'] {
     value === 'flux' ||
     value === 'flux2' ||
     value === 'sana_video' ||
+    value === 'wan' ||
     value === 'sd15' ||
     value === 'sdxl' ||
     value === 'sd35' ||
     value === 'zimage' ||
+    value === 'qwen' ||
+    value === 'sana' ||
     value === 'unknown'
   ) {
     return value

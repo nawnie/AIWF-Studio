@@ -9,8 +9,10 @@ from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_SD15,
     ARCH_SDXL,
     ARCH_SDXL_INPAINT,
+    ARCH_UNKNOWN,
     detect_checkpoint_architecture,
     infer_architecture_from_shapes,
+    looks_like_controlnet_weights,
 )
 
 
@@ -22,8 +24,13 @@ def _write_fake_safetensors(path: Path, shapes: dict[str, list[int]]) -> None:
         handle.write(payload)
 
 
-def test_infer_sd15_default():
-    assert infer_architecture_from_shapes({}) == ARCH_SD15
+def test_infer_unknown_when_no_shape_or_name_evidence():
+    assert infer_architecture_from_shapes({}) == ARCH_UNKNOWN
+
+
+def test_infer_sd15_from_four_channel_unet_key():
+    shapes = {"model.diffusion_model.input_blocks.0.0.weight": [320, 4, 3, 3]}
+    assert infer_architecture_from_shapes(shapes) == ARCH_SD15
 
 
 def test_infer_sdxl_from_openclip_key():
@@ -60,3 +67,16 @@ def test_detect_sdxl_filename_fallback(tmp_path: Path):
     path = tmp_path / "juggernaut_xl.safetensors"
     _write_fake_safetensors(path, {})
     assert detect_checkpoint_architecture(path) == ARCH_SDXL
+
+
+def test_controlnet_weights_are_detected_as_non_base_checkpoint(tmp_path: Path):
+    path = tmp_path / "diffusion_pytorch_model.safetensors"
+    _write_fake_safetensors(
+        path,
+        {
+            "controlnet_cond_embedding.conv_in.weight": [16, 3, 3, 3],
+            "controlnet_down_blocks.0.weight": [320, 320, 1, 1],
+        },
+    )
+
+    assert looks_like_controlnet_weights(path)

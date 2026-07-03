@@ -629,7 +629,10 @@ def _wan_group_offload_blocks() -> int:
 
 
 def _wan_group_offload_stream_enabled() -> bool:
-    return _env_flag("AIWF_WAN_GROUP_OFFLOAD_STREAM", default=False)
+    # Default on: with pinned memory, streamed block transfers overlap with
+    # compute and reduce group-offload stalls. Adjustable in Settings →
+    # Video & Performance (persisted via AIWF_WAN_GROUP_OFFLOAD_STREAM).
+    return _env_flag("AIWF_WAN_GROUP_OFFLOAD_STREAM", default=True)
 
 
 def _wan_group_offload_record_stream() -> bool:
@@ -2715,12 +2718,21 @@ class WanI2VBackend:
             logger.debug("Wan attention cleanup failed.", exc_info=True)
         _free_cuda_memory()
 
-    def _aspect_resize(self, pipe, image, max_area: int):
-        """Resize the image to a Wan-valid size near ``max_area`` (model-aware)."""
+    def _aspect_resize(self, pipe, image, max_area: int, *, request_width: int = 0, request_height: int = 0):
+        """Resize the image to a Wan-valid size near ``max_area`` (model-aware).
+
+        With no image (text-to-video), the requested width/height are snapped
+        to the model's spatial modulus instead.
+        """
         import numpy as np
 
-        ar = image.height / image.width
         mod = pipe.vae_scale_factor_spatial * pipe.transformer.config.patch_size[1]
+        if image is None:
+            ar = (request_height / request_width) if request_width > 0 and request_height > 0 else 1.0
+            height = max(mod, round(np.sqrt(max_area * ar)) // mod * mod)
+            width = max(mod, round(np.sqrt(max_area / ar)) // mod * mod)
+            return None, int(height), int(width)
+        ar = image.height / image.width
         height = max(mod, round(np.sqrt(max_area * ar)) // mod * mod)
         width = max(mod, round(np.sqrt(max_area / ar)) // mod * mod)
         return image.resize((width, height)), int(height), int(width)
@@ -3637,8 +3649,18 @@ class WanI2VBackend:
             import random
             seed = random.randint(0, 2 ** 32 - 1)
 
+        if image is None and requires_dual:
+            raise WanUnavailable(
+                "Wan 2.2 dual 14B is image-to-video only; text-to-video runs on the TI2V-5B route."
+            )
         max_area = int(getattr(request, "width", 480)) * int(getattr(request, "height", 480))
-        image, h, w = self._aspect_resize(pipe, image, max_area)
+        image, h, w = self._aspect_resize(
+            pipe,
+            image,
+            max_area,
+            request_width=int(getattr(request, "width", 480) or 480),
+            request_height=int(getattr(request, "height", 480) or 480),
+        )
 
         real_device = self._real_device(pipe)
         generator = torch.Generator(device=real_device).manual_seed(seed)

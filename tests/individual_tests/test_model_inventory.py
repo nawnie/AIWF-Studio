@@ -74,6 +74,23 @@ def test_inventory_finds_misplaced_sdxl_lora_and_writes_manifest(tmp_path: Path)
     assert checkpoints == []
 
 
+def test_unknown_safetensor_goes_to_sort_bucket_not_sd15_catalog(tmp_path: Path):
+    models = tmp_path / "models"
+    unknown = models / "Stable-diffusion" / "mystery.safetensors"
+    _write_safetensors_header(unknown, {})
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    records = scan_and_write_model_inventory(flags)
+    checkpoints = scan_from_flags(flags)
+
+    record = next(item for item in records if item.filename == "mystery.safetensors")
+    assert record.family == "checkpoint"
+    assert record.architecture == "unknown"
+    assert record.recommended_subdir == "models to sort"
+    assert record.should_move is True
+    assert checkpoints == []
+
+
 def test_inventory_excludes_reactor_face_embedding_from_checkpoints(tmp_path: Path):
     models = tmp_path / "models"
     face = models / "reactor" / "faces" / "person.safetensors"
@@ -242,7 +259,7 @@ def test_flux2_klein_gguf_is_runtime_asset_and_selectable_flux2_checkpoint(tmp_p
 
 def test_comfy_saved_flux2_klein_safetensor_is_selectable_runtime_asset(tmp_path: Path):
     models = tmp_path / "models"
-    klein = models / "flux" / "UNet" / "snofsSexNudesAndOtherFunStuff_distilledV12Fp8.safetensors"
+    klein = models / "flux" / "UNet" / "snofsSexNudesAndOtherFunStuff_v14Distilled.safetensors"
     _write_safetensors_header(
         klein,
         {
@@ -276,7 +293,7 @@ def test_comfy_saved_flux2_klein_safetensor_is_selectable_runtime_asset(tmp_path
     assert record.current_subdir == "flux/UNet"
     assert record.recommended_subdir == "flux2/UNet"
     assert record.should_move is True
-    assert [checkpoint.id for checkpoint in checkpoints] == ["snofsSexNudesAndOtherFunStuff_distilledV12Fp8"]
+    assert [checkpoint.id for checkpoint in checkpoints] == ["snofsSexNudesAndOtherFunStuff_v14Distilled"]
     assert checkpoints[0].architecture == "flux2_klein"
     assert checkpoints[0].kind == "flux2"
 

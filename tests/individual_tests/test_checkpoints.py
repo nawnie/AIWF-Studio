@@ -1,8 +1,35 @@
+import json
+import struct
 from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.infrastructure.diffusers.checkpoints import scan_checkpoints, scan_from_flags
 from aiwf.infrastructure.diffusers.model_arch import looks_like_lora_weights
+
+
+def _write_sd15_ckpt(path: Path) -> None:
+    """Write a minimal checkpoint that classifies as SD 1.5.
+
+    The scan drops files whose architecture cannot be identified, so plain
+    garbage bytes no longer appear in the catalog.
+    """
+    import torch
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model.diffusion_model.input_blocks.0.0.weight": torch.zeros(320, 4, 3, 3)}, path)
+
+
+def _write_sd15_safetensors(path: Path) -> None:
+    header = {
+        "model.diffusion_model.input_blocks.0.0.weight": {
+            "dtype": "F16",
+            "shape": [320, 4, 3, 3],
+            "data_offsets": [0, 320 * 4 * 3 * 3 * 2],
+        }
+    }
+    body = json.dumps(header).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(struct.pack("<Q", len(body)) + body + b"\x00" * (320 * 4 * 3 * 3 * 2))
 
 
 def test_scan_empty_dir(tmp_path: Path):
@@ -14,7 +41,7 @@ def test_scan_finds_nested_checkpoint(tmp_path: Path):
     nested = models / "Stable-diffusion" / "sub"
     nested.mkdir(parents=True)
     model = nested / "test_model.safetensors"
-    model.write_bytes(b"fake model content for test")
+    _write_sd15_safetensors(model)
 
     flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
     checkpoints = scan_from_flags(flags)
@@ -46,7 +73,7 @@ def test_scan_skips_non_image_model_runtime_folders(tmp_path: Path):
     (models / "wan" / "Safetensor" / "wan2.2_ti2v_5B_fp16.safetensors").write_bytes(b"wan")
     (models / "diffusion_models" / "clip_l.safetensors").write_bytes(b"clip")
     (models / "upscale_models" / "4xBHI_dat2_real.safetensors").write_bytes(b"upscaler")
-    (models / "root_model.ckpt").write_bytes(b"root checkpoint")
+    _write_sd15_ckpt(models / "root_model.ckpt")
 
     flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
     checkpoints = scan_from_flags(flags)
@@ -65,7 +92,8 @@ def test_known_broken_runtime_assets_do_not_enter_selectable_checkpoint_catalog(
     flux_fp8 = models / "flux" / "UNet" / "fluxedUpFluxNSFW_110FP8.safetensors"
     flux_gguf = models / "flux" / "GGUF" / "fluxFusionV24StepsGGUFNF4_V2GGUFQ4KM.gguf"
     bad_upscaler = models / "upscale_models" / "4xBHI_dat2_multiblurjpg.safetensors"
-    for path in (good, flux_fp8, flux_gguf, bad_upscaler):
+    _write_sd15_ckpt(good)
+    for path in (flux_fp8, flux_gguf, bad_upscaler):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"fake")
 
@@ -99,7 +127,7 @@ def test_looks_like_lora_weights_detects_lora_keys(tmp_path: Path):
 def test_scan_finds_model_in_models_root(tmp_path: Path):
     models = tmp_path / "models"
     models.mkdir()
-    (models / "root_model.ckpt").write_bytes(b"root checkpoint")
+    _write_sd15_ckpt(models / "root_model.ckpt")
 
     flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
     checkpoints = scan_from_flags(flags)

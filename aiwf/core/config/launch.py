@@ -43,7 +43,7 @@ class LaunchSettings(BaseSettings):
     opt_split_attention: bool = False
     async_offload: bool = True
     pinned_memory: bool = True
-    cuda_malloc: bool = True
+    cuda_malloc: bool = False
     no_half: bool = False
     fp8: bool = False
     fluxfp8: bool = False
@@ -272,8 +272,8 @@ class LaunchSettings(BaseSettings):
             args.append("--no-async-offload")
         if not self.pinned_memory:
             args.append("--no-pinned-memory")
-        if not self.cuda_malloc:
-            args.append("--no-cuda-malloc")
+        if self.cuda_malloc:
+            args.append("--cuda-malloc")
         if self.no_half:
             args.append("--no-half")
         if self.fp8:
@@ -387,7 +387,7 @@ def merge_launch_settings(
     field_to_flag = {
         "listen": "--listen",
         "port": "--port",
-        "autolaunch": "--autolaunch",
+        "autolaunch": ("--autolaunch", "--no-autolaunch"),
         "theme": "--theme",
         "gradio_auth": "--gradio-auth",
         "api_cors_origins": "--api-cors-origins",
@@ -403,7 +403,7 @@ def merge_launch_settings(
         "opt_split_attention": "--opt-split-attention",
         "async_offload": "--no-async-offload",
         "pinned_memory": "--no-pinned-memory",
-        "cuda_malloc": "--no-cuda-malloc",
+        "cuda_malloc": ("--cuda-malloc", "--no-cuda-malloc"),
         "no_half": "--no-half",
         "fp8": "--fp8",
         "fluxfp8": "--fluxfp8",
@@ -438,7 +438,8 @@ def merge_launch_settings(
     merged_dump = merged.model_dump()
 
     for field, flag in field_to_flag.items():
-        if flag in explicit:
+        flags = flag if isinstance(flag, tuple) else (flag,)
+        if any(item in explicit for item in flags):
             merged_dump[field] = cli_dump[field]
 
     return RuntimeFlags.model_validate(merged_dump)

@@ -60,10 +60,17 @@ def _align_sdpa_dtypes(q, k, v):
 
 
 @contextmanager
-def attention_call_context(flags):
+def attention_call_context(flags, *, pipe=None):
     """Apply per-call attention patches that must not leak outside generation."""
     if _attention_backend(flags) != "sage_sdpa":
         yield "none"
+        return
+    if pipe is not None and getattr(pipe, "unet", None) is not None:
+        # SD/SDXL UNet attention already runs through AttnProcessor2_0/torch SDPA.
+        # The global SageAttention shim is unsafe here because Diffusers passes
+        # SDPA tensors in torch's [batch, heads, tokens, dim] layout; using the
+        # generic shim can silently scramble denoise output instead of failing.
+        yield "sdpa"
         return
     try:
         from sageattention import sageattn

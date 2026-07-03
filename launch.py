@@ -598,7 +598,9 @@ def main() -> None:
     env.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     env["PYTHONPATH"] = str(ROOT) if "PYTHONPATH" not in env else str(ROOT) + os.pathsep + env["PYTHONPATH"]
 
-    crash_log = ROOT / "aiwf-crash.log"
+    # Crash logs live under logs/ so the repo root stays user-facing.
+    (ROOT / "logs").mkdir(parents=True, exist_ok=True)
+    crash_log = ROOT / "logs" / "aiwf-crash.log"
     ret = _tee_run([python(), str(ROOT / "webui.py"), *webui_argv], env=env, log_path=crash_log)
     if ret != 0:
         print(

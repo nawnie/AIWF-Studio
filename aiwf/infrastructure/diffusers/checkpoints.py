@@ -20,6 +20,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
     architecture_label,
     detect_checkpoint_architecture,
     is_inpaint_architecture,
+    looks_like_controlnet_weights,
     looks_like_lora_weights,
 )
 from aiwf.infrastructure.diffusers.model_blocks import (
@@ -55,6 +56,7 @@ SKIP_DIR_NAMES = {
     "textencoder",
     "text_encoder",
     "text-encoder",
+    "ultralytics",
     "wan",
 }
 
@@ -178,6 +180,9 @@ def scan_checkpoints(roots: list[Path]) -> list[Checkpoint]:
             if looks_like_lora_weights(path):
                 logger.debug("Skipping LoRA weights in checkpoint scan: %s", path)
                 continue
+            if looks_like_controlnet_weights(path):
+                logger.debug("Skipping ControlNet weights in checkpoint scan: %s", path)
+                continue
             seen_paths.add(dedup_key)
 
             short_hash = _fast_fingerprint(path)
@@ -258,6 +263,15 @@ def _is_selectable_inventory_checkpoint(
             logger.info("Skipping incomplete Diffusers runtime folder in checkpoint scan: %s", path)
             return False
     if record.family == "checkpoint" and record.architecture not in non_image_runtime_arches:
+        if record.architecture == "unknown":
+            logger.info("Skipping unknown checkpoint architecture in checkpoint scan: %s", path)
+            return False
+        if looks_like_lora_weights(path):
+            logger.debug("Skipping LoRA inventory checkpoint: %s", path)
+            return False
+        if looks_like_controlnet_weights(path):
+            logger.debug("Skipping ControlNet inventory checkpoint: %s", path)
+            return False
         return True
     return record.family == "runtime_asset" and record.architecture in selectable_runtime_arches
 
@@ -271,19 +285,28 @@ def diffusers_dir_has_required_local_files(path: Path) -> bool:
     """
     if not (path / "model_index.json").is_file():
         return False
+    return not missing_diffusers_local_files(path, limit=1)
+
+
+def missing_diffusers_local_files(path: Path, *, limit: int = 20) -> list[Path]:
+    """Return local files referenced by Diffusers shard indexes but absent on disk."""
+    missing: list[Path] = []
     for index_path in path.rglob("*.index.json"):
         try:
             payload = json.loads(index_path.read_text(encoding="utf-8"))
         except Exception:
             logger.debug("Could not inspect Diffusers shard index: %s", index_path, exc_info=True)
-            return False
+            return [index_path]
         weight_map = payload.get("weight_map")
         if not isinstance(weight_map, dict):
             continue
-        for shard_name in set(str(name) for name in weight_map.values()):
-            if not (index_path.parent / shard_name).is_file():
-                return False
-    return True
+        for shard_name in sorted(set(str(name) for name in weight_map.values())):
+            shard_path = index_path.parent / shard_name
+            if not shard_path.is_file():
+                missing.append(shard_path)
+                if len(missing) >= limit:
+                    return missing
+    return missing
 
 
 _diffusers_dir_has_required_local_files = diffusers_dir_has_required_local_files

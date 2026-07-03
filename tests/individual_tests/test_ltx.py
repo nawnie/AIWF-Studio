@@ -264,13 +264,16 @@ def test_ltx2b_diffusers_pipeline_cache_reuses_matching_assets(tmp_path: Path, m
         def enable_model_cpu_offload(self):
             return None
 
+        def to(self, *_args, **_kwargs):
+            return self
+
     fake_diffusers = types.SimpleNamespace(LTXPipeline=FakePipe)
     fake_transformers = types.SimpleNamespace(
         AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *_args, **_kwargs: object())
     )
     monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
-    monkeypatch.setattr(ltx_diffusers, "load_t5_encoder", lambda _path: object())
+    monkeypatch.setattr(ltx_diffusers, "load_t5_encoder", lambda _path, **_kwargs: object())
 
     pipe1, hit1 = ltx_diffusers.load_ltx2b_pipeline(
         checkpoint=checkpoint,

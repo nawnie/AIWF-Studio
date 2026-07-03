@@ -2,7 +2,7 @@ export type CreationMode = 'image' | 'video' | 'inpaint'
 
 export type ProMode = CreationMode | 'models' | 'data'
 
-export type EngineId = 'all' | 'flux' | 'flux2' | 'sana_video' | 'sd15' | 'sdxl' | 'sd35' | 'zimage' | 'unknown'
+export type EngineId = 'all' | 'flux' | 'flux_fill' | 'flux2' | 'sana_video' | 'wan' | 'sd15' | 'sdxl' | 'sd35' | 'zimage' | 'qwen' | 'sana' | 'unknown'
 
 export type ResourceTone = 'mint' | 'blue' | 'amber' | 'red' | 'neutral'
 
@@ -20,12 +20,16 @@ export interface ProModelOption {
   sizeBytes?: number
   fileCount?: number
   assetSummary?: string
+  kind?: string
   engineId?: EngineId
   engineLabel?: string
   backend?: string
   status?: string
   reason?: string
   suggestedAction?: string
+  estVramGb?: number
+  heavyFor12Gb?: boolean
+  generationPreset?: Partial<GenerationSettings>
 }
 
 export interface EngineSummary {
@@ -47,8 +51,14 @@ export interface GenerationSettings {
   sampler: string
   scheduler: string
   seed: number
+  clipSkip: number
   batchSize: number
   batchCount: number
+  enableHires: boolean
+  hiresScale: number
+  hiresSteps: number
+  hiresDenoise: number
+  hiresUpscaler: string
   frames: number
   fps: number
   sourceImageDataUrl: string
@@ -58,6 +68,20 @@ export interface GenerationSettings {
   offloadTextEncoderAfterEncode: boolean
   useSageAttention: boolean
   generateAudio: boolean
+  initImageDataUrl: string
+  maskImageDataUrl: string
+  denoisingStrength: number
+  maskBlur: number
+  inpaintOnlyMasked: boolean
+  inpaintMaskedPadding: number
+  inpaintMaskContent: string
+  inpaintMaskOpacity: number
+  autoMaskEnabled: boolean
+  autoMaskPrompt: string
+  autoMaskModel: string
+  autoMaskBoxThreshold: number
+  autoMaskTextThreshold: number
+  saveImages: boolean
 }
 
 export interface RecentOutput {
@@ -66,11 +90,18 @@ export interface RecentOutput {
   thumbnailUrl: string
   path?: string
   prompt: string
+  negativePrompt?: string
+  infotext?: string
   width: number
   height: number
   createdAt: string
   mode: CreationMode
   seed?: number
+  steps?: number
+  cfgScale?: number
+  clipSkip?: number
+  sampler?: string
+  scheduler?: string
   modelName?: string
   status?: string
   source?: string
@@ -104,6 +135,7 @@ export interface RuntimeJobStatus {
   message: string
   hasResult: boolean
   error: string
+  previewUrl: string
 }
 
 export interface ProRuntimeStatus {
@@ -201,12 +233,21 @@ export interface ProDownloadCatalogItem {
   destination: string
   engineId?: EngineId
   engineLabel?: string
+  hfUrl?: string
+}
+
+export interface CivitaiBrowseLink {
+  label: string
+  url: string
+  note: string
+  engine: string
 }
 
 export interface ProDownloadsStatus {
   categories: ProDownloadCategory[]
   bundles: Record<string, string[]>
   catalog: ProDownloadCatalogItem[]
+  civitaiLinks: CivitaiBrowseLink[]
   counts: {
     categories: number
     catalog: number
@@ -249,14 +290,80 @@ export interface ProSettingsStatus {
     galleryColumns: number
     galleryHeight: number
     livePreview: boolean
+    showProgressEveryNSteps: number
+    livePreviewDecoder: string
     hiddenTabs: string[]
   }
+  output: {
+    imageFormat: string
+    imageQuality: number
+    embedMetadata: boolean
+    saveGrid: boolean
+    saveSidecarTxt: boolean
+    filenamePattern: string
+    saveBeforeHires: boolean
+    saveInterrupted: boolean
+    metadataIncludeModelHash: boolean
+    metadataIncludeVaeHash: boolean
+    metadataIncludeLoraHashes: boolean
+    metadataIncludeAppVersion: boolean
+    metadataIncludeOptimizationProfile: boolean
+    optimizationProfileId: string
+  }
+  video: {
+    wanHigh: string
+    wanLow: string
+    wanVae: string
+    wanTextEncoder: string
+    wanOffload: string
+    wanSampler: string
+    wanFlowShift: number
+    wanRuntimeMode: string
+    ltxDtype: string
+    ltxCpuOffload: string
+    wanGroupOffloadStream: boolean
+    wanGroupOffloadBlocks: number
+    ggufCudaKernels: boolean
+  }
   runtime: {
+    port: number
     listen: boolean
+    share: boolean
+    autolaunch: boolean
     api: boolean
     genlog: boolean
     backend: string
+    onnxProvider: string
     attention: string
+    xformers: boolean
+    optSdpAttention: boolean
+    optSplitAttention: boolean
+    asyncOffload: boolean
+    pinnedMemory: boolean
+    cudaMalloc: boolean
+    medvram: boolean
+    lowvram: boolean
+    noHalf: boolean
+    fp8: boolean
+    fluxFp8: boolean
+    directml: boolean
+    cpu: boolean
+    cudaGraphs: boolean
+    torchao: boolean
+    fp8Quant: boolean
+    torchCompile: boolean
+    channelsLast: boolean
+    nvenc: boolean
+    hevc: boolean
+    blockPrivateDownloadUrls: boolean
+    apiCorsOrigins: string
+    apiRateLimitPerMinute: number
+    theme: string
+    modelsDir: string
+    checkpointDir: string
+    outputDir: string
+    extraModelDirs: string
+    extraCheckpointDirs: string
   }
 }
 

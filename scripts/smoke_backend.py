@@ -4,9 +4,9 @@ No Gradio, no UI. Exercises the real checkpoint-loading + generation code
 paths directly so regressions like the torch_dtype/dtype kwarg mismatch or
 the Wan VAE channel-detection bug get caught before manual QA in the GUI.
 
-By default, reads one prompt line each, at its own runtime, from:
-    F:\\AIWF_Studio\\prompt_image.txt
-    F:\\AIWF_Studio\\prompt_video.txt
+By default, reads one prompt line each, at its own runtime, from
+``_local/prompt_image.txt`` and ``_local/prompt_video.txt`` (repo-root
+fallback). Both files are local-only and never committed.
 The image prompt can be overridden with --prompt for validation runs.
 
 Restricted to Q4/Q5 GGUF checkpoints only -- Q8 (and Q3/Q6 for Wan) are
@@ -42,8 +42,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-PROMPT_IMAGE_FILE = ROOT / "prompt_image.txt"
-PROMPT_VIDEO_FILE = ROOT / "prompt_video.txt"
+def _prompt_file(name: str) -> Path:
+    """Prompt files are local-only (never committed); prefer the _local bucket."""
+    local = ROOT / "_local" / name
+    return local if local.is_file() else ROOT / name
+
+
+PROMPT_IMAGE_FILE = _prompt_file("prompt_image.txt")
+PROMPT_VIDEO_FILE = _prompt_file("prompt_video.txt")
 
 # Only these quant tiers are considered safe to smoke-test. Q8 native-crashes
 # on VRAM exhaustion (confirmed via aiwf-crash.log); Q3/Q6 are untested.
@@ -210,6 +216,8 @@ def run_one_checkpoint(
     width = int(width_override if width_override is not None else preset.get("width", 512))
     height = int(height_override if height_override is not None else preset.get("height", 512))
     mode = GenerationMode.INPAINT if is_inpaint_architecture(checkpoint.architecture) else GenerationMode.TXT2IMG
+    if mode == GenerationMode.INPAINT and steps < 2:
+        steps = 2
     print(
         f"Smoke settings: mode={mode.value} steps={steps} cfg={cfg_scale} "
         f"sampler={sampler} scheduler={scheduler} size={width}x{height}"

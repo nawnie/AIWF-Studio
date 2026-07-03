@@ -52,7 +52,7 @@ class RuntimeFlags(BaseSettings):
     opt_split_attention: bool = False
     async_offload: bool = True
     pinned_memory: bool = True
-    cuda_malloc: bool = True
+    cuda_malloc: bool = False
     cpu: bool = False
     skip_install: bool = False
     skip_prepare_environment: bool = False
@@ -125,7 +125,7 @@ class UserSettings(BaseSettings):
     upscale_tile_overlap: int = Field(default=32, ge=0, le=512)
     auto_launch_browser: bool = True
     enable_live_preview: bool = True
-    show_progress_every_n_steps: int = Field(default=1, ge=1, le=20)
+    show_progress_every_n_steps: int = Field(default=5, ge=1, le=20)
     live_preview_decoder: str = "vae"
     live_preview_title_progress: bool = True
     recent_tags: list[str] = Field(default_factory=list)
@@ -267,6 +267,55 @@ class UserSettings(BaseSettings):
     # ONNX model root — directory containing one or more ONNX model subdirs.
     # Only used when inference_backend == "onnx".
     onnx_model_dir: str = ""
+
+    # Video pipeline performance (Wan / LTX). These are user-adjustable and
+    # applied to the process environment on startup and on every save, so the
+    # next pipeline load picks them up without a restart.
+    # ltx_dtype: bf16 matches how LTX-Video is distributed/calibrated; fp16 is
+    # a fallback for pre-Ampere GPUs without bf16 support.
+    ltx_dtype: str = "bf16"
+    # ltx_cpu_offload: auto = offload only when the checkpoint is too big to
+    # stay resident; model = always model-offload; none = keep fully on GPU.
+    ltx_cpu_offload: str = "auto"
+    # Streamed group offload overlaps Wan block transfers with compute
+    # (needs pinned memory; costs a little extra VRAM headroom).
+    wan_group_offload_stream: bool = True
+    wan_group_offload_blocks: int = Field(default=4, ge=1, le=40)
+    # Diffusers optimized GGUF CUDA kernels (needs the `kernels` package).
+    gguf_cuda_kernels: bool = False
+
+    @field_validator("ltx_dtype")
+    @classmethod
+    def validate_ltx_dtype(cls, value: str) -> str:
+        normalized = (value or "bf16").strip().lower()
+        if normalized in {"bfloat16", "bf16"}:
+            return "bf16"
+        if normalized in {"float16", "fp16", "half"}:
+            return "fp16"
+        raise ValueError("ltx_dtype must be bf16 or fp16")
+
+    @field_validator("ltx_cpu_offload")
+    @classmethod
+    def validate_ltx_cpu_offload(cls, value: str) -> str:
+        normalized = (value or "auto").strip().lower()
+        if normalized not in {"auto", "model", "none"}:
+            raise ValueError("ltx_cpu_offload must be auto, model, or none")
+        return normalized
+
+    def apply_video_perf_env(self) -> None:
+        """Push video performance preferences into the process environment.
+
+        The Wan/LTX loaders read these env knobs at pipeline-load time, so
+        applying them on save means the next generation uses the new values
+        without restarting the app.
+        """
+        import os
+
+        os.environ["AIWF_LTX_DTYPE"] = self.ltx_dtype
+        os.environ["AIWF_LTX_CPU_OFFLOAD"] = self.ltx_cpu_offload
+        os.environ["AIWF_WAN_GROUP_OFFLOAD_STREAM"] = "1" if self.wan_group_offload_stream else "0"
+        os.environ["AIWF_WAN_GROUP_OFFLOAD_BLOCKS"] = str(int(self.wan_group_offload_blocks))
+        os.environ["DIFFUSERS_GGUF_CUDA_KERNELS"] = "1" if self.gguf_cuda_kernels else "0"
 
     def apply_token_env(self) -> None:
         """Expose saved API keys to download helpers via environment variables."""

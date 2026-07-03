@@ -1,9 +1,53 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 from typing import Any
+
+def _ltx_dtype():
+    """Resolve the LTX compute dtype from settings env (AIWF_LTX_DTYPE).
+
+    LTX-Video is distributed and calibrated in bfloat16; fp16 can overflow in
+    the transformer and produce artifacts. Default to bf16 whenever the GPU
+    supports it, fall back to fp16 otherwise.
+    """
+    import torch
+
+    choice = os.environ.get("AIWF_LTX_DTYPE", "").strip().lower()
+    if choice in {"fp16", "float16", "half"}:
+        return torch.float16
+    bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    if choice in {"bf16", "bfloat16"}:
+        return torch.bfloat16 if bf16_ok else torch.float16
+    return torch.bfloat16 if bf16_ok else torch.float16
+
+
+def _ltx_offload_mode() -> str:
+    mode = os.environ.get("AIWF_LTX_CPU_OFFLOAD", "").strip().lower()
+    return mode if mode in {"auto", "model", "none"} else "auto"
+
+
+def _ltx_should_offload(checkpoint: Path) -> bool:
+    mode = _ltx_offload_mode()
+    if mode == "model":
+        return True
+    if mode == "none":
+        return False
+    # auto: keep small checkpoints (e.g. LTX 2B distilled) fully resident when
+    # VRAM allows — skipping per-component transfers removes real overhead.
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return True
+        total_gb = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory / 1024**3
+        ckpt_gb = checkpoint.stat().st_size / 1024**3
+        # ~10 GB margin covers the T5XXL encoder, VAE, and decode activations.
+        return (ckpt_gb + 10.0) > total_gb
+    except Exception:
+        return True
 
 
 @dataclass(frozen=True)
@@ -22,6 +66,8 @@ class _Ltx2BCacheKey:
     checkpoint: str
     t5_weights: str
     tokenizer_id: str
+    dtype: str = ""
+    offload: str = ""
 
 
 @dataclass
@@ -108,10 +154,14 @@ def load_ltx2b_pipeline(*, checkpoint: Path, t5_weights: Path, tokenizer_id: str
     from diffusers import LTXPipeline
     from transformers import AutoTokenizer
 
+    dtype = _ltx_dtype()
+    offload = _ltx_should_offload(checkpoint)
     key = _Ltx2BCacheKey(
         checkpoint=str(checkpoint.resolve()),
         t5_weights=str(t5_weights.resolve()),
         tokenizer_id=str(tokenizer_id),
+        dtype=str(dtype).replace("torch.", ""),
+        offload="model" if offload else "none",
     )
     with _CACHE_LOCK:
         if use_cache and _PIPE_CACHE is not None and _PIPE_CACHE.key == key:
@@ -120,15 +170,18 @@ def load_ltx2b_pipeline(*, checkpoint: Path, t5_weights: Path, tokenizer_id: str
             unload_ltx2b_diffusers_cache()
 
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, local_files_only=True)
-        text_encoder = load_t5_encoder(t5_weights)
+        text_encoder = load_t5_encoder(t5_weights, dtype=dtype)
         pipe = LTXPipeline.from_single_file(
             str(checkpoint),
             text_encoder=text_encoder,
             tokenizer=tokenizer,
-            torch_dtype=torch.float16,
+            torch_dtype=dtype,
             local_files_only=True,
         )
-        pipe.enable_model_cpu_offload()
+        if offload:
+            pipe.enable_model_cpu_offload()
+        elif torch.cuda.is_available():
+            pipe.to("cuda")
         vae = getattr(pipe, "vae", None)
         if hasattr(vae, "enable_tiling"):
             vae.enable_tiling()
@@ -158,10 +211,13 @@ def unload_ltx2b_diffusers_cache() -> bool:
     return had_cache
 
 
-def load_t5_encoder(path: Path):
+def load_t5_encoder(path: Path, *, dtype=None):
     import torch
     from safetensors.torch import load_file
     from transformers import T5Config, T5EncoderModel
+
+    if dtype is None:
+        dtype = _ltx_dtype()
 
     config = T5Config(
         vocab_size=32128,
@@ -182,7 +238,7 @@ def load_t5_encoder(path: Path):
         decoder_start_token_id=0,
         tie_word_embeddings=False,
     )
-    model = T5EncoderModel(config).to(dtype=torch.float16)
+    model = T5EncoderModel(config).to(dtype=dtype)
     state = load_file(str(path), device="cpu")
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing or unexpected:
