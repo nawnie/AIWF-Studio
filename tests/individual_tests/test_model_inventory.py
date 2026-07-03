@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 from pathlib import Path
 
@@ -316,9 +317,14 @@ def test_z_image_gguf_is_runtime_asset_and_selectable_z_image_checkpoint(tmp_pat
     assert record.current_subdir == "flux/GGUF"
     assert record.recommended_subdir == "z-image/GGUF"
     assert record.should_move is True
-    assert [checkpoint.id for checkpoint in checkpoints] == ["fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4"]
-    assert checkpoints[0].architecture == "z_image"
-    assert checkpoints[0].kind == "z-image"
+    if os.name == "nt":
+        # Z-Image GGUF is blocked on Windows: the fused GGUF CUDA kernels are
+        # Linux-only and the fallback dequant path pages out 16 GB GPUs.
+        assert checkpoints == []
+    else:
+        assert [checkpoint.id for checkpoint in checkpoints] == ["fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4"]
+        assert checkpoints[0].architecture == "z_image"
+        assert checkpoints[0].kind == "z-image"
 
 
 def test_qwen_and_sana_diffusers_dirs_are_selectable_runtime_assets(tmp_path: Path):

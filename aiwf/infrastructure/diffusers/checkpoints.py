@@ -10,6 +10,7 @@ from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.models import Checkpoint
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
+    ARCH_FLUX_FILL,
     ARCH_FLUX_KONTEXT,
     ARCH_FLUX2_KLEIN,
     ARCH_QWEN_IMAGE,
@@ -223,6 +224,7 @@ def scan_from_flags(flags: RuntimeFlags) -> list[Checkpoint]:
     inventory = get_model_inventory(flags)
     selectable_runtime_arches = {
         ARCH_FLUX,
+        ARCH_FLUX_FILL,
         ARCH_FLUX_KONTEXT,
         ARCH_FLUX2_KLEIN,
         ARCH_Z_IMAGE,
@@ -324,6 +326,8 @@ def _checkpoint_from_inventory(record: ModelInventoryRecord) -> Checkpoint:
     is_runtime_asset = record.family == "runtime_asset"
     if is_runtime_asset and architecture == ARCH_FLUX:
         kind = "flux"
+    elif is_runtime_asset and architecture == ARCH_FLUX_FILL:
+        kind = "flux-fill"
     elif is_runtime_asset and architecture == ARCH_FLUX_KONTEXT:
         kind = "flux-kontext"
     elif is_runtime_asset and architecture == ARCH_FLUX2_KLEIN:

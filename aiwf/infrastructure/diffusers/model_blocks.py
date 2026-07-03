@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,7 +43,27 @@ _NON_SELECTABLE_IMAGE_ASSET_DIRS = {
 
 
 def known_broken_selectable_image_asset(path: Path | str) -> BlockedImageAsset | None:
-    return _KNOWN_BROKEN_SELECTABLE_IMAGE_ASSETS.get(Path(path).name.lower())
+    resolved = Path(path)
+    entry = _KNOWN_BROKEN_SELECTABLE_IMAGE_ASSETS.get(resolved.name.lower())
+    if entry is not None:
+        return entry
+    # Z-Image GGUF needs fused GGUF CUDA kernels (Hub repo Isotr0py/ggml),
+    # which only ship Linux builds. The Windows fallback dequantizes layer by
+    # layer, exhausts 16 GB VRAM, and falls into very slow system-memory paging.
+    # Blocked until a Windows kernel build or a bf16/FP8 Z-Image transformer route exists.
+    if os.name == "nt" and resolved.suffix.lower() == ".gguf":
+        compact_name = resolved.name.lower().replace("-", "").replace("_", "")
+        in_zimage_dir = any(part.lower() in {"z-image", "zimage"} for part in resolved.parts)
+        if in_zimage_dir or "zimage" in compact_name:
+            return BlockedImageAsset(
+                status="blocked-cleanly",
+                reason=(
+                    "Z-Image GGUF is unusable on Windows: the fused GGUF CUDA kernels are Linux-only "
+                    "and the fallback dequant path exhausts VRAM on 16 GB GPUs."
+                ),
+                suggested_action="Use a bf16/FP8 Z-Image transformer instead, or run this route on Linux.",
+            )
+    return None
 
 
 def is_non_selectable_image_asset_path(path: Path | str) -> bool:

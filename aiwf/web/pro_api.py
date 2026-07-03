@@ -443,6 +443,12 @@ def _selectable_checkpoint_payloads(ctx: Any) -> tuple[list[dict[str, Any]], lis
     for item in _safe_list(ctx.generation.list_checkpoints):
         payload = _checkpoint_payload(ctx, item)
         block = _blocked_checkpoint_detail(item) or _runtime_checkpoint_block(ctx, item)
+        if block is None and str(payload.get("architecture") or "") == "sdxl_refiner":
+            block = {
+                "status": "blocked-cleanly",
+                "reason": "This is the SDXL refiner, not a base checkpoint — it cannot generate on its own.",
+                "suggestedAction": "Enable it as the refiner in generation settings instead of selecting it as the model.",
+            }
         if block is None and payload.get("engineId") == "unknown":
             block = {
                 "status": "blocked-cleanly",

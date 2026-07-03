@@ -1702,6 +1702,7 @@ function normalizeEngineId(value: unknown): ProModelOption['engineId'] {
   if (
     value === 'all' ||
     value === 'flux' ||
+    value === 'flux_fill' ||
     value === 'flux2' ||
     value === 'sana_video' ||
     value === 'wan' ||

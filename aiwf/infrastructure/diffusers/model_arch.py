@@ -18,6 +18,7 @@ ARCH_SD15 = "sd15"
 ARCH_INPAINT = "inpaint"
 ARCH_SDXL = "sdxl"
 ARCH_SDXL_INPAINT = "sdxl_inpaint"
+ARCH_SDXL_REFINER = "sdxl_refiner"
 ARCH_SD35 = "sd35"
 ARCH_FLUX = "flux"
 ARCH_FLUX_FILL = "flux_fill"
@@ -157,6 +158,11 @@ def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: st
 
     unet_in = shapes.get(UNET_INPUT_KEY)
     has_sdxl = SDXL_OPENCLIP_KEY in shapes or SDXL_BASE_KEY in shapes
+    # The SDXL refiner conditions on OpenCLIP as embedder 0 (no CLIP-L at all);
+    # base SDXL keeps OpenCLIP at embedder 1. Without this check the refiner's
+    # 4-channel UNet input misclassifies it as an SD 1.5 base checkpoint.
+    if "conditioner.embedders.0.model.ln_final.weight" in shapes and not has_sdxl:
+        return ARCH_SDXL_REFINER
     lower = filename.lower().replace("_", "-")
     has_sd3 = any(
         SD3_JOINT_BLOCK_MARKER in key or key.startswith(SD3_DIFFUSERS_BLOCK_MARKER)
@@ -193,11 +199,15 @@ def infer_architecture_from_shapes(shapes: dict[str, list[int]], *, filename: st
         if has_sdxl:
             return ARCH_SDXL_INPAINT
         return ARCH_INPAINT
-    if unet_in and len(unet_in) >= 2 and unet_in[1] == 4:
-        return ARCH_SD15
 
+    # SDXL must be decided BEFORE the 4-channel SD 1.5 check: SDXL's UNet
+    # input is also 4-channel, so checking unet_in first silently downgrades
+    # every SDXL base checkpoint to SD 1.5.
     if has_sdxl:
         return ARCH_SDXL
+
+    if unet_in and len(unet_in) >= 2 and unet_in[1] == 4:
+        return ARCH_SD15
 
     if "inpaint" in lower:
         return ARCH_INPAINT
@@ -269,6 +279,7 @@ def architecture_label(architecture: str) -> str:
     return {
         ARCH_SDXL: "SDXL",
         ARCH_SDXL_INPAINT: "SDXL inpaint",
+        ARCH_SDXL_REFINER: "SDXL refiner",
         ARCH_SD35: "SD3.5",
         ARCH_FLUX: "Flux",
         ARCH_FLUX_FILL: "Flux Fill (inpaint)",

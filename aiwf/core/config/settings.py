@@ -315,7 +315,11 @@ class UserSettings(BaseSettings):
         os.environ["AIWF_LTX_CPU_OFFLOAD"] = self.ltx_cpu_offload
         os.environ["AIWF_WAN_GROUP_OFFLOAD_STREAM"] = "1" if self.wan_group_offload_stream else "0"
         os.environ["AIWF_WAN_GROUP_OFFLOAD_BLOCKS"] = str(int(self.wan_group_offload_blocks))
-        os.environ["DIFFUSERS_GGUF_CUDA_KERNELS"] = "1" if self.gguf_cuda_kernels else "0"
+        # The fused GGUF kernels (Hub repo Isotr0py/ggml) only ship Linux
+        # builds; enabling the flag on Windows makes diffusers' GGUF import
+        # crash, so the toggle is Linux-gated regardless of the saved value.
+        gguf_kernels = self.gguf_cuda_kernels and os.name != "nt"
+        os.environ["DIFFUSERS_GGUF_CUDA_KERNELS"] = "1" if gguf_kernels else "0"
 
     def apply_token_env(self) -> None:
         """Expose saved API keys to download helpers via environment variables."""

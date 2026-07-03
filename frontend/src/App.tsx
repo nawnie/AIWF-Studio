@@ -4495,11 +4495,11 @@ function SettingsWorkspace({
                 onChange={(event) => updateVideoSetting({ ggufCudaKernels: event.target.checked })}
                 disabled={!settingsStatus}
               />
-              <span>GGUF optimized CUDA kernels (needs the `kernels` package)</span>
+              <span>GGUF optimized CUDA kernels (needs the `kernels` package; Linux only, ignored on Windows)</span>
             </label>
             <p className="pro-field-note">
-              Tip for 16 GB cards: in NVIDIA Control Panel set CUDA Sysmem Fallback Policy to “Prefer No Sysmem
-              Fallback” so an over-budget run fails fast instead of silently paging at 10x slower speed.
+              Tip for 16 GB cards: in NVIDIA Control Panel set CUDA Sysmem Fallback Policy to "Prefer No Sysmem
+              Fallback" so an over-budget run fails fast instead of silently paging at 10x slower speed.
             </p>
           </div>
         </InfoCard>

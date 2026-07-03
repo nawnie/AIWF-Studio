@@ -10,6 +10,7 @@ from pathlib import Path
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
+    ARCH_FLUX_FILL,
     ARCH_FLUX_KONTEXT,
     ARCH_FLUX2_KLEIN,
     ARCH_INPAINT,
@@ -55,7 +56,10 @@ from aiwf.infrastructure.safetensors_metadata import read_safetensors_metadata
 logger = logging.getLogger(__name__)
 
 MODEL_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".onnx"}
-MODEL_INVENTORY_VERSION = 1
+# Bump this whenever architecture classification logic changes: the disk
+# cache stores classified records, so stale caches would otherwise keep
+# serving old (wrong) architectures to every picker after an update.
+MODEL_INVENTORY_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -171,6 +175,8 @@ def _architecture_from_text(text: str) -> str:
         return ARCH_SDXL
     if "fluxkontextpipeline" in compact or "kontext" in normalized:
         return ARCH_FLUX_KONTEXT
+    if "flux" in normalized and "fill" in normalized:
+        return ARCH_FLUX_FILL
     if "flux" in normalized:
         return ARCH_FLUX
     if "ltx" in normalized or "lightricks" in normalized:
@@ -313,6 +319,11 @@ def _header_family_architecture(path: Path) -> tuple[str, str, dict[str, str]] |
         architecture = _architecture_from_text(f"{path.as_posix()} {info.display_name} {' '.join(info.raw_meta.values())}")
         return "vae", architecture, identifiers
     if info.arch in {ARCH_FLUX_TRANSFORMER}:
+        # Flux.1-Fill shares the transformer header signature with base Flux;
+        # only the widened 384-channel image projection tells them apart, and
+        # it matters because Fill is inpaint-only.
+        if "fill" in path.name.lower() or detect_checkpoint_architecture(path) == ARCH_FLUX_FILL:
+            return "runtime_asset", ARCH_FLUX_FILL, identifiers
         return "runtime_asset", ARCH_FLUX, identifiers
     if info.arch == ARCH_FLUX2_KLEIN_TRANSFORMER:
         return "runtime_asset", ARCH_FLUX2_KLEIN, identifiers

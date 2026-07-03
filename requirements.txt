@@ -24,6 +24,8 @@ facexlib>=0.3.0
 compel>=2.0.0
 ftfy>=6.1.0
 gguf>=0.19.0
+# Quantized transformer/text-encoder loaders used by Flux/Z-Image paths.
+bitsandbytes>=0.46.0
 # SageAttention is optional Wan/video acceleration. It is not listed as a hard
 # dependency because Windows CUDA/Triton compatibility changes quickly.
 # launch.py may attempt a best-effort install and must fall back cleanly.

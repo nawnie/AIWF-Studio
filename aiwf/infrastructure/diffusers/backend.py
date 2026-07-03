@@ -1858,6 +1858,29 @@ class DiffusersBackend:
                 denoisers_to_restore.append((attr, denoiser))
             if denoisers_to_restore:
                 self.devices.empty_cache()
+            # Re-check REAL free VRAM after parking: quantized (GGUF/BNB)
+            # denoisers often keep buffers resident after .to("cpu"), so the
+            # up-front headroom estimate can credit space that never freed.
+            # Moving the encoder anyway tips the card into driver sysmem
+            # paging. That slowdown looks like a hang to the user.
+            try:
+                free_after_park, _total = torch.cuda.mem_get_info(device)
+            except Exception:
+                free_after_park = 0
+            if free_after_park and te_bytes + reserve_bytes > free_after_park:
+                logger.info(
+                    "%s text encoder (%.1f GB) does not fit the %.1f GB actually free after parking; encoding on CPU.",
+                    architecture,
+                    te_bytes / 1024**3,
+                    free_after_park / 1024**3,
+                )
+                for attr, denoiser in denoisers_to_restore:
+                    try:
+                        denoiser.to(device)
+                    except Exception:
+                        logger.warning("Failed to restore %s %s after aborted encode swap", architecture, attr, exc_info=True)
+                denoisers_to_restore.clear()
+                return encode(fallback_device)
             text_encoder.to(device)
             if denoisers_to_restore:
                 logger.info(
@@ -2818,11 +2841,7 @@ class DiffusersBackend:
                 torch_dtype=aux_dtype,
                 local_files_only=True,
             )
-            text_encoder = AutoModel.from_pretrained(
-                str(component_dir / "text_encoder"),
-                dtype=aux_dtype,
-                local_files_only=True,
-            )
+            text_encoder = self._load_z_image_text_encoder(component_dir, aux_dtype)
             tokenizer = AutoTokenizer.from_pretrained(str(component_dir / "tokenizer"), local_files_only=True)
             scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
                 str(component_dir / "scheduler"),
@@ -2851,6 +2870,53 @@ class DiffusersBackend:
         self._txt2img = pipe
         self._img2img = None
         return checkpoint
+
+    def _load_z_image_text_encoder(self, component_dir: Path, aux_dtype):
+        """Load the Z-Image Qwen3 text encoder, 4-bit on CUDA when possible.
+
+        The bf16 encoder is ~7.5 GB. Swapping it onto a 16 GB GPU next to the
+        resident transformer tips the card into driver sysmem paging (minutes
+        per prompt), and CPU encode measures ~80 s. NF4 shrinks it to ~2.5 GB
+        so it can stay resident on the GPU and avoids the repeated component
+        swap around prompt encoding.
+        """
+        from transformers import AutoModel
+
+        use_4bit = False
+        if torch.cuda.is_available():
+            try:
+                import bitsandbytes  # noqa: F401
+
+                use_4bit = True
+            except Exception:
+                use_4bit = False
+        if use_4bit:
+            try:
+                from transformers import BitsAndBytesConfig
+
+                encoder = AutoModel.from_pretrained(
+                    str(component_dir / "text_encoder"),
+                    quantization_config=BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_compute_dtype=aux_dtype,
+                    ),
+                    device_map={"": 0},
+                    local_files_only=True,
+                )
+                encoder._aiwf_bnb_resident = True
+                logger.info("Z-Image text encoder loaded 4-bit NF4, resident on GPU.")
+                return encoder
+            except Exception:
+                logger.warning(
+                    "Z-Image 4-bit text encoder load failed; falling back to CPU bf16 encoder.",
+                    exc_info=True,
+                )
+        return AutoModel.from_pretrained(
+            str(component_dir / "text_encoder"),
+            dtype=aux_dtype,
+            local_files_only=True,
+        )
 
     @staticmethod
     def _pipeline_class_name(path: Path) -> str:
@@ -3450,7 +3516,7 @@ class DiffusersBackend:
         if not checkpoint_id:
             raise ValueError("SDXL refiner is enabled but no refiner checkpoint is selected.")
         checkpoint = self._resolve_checkpoint(checkpoint_id)
-        if not is_sdxl_architecture(checkpoint.architecture):
+        if not is_sdxl_architecture(checkpoint.architecture) and checkpoint.architecture != "sdxl_refiner":
             raise ValueError("SDXL refiner checkpoint must be an SDXL checkpoint.")
         if self._refiner is not None and self._refiner_active and self._refiner_active.path == checkpoint.path:
             return self._refiner

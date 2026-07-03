@@ -263,6 +263,8 @@ def test_supported_image_gguf_runtime_assets_are_not_unsupported_no_route(tmp_pa
         ("fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf", "flux2_klein", "flux2-klein"),
         ("fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf", "z_image", "z-image"),
     ]
+    import os
+
     for filename, architecture, route in cases:
         path = tmp_path / "models" / "flux" / "GGUF" / filename
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -270,9 +272,14 @@ def test_supported_image_gguf_runtime_assets_are_not_unsupported_no_route(tmp_pa
 
         record = classify_pipeline_asset("runtime_asset", architecture, path)
 
-        assert record.status == "metadata-only"
         assert record.route == route
-        assert "runtime path" in record.reason
+        if architecture == "z_image" and os.name == "nt":
+            # Z-Image GGUF is blocked on Windows (fused GGUF kernels are
+            # Linux-only; the fallback dequant path pages out 16 GB GPUs).
+            assert record.status == "blocked-cleanly"
+        else:
+            assert record.status == "metadata-only"
+            assert "runtime path" in record.reason
 
 
 def test_collect_pipeline_readiness_includes_download_assets(tmp_path: Path):
