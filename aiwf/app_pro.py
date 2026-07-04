@@ -216,6 +216,15 @@ def create_app(
     app = FastAPI(title="AIWF Studio Pro", middleware=middleware or [])
     app.include_router(build_client_log_router(ctx), prefix="/api/v1")
     app.include_router(build_router(ctx))
+    # User extensions: routers registered via ctx.plugins.register_api(id, router)
+    # are served under /api/ext/<plugin-id>/. A broken extension must never
+    # take the whole app down, so mounting failures are logged and skipped.
+    for plugin_id, plugin_router in getattr(getattr(ctx, "plugins", None), "api_routers", []) or []:
+        try:
+            app.include_router(plugin_router, prefix=f"/api/ext/{plugin_id}")
+            logger.info("Mounted extension API: /api/ext/%s", plugin_id)
+        except Exception:
+            logger.exception("Could not mount extension API for %s", plugin_id)
     _mount_frontend(app, frontend_dist or _frontend_dist())
     return app
 

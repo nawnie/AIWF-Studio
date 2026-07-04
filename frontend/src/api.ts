@@ -123,6 +123,15 @@ const DEFAULT_SETTINGS: GenerationSettings = {
   autoMaskModel: 'sam+dino',
   autoMaskBoxThreshold: 0.3,
   autoMaskTextThreshold: 0.25,
+  controlNetEnabled: false,
+  controlNetModel: '',
+  controlNetModule: 'canny',
+  controlNetImageDataUrl: '',
+  controlNetImageName: '',
+  controlNetWeight: 1,
+  controlNetGuidanceStart: 0,
+  controlNetGuidanceEnd: 1,
+  controlNetProcessorRes: 512,
   saveImages: true,
 }
 
@@ -179,7 +188,7 @@ const FALLBACK_CAPABILITIES: ProCapabilitiesStatus = {
   gradioTabs: [
     { id: 'studio', label: 'Studio', group: 'Create', status: 'ready', count: 0, route: 'create', tab: 'Image', summary: 'Image generation and inpaint.', details: ['Existing image surface is available.'] },
     { id: 'video', label: 'Sana / Wan / LTX Video', group: 'Video', status: 'available', count: 0, route: 'create', tab: 'Video', summary: 'Video tool coverage is tracked.', details: ['React Pro can submit Sana Video.'] },
-    { id: 'enhance', label: 'Enhance', group: 'Image', status: 'available', count: 0, route: 'tools', tab: 'Enhance', summary: 'Enhance tool coverage is tracked.', details: ['React Pro shows status only.'] },
+    { id: 'enhance', label: 'Enhance', group: 'Image', status: 'available', count: 0, route: 'tools', tab: 'Enhance', summary: 'Quick restore, upscale, and VSR image tools.', details: ['Full old-photo and batch workflows remain in Gradio.'] },
     { id: 'segment', label: 'Segment', group: 'Image', status: 'available', count: 0, route: 'modal:segmentation', tab: 'Segment', summary: 'SAM tool coverage is tracked.', details: ['React Pro has a quick popup.'] },
     { id: 'reactor', label: 'ReActor', group: 'Image', status: 'available', count: 0, route: 'modal:reactor', tab: 'ReActor', summary: 'Face swap coverage is tracked.', details: ['React Pro has a quick popup.'] },
   ],
@@ -375,6 +384,13 @@ export async function saveProSettings(
             wanGroupOffloadStream: video.wanGroupOffloadStream,
             wanGroupOffloadBlocks: video.wanGroupOffloadBlocks,
             ggufCudaKernels: video.ggufCudaKernels,
+            wanSageAttention: video.wanSageAttention,
+            wanNativeDenoise: video.wanNativeDenoise,
+            wanManualVaeDecode: video.wanManualVaeDecode,
+            wanVaeChunkFrames: video.wanVaeChunkFrames,
+            wanGroupOffloadRecordStream: video.wanGroupOffloadRecordStream,
+            wanGroupOffloadLowCpuMem: video.wanGroupOffloadLowCpuMem,
+            wanResidentMinVramGb: video.wanResidentMinVramGb,
           }
         : {},
       runtime: runtime
@@ -590,6 +606,123 @@ export async function runFaceSwap(
   }
 }
 
+export interface ProEnhanceImageRequest {
+  imageDataUrl: string
+  restoreEnabled: boolean
+  restoreModel: string
+  restoreVisibility: number
+  codeformerWeight: number
+  upscaleEnabled: boolean
+  upscaleModel: string
+  upscaleScale: number
+  tileSize: number
+  tileOverlap: number
+  restoreFirst: boolean
+}
+
+export interface ProImageProcessResult {
+  status: string
+  image: string
+  url: string
+  outputPath: string
+  width: number
+  height: number
+  message: string
+  infotext: string
+}
+
+function normalizeImageProcessResult(payload: unknown): ProImageProcessResult {
+  const record = asRecord(payload)
+  return {
+    status: readString(record, ['status'], 'completed'),
+    image: readString(record, ['image'], ''),
+    url: readString(record, ['url'], ''),
+    outputPath: readString(record, ['outputPath', 'output_path'], ''),
+    width: readNumber(record, ['width'], 0),
+    height: readNumber(record, ['height'], 0),
+    message: readString(record, ['message'], ''),
+    infotext: readString(record, ['infotext'], ''),
+  }
+}
+
+export async function runEnhanceImage(request: ProEnhanceImageRequest): Promise<ProImageProcessResult> {
+  const payload = await requestJson('/api/pro/enhance/image', {
+    method: 'POST',
+    body: JSON.stringify(request),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  return normalizeImageProcessResult(payload)
+}
+
+export async function runVsrImage(request: {
+  imageDataUrl: string
+  scale: number
+  mode: number
+  effect: string
+  strength: number
+}): Promise<ProImageProcessResult> {
+  const payload = await requestJson('/api/pro/vsr/image', {
+    method: 'POST',
+    body: JSON.stringify(request),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  return normalizeImageProcessResult(payload)
+}
+
+export interface ProExtensionInfo {
+  id: string
+  name: string
+  version: string
+  description: string
+  path: string
+  enabled: boolean
+  error: string | null
+  hasApi: boolean
+  apiBase: string
+}
+
+export interface ProExtensionsStatus {
+  pluginsDir: string
+  disabled: string[]
+  extensions: ProExtensionInfo[]
+}
+
+export async function fetchProExtensions(signal?: AbortSignal): Promise<ProExtensionsStatus> {
+  const payload = await requestJson('/api/pro/extensions', { signal })
+  const record = asRecord(payload)
+  return {
+    pluginsDir: readString(record, ['pluginsDir', 'plugins_dir'], ''),
+    disabled: readArray(record, ['disabled']).map((item) => `${item}`),
+    extensions: readArray(record, ['extensions']).map((item) => {
+      const ext = asRecord(item)
+      return {
+        id: readString(ext, ['id'], ''),
+        name: readString(ext, ['name'], ''),
+        version: readString(ext, ['version'], '0.0.0'),
+        description: readString(ext, ['description'], ''),
+        path: readString(ext, ['path'], ''),
+        enabled: readBoolean(ext, ['enabled'], true),
+        error: readOptionalString(ext, ['error']) ?? null,
+        hasApi: readBoolean(ext, ['hasApi', 'has_api'], false),
+        apiBase: readString(ext, ['apiBase', 'api_base'], ''),
+      }
+    }),
+  }
+}
+
+export async function toggleProExtension(id: string, enabled: boolean): Promise<{ note: string; disabled: string[] }> {
+  const payload = await requestJson('/api/pro/extensions/toggle', {
+    method: 'POST',
+    body: JSON.stringify({ id, enabled }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const record = asRecord(payload)
+  return {
+    note: readString(record, ['note'], ''),
+    disabled: readArray(record, ['disabled']).map((item) => `${item}`),
+  }
+}
+
 export async function stopProGeneration(): Promise<ProStopResult> {
   const payload = await requestJson('/api/pro/interrupt', {
     method: 'POST',
@@ -763,6 +896,22 @@ function toGeneratePayload(request: ProGenerateRequest): JsonRecord {
     inpaint_only_masked: request.inpaintOnlyMasked,
     inpaint_masked_padding: request.inpaintMaskedPadding,
     inpaint_mask_content: request.inpaintMaskContent,
+    controlnet_units: request.controlNetEnabled
+      ? [
+          {
+            enabled: true,
+            model: request.controlNetModel,
+            module: request.controlNetModule || 'none',
+            image: request.controlNetImageDataUrl,
+            weight: request.controlNetWeight,
+            guidance_start: request.controlNetGuidanceStart,
+            guidance_end: request.controlNetGuidanceEnd,
+            processor_res: request.controlNetProcessorRes,
+            resize_mode: 'resize',
+            control_mode: 'balanced',
+          },
+        ]
+      : [],
   }
 }
 
@@ -954,6 +1103,13 @@ function normalizeSettingsStatus(value: unknown): ProSettingsStatus {
       wanGroupOffloadStream: readBoolean(video, ['wanGroupOffloadStream', 'wan_group_offload_stream'], true),
       wanGroupOffloadBlocks: readNumber(video, ['wanGroupOffloadBlocks', 'wan_group_offload_blocks'], 4),
       ggufCudaKernels: readBoolean(video, ['ggufCudaKernels', 'gguf_cuda_kernels'], false),
+      wanSageAttention: readString(video, ['wanSageAttention', 'wan_sage_attention'], 'auto'),
+      wanNativeDenoise: readBoolean(video, ['wanNativeDenoise', 'wan_native_denoise'], true),
+      wanManualVaeDecode: readBoolean(video, ['wanManualVaeDecode', 'wan_manual_vae_decode'], false),
+      wanVaeChunkFrames: readNumber(video, ['wanVaeChunkFrames', 'wan_vae_chunk_frames'], 4),
+      wanGroupOffloadRecordStream: readBoolean(video, ['wanGroupOffloadRecordStream', 'wan_group_offload_record_stream'], true),
+      wanGroupOffloadLowCpuMem: readBoolean(video, ['wanGroupOffloadLowCpuMem', 'wan_group_offload_low_cpu_mem'], true),
+      wanResidentMinVramGb: readNumber(video, ['wanResidentMinVramGb', 'wan_resident_min_vram_gb'], 20),
     },
     runtime: {
       port: readNumber(runtime, ['port'], 7860),
@@ -1375,6 +1531,15 @@ function normalizeSettings(
     autoMaskModel: readString(record, ['auto_mask_model', 'autoMaskModel'], fallback.autoMaskModel),
     autoMaskBoxThreshold: readNumber(record, ['auto_mask_box_threshold', 'autoMaskBoxThreshold'], fallback.autoMaskBoxThreshold),
     autoMaskTextThreshold: readNumber(record, ['auto_mask_text_threshold', 'autoMaskTextThreshold'], fallback.autoMaskTextThreshold),
+    controlNetEnabled: readBoolean(record, ['controlnet_enabled', 'controlNetEnabled'], fallback.controlNetEnabled),
+    controlNetModel: readString(record, ['controlnet_model', 'controlNetModel'], fallback.controlNetModel),
+    controlNetModule: readString(record, ['controlnet_module', 'controlNetModule'], fallback.controlNetModule),
+    controlNetImageDataUrl: readString(record, ['controlnet_image_data_url', 'controlNetImageDataUrl'], fallback.controlNetImageDataUrl),
+    controlNetImageName: readString(record, ['controlnet_image_name', 'controlNetImageName'], fallback.controlNetImageName),
+    controlNetWeight: readNumber(record, ['controlnet_weight', 'controlNetWeight'], fallback.controlNetWeight),
+    controlNetGuidanceStart: readNumber(record, ['controlnet_guidance_start', 'controlNetGuidanceStart'], fallback.controlNetGuidanceStart),
+    controlNetGuidanceEnd: readNumber(record, ['controlnet_guidance_end', 'controlNetGuidanceEnd'], fallback.controlNetGuidanceEnd),
+    controlNetProcessorRes: readNumber(record, ['controlnet_processor_res', 'controlNetProcessorRes'], fallback.controlNetProcessorRes),
     saveImages: readBoolean(record, ['save_images', 'saveImages'], fallback.saveImages),
   }
 }

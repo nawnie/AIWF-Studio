@@ -43,8 +43,10 @@ import {
   fetchProDownloads,
   fetchProLogs,
   fetchProRuntime,
+  fetchProExtensions,
   fetchProSettings,
   fetchVideoLabStatus,
+  toggleProExtension,
   formatApiError,
   generateAutoMask,
   generateProOutput,
@@ -57,11 +59,13 @@ import {
   reportProClientError,
   reportProClientEvent,
   requestProRestart,
+  runEnhanceImage,
   saveProSettings,
   streamProRuntime,
   stopProGeneration,
+  runVsrImage,
 } from './api'
-import type { VideoLabProbe, VideoLabStatus } from './api'
+import type { ProExtensionsStatus, VideoLabProbe, VideoLabStatus } from './api'
 import type {
   AspectRatioOption,
   CreationMode,
@@ -92,7 +96,7 @@ interface IconItem<T extends string> {
   icon: LucideIcon
 }
 
-type ToolModalId = 'segmentation' | 'hires' | 'reactor' | 'about' | null
+type ToolModalId = 'segmentation' | 'hires' | 'enhance' | 'reactor' | 'about' | null
 type MenuBarId = 'file' | 'edit' | 'view' | 'options' | 'help' | null
 type DragTarget = 'left' | 'right' | 'bottom'
 
@@ -168,6 +172,18 @@ const SANA_VAE_TILING_OPTIONS = [
   { value: 'auto', label: 'Auto' },
   { value: 'off', label: 'Off' },
   { value: 'always', label: 'Always' },
+]
+
+const CONTROLNET_MODULE_OPTIONS = [
+  { value: 'none', label: 'None / passthrough' },
+  { value: 'canny', label: 'Canny' },
+  { value: 'depth', label: 'Depth' },
+  { value: 'openpose', label: 'OpenPose' },
+  { value: 'lineart', label: 'Lineart' },
+  { value: 'scribble', label: 'Scribble' },
+  { value: 'softedge', label: 'SoftEdge' },
+  { value: 'normal', label: 'Normal' },
+  { value: 'segmentation', label: 'Segmentation' },
 ]
 
 const EMPTY_READINESS: ProReadinessStatus = {
@@ -356,9 +372,21 @@ function App() {
   const [activeModal, setActiveModal] = useState<ToolModalId>(null)
   const [openMenu, setOpenMenu] = useState<MenuBarId>(null)
   const [dragState, setDragState] = useState<DragState | null>(null)
-  const [hiresEnabled, setHiresEnabled] = useState(false)
-  const [hiresScale, setHiresScale] = useState(1.75)
-  const [hiresDenoise, setHiresDenoise] = useState(0.3)
+  const [enhanceSourceDataUrl, setEnhanceSourceDataUrl] = useState('')
+  const [enhanceSourceName, setEnhanceSourceName] = useState('')
+  const [enhanceMode, setEnhanceMode] = useState<'restore' | 'upscale' | 'restore-upscale' | 'vsr'>('restore')
+  const [enhanceRestoreModel, setEnhanceRestoreModel] = useState('gfpgan-v1.4')
+  const [enhanceUpscaleModel, setEnhanceUpscaleModel] = useState('realesrgan-x4plus')
+  const [enhanceRestoreVisibility, setEnhanceRestoreVisibility] = useState(1)
+  const [enhanceCodeformerWeight, setEnhanceCodeformerWeight] = useState(0.5)
+  const [enhanceUpscaleScale, setEnhanceUpscaleScale] = useState(2)
+  const [enhanceTileSize, setEnhanceTileSize] = useState(256)
+  const [enhanceTileOverlap, setEnhanceTileOverlap] = useState(32)
+  const [enhanceVsrScale, setEnhanceVsrScale] = useState(2)
+  const [enhanceVsrMode, setEnhanceVsrMode] = useState(0)
+  const [enhanceVsrStrength, setEnhanceVsrStrength] = useState(0.4)
+  const [enhanceBusy, setEnhanceBusy] = useState(false)
+  const [enhanceMessage, setEnhanceMessage] = useState('')
   const [segmentationMode, setSegmentationMode] = useState('Auto mask')
   const [reactorSourceDataUrl, setReactorSourceDataUrl] = useState('')
   const [reactorBusy, setReactorBusy] = useState(false)
@@ -1050,15 +1078,7 @@ function App() {
       },
     })
     try {
-      const result = await generateProOutput(
-        {
-          ...settings,
-          enableHires: hiresEnabled,
-          hiresScale,
-          hiresDenoise,
-        },
-        controller.signal,
-      )
+      const result = await generateProOutput(settings, controller.signal)
       setGenerationProgress(result.progress)
       setGenerationTimings(result.timings)
       setGenerationReceiptPath(result.receiptPath ?? '')
@@ -1124,7 +1144,7 @@ function App() {
       void fetchProRuntime().then(setRuntime).catch(() => undefined)
       void fetchProLogs().then(setLogStatus).catch(() => undefined)
     }
-  }, [bootstrap.models, generationActive, hiresDenoise, hiresEnabled, hiresScale, selectedModel, settings])
+  }, [bootstrap.models, generationActive, selectedModel, settings])
 
   const handleStopGenerate = useCallback(() => {
     const controller = generationAbortRef.current
@@ -1203,6 +1223,144 @@ function App() {
     }))
     setStatusMessage('Output settings applied to the current generation controls.')
   }, [])
+
+  const readCurrentPreviewDataUrl = useCallback(async () => {
+    if (!preview?.url) {
+      return ''
+    }
+    if (preview.url.startsWith('data:')) {
+      return preview.url
+    }
+    const blob = await (await fetch(preview.url)).blob()
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = () => reject(new Error('Could not read the current preview image.'))
+      reader.readAsDataURL(blob)
+    })
+  }, [preview?.url])
+
+  const handleEnhanceSourceChange = useCallback((event: ReactChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setEnhanceSourceDataUrl(reader.result)
+        setEnhanceSourceName(file.name)
+        setEnhanceMessage(`Loaded ${file.name}.`)
+      }
+    }
+    reader.readAsDataURL(file)
+  }, [])
+
+  const handleUsePreviewForEnhance = useCallback(async () => {
+    try {
+      const dataUrl = await readCurrentPreviewDataUrl()
+      if (!dataUrl) {
+        setEnhanceMessage('Generate or select an image first.')
+        return
+      }
+      setEnhanceSourceDataUrl(dataUrl)
+      setEnhanceSourceName('Current preview')
+      setEnhanceMessage('Current preview loaded for Enhance.')
+    } catch (error: unknown) {
+      setEnhanceMessage(`Could not load preview: ${formatApiError(error)}`)
+    }
+  }, [readCurrentPreviewDataUrl])
+
+  const handleRunEnhance = useCallback(async () => {
+    let source = enhanceSourceDataUrl
+    if (!source) {
+      source = await readCurrentPreviewDataUrl()
+    }
+    if (!source) {
+      setEnhanceMessage('Upload an image or use the current preview first.')
+      return
+    }
+    setEnhanceBusy(true)
+    setEnhanceMessage(enhanceMode === 'vsr' ? 'Running NVIDIA VSR image upscale...' : 'Running Enhance pipeline...')
+    try {
+      const result = enhanceMode === 'vsr'
+        ? await runVsrImage({
+            imageDataUrl: source,
+            scale: enhanceVsrScale,
+            mode: enhanceVsrMode,
+            effect: 'SuperRes',
+            strength: enhanceVsrStrength,
+          })
+        : await runEnhanceImage({
+            imageDataUrl: source,
+            restoreEnabled: enhanceMode === 'restore' || enhanceMode === 'restore-upscale',
+            restoreModel: enhanceRestoreModel,
+            restoreVisibility: enhanceRestoreVisibility,
+            codeformerWeight: enhanceCodeformerWeight,
+            upscaleEnabled: enhanceMode === 'upscale' || enhanceMode === 'restore-upscale',
+            upscaleModel: enhanceUpscaleModel,
+            upscaleScale: enhanceUpscaleScale,
+            tileSize: enhanceTileSize,
+            tileOverlap: enhanceTileOverlap,
+            restoreFirst: true,
+          })
+      const outputUrl = result.image || result.url
+      if (!outputUrl) {
+        setEnhanceMessage(result.message || 'Enhance completed without an image payload.')
+        return
+      }
+      const enhanced: RecentOutput = {
+        id: `pro-${enhanceMode}-${Date.now()}`,
+        url: outputUrl,
+        thumbnailUrl: outputUrl,
+        width: result.width || preview?.width || settings.width,
+        height: result.height || preview?.height || settings.height,
+        prompt: preview?.prompt || 'Pro image post-process',
+        negativePrompt: preview?.negativePrompt || '',
+        modelName: enhanceMode === 'vsr' ? 'NVIDIA VSR' : 'Pro Enhance',
+        mode: 'image',
+        seed: preview?.seed,
+        steps: preview?.steps,
+        cfgScale: preview?.cfgScale,
+        sampler: preview?.sampler,
+        scheduler: preview?.scheduler,
+        infotext: result.infotext || result.message,
+        createdAt: new Date().toISOString(),
+        status: 'completed',
+        path: result.outputPath,
+      }
+      setPreview(enhanced)
+      setBootstrap((current) => ({
+        ...current,
+        recentOutputs: mergeRecentOutputs([enhanced], current.recentOutputs),
+      }))
+      setEnhanceMessage(result.message || 'Enhance complete.')
+      setStatusMessage(result.message || 'Enhance complete.')
+    } catch (error: unknown) {
+      setEnhanceMessage(`Enhance failed: ${formatApiError(error)}`)
+    } finally {
+      setEnhanceBusy(false)
+    }
+  }, [
+    enhanceCodeformerWeight,
+    enhanceMode,
+    enhanceRestoreModel,
+    enhanceRestoreVisibility,
+    enhanceSourceDataUrl,
+    enhanceTileOverlap,
+    enhanceTileSize,
+    enhanceUpscaleModel,
+    enhanceUpscaleScale,
+    enhanceVsrMode,
+    enhanceVsrScale,
+    enhanceVsrStrength,
+    preview,
+    readCurrentPreviewDataUrl,
+    settings.height,
+    settings.width,
+    setPreview,
+  ])
 
   const handleLayoutReset = useCallback(() => {
     setLeftPanelWidth(380)
@@ -1286,6 +1444,8 @@ function App() {
               setActiveModal('segmentation')
             } else if (action === 'open-reactor') {
               setActiveModal('reactor')
+            } else if (action === 'open-enhance') {
+              setActiveModal('enhance')
             } else if (action === 'copy-last') {
               void navigator.clipboard?.writeText(settings.prompt)
               setStatusMessage('Prompt copied to clipboard.')
@@ -1377,6 +1537,7 @@ function App() {
                 }}
                 onOpenData={() => handleRailSelect('data')}
                 onOpenSegmentation={() => setActiveModal('segmentation')}
+                onOpenEnhance={() => setActiveModal('enhance')}
                 onOpenReactor={() => setActiveModal('reactor')}
               />
               <ResizeHandle
@@ -1395,6 +1556,7 @@ function App() {
                 }}
                 onOpenData={() => handleRailSelect('data')}
                 onOpenSegmentation={() => setActiveModal('segmentation')}
+                onOpenEnhance={() => setActiveModal('enhance')}
                 onOpenReactor={() => setActiveModal('reactor')}
               />
               <ResizeHandle
@@ -1528,6 +1690,7 @@ function App() {
                 onToggleAdvanced={() => setShowAdvanced((value) => !value)}
                 onOpenSegmentation={() => setActiveModal('segmentation')}
                 onOpenHires={() => setActiveModal('hires')}
+                onOpenEnhance={() => setActiveModal('enhance')}
                 onOpenReactor={() => setActiveModal('reactor')}
                 onPromptAnalyze={handlePromptAnalyze}
                 bottomDockVisible={bottomDockVisible}
@@ -1555,6 +1718,7 @@ function App() {
                     height={settings.height}
                     onOpenSegmentation={() => setActiveModal('segmentation')}
                     onOpenHires={() => setActiveModal('hires')}
+                    onOpenEnhance={() => setActiveModal('enhance')}
                     onOpenReactor={() => setActiveModal('reactor')}
                     bottomDockVisible={bottomDockVisible}
                     onToggleBottomDock={() => setBottomDockVisible((value) => !value)}
@@ -1599,17 +1763,210 @@ function App() {
               <option>Box then segment</option>
             </select>
           </label>
+          <p className="pro-field-note">
+            Quick auto-mask controls are on the Inpaint canvas. Full SAM box, point, and DINO workflows remain in Gradio Lab.
+          </p>
         </div>
       </ToolModal>
 
       <ToolModal open={activeModal === 'hires'} title="High-res fix" onClose={() => setActiveModal(null)}>
         <div className="pro-modal-form">
           <label className="pro-toggle">
-            <input type="checkbox" checked={hiresEnabled} onChange={(event) => setHiresEnabled(event.target.checked)} />
+            <input
+              type="checkbox"
+              checked={settings.enableHires}
+              onChange={(event) => setSettings((current) => ({ ...current, enableHires: event.target.checked }))}
+            />
             <span>Enable high-res pass</span>
           </label>
-          <RangeField label="Scale" min={1} max={3} step={0.05} value={hiresScale} onChange={setHiresScale} />
-          <RangeField label="Denoise" min={0} max={1} step={0.05} value={hiresDenoise} onChange={setHiresDenoise} />
+          <RangeField
+            label="Scale"
+            min={1}
+            max={4}
+            step={0.05}
+            value={settings.hiresScale}
+            onChange={(value) => setSettings((current) => ({ ...current, hiresScale: value }))}
+          />
+          <RangeField
+            label="Denoise"
+            min={0}
+            max={1}
+            step={0.05}
+            value={settings.hiresDenoise}
+            onChange={(value) => setSettings((current) => ({ ...current, hiresDenoise: value }))}
+          />
+          <label className="pro-field">
+            <FieldLabel
+              label="Second-pass steps"
+              tooltip="Use fewer high-res steps than the base pass unless the model visibly needs more detail cleanup."
+            />
+            <input
+              type="number"
+              min={0}
+              max={80}
+              value={settings.hiresSteps}
+              onChange={(event) => setSettings((current) => ({ ...current, hiresSteps: Number(event.target.value) }))}
+            />
+          </label>
+          <label className="pro-field">
+            <FieldLabel
+              label="Upscaler"
+              tooltip="Diffusers accepts common resize names such as latent, nearest, lanczos, bicubic, or a project upscaler id when supported by the route."
+            />
+            <input
+              value={settings.hiresUpscaler}
+              placeholder="latent, lanczos, bicubic, nearest"
+              onChange={(event) => setSettings((current) => ({ ...current, hiresUpscaler: event.target.value }))}
+            />
+          </label>
+        </div>
+      </ToolModal>
+
+      <ToolModal open={activeModal === 'enhance'} title="Enhance / VSR" onClose={() => setActiveModal(null)}>
+        <div className="pro-modal-form">
+          <div className="pro-enhance-source-row">
+            {enhanceSourceDataUrl ? (
+              <img className="pro-enhance-preview" src={enhanceSourceDataUrl} alt="" />
+            ) : (
+              <div className="pro-enhance-empty">No source image</div>
+            )}
+            <div className="pro-enhance-source-actions">
+              <span>{enhanceSourceName || 'Use the current canvas image or upload a source.'}</span>
+              <button type="button" className="pro-secondary-button" onClick={handleUsePreviewForEnhance} disabled={enhanceBusy || !preview?.url}>
+                Use current preview
+              </button>
+              <label className="pro-secondary-button" htmlFor="pro-enhance-source-input">
+                <FileImage size={15} aria-hidden="true" />
+                <span>Upload image</span>
+              </label>
+              <input
+                id="pro-enhance-source-input"
+                className="pro-file-input-hidden"
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={handleEnhanceSourceChange}
+                disabled={enhanceBusy}
+              />
+            </div>
+          </div>
+          <label className="pro-field">
+            <FieldLabel
+              label="Mode"
+              tooltip="Face restore uses GFPGAN/CodeFormer-style restorer models. Upscale uses local Enhance upscalers. VSR uses NVIDIA VideoFX when installed."
+            />
+            <select value={enhanceMode} onChange={(event) => setEnhanceMode(event.target.value as typeof enhanceMode)} disabled={enhanceBusy}>
+              <option value="restore">Face restore</option>
+              <option value="upscale">Upscale</option>
+              <option value="restore-upscale">Face restore + upscale</option>
+              <option value="vsr">NVIDIA VSR image upscale</option>
+            </select>
+          </label>
+          {enhanceMode !== 'upscale' && enhanceMode !== 'vsr' ? (
+            <>
+              <label className="pro-field">
+                <FieldLabel label="Face restorer model" />
+                <input
+                  value={enhanceRestoreModel}
+                  onChange={(event) => setEnhanceRestoreModel(event.target.value)}
+                  placeholder="gfpgan-v1.4 or codeformer"
+                  disabled={enhanceBusy}
+                />
+              </label>
+              <RangeField
+                label="Restore strength"
+                min={0}
+                max={1}
+                step={0.05}
+                value={enhanceRestoreVisibility}
+                onChange={setEnhanceRestoreVisibility}
+              />
+              <RangeField
+                label="CodeFormer weight"
+                min={0}
+                max={1}
+                step={0.05}
+                value={enhanceCodeformerWeight}
+                onChange={setEnhanceCodeformerWeight}
+              />
+            </>
+          ) : null}
+          {enhanceMode === 'upscale' || enhanceMode === 'restore-upscale' ? (
+            <>
+              <label className="pro-field">
+                <FieldLabel label="Upscaler model" />
+                <input
+                  value={enhanceUpscaleModel}
+                  onChange={(event) => setEnhanceUpscaleModel(event.target.value)}
+                  placeholder="realesrgan-x4plus"
+                  disabled={enhanceBusy}
+                />
+              </label>
+              <RangeField label="Scale" min={1} max={8} step={0.5} value={enhanceUpscaleScale} onChange={setEnhanceUpscaleScale} />
+              <div className="pro-control-grid">
+                <label className="pro-field">
+                  <FieldLabel label="Tile size" />
+                  <input
+                    type="number"
+                    min={0}
+                    max={2048}
+                    step={64}
+                    value={enhanceTileSize}
+                    onChange={(event) => setEnhanceTileSize(Number(event.target.value))}
+                    disabled={enhanceBusy}
+                  />
+                </label>
+                <label className="pro-field">
+                  <FieldLabel label="Tile overlap" />
+                  <input
+                    type="number"
+                    min={0}
+                    max={512}
+                    step={16}
+                    value={enhanceTileOverlap}
+                    onChange={(event) => setEnhanceTileOverlap(Number(event.target.value))}
+                    disabled={enhanceBusy}
+                  />
+                </label>
+              </div>
+            </>
+          ) : null}
+          {enhanceMode === 'vsr' ? (
+            <>
+              <RangeField label="VSR scale" min={1} max={4} step={0.5} value={enhanceVsrScale} onChange={setEnhanceVsrScale} />
+              <div className="pro-control-grid">
+                <label className="pro-field">
+                  <FieldLabel label="VSR mode" />
+                  <input
+                    type="number"
+                    min={0}
+                    max={19}
+                    value={enhanceVsrMode}
+                    onChange={(event) => setEnhanceVsrMode(clamp(Number(event.target.value) || 0, 0, 19))}
+                    disabled={enhanceBusy}
+                  />
+                </label>
+                <label className="pro-field">
+                  <FieldLabel label="Strength" />
+                  <input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={enhanceVsrStrength}
+                    onChange={(event) => setEnhanceVsrStrength(clamp(Number(event.target.value) || 0, 0, 1))}
+                    disabled={enhanceBusy}
+                  />
+                </label>
+              </div>
+              <p className="pro-field-note">Video VSR is also available from Video Lab after uploading a clip.</p>
+            </>
+          ) : null}
+          <div className="pro-settings-actions">
+            <button type="button" className="pro-primary-button" onClick={handleRunEnhance} disabled={enhanceBusy}>
+              {enhanceBusy ? 'Working...' : 'Run'}
+            </button>
+            <span>{enhanceMessage || 'Ready.'}</span>
+          </div>
         </div>
       </ToolModal>
 
@@ -1894,6 +2251,7 @@ function PromptPanel({
   onToggleAdvanced,
   onOpenSegmentation,
   onOpenHires,
+  onOpenEnhance,
   onOpenReactor,
   onPromptAnalyze,
   bottomDockVisible,
@@ -1923,6 +2281,7 @@ function PromptPanel({
   onToggleAdvanced: () => void
   onOpenSegmentation: () => void
   onOpenHires: () => void
+  onOpenEnhance: () => void
   onOpenReactor: () => void
   onPromptAnalyze: () => void
   bottomDockVisible: boolean
@@ -2006,6 +2365,27 @@ function PromptPanel({
         ...current,
         sourceImageDataUrl: value,
         sourceImageName: file.name,
+      }))
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const handleControlNetImageChange = (event: ReactChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => {
+      const value = typeof reader.result === 'string' ? reader.result : ''
+      if (!value) {
+        return
+      }
+      onSettingsChange((current) => ({
+        ...current,
+        controlNetImageDataUrl: value,
+        controlNetImageName: file.name,
       }))
     }
     reader.readAsDataURL(file)
@@ -2518,6 +2898,134 @@ function PromptPanel({
         />
       ) : null}
 
+      {settings.mode !== 'video' ? (
+        <section className="pro-controlnet-card" aria-label="ControlNet unit">
+          <div className="pro-controlnet-header">
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={settings.controlNetEnabled}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({ ...current, controlNetEnabled: event.target.checked }))
+                }
+              />
+              <span>ControlNet unit 1</span>
+            </label>
+            <small>Gradio Lab has the multi-unit stack.</small>
+          </div>
+          <label className="pro-field pro-compact-field">
+            <FieldLabel
+              label="ControlNet model"
+              tooltip="Use a local ControlNet model id or path that matches the selected SD/SDXL family."
+            />
+            <input
+              value={settings.controlNetModel}
+              placeholder="control_v11p_sd15_canny, diffusers folder, or local path"
+              onChange={(event) =>
+                onSettingsChange((current) => ({ ...current, controlNetModel: event.target.value }))
+              }
+            />
+          </label>
+          <label className="pro-field pro-compact-field">
+            <FieldLabel
+              label="Preprocessor"
+              tooltip="Choose none if the image is already prepared. Canny, depth, pose, line, and segmentation preprocessors run before the ControlNet pass when available."
+            />
+            <select
+              value={settings.controlNetModule}
+              onChange={(event) =>
+                onSettingsChange((current) => ({ ...current, controlNetModule: event.target.value }))
+              }
+            >
+              {CONTROLNET_MODULE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="pro-controlnet-upload-row">
+            {settings.controlNetImageDataUrl ? (
+              <img className="pro-controlnet-preview" src={settings.controlNetImageDataUrl} alt="" />
+            ) : (
+              <div className="pro-controlnet-empty">No control image</div>
+            )}
+            <div className="pro-controlnet-upload-actions">
+              <span>{settings.controlNetImageName || 'Upload an edge, pose, depth, or reference image.'}</span>
+              <label className="pro-secondary-button" htmlFor="pro-controlnet-image-input">
+                <FileImage size={15} aria-hidden="true" />
+                <span>Upload image</span>
+              </label>
+              <input
+                id="pro-controlnet-image-input"
+                className="pro-file-input-hidden"
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={handleControlNetImageChange}
+              />
+              {settings.controlNetImageDataUrl ? (
+                <button
+                  type="button"
+                  className="pro-secondary-button ghost"
+                  onClick={() =>
+                    onSettingsChange((current) => ({
+                      ...current,
+                      controlNetImageDataUrl: '',
+                      controlNetImageName: '',
+                    }))
+                  }
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
+          </div>
+          <RangeField
+            label="Weight"
+            tooltip="ControlNet weight decides how strongly the control image steers the generation."
+            min={0}
+            max={2}
+            step={0.05}
+            value={settings.controlNetWeight}
+            onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetWeight: value }))}
+          />
+          <div className="pro-controlnet-window">
+            <RangeField
+              label="Start"
+              min={0}
+              max={1}
+              step={0.01}
+              value={settings.controlNetGuidanceStart}
+              onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceStart: value }))}
+            />
+            <RangeField
+              label="End"
+              min={0}
+              max={1}
+              step={0.01}
+              value={settings.controlNetGuidanceEnd}
+              onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceEnd: value }))}
+            />
+          </div>
+          <label className="pro-field pro-compact-field">
+            <FieldLabel label="Processor resolution" compact />
+            <input
+              type="number"
+              min={64}
+              max={4096}
+              step={64}
+              value={settings.controlNetProcessorRes}
+              onChange={(event) =>
+                onSettingsChange((current) => ({
+                  ...current,
+                  controlNetProcessorRes: Number(event.target.value),
+                }))
+              }
+            />
+          </label>
+        </section>
+      ) : null}
+
       <div className="pro-tool-launchers">
         <button type="button" className="pro-tool-button" onClick={onOpenSegmentation}>
           <ScanSearch size={15} aria-hidden="true" />
@@ -2526,6 +3034,10 @@ function PromptPanel({
         <button type="button" className="pro-tool-button" onClick={onOpenHires}>
           <Highlighter size={15} aria-hidden="true" />
           <span>High-res fix</span>
+        </button>
+        <button type="button" className="pro-tool-button" onClick={onOpenEnhance}>
+          <Sparkles size={15} aria-hidden="true" />
+          <span>Enhance / VSR</span>
         </button>
         <button type="button" className="pro-tool-button" onClick={onOpenReactor}>
           <Wand2 size={15} aria-hidden="true" />
@@ -3083,6 +3595,7 @@ function ToolsControlPanel({
   onOpenVideo,
   onOpenData,
   onOpenSegmentation,
+  onOpenEnhance,
   onOpenReactor,
 }: {
   capabilitiesStatus: ProCapabilitiesStatus | null
@@ -3091,6 +3604,7 @@ function ToolsControlPanel({
   onOpenVideo: () => void
   onOpenData: () => void
   onOpenSegmentation: () => void
+  onOpenEnhance: () => void
   onOpenReactor: () => void
 }) {
   const status = capabilitiesStatus ?? EMPTY_CAPABILITIES
@@ -3116,6 +3630,7 @@ function ToolsControlPanel({
             <button type="button" className="pro-secondary-button" onClick={onOpenVideo}>Sana Video</button>
             <button type="button" className="pro-secondary-button" onClick={onOpenData}>Data</button>
             <button type="button" className="pro-secondary-button" onClick={onOpenSegmentation}>Segment</button>
+            <button type="button" className="pro-secondary-button" onClick={onOpenEnhance}>Enhance</button>
             <button type="button" className="pro-secondary-button" onClick={onOpenReactor}>ReActor</button>
           </div>
         </InfoCard>
@@ -3133,6 +3648,75 @@ function ToolsControlPanel({
         </InfoCard>
       </div>
     </aside>
+  )
+}
+
+function ExtensionsCard() {
+  const [status, setStatus] = useState<ProExtensionsStatus | null>(null)
+  const [message, setMessage] = useState('')
+  const [busyId, setBusyId] = useState('')
+
+  const refresh = useCallback(() => {
+    fetchProExtensions()
+      .then(setStatus)
+      .catch((error: unknown) => setMessage(`Could not load extensions: ${formatApiError(error)}`))
+  }, [])
+
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+
+  const handleToggle = async (id: string, enabled: boolean) => {
+    setBusyId(id)
+    try {
+      const result = await toggleProExtension(id, enabled)
+      setMessage(result.note || 'Saved.')
+      refresh()
+    } catch (error: unknown) {
+      setMessage(`Toggle failed: ${formatApiError(error)}`)
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  return (
+    <InfoCard
+      title="Extensions"
+      subtitle="User extensions loaded from the plugins folder. Add your own by copying plugins/hello-extension — see docs/EXTENSIONS.md."
+    >
+      <div className="pro-form-stack">
+        {status && status.extensions.length === 0 ? (
+          <p className="pro-muted">
+            No extensions found. Drop a folder with a plugin.py into {status.pluginsDir || 'plugins/'} and restart.
+          </p>
+        ) : null}
+        {(status?.extensions ?? []).map((ext) => (
+          <div key={ext.id} className="pro-extension-row">
+            <div className="pro-extension-info">
+              <strong>
+                {ext.name} <small>v{ext.version}</small>
+              </strong>
+              {ext.description ? <span>{ext.description}</span> : null}
+              {ext.error ? <span className="pro-extension-error">Load error: {ext.error}</span> : null}
+              {ext.hasApi ? <small className="pro-muted">API: {ext.apiBase}</small> : null}
+            </div>
+            <button
+              type="button"
+              className="pro-secondary-button"
+              disabled={busyId === ext.id}
+              onClick={() => handleToggle(ext.id, !ext.enabled)}
+            >
+              {ext.enabled ? 'Disable' : 'Enable'}
+            </button>
+          </div>
+        ))}
+        {message ? <p className="pro-field-note">{message}</p> : null}
+        <p className="pro-field-note">
+          Extensions run as Python code inside the app — only install ones you trust. Enable/disable changes apply on
+          the next restart.
+        </p>
+      </div>
+    </InfoCard>
   )
 }
 
@@ -3411,6 +3995,7 @@ function ToolsWorkspace({
   onOpenVideo,
   onOpenData,
   onOpenSegmentation,
+  onOpenEnhance,
   onOpenReactor,
 }: {
   capabilitiesStatus: ProCapabilitiesStatus | null
@@ -3420,6 +4005,7 @@ function ToolsWorkspace({
   onOpenVideo: () => void
   onOpenData: () => void
   onOpenSegmentation: () => void
+  onOpenEnhance: () => void
   onOpenReactor: () => void
 }) {
   const status = capabilitiesStatus ?? EMPTY_CAPABILITIES
@@ -3450,6 +4036,7 @@ function ToolsWorkspace({
       ],
       actions: [
         { label: 'Segment', onClick: onOpenSegmentation },
+        { label: 'Enhance', onClick: onOpenEnhance },
         { label: 'ReActor', onClick: onOpenReactor },
       ],
     },
@@ -4002,6 +4589,13 @@ function SettingsWorkspace({
     wanGroupOffloadStream: true,
     wanGroupOffloadBlocks: 4,
     ggufCudaKernels: false,
+    wanSageAttention: 'auto',
+    wanNativeDenoise: true,
+    wanManualVaeDecode: false,
+    wanVaeChunkFrames: 4,
+    wanGroupOffloadRecordStream: true,
+    wanGroupOffloadLowCpuMem: true,
+    wanResidentMinVramGb: 20,
   }
   const runtimeSettings = settingsStatus?.runtime ?? {
     port: 7860,
@@ -4504,6 +5098,89 @@ function SettingsWorkspace({
           </div>
         </InfoCard>
         )}
+        {show('video', 'advanced wan runtime sage attention native denoise vae decode chunk record stream resident vram low cpu memory') && (
+        <InfoCard
+          title="Advanced Wan runtime"
+          subtitle="Exact control over the Wan execution path. Defaults are the shipped behavior — change one knob at a time and compare timings."
+        >
+          <div className="pro-form-stack">
+            <label className="pro-field">
+              <FieldLabel
+                label="SageAttention"
+                tooltip="Auto uses SageAttention when the package is installed (the shipped behavior). Force warns if it is missing; Off falls back to plain torch SDPA — useful when comparing quality or debugging attention artifacts."
+              />
+              <select
+                value={videoSettings.wanSageAttention}
+                onChange={(event) => updateVideoSetting({ wanSageAttention: event.target.value })}
+                disabled={!settingsStatus}
+              >
+                <option value="auto">Auto (use when installed)</option>
+                <option value="force">Force (warn if missing)</option>
+                <option value="off">Off (plain torch SDPA)</option>
+              </select>
+            </label>
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={videoSettings.wanNativeDenoise}
+                onChange={(event) => updateVideoSetting({ wanNativeDenoise: event.target.checked })}
+                disabled={!settingsStatus}
+              />
+              <span>Native denoise loop (AIWF-owned stepping; off = diffusers pipeline as a black box)</span>
+            </label>
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={videoSettings.wanManualVaeDecode}
+                onChange={(event) => updateVideoSetting({ wanManualVaeDecode: event.target.checked })}
+                disabled={!settingsStatus}
+              />
+              <span>Manual chunked VAE decode (lower peak VRAM, slower decode)</span>
+            </label>
+            {videoSettings.wanManualVaeDecode ? (
+              <RangeField
+                label="VAE decode chunk frames"
+                min={1}
+                max={16}
+                step={1}
+                value={videoSettings.wanVaeChunkFrames}
+                onChange={(value) => updateVideoSetting({ wanVaeChunkFrames: value })}
+              />
+            ) : null}
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={videoSettings.wanGroupOffloadRecordStream}
+                onChange={(event) => updateVideoSetting({ wanGroupOffloadRecordStream: event.target.checked })}
+                disabled={!settingsStatus}
+              />
+              <span>Record CUDA streams during group offload (safer overlap; tiny overhead)</span>
+            </label>
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={videoSettings.wanGroupOffloadLowCpuMem}
+                onChange={(event) => updateVideoSetting({ wanGroupOffloadLowCpuMem: event.target.checked })}
+                disabled={!settingsStatus}
+              />
+              <span>Low CPU memory staging for offload (off = faster swaps, more system RAM)</span>
+            </label>
+            <RangeField
+              label="Resident mode minimum VRAM (GB)"
+              tooltip="Dual FP8 high/low stages only co-reside on GPUs with at least this much VRAM; below it, Resident falls back to Balanced swapping. Lower at your own risk."
+              min={8}
+              max={96}
+              step={1}
+              value={videoSettings.wanResidentMinVramGb}
+              onChange={(value) => updateVideoSetting({ wanResidentMinVramGb: value })}
+            />
+            <p className="pro-field-note">
+              Applied to the next generation — no restart needed. If a change makes things slower or unstable, set it
+              back: the defaults shown on first load are the tested configuration.
+            </p>
+          </div>
+        </InfoCard>
+        )}
         {show('video', 'wan video defaults runtime mode offload sampler flow shift high low model vae text encoder') && (
         <InfoCard title="Wan video defaults" subtitle="Restore the default Wan split, sampler, and offload choices when the video tab opens.">
           <div className="pro-form-stack">
@@ -4763,6 +5440,9 @@ function SettingsWorkspace({
           </div>
         </InfoCard>
         )}
+        {show('system', 'extensions plugins user addons custom api routes enable disable') && (
+        <ExtensionsCard />
+        )}
         {show('system', 'backend paths config launch profile models checkpoints outputs') && (
         <InfoCard title="Backend paths" subtitle="Real paths reported by the Pro API for tonight's QA pass.">
           <dl className="pro-runtime-list">
@@ -4847,6 +5527,7 @@ function CanvasPreview({
   height,
   onOpenSegmentation,
   onOpenHires,
+  onOpenEnhance,
   onOpenReactor,
   bottomDockVisible,
   onToggleBottomDock,
@@ -4858,6 +5539,7 @@ function CanvasPreview({
   height: number
   onOpenSegmentation: () => void
   onOpenHires: () => void
+  onOpenEnhance: () => void
   onOpenReactor: () => void
   bottomDockVisible: boolean
   onToggleBottomDock: () => void
@@ -4918,6 +5600,20 @@ function CanvasPreview({
       height: `${previewFrameSize.height}px`,
     }
   }, [aspectRatio, previewFrameSize.height, previewFrameSize.width])
+  const emptyCanvas = activeMode === 'video'
+    ? {
+        className: 'pro-empty-preview pro-stage-empty pro-stage-empty-video',
+        icon: Video,
+        title: 'Video canvas',
+        message: 'Generate text-to-video or upload a first frame in the prompt panel. Playback controls appear here.',
+      }
+    : {
+        className: 'pro-empty-preview pro-stage-empty pro-stage-empty-image',
+        icon: Image,
+        title: 'Image canvas',
+        message: 'Generate an image or select one from the output dock. Settings and history stay below the canvas.',
+      }
+  const EmptyIcon = emptyCanvas.icon
 
   return (
     <section className="pro-canvas" aria-label="Canvas and output preview">
@@ -4934,6 +5630,10 @@ function CanvasPreview({
           <button type="button" className="pro-tool-chip" onClick={onOpenHires}>
             <Highlighter size={14} aria-hidden="true" />
             <span>Hi-res</span>
+          </button>
+          <button type="button" className="pro-tool-chip" onClick={onOpenEnhance}>
+            <Sparkles size={14} aria-hidden="true" />
+            <span>Enhance</span>
           </button>
           <button type="button" className="pro-tool-chip" onClick={onOpenReactor}>
             <Wand2 size={14} aria-hidden="true" />
@@ -4960,10 +5660,10 @@ function CanvasPreview({
           ) : preview ? (
             <img src={preview.url} alt={preview.prompt} />
           ) : (
-            <div className="pro-empty-preview pro-stage-empty">
-              <Monitor size={42} aria-hidden="true" />
-              <strong>{activeMode === 'video' ? 'Video preview' : 'Image preview'}</strong>
-              <span>Ready for the next render.</span>
+            <div className={emptyCanvas.className}>
+              <EmptyIcon size={42} aria-hidden="true" />
+              <strong>{emptyCanvas.title}</strong>
+              <span>{emptyCanvas.message}</span>
             </div>
           )}
         </div>
@@ -5403,10 +6103,10 @@ function InpaintCanvas({
             />
           </div>
         ) : (
-          <div className="pro-empty-preview pro-stage-empty">
+          <div className="pro-empty-preview pro-stage-empty pro-stage-empty-inpaint">
             <Brush size={42} aria-hidden="true" />
-            <strong>Inpaint canvas</strong>
-            <span>Load an image, then paint the area to regenerate. SD 1.5 and SDXL routes are shown.</span>
+            <strong>Load image to inpaint</strong>
+            <span>Use Load image or Use preview, then paint the white mask. Scroll the canvas to zoom for edge cleanup.</span>
           </div>
         )}
       </div>
@@ -6501,6 +7201,7 @@ const MENU_BAR_ITEMS: Array<{
       { id: 'open-settings', label: 'Settings' },
       { id: 'open-segmentation', label: 'Segmentation' },
       { id: 'open-hires', label: 'High-res fix' },
+      { id: 'open-enhance', label: 'Enhance / VSR' },
       { id: 'open-reactor', label: 'ReActor' },
     ],
   },

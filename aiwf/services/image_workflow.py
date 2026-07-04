@@ -23,6 +23,7 @@ from aiwf.core.domain.image_workflow import (
 )
 from aiwf.core.domain.segment import SegmentRequest
 from aiwf.core.domain.segment_presets import resolve_segment_text_prompt
+from aiwf.infrastructure.diffusers.model_arch import ARCH_INPAINT, ARCH_SDXL, ARCH_SDXL_INPAINT
 
 
 IMAGE_WORKFLOW_PRESETS: dict[str, dict[str, object]] = {
@@ -57,6 +58,42 @@ IMAGE_WORKFLOW_PRESETS: dict[str, dict[str, object]] = {
     },
     "custom": {"stages": ["tone", "export"]},
 }
+
+
+def _checkpoint_architecture(ctx, checkpoint_id: str | None) -> str:
+    if not checkpoint_id:
+        return ""
+    generation = getattr(ctx, "generation", None)
+    if generation is None:
+        return ""
+    try:
+        checkpoint = generation.resolve_checkpoint(checkpoint_id)
+    except Exception:
+        return ""
+    return str(getattr(checkpoint, "architecture", "") or "").strip().lower()
+
+
+def _resolve_inpaint_request_flags(ctx, settings: ImageWorkflowSettings) -> dict[str, object]:
+    architecture = _checkpoint_architecture(ctx, settings.checkpoint_id)
+    if settings.inpaint_only_masked is not None:
+        only_masked = bool(settings.inpaint_only_masked)
+    elif architecture == ARCH_INPAINT:
+        only_masked = False
+    else:
+        # SDXL/SD1.5 base and legacy SDXL inpaint UNets work best with masked crop.
+        only_masked = True
+    padding = (
+        int(settings.inpaint_masked_padding_sdxl)
+        if architecture in {ARCH_SDXL, ARCH_SDXL_INPAINT}
+        else int(settings.inpaint_masked_padding)
+    )
+    return {
+        "mask_blur": int(settings.mask_blur),
+        "seam_erode": int(settings.seam_erode),
+        "inpaint_only_masked": only_masked,
+        "inpaint_masked_padding": padding,
+        "inpaint_mask_content": str(settings.inpaint_mask_content or "original"),
+    }
 
 
 def preset_image_settings(name: str) -> ImageWorkflowSettings:
@@ -207,6 +244,7 @@ class ImageWorkflowService:
                 if mask is None:
                     raise ValueError("Inpaint reached the execution graph without a mask.")
                 width, height = self._generation_size(working)
+                inpaint_flags = _resolve_inpaint_request_flags(self.ctx, settings)
                 request = GenerationRequest(
                     mode=GenerationMode.INPAINT,
                     prompt=settings.inpaint_prompt,
@@ -219,8 +257,8 @@ class ImageWorkflowService:
                     height=height,
                     seed=settings.seed,
                     denoising_strength=settings.denoising_strength,
-                    mask_blur=0,
                     save_images=False,
+                    **inpaint_flags,
                 )
                 record = self.ctx.generation.submit(request, init_images=[working], mask_images=[mask])
                 if record.result is None or not record.result.images:

@@ -21,6 +21,7 @@ class PluginInfo(BaseModel):
     id: str
     name: str
     version: str = "0.0.0"
+    description: str = ""
     path: str = ""
     enabled: bool = True
     error: str | None = None

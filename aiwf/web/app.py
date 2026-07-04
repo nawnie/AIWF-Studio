@@ -19,6 +19,7 @@ from aiwf.web.tabs.enhance import register_enhance
 from aiwf.web.tabs.faceswap import register_faceswap
 from aiwf.web.tabs.history import register_history
 from aiwf.web.tabs.image_lab import register_image_lab
+from aiwf.web.tabs.sana_video import register_sana_video
 from aiwf.web.tabs.wan_i2v import register_wan_i2v
 from aiwf.web.tabs.video_lab import register_video_lab
 from aiwf.web.tabs.library import register_library
@@ -101,6 +102,7 @@ def register_default_tabs(registry: WebRegistry) -> None:
     register_studio(registry)
     register_image_lab(registry)
     register_wan_i2v(registry)
+    register_sana_video(registry)
     register_video_lab(registry)
     from aiwf.web.tabs.rife import register_rife
 

@@ -25,6 +25,7 @@ from PIL import Image
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from aiwf.core.config.launch import LaunchSettings, save_launch_settings
+from aiwf.core.domain.controlnet import ControlNetUnit
 from aiwf.core.domain.errors import GenerationCancelledError
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest, JobRecord, JobState
 from aiwf.core.domain.models import SCHEDULE_TYPES, normalize_schedule_id_for_sampler
@@ -83,6 +84,7 @@ _GRADIO_TOOL_TABS = [
     {"id": "studio", "label": "Studio", "group": "Create", "tab": "Image", "status": "ready", "summary": "Image, inpaint, ControlNet, LoRA, prompt tools"},
     {"id": "image_lab", "label": "Image Lab", "group": "Image", "tab": "Image Lab", "status": "ready", "summary": "XYZ plots, route maturity, batch runners"},
     {"id": "video", "label": "Wan / LTX Video", "group": "Video", "tab": "Video", "status": "ready", "summary": "Wan, LTX, post-processing chain"},
+    {"id": "sana_video", "label": "Sana Video", "group": "Video", "tab": "Sana Video", "status": "experimental", "summary": "Sana text-to-video and image-to-video"},
     {"id": "video_lab", "label": "Video Lab", "group": "Video", "tab": "Video Lab", "status": "ready", "summary": "Trim, stabilize, denoise, upscale, encode"},
     {"id": "rife", "label": "RIFE", "group": "Video", "tab": "RIFE", "status": "ready", "summary": "Frame interpolation for generated or uploaded video"},
     {"id": "audio_lab", "label": "Audio Lab", "group": "Audio", "tab": "Audio Lab", "status": "ready", "summary": "Audio cleanup, mixing, music and SFX generation"},
@@ -247,12 +249,34 @@ class ProGeneratePayload(BaseModel):
         default="original",
         validation_alias=AliasChoices("inpaintMaskContent", "inpaint_mask_content"),
     )
+    controlnet_units: list["ProControlNetUnitPayload"] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("controlnetUnits", "controlnet_units"),
+    )
 
     @model_validator(mode="after")
     def total_batch_must_be_bounded(self):
         if self.batch_size * self.batch_count > _MAX_PRO_BATCH_IMAGES:
             raise ValueError(f"batchSize * batchCount must be <= {_MAX_PRO_BATCH_IMAGES}")
         return self
+
+
+class ProControlNetUnitPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    enabled: bool = True
+    model: str | None = None
+    module: str = "none"
+    weight: float = Field(default=1.0, ge=0.0, le=2.0)
+    image: str | None = None
+    mask: str | None = None
+    resize_mode: str = Field(default="resize", validation_alias=AliasChoices("resizeMode", "resize_mode"))
+    processor_res: int = Field(default=512, ge=64, le=4096, validation_alias=AliasChoices("processorRes", "processor_res"))
+    threshold_a: float = Field(default=64.0, validation_alias=AliasChoices("thresholdA", "threshold_a"))
+    threshold_b: float = Field(default=64.0, validation_alias=AliasChoices("thresholdB", "threshold_b"))
+    guidance_start: float = Field(default=0.0, ge=0.0, le=1.0, validation_alias=AliasChoices("guidanceStart", "guidance_start"))
+    guidance_end: float = Field(default=1.0, ge=0.0, le=1.0, validation_alias=AliasChoices("guidanceEnd", "guidance_end"))
+    control_mode: str = Field(default="balanced", validation_alias=AliasChoices("controlMode", "control_mode"))
 
 
 class ProSettingsUpdatePayload(BaseModel):
@@ -1660,6 +1684,13 @@ def _settings_payload(ctx: Any) -> dict[str, Any]:
             "wanGroupOffloadStream": bool(getattr(settings, "wan_group_offload_stream", True)),
             "wanGroupOffloadBlocks": int(getattr(settings, "wan_group_offload_blocks", 4)),
             "ggufCudaKernels": bool(getattr(settings, "gguf_cuda_kernels", False)),
+            "wanSageAttention": getattr(settings, "wan_sage_attention", "auto"),
+            "wanNativeDenoise": bool(getattr(settings, "wan_native_denoise", True)),
+            "wanManualVaeDecode": bool(getattr(settings, "wan_manual_vae_decode", False)),
+            "wanVaeChunkFrames": int(getattr(settings, "wan_vae_chunk_frames", 4)),
+            "wanGroupOffloadRecordStream": bool(getattr(settings, "wan_group_offload_record_stream", True)),
+            "wanGroupOffloadLowCpuMem": bool(getattr(settings, "wan_group_offload_low_cpu_mem", True)),
+            "wanResidentMinVramGb": int(getattr(settings, "wan_resident_min_vram_gb", 20)),
         },
         "runtime": {
             "port": int(getattr(flags, "port", 7860)) if flags is not None else 7860,
@@ -1882,6 +1913,24 @@ def _apply_settings_update(ctx: Any, payload: ProSettingsUpdatePayload) -> dict[
         gguf_kernels = _payload_value(video, "ggufCudaKernels", "gguf_cuda_kernels")
         if gguf_kernels is not _MISSING_SETTING:
             setattr(settings, "gguf_cuda_kernels", _bool_setting(gguf_kernels))
+        wan_sage = _payload_value(video, "wanSageAttention", "wan_sage_attention")
+        if wan_sage is not _MISSING_SETTING:
+            setattr(settings, "wan_sage_attention", _choice_setting(wan_sage, allowed={"auto", "force", "off"}, default="auto"))
+        for camel, snake, attr in (
+            ("wanNativeDenoise", "wan_native_denoise", "wan_native_denoise"),
+            ("wanManualVaeDecode", "wan_manual_vae_decode", "wan_manual_vae_decode"),
+            ("wanGroupOffloadRecordStream", "wan_group_offload_record_stream", "wan_group_offload_record_stream"),
+            ("wanGroupOffloadLowCpuMem", "wan_group_offload_low_cpu_mem", "wan_group_offload_low_cpu_mem"),
+        ):
+            value = _payload_value(video, camel, snake)
+            if value is not _MISSING_SETTING:
+                setattr(settings, attr, _bool_setting(value))
+        wan_vae_chunk = _payload_value(video, "wanVaeChunkFrames", "wan_vae_chunk_frames")
+        if wan_vae_chunk is not _MISSING_SETTING:
+            setattr(settings, "wan_vae_chunk_frames", _int_setting(wan_vae_chunk, minimum=1, maximum=16))
+        wan_resident_min = _payload_value(video, "wanResidentMinVramGb", "wan_resident_min_vram_gb")
+        if wan_resident_min is not _MISSING_SETTING:
+            setattr(settings, "wan_resident_min_vram_gb", _int_setting(wan_resident_min, minimum=8, maximum=96))
         # Apply immediately so the next pipeline load honors the new values
         # without an app restart.
         apply_video_perf_env = getattr(settings, "apply_video_perf_env", None)
@@ -2239,8 +2288,8 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "status": _capability_status(controlnet_count),
             "count": controlnet_count,
             "route": "create",
-            "summary": "Gradio has multi-unit ControlNet controls; React needs the full request schema next.",
-            "details": [f"{controlnet_count} models", f"{controlnet_modules} preprocessors"],
+            "summary": "React Pro has one ControlNet unit; Gradio remains the advanced multi-unit surface.",
+            "details": [f"{controlnet_count} models", f"{controlnet_modules} preprocessors", "One Pro unit, multi-unit in Gradio"],
         },
         {
             "id": "segment",
@@ -2249,8 +2298,8 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "status": _capability_status(sam_count),
             "count": sam_count,
             "route": "modal:segmentation",
-            "summary": "SAM masks are available in Gradio and exposed as a React tool popup.",
-            "details": [f"{sam_count} SAM models", "Box, point, and text-prompt masks in Gradio."],
+            "summary": "Pro exposes quick mask routing; Gradio remains the full SAM and DINO workspace.",
+            "details": [f"{sam_count} SAM models", "Box, point, and text-prompt masks in Gradio.", "Pro inpaint has quick auto-mask controls."],
         },
         {
             "id": "enhance",
@@ -2259,8 +2308,8 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "status": _capability_status(upscaler_count + restorer_count),
             "count": upscaler_count + restorer_count,
             "route": "tools",
-            "summary": "Upscale, restore, old-photo repair, and video frame enhancement run from Gradio.",
-            "details": [f"{upscaler_count} upscalers", f"{restorer_count} restorers"],
+            "summary": "Pro can run quick face restore, upscale, and image VSR; Gradio keeps full old-photo and batch workflows.",
+            "details": [f"{upscaler_count} upscalers", f"{restorer_count} restorers", "Video VSR is available from Pro Video Lab."],
         },
         {
             "id": "reactor",
@@ -2269,8 +2318,8 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "status": _capability_status(reactor_model_count),
             "count": reactor_model_count,
             "route": "modal:reactor",
-            "summary": "Face swap can run from Gradio and video post-processing stages.",
-            "details": [f"{reactor_model_count} swapper models", f"{reactor_face_count} saved face models"],
+            "summary": "Pro can swap onto the current preview; Gradio keeps the advanced image and video ReActor workflow.",
+            "details": [f"{reactor_model_count} swapper models", f"{reactor_face_count} saved face models", "Saved face and video-stage options stay in Gradio Lab."],
         },
         {
             "id": "video",
@@ -2279,7 +2328,7 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "status": "ready" if sana_ready or (wan_available and wan_count > 0) else "available",
             "count": wan_count + (1 if sana_ready else 0),
             "route": "create",
-            "summary": "Sana Video runs from React Pro; Wan, LTX, RIFE, and post stages remain visible in Gradio.",
+            "summary": "Sana, Wan, LTX, RIFE, and post stages are visible in Gradio; Pro exposes Sana/Wan generation.",
             "details": [
                 "Sana ready" if sana_ready else ("Sana backend disabled" if not sana_enabled else "Sana snapshot missing"),
                 f"{wan_count} Wan models",
@@ -2818,6 +2867,31 @@ def _generation_mode_from_payload(payload: ProGeneratePayload) -> GenerationMode
     raise HTTPException(status_code=422, detail="React Pro generation currently supports image/txt2img and inpaint modes.")
 
 
+def _controlnet_units_from_payload(payload: ProGeneratePayload) -> list[ControlNetUnit]:
+    units: list[ControlNetUnit] = []
+    for item in payload.controlnet_units or []:
+        if not item.enabled:
+            continue
+        units.append(
+            ControlNetUnit(
+                enabled=True,
+                model=item.model,
+                module=item.module or "none",
+                weight=item.weight,
+                image=item.image,
+                mask=item.mask,
+                resize_mode=item.resize_mode or "resize",
+                processor_res=item.processor_res,
+                threshold_a=item.threshold_a,
+                threshold_b=item.threshold_b,
+                guidance_start=item.guidance_start,
+                guidance_end=item.guidance_end,
+                control_mode=item.control_mode or "balanced",
+            )
+        )
+    return units
+
+
 def _generation_request(ctx: Any, payload: ProGeneratePayload) -> GenerationRequest:
     sampler = normalize_sampler(payload.sampler) or "euler_a"
     scheduler = normalize_schedule_id_for_sampler(sampler, payload.scheduler)
@@ -2847,7 +2921,7 @@ def _generation_request(ctx: Any, payload: ProGeneratePayload) -> GenerationRequ
             inpaint_only_masked=payload.inpaint_only_masked,
             inpaint_masked_padding=payload.inpaint_masked_padding,
             inpaint_mask_content=payload.inpaint_mask_content,
-            controlnet_units=[],
+            controlnet_units=_controlnet_units_from_payload(payload),
             sdxl_refiner_enabled=False,
         )
     except ValidationError as exc:
@@ -3331,6 +3405,13 @@ class ProFaceSwapPayload(BaseModel):
     )
 
 
+class ProExtensionTogglePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    extension_id: str = Field(validation_alias=AliasChoices("id", "extensionId", "extension_id"))
+    enabled: bool = True
+
+
 class ProVsrImagePayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -3339,6 +3420,32 @@ class ProVsrImagePayload(BaseModel):
     mode: int = Field(default=0, ge=0, le=19)
     effect: str = "SuperRes"
     strength: float = Field(default=0.4, ge=0.0, le=1.0)
+
+
+class ProEnhanceImagePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    image_data_url: str = Field(validation_alias=AliasChoices("imageDataUrl", "image_data_url", "image"))
+    restore_enabled: bool = Field(default=True, validation_alias=AliasChoices("restoreEnabled", "restore_enabled"))
+    restore_model: str = Field(default="", validation_alias=AliasChoices("restoreModel", "restore_model"))
+    restore_visibility: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("restoreVisibility", "restore_visibility"),
+    )
+    codeformer_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("codeformerWeight", "codeformer_weight"),
+    )
+    upscale_enabled: bool = Field(default=False, validation_alias=AliasChoices("upscaleEnabled", "upscale_enabled"))
+    upscale_model: str = Field(default="", validation_alias=AliasChoices("upscaleModel", "upscale_model"))
+    upscale_scale: float = Field(default=2.0, ge=1.0, le=8.0, validation_alias=AliasChoices("upscaleScale", "upscale_scale"))
+    tile_size: int = Field(default=256, ge=0, le=2048, validation_alias=AliasChoices("tileSize", "tile_size"))
+    tile_overlap: int = Field(default=32, ge=0, le=512, validation_alias=AliasChoices("tileOverlap", "tile_overlap"))
+    restore_first: bool = Field(default=True, validation_alias=AliasChoices("restoreFirst", "restore_first"))
 
 
 def _video_lab_upload_root(ctx: Any) -> Path:
@@ -3942,6 +4049,70 @@ def build_router(ctx: Any) -> APIRouter:
             "message": "Face swap complete.",
         }
 
+    @router.post("/enhance/image")
+    def enhance_image(payload: ProEnhanceImagePayload):
+        from aiwf.core.domain.enhance import RestoreOptions, UpscaleOptions
+
+        enhance_service = getattr(ctx, "enhance", None)
+        if enhance_service is None:
+            raise HTTPException(status_code=503, detail="Enhance service is not available in this runtime.")
+        image = _decode_pro_image_data_url(payload.image_data_url, "Source image")
+        if image is None:
+            raise HTTPException(status_code=422, detail="Provide a source image as a base64 data URL.")
+
+        restore_opts = None
+        if payload.restore_enabled:
+            restore_model = (payload.restore_model or "").strip()
+            if not restore_model:
+                raise HTTPException(status_code=422, detail="Select or enter a face restoration model.")
+            restore_opts = RestoreOptions(
+                model_id=restore_model,
+                visibility=float(payload.restore_visibility),
+                codeformer_weight=float(payload.codeformer_weight),
+            )
+
+        upscale_opts = None
+        if payload.upscale_enabled:
+            upscale_model = (payload.upscale_model or "").strip()
+            if not upscale_model:
+                raise HTTPException(status_code=422, detail="Select or enter an upscaler model.")
+            upscale_opts = UpscaleOptions(
+                model_id=upscale_model,
+                scale=float(payload.upscale_scale),
+                tile_size=int(payload.tile_size),
+                tile_overlap=int(payload.tile_overlap),
+            )
+
+        if restore_opts is None and upscale_opts is None:
+            raise HTTPException(status_code=422, detail="Enable face restore, upscale, or both.")
+
+        try:
+            result, infotext = enhance_service.run_pipeline(
+                image.convert("RGB"),
+                restore=restore_opts,
+                upscale=upscale_opts,
+                restore_first=bool(payload.restore_first),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Enhance failed: {exc}") from exc
+
+        flags = getattr(ctx, "flags", None)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        sub = getattr(getattr(ctx, "settings", None), "enhance_output_subdir", "extras-images")
+        dest = flags.resolved_output_dir() / sub / f"pro_enhance_{stamp}.png"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        result.save(dest, format="PNG")
+        return {
+            "status": "completed",
+            "outputPath": str(dest),
+            "url": _output_asset_url(ctx, dest),
+            "width": result.width,
+            "height": result.height,
+            "image": _image_to_data_url(result),
+            "infotext": infotext,
+            "message": infotext or "Enhance complete.",
+        }
+
     @router.post("/vsr/image")
     def vsr_image(payload: ProVsrImagePayload):
         from aiwf.core.domain.vsr import VsrOptions
@@ -3976,6 +4147,60 @@ def build_router(ctx: Any) -> APIRouter:
             "height": result.height,
             "image": _image_to_data_url(result),
             "message": f"Upscaled to {result.width}x{result.height} via NVIDIA VSR.",
+        }
+
+    @router.get("/extensions")
+    def extensions():
+        registry = getattr(ctx, "plugins", None)
+        plugins = registry.list_plugins() if registry is not None else []
+        api_routes = {plugin_id for plugin_id, _router in getattr(registry, "api_routers", []) or []}
+        flags = getattr(ctx, "flags", None)
+        plugins_dir = str(flags.data_dir / "plugins") if flags is not None else ""
+        disabled = list(getattr(getattr(ctx, "settings", None), "disabled_extensions", None) or [])
+        return {
+            "pluginsDir": plugins_dir,
+            "disabled": disabled,
+            "extensions": [
+                {
+                    "id": plugin.id,
+                    "name": plugin.name,
+                    "version": plugin.version,
+                    "description": plugin.description,
+                    "path": plugin.path,
+                    "enabled": plugin.enabled,
+                    "error": plugin.error,
+                    "hasApi": plugin.id in api_routes,
+                    "apiBase": f"/api/ext/{plugin.id}" if plugin.id in api_routes else "",
+                }
+                for plugin in plugins
+            ],
+        }
+
+    @router.post("/extensions/toggle")
+    def extensions_toggle(payload: ProExtensionTogglePayload):
+        settings = getattr(ctx, "settings", None)
+        if settings is None:
+            raise HTTPException(status_code=500, detail="Settings are not available in this runtime.")
+        extension_id = (payload.extension_id or "").strip()
+        if not extension_id:
+            raise HTTPException(status_code=422, detail="extension id is required")
+        disabled = [str(item) for item in (getattr(settings, "disabled_extensions", None) or [])]
+        normalized = {item.lower() for item in disabled}
+        if payload.enabled and extension_id.lower() in normalized:
+            disabled = [item for item in disabled if item.lower() != extension_id.lower()]
+        elif not payload.enabled and extension_id.lower() not in normalized:
+            disabled.append(extension_id)
+        settings.disabled_extensions = disabled
+        save_settings = getattr(ctx, "save_settings", None)
+        if callable(save_settings):
+            try:
+                save_settings()
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail=f"Could not save settings: {exc}") from exc
+        return {
+            "status": "saved",
+            "disabled": disabled,
+            "note": "Extension changes apply on the next app restart.",
         }
 
     @router.post("/interrupt")

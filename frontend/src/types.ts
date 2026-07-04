@@ -81,6 +81,15 @@ export interface GenerationSettings {
   autoMaskModel: string
   autoMaskBoxThreshold: number
   autoMaskTextThreshold: number
+  controlNetEnabled: boolean
+  controlNetModel: string
+  controlNetModule: string
+  controlNetImageDataUrl: string
+  controlNetImageName: string
+  controlNetWeight: number
+  controlNetGuidanceStart: number
+  controlNetGuidanceEnd: number
+  controlNetProcessorRes: number
   saveImages: boolean
 }
 
@@ -324,6 +333,13 @@ export interface ProSettingsStatus {
     wanGroupOffloadStream: boolean
     wanGroupOffloadBlocks: number
     ggufCudaKernels: boolean
+    wanSageAttention: string
+    wanNativeDenoise: boolean
+    wanManualVaeDecode: boolean
+    wanVaeChunkFrames: number
+    wanGroupOffloadRecordStream: boolean
+    wanGroupOffloadLowCpuMem: boolean
+    wanResidentMinVramGb: number
   }
   runtime: {
     port: number
