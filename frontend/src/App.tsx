@@ -35,7 +35,16 @@ import {
   Wand2,
   X,
 } from 'lucide-react'
+import { Workflow as WorkflowIcon } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { WorkflowPanel } from './workflow/WorkflowPanel'
+import {
+  createWorkflowBlocksFromSettings,
+  loadWorkflowBlocksFromStorage,
+  renumberWorkflowBlocks,
+  saveWorkflowBlocksToStorage,
+} from './workflow/workflowBlocks'
+import type { WorkflowCodeBlock } from './types'
 import {
   fetchProData,
   fetchProBootstrap,
@@ -149,6 +158,7 @@ const MODE_TABS: IconItem<ProMode>[] = [
 
 const RAIL_ITEMS: IconItem<string>[] = [
   { id: 'create', label: 'Create', icon: Sparkles },
+  { id: 'workflow', label: 'Workflow', icon: WorkflowIcon },
   { id: 'models', label: 'Models', icon: Boxes },
   { id: 'tools', label: 'Tools', icon: Wand2 },
   { id: 'data', label: 'Data', icon: Database },
@@ -337,6 +347,8 @@ function App() {
   const [generationError, setGenerationError] = useState('')
   const [activeMode, setActiveMode] = useState<ProMode>('image')
   const [activeRail, setActiveRail] = useState(readInitialRail)
+  const [workflowBlocks, setWorkflowBlocks] = useState<WorkflowCodeBlock[]>(() => loadWorkflowBlocksFromStorage())
+  const [workflowStatus, setWorkflowStatus] = useState('')
   const [previews, setPreviews] = useState<Partial<Record<CreationMode, RecentOutput | null>>>({
     image: fallbackBootstrap.recentOutputs[0] ?? null,
   })
@@ -851,6 +863,31 @@ function App() {
       creationModels[0]
     )
   }, [creationModels, filteredModels, settings.modelId])
+
+  useEffect(() => {
+    saveWorkflowBlocksToStorage(workflowBlocks)
+  }, [workflowBlocks])
+
+  const handleSendToWorkflow = useCallback(
+    (source = 'Create panel') => {
+      setWorkflowBlocks((current) => {
+        const created = createWorkflowBlocksFromSettings(
+          {
+            settings,
+            bootstrap,
+            runtime,
+            selectedModel,
+            selectedModelName: selectedModel?.name ?? settings.modelId,
+            source,
+          },
+          current.length,
+        )
+        return renumberWorkflowBlocks([...current, ...created])
+      })
+      setWorkflowStatus('Captured current settings as a workflow node. Open the Workflow tab to reorder.')
+    },
+    [bootstrap, runtime, selectedModel, settings],
+  )
 
   useEffect(() => {
     if (creationModels.length === 0) {
@@ -1487,7 +1524,22 @@ function App() {
           aria-label="AIWF Pro workspace"
           style={workspaceStyle}
         >
-          {activeRail === 'models' ? (
+          {activeRail === 'workflow' ? (
+            <section className="pro-workspace-surface" aria-label="Workflow">
+              <WorkspaceHeader
+                eyebrow="Workflow"
+                title="Workflow builder"
+                description="Send settings here from any generation tab, then reorder the nodes into the exact pipeline you want."
+              />
+              <div className="pro-workflow-wrap">
+                <WorkflowPanel
+                  blocks={workflowBlocks}
+                  onChange={setWorkflowBlocks}
+                  runStatus={workflowStatus}
+                />
+              </div>
+            </section>
+          ) : activeRail === 'models' ? (
             <ModelsWorkspace
               engineFilter={engineFilter}
               engines={bootstrap.engines}
@@ -1687,6 +1739,7 @@ function App() {
                 onPreviewSelect={setPreview}
                 onGenerate={handleGenerate}
                 onStopGenerate={handleStopGenerate}
+                onSendToWorkflow={handleSendToWorkflow}
                 onToggleAdvanced={() => setShowAdvanced((value) => !value)}
                 onOpenSegmentation={() => setActiveModal('segmentation')}
                 onOpenHires={() => setActiveModal('hires')}
@@ -2248,6 +2301,7 @@ function PromptPanel({
   onPreviewSelect,
   onGenerate,
   onStopGenerate,
+  onSendToWorkflow,
   onToggleAdvanced,
   onOpenSegmentation,
   onOpenHires,
@@ -2278,6 +2332,7 @@ function PromptPanel({
   onPreviewSelect: (value: RecentOutput) => void
   onGenerate: () => void
   onStopGenerate: () => void
+  onSendToWorkflow: (source?: string) => void
   onToggleAdvanced: () => void
   onOpenSegmentation: () => void
   onOpenHires: () => void
@@ -2502,6 +2557,15 @@ function PromptPanel({
         >
           {isGenerating ? <X size={18} aria-hidden="true" /> : <Sparkles size={18} aria-hidden="true" />}
           <span>{isGenerating ? 'Stop' : settings.mode === 'video' ? 'Generate video' : 'Generate image'}</span>
+        </button>
+        <button
+          type="button"
+          className="pro-secondary-button pro-workflow-send-button"
+          onClick={() => onSendToWorkflow('Create panel')}
+          title="Capture the current settings as a reorderable workflow node"
+        >
+          <WorkflowIcon size={16} aria-hidden="true" />
+          <span>Send to workflow</span>
         </button>
         <button
           type="button"

@@ -38,6 +38,25 @@ export interface EngineSummary {
   count: number
 }
 
+// A single node in a user-built workflow. Created by "Send to workflow" from a
+// generation panel; ordered by `order` and manually reorderable in the UI.
+export interface WorkflowCodeBlock {
+  id: string
+  label: string
+  kind: 'generation' | 'workflow' | 'qa' | 'export'
+  nodeId: string
+  source: string
+  createdAt: string
+  summary: string
+  order: number
+  classes: {
+    requires: string[]
+    produces: string[]
+  }
+  payload: Record<string, unknown>
+  code: string
+}
+
 export interface GenerationSettings {
   mode: CreationMode
   prompt: string

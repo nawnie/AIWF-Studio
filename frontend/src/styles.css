@@ -4620,3 +4620,40 @@ kbd {
     grid-template-columns: 1fr;
   }
 }
+
+/* Workflow builder */
+.pro-workflow-wrap { padding: 4px 2px 24px; }
+.pro-workflow-panel { display: grid; gap: 12px; }
+.pro-workflow-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.pro-workflow-panel-head strong { display: block; font-size: 15px; }
+.pro-workflow-panel-head span { font-size: 13px; opacity: 0.72; }
+.pro-workflow-panel-actions { display: flex; gap: 8px; }
+.pro-workflow-send-button { color: var(--pro-accent, #6ee7b7); }
+.pro-workflow-validation { border: 1px solid #f59e0b55; background: #f59e0b14; color: #fbbf24; border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+.pro-workflow-node-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.pro-workflow-node {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--pro-border, rgba(255,255,255,0.1)); border-radius: 10px;
+  background: var(--pro-panel, rgba(255,255,255,0.03)); cursor: grab;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+.pro-workflow-node.is-dragging { opacity: 0.5; cursor: grabbing; }
+.pro-workflow-node.is-over { border-color: color-mix(in srgb, var(--pro-accent, #6ee7b7) 60%, transparent); transform: translateY(1px); }
+.pro-workflow-node-grip { color: var(--pro-muted, rgba(255,255,255,0.5)); display: flex; }
+.pro-workflow-node-order {
+  width: 24px; height: 24px; flex: none; display: grid; place-items: center;
+  border-radius: 999px; font-size: 12px; font-weight: 700;
+  background: color-mix(in srgb, var(--pro-accent, #6ee7b7) 18%, transparent);
+  color: var(--pro-accent, #6ee7b7);
+}
+.pro-workflow-node-body { flex: 1; min-width: 0; }
+.pro-workflow-node-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.pro-workflow-node-title small { opacity: 0.6; font-size: 12px; }
+.pro-workflow-node-summary { margin: 2px 0 0; font-size: 12px; opacity: 0.75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pro-workflow-node-controls { display: flex; gap: 2px; flex: none; }
+.pro-workflow-node-controls button {
+  appearance: none; border: 1px solid transparent; background: transparent; color: var(--pro-muted, rgba(255,255,255,0.6));
+  border-radius: 6px; width: 28px; height: 28px; display: grid; place-items: center; cursor: pointer;
+}
+.pro-workflow-node-controls button:hover:not(:disabled) { color: var(--pro-text, #fff); background: rgba(255,255,255,0.06); }
+.pro-workflow-node-controls button:disabled { opacity: 0.3; cursor: default; }
