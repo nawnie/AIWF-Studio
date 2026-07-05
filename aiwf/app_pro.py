@@ -28,6 +28,7 @@ from aiwf.app import (
 from aiwf.bootstrap import AppContext, build_context
 from aiwf.core.util.network import find_free_port
 from aiwf.web.pro_api import build_router
+from aiwf.web.ext_api import build_extension_router
 
 logger = logging.getLogger("aiwf")
 
@@ -225,6 +226,8 @@ def create_app(
             logger.info("Mounted extension API: /api/ext/%s", plugin_id)
         except Exception:
             logger.exception("Could not mount extension API for %s", plugin_id)
+    # Built-in extension API (workflow blocks, Ollama chat bridge, media browse).
+    app.include_router(build_extension_router(ctx))
     _mount_frontend(app, frontend_dist or _frontend_dist())
     return app
 

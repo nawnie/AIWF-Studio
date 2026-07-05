@@ -138,3 +138,32 @@ Thumbs.db
 .idea/
 .vscode/
 *.lnk
+
+
+# AIWF PAID Layout 2+3 v4 media center local state
+extensions/paid-media-center-v4/
+projects/*.aiwf/
+projects/*.aiwf.zip
+*.aiwf.zip
+.aiwf/autosave/
+.aiwf/cache/
+.aiwf/recovery/
+plugin-workspaces/
+community-plugins/
+*.plugin.local.json
+*.workflow.local.json
+*.project.local.json
+*.queue.local.json
+outputs/**/autosave*.json
+outputs/**/export-plan*.json
+
+# Local media/runtime payloads
+models/
+outputs/
+logs/
+venv/
+node_modules/
+.env
+.env.*
+*.tmp
+*.bak
