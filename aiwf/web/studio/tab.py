@@ -34,6 +34,7 @@ from aiwf.web.studio.handlers import reactor as reactor_handlers
 from aiwf.web.tabs.segment import build_segment_panel
 from aiwf.web.studio.handlers import styles as style_handlers
 from aiwf.services.prompt_tools import PromptToolsService
+from aiwf.services.studio_generation_packet import gradio_studio_workflow_json
 from aiwf.web.studio.resolution import (
     ASPECT_RATIO_PRESETS,
     BUCKET_CHOICES,
@@ -186,6 +187,11 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                             elem_id="aiwf-generate",
                         )
                         interrupt = gr.Button("Stop", elem_classes=["aiwf-btn-stop"])
+                        send_workflow = gr.Button(
+                            "Send to workflow",
+                            scale=2,
+                            elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm", "aiwf-send-workflow"],
+                        )
                         continuous_toggle = gr.Checkbox(
                             label="Continuous",
                             value=False,
@@ -965,6 +971,14 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                         elem_classes=["aiwf-generate-btn", "aiwf-btn-sm"],
                     )
                 status = gr.Markdown("**Ready** — configure parameters and generate", elem_classes=["aiwf-status-bar"])
+                workflow_code = gr.Code(
+                    label="Workflow code block JSON",
+                    language="json",
+                    value="",
+                    lines=18,
+                    visible=False,
+                    elem_classes=["aiwf-workflow-json"],
+                )
                 send_to_wan = gr.Button(
                     "Send result → Video",
                     elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
@@ -2226,6 +2240,154 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         vsr_mode,
         vsr_strength,
     ]
+
+    def _mode_for_workflow(mode_label):
+        if str(mode_label or "").lower().startswith("inpaint"):
+            return "inpaint"
+        return "image"
+
+    def _capture_studio_workflow(
+        mode_label,
+        prompt_value,
+        negative_value,
+        checkpoint_value,
+        sampler_value,
+        scheduler_value,
+        steps_value,
+        cfg_value,
+        clip_skip_value,
+        width_value,
+        height_value,
+        batch_size_value,
+        batch_count_value,
+        seed_value,
+        enable_hr_value,
+        hr_scale_value,
+        hr_steps_value,
+        hr_denoise_value,
+        hr_upscaler_value,
+        denoise_value,
+        inpaint_denoise_value,
+        mask_blur_value,
+        inpaint_area_value,
+        inpaint_padding_value,
+        masked_content_value,
+        tags_value,
+        use_prompt_file_value,
+        prompt_file_value,
+        style_value,
+        cn_enable_value,
+        cn_model_value,
+        cn_module_value,
+        cn_weight_value,
+        cn2_enable_value,
+        cn2_model_value,
+        cn2_module_value,
+        cn2_weight_value,
+        cn3_enable_value,
+        cn3_model_value,
+        cn3_module_value,
+        cn3_weight_value,
+        vsr_enabled_value,
+        vsr_scale_value,
+        vsr_mode_value,
+    ):
+        mode_id = _mode_for_workflow(mode_label)
+        json_text = gradio_studio_workflow_json(
+            mode=mode_id,
+            prompt=prompt_value or "",
+            negativePrompt=negative_value or "",
+            checkpointId=checkpoint_value or "",
+            modelName=checkpoint_value or "",
+            modelStatus="metadata-only",
+            sampler=sampler_value or "automatic",
+            scheduler=scheduler_value or "automatic",
+            steps=steps_value or 20,
+            cfgScale=cfg_value or 7.0,
+            clipSkip=clip_skip_value or 1,
+            width=width_value or 512,
+            height=height_value or 512,
+            batchSize=batch_size_value or 1,
+            batchCount=batch_count_value or 1,
+            seed=seed_value if seed_value is not None else -1,
+            enableHires=bool(enable_hr_value),
+            hiresScale=hr_scale_value or 2.0,
+            hiresSteps=hr_steps_value or 20,
+            hiresDenoise=hr_denoise_value or 0.35,
+            hiresUpscaler=hr_upscaler_value or "lanczos",
+            denoisingStrength=inpaint_denoise_value or denoise_value or 0.75,
+            maskBlur=mask_blur_value or 4,
+            inpaintOnlyMasked=str(inpaint_area_value or "").lower().startswith("only"),
+            inpaintMaskedPadding=inpaint_padding_value or 32,
+            inpaintMaskContent=masked_content_value or "original",
+            extra={
+                "tags": tags_value or "",
+                "promptFileEnabled": bool(use_prompt_file_value),
+                "promptFile": prompt_file_value or "",
+                "style": style_value or "",
+                "controlNet": [
+                    {"enabled": bool(cn_enable_value), "model": cn_model_value or "", "module": cn_module_value or "", "weight": cn_weight_value or 0},
+                    {"enabled": bool(cn2_enable_value), "model": cn2_model_value or "", "module": cn2_module_value or "", "weight": cn2_weight_value or 0},
+                    {"enabled": bool(cn3_enable_value), "model": cn3_model_value or "", "module": cn3_module_value or "", "weight": cn3_weight_value or 0},
+                ],
+                "postProcess": {
+                    "vsr": {"enabled": bool(vsr_enabled_value), "scale": vsr_scale_value or 2.0, "mode": vsr_mode_value or 3},
+                },
+            },
+        )
+        return gr.update(value=json_text, visible=True), "**Workflow captured** — settings saved as a movable code block. No generation was run."
+
+    send_workflow.click(
+        _capture_studio_workflow,
+        inputs=[
+            mode_toggle,
+            prompt,
+            negative,
+            checkpoint,
+            sampler,
+            scheduler,
+            steps,
+            cfg,
+            clip_skip,
+            width,
+            height,
+            batch_size,
+            batch_count,
+            seed,
+            enable_hr,
+            hr_scale,
+            hr_steps,
+            hr_denoise,
+            hr_upscaler,
+            denoise,
+            inpaint_denoise,
+            mask_blur,
+            inpaint_area,
+            inpaint_padding,
+            masked_content,
+            tags_input,
+            use_prompt_file,
+            prompt_file,
+            style_select,
+            cn_enable,
+            cn_model,
+            cn_module,
+            cn_weight,
+            cn2_enable,
+            cn2_model,
+            cn2_module,
+            cn2_weight,
+            cn3_enable,
+            cn3_model,
+            cn3_module,
+            cn3_weight,
+            vsr_enabled,
+            vsr_scale,
+            vsr_mode,
+        ],
+        outputs=[workflow_code, status],
+        show_progress=False,
+    )
 
     generate.click(
         run,

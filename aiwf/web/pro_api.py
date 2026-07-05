@@ -213,6 +213,37 @@ class ProGeneratePayload(BaseModel):
         validation_alias=AliasChoices("useSageAttention", "use_sage_attention"),
     )
     generate_audio: bool = Field(default=False, validation_alias=AliasChoices("generateAudio", "generate_audio"))
+    wan_runtime_mode: str = Field(
+        default="fast_5b",
+        validation_alias=AliasChoices("wanRuntimeMode", "wan_runtime_mode", "runtimeMode", "runtime_mode"),
+    )
+    high_noise_model_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("highNoiseModelId", "high_noise_model_id"),
+    )
+    low_noise_model_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("lowNoiseModelId", "low_noise_model_id"),
+    )
+    high_noise_steps: int = Field(default=20, ge=1, le=60, validation_alias=AliasChoices("highNoiseSteps", "high_noise_steps"))
+    low_noise_steps: int = Field(default=1, ge=1, le=60, validation_alias=AliasChoices("lowNoiseSteps", "low_noise_steps"))
+    boundary_ratio: float = Field(default=0.875, ge=0.0, le=1.0, validation_alias=AliasChoices("boundaryRatio", "boundary_ratio"))
+    high_noise_lora_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("highNoiseLoraId", "high_noise_lora_id"),
+    )
+    high_noise_lora_scale: float = Field(default=1.0, ge=0.0, le=2.0, validation_alias=AliasChoices("highNoiseLoraScale", "high_noise_lora_scale"))
+    low_noise_lora_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("lowNoiseLoraId", "low_noise_lora_id"),
+    )
+    low_noise_lora_scale: float = Field(default=1.0, ge=0.0, le=2.0, validation_alias=AliasChoices("lowNoiseLoraScale", "low_noise_lora_scale"))
+    vae_id: str | None = Field(default=None, validation_alias=AliasChoices("vaeId", "vae_id"))
+    text_encoder_path: str | None = Field(default=None, validation_alias=AliasChoices("textEncoderPath", "text_encoder_path"))
+    wan_offload: str = Field(default="balanced", validation_alias=AliasChoices("wanOffload", "wan_offload", "offload"))
+    wan_sigma_type: str = Field(default="simple", validation_alias=AliasChoices("wanSigmaType", "wan_sigma_type", "sigmaType", "sigma_type"))
+    wan_sampler: str = Field(default="unipc", validation_alias=AliasChoices("wanSampler", "wan_sampler"))
+    wan_flow_shift: float = Field(default=5.0, ge=0.5, le=25.0, validation_alias=AliasChoices("wanFlowShift", "wan_flow_shift", "flowShift", "flow_shift"))
     init_image_data_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices("initImageDataUrl", "init_image_data_url", "initImage"),
@@ -1738,6 +1769,18 @@ def _text_setting(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _canonical_wan_runtime_mode(value: Any, *, default: str = "fast_5b") -> str:
+    normalized = str(value or default).strip().lower().replace("-", "_")
+    aliases = {
+        "high_low": "native_high_low",
+        "high_low_fp8": "native_high_low_fp8_experimental",
+        "fp8_high_low": "native_high_low_fp8_experimental",
+    }
+    normalized = aliases.get(normalized, normalized)
+    allowed = {"fast_5b", "native_high_low", "native_high_low_fp8_experimental"}
+    return normalized if normalized in allowed else default
+
+
 def _save_launch_profile(ctx: Any, launch: LaunchSettings) -> None:
     save_launch = getattr(ctx, "save_launch_settings", None)
     if callable(save_launch):
@@ -1866,7 +1909,7 @@ def _apply_settings_update(ctx: Any, payload: ProSettingsUpdatePayload) -> dict[
             setattr(settings, "last_wan_flow_shift", _float_setting(wan_flow_shift, minimum=0.0, maximum=20.0))
         wan_runtime_mode = _payload_value(video, "wanRuntimeMode", "wan_runtime_mode")
         if wan_runtime_mode is not _MISSING_SETTING:
-            setattr(settings, "last_wan_runtime_mode", _choice_setting(wan_runtime_mode, allowed={"fast_5b", "high_low"}, default="fast_5b"))
+            setattr(settings, "last_wan_runtime_mode", _choice_setting(wan_runtime_mode, allowed={"fast_5b", "high_low", "native_high_low", "native_high_low_fp8_experimental"}, default="fast_5b"))
         ltx_dtype = _payload_value(video, "ltxDtype", "ltx_dtype")
         if ltx_dtype is not _MISSING_SETTING:
             setattr(settings, "ltx_dtype", _choice_setting(ltx_dtype, allowed={"bf16", "fp16"}, default="bf16"))
@@ -2795,6 +2838,22 @@ def _settings_defaults(ctx: Any) -> dict[str, Any]:
         "batchSize": 1,
         "batchCount": 1,
         "saveImages": bool(getattr(settings, "save_images", True)),
+        "wanRuntimeMode": _canonical_wan_runtime_mode(getattr(settings, "last_wan_runtime_mode", "fast_5b")),
+        "highNoiseModelId": "",
+        "lowNoiseModelId": "",
+        "highNoiseSteps": 20,
+        "lowNoiseSteps": 1,
+        "boundaryRatio": 0.875,
+        "highNoiseLoraId": "",
+        "highNoiseLoraScale": 1.0,
+        "lowNoiseLoraId": "",
+        "lowNoiseLoraScale": 1.0,
+        "vaeId": "",
+        "textEncoderPath": getattr(settings, "last_wan_text_encoder", "") or "",
+        "wanOffload": getattr(settings, "last_wan_offload", "balanced") or "balanced",
+        "wanSigmaType": getattr(settings, "last_wan_sigma_type", "simple") or "simple",
+        "wanSampler": getattr(settings, "last_wan_sampler", "unipc") or "unipc",
+        "wanFlowShift": float(getattr(settings, "last_wan_flow_shift", 5.0) or 5.0),
     }
 
 
@@ -3150,23 +3209,48 @@ def _generate_sana_video_response(ctx: Any, payload: ProGeneratePayload) -> dict
 
 
 def _wan_video_request_from_payload(ctx: Any, payload: ProGeneratePayload):
-    from aiwf.core.domain.wan import WAN_RUNTIME_FAST_5B, WanI2VRequest
+    from aiwf.core.domain.wan import (
+        OFFLOAD_MODES,
+        SAMPLER_TYPES,
+        SIGMA_TYPES,
+        WAN_RUNTIME_FAST_5B,
+        WAN_RUNTIME_HIGH_LOW,
+        WAN_RUNTIME_HIGH_LOW_FP8,
+        WAN_RUNTIME_MODES,
+        WanI2VRequest,
+    )
 
     service = _wan_service(ctx)
     settings = getattr(ctx, "settings", None)
-    sampler = str(getattr(settings, "last_wan_sampler", "") or "unipc").strip().lower()
-    if sampler not in {"unipc", "euler", "heun"}:
+    runtime_mode = _canonical_wan_runtime_mode(
+        payload.wan_runtime_mode or getattr(settings, "last_wan_runtime_mode", "") or WAN_RUNTIME_FAST_5B,
+        default=WAN_RUNTIME_FAST_5B,
+    )
+    if runtime_mode not in WAN_RUNTIME_MODES:
+        runtime_mode = WAN_RUNTIME_FAST_5B
+    sampler = str(payload.wan_sampler or getattr(settings, "last_wan_sampler", "") or "unipc").strip().lower()
+    if sampler not in SAMPLER_TYPES:
         sampler = "unipc"
+    sigma_type = str(payload.wan_sigma_type or getattr(settings, "last_wan_sigma_type", "") or "simple").strip().lower()
+    if sigma_type not in SIGMA_TYPES:
+        sigma_type = "simple"
     try:
-        flow_shift = float(getattr(settings, "last_wan_flow_shift", 5.0) or 5.0)
+        flow_shift = float(payload.wan_flow_shift if payload.wan_flow_shift is not None else getattr(settings, "last_wan_flow_shift", 5.0) or 5.0)
     except (TypeError, ValueError):
         flow_shift = 5.0
-    vae_id = None
-    try:
-        vae_id = service.preferred_vae(WAN_RUNTIME_FAST_5B)
-    except Exception:
-        vae_id = None
-    text_encoder = str(getattr(settings, "last_wan_text_encoder", "") or "").strip()
+    offload = str(payload.wan_offload or getattr(settings, "last_wan_offload", "balanced") or "balanced").strip().lower()
+    if offload not in OFFLOAD_MODES:
+        offload = "balanced"
+    vae_id = str(payload.vae_id or "").strip() or None
+    if not vae_id:
+        try:
+            vae_id = service.preferred_vae(runtime_mode)
+        except Exception:
+            vae_id = None
+    text_encoder = str(payload.text_encoder_path or getattr(settings, "last_wan_text_encoder", "") or "").strip()
+    model_id = str(payload.checkpoint_id or "")
+    if runtime_mode in {WAN_RUNTIME_HIGH_LOW, WAN_RUNTIME_HIGH_LOW_FP8}:
+        model_id = model_id or str(payload.high_noise_model_id or "")
     try:
         return WanI2VRequest(
             prompt=payload.prompt,
@@ -3176,15 +3260,27 @@ def _wan_video_request_from_payload(ctx: Any, payload: ProGeneratePayload):
             num_frames=min(max(int(payload.frames), 5), 257),
             fps=max(1, int(round(payload.fps))),
             steps=min(int(payload.steps), 100),
+            high_noise_steps=min(max(int(payload.high_noise_steps), 1), 60),
+            low_noise_steps=min(max(int(payload.low_noise_steps), 1), 60),
             guidance_scale=min(max(float(payload.cfg_scale), 1.0), 20.0),
             sampler=sampler,
+            sigma_type=sigma_type,
             flow_shift=flow_shift,
             seed=payload.seed,
-            runtime_mode=WAN_RUNTIME_FAST_5B,
-            model_id=str(payload.checkpoint_id or ""),
-            offload=str(getattr(settings, "last_wan_offload", "balanced") or "balanced"),
+            runtime_mode=runtime_mode,
+            model_id=model_id,
+            offload=offload,
+            boundary_ratio=payload.boundary_ratio,
+            high_noise_model_id=payload.high_noise_model_id,
+            low_noise_model_id=payload.low_noise_model_id,
+            high_noise_lora_id=payload.high_noise_lora_id,
+            high_noise_lora_scale=payload.high_noise_lora_scale,
+            low_noise_lora_id=payload.low_noise_lora_id,
+            low_noise_lora_scale=payload.low_noise_lora_scale,
             vae_id=vae_id,
             text_encoder_path=text_encoder,
+            offload_text_encoder_after_encode=payload.offload_text_encoder_after_encode,
+            use_sage_attention=payload.use_sage_attention,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc

@@ -68,6 +68,22 @@ export interface GenerationSettings {
   offloadTextEncoderAfterEncode: boolean
   useSageAttention: boolean
   generateAudio: boolean
+  wanRuntimeMode: string
+  highNoiseModelId: string
+  lowNoiseModelId: string
+  highNoiseSteps: number
+  lowNoiseSteps: number
+  boundaryRatio: number
+  highNoiseLoraId: string
+  highNoiseLoraScale: number
+  lowNoiseLoraId: string
+  lowNoiseLoraScale: number
+  vaeId: string
+  textEncoderPath: string
+  wanOffload: string
+  wanSigmaType: string
+  wanSampler: string
+  wanFlowShift: number
   initImageDataUrl: string
   maskImageDataUrl: string
   denoisingStrength: number

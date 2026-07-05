@@ -17,6 +17,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_Z_IMAGE,
 )
 from aiwf.infrastructure.diffusers.model_blocks import known_broken_selectable_image_asset
+from aiwf.services.model_family_support import detect_precision_from_name
 
 READINESS_STATUSES = (
     "working",
@@ -864,30 +865,13 @@ def _ltx_request_failure_hint(path: Path) -> str:
 
 
 def _quant_from_name(filename: str) -> str:
-    lower = filename.lower()
-    for token in (
-        "q2_k",
-        "q3_k_s",
-        "q3_k_m",
-        "q4_k_s",
-        "q4_k_m",
-        "q4_0",
-        "q5_k_s",
-        "q5_k_m",
-        "q5_0",
-        "q6_k",
-        "q8_0",
-        "nf4",
-        "nvfp4",
-        "fp4",
-        "fp8",
-        "bf16",
-        "fp16",
-    ):
-        if token in lower:
-            return token.upper()
-    match = re.search(r"(?:^|[_\-.])q([2-8])(?:[_\-.]|$)", lower)
-    return f"Q{match.group(1)}" if match else ""
+    """Return a normalized precision/quant token from a model filename.
+
+    Kept as a small wrapper so legacy readiness callers now share the same
+    vocabulary as the Studio model-family matrix (INT8, NF4, FP4/NVFP4,
+    FP8/BF16/FP16, and GGUF Q/IQ variants).
+    """
+    return detect_precision_from_name(filename)
 
 
 def _size_gib(path: Path) -> float:

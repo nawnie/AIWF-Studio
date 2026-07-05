@@ -28,6 +28,7 @@ from aiwf.app import (
 from aiwf.bootstrap import AppContext, build_context
 from aiwf.core.util.network import find_free_port
 from aiwf.web.pro_api import build_router
+from aiwf.web.paid_ext_api import build_paid_extension_router
 
 logger = logging.getLogger("aiwf")
 
@@ -216,6 +217,7 @@ def create_app(
     app = FastAPI(title="AIWF Studio Pro", middleware=middleware or [])
     app.include_router(build_client_log_router(ctx), prefix="/api/v1")
     app.include_router(build_router(ctx))
+    app.include_router(build_paid_extension_router(ctx))
     _mount_frontend(app, frontend_dist or _frontend_dist())
     return app
 

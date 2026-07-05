@@ -41,6 +41,7 @@ from aiwf.services.vsr import VsrService, VsrUnavailable
 from aiwf.services.wan import (
     WanService,
 )
+from aiwf.services.studio_generation_packet import gradio_wan_workflow_json
 from aiwf.services.wan_models import (
     wan_model_pair_compatibility,
     wan_model_quant_family,
@@ -1162,10 +1163,19 @@ def register_wan_i2v(registry: WebRegistry) -> None:
 
                     with gr.Row():
                         run = gr.Button("Generate video", variant="primary", elem_classes=["aiwf-generate-btn"])
+                        send_workflow = gr.Button("Send to workflow", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm", "aiwf-send-workflow"])
                         stop_btn = gr.Button("Stop", variant="stop", elem_classes=["aiwf-btn-stop"])
                     video_out = gr.Video(label="Result", interactive=False)
                     save_bad_video = gr.Button("Save bad result", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
                     status = gr.Markdown("**Ready** - upload an image and generate.", elem_classes=["aiwf-status-bar"])
+                    workflow_code = gr.Code(
+                        label="Workflow code block JSON",
+                        language="json",
+                        value="",
+                        lines=18,
+                        visible=False,
+                        elem_classes=["aiwf-workflow-json"],
+                    )
 
                     default_ltx_pipeline = ltx_service.default_launch_pipeline()
                     default_ltx_checkpoint = ltx_service.default_checkpoint_path(default_ltx_pipeline)
@@ -2452,6 +2462,135 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                 logger.exception("LTX generation failed")
                 raise gr.Error(f"LTX generation failed: {exc}") from exc
             return result.output_path, f"**Done** -- {result.message}"
+
+        def _capture_wan_workflow(
+            prompt_v,
+            negative_v,
+            offload_v,
+            width_v,
+            height_v,
+            frames_v,
+            fps_v,
+            high_steps_v,
+            low_steps_v,
+            guidance_v,
+            sampler_v,
+            sigma_type_v,
+            flow_v,
+            seed_v,
+            runtime_mode_v,
+            high_v,
+            low_v,
+            vae_v,
+            text_encoder_v,
+            high_lora_v,
+            high_lora_scale_v,
+            low_lora_v,
+            low_lora_scale_v,
+            chunk_size_v,
+            chunk_overlap_v,
+            temporal_chunks_v,
+            image_guidance_scale_v,
+            rife_enabled_v,
+            rife_target_fps_v,
+            rife_ckpt_v,
+            vsr_enabled_v,
+            vsr_scale_v,
+            vsr_mode_v,
+            audio_enabled_v,
+            audio_prompt_v,
+            audio_kind_v,
+            audio_model_v,
+        ):
+            selected_runtime = str(runtime_mode_v or WAN_RUNTIME_FAST_5B)
+            model_id = high_v or selected_runtime
+            json_text = gradio_wan_workflow_json(
+                mode="video",
+                route="wan-video",
+                modelId=model_id or "wan-video",
+                modelName=model_id or "Wan video route",
+                modelStatus="metadata-only",
+                prompt=prompt_v or "",
+                negativePrompt=negative_v or "",
+                width=width_v or 512,
+                height=height_v or 512,
+                frames=frames_v or 81,
+                fps=fps_v or 16,
+                steps=(int(high_steps_v or 0) + int(low_steps_v or 0)) or 20,
+                cfgScale=guidance_v or 5.0,
+                seed=seed_v if seed_v is not None else -1,
+                wanRuntimeMode=selected_runtime,
+                highNoiseModelId=high_v or "",
+                lowNoiseModelId=low_v or "",
+                highNoiseSteps=high_steps_v or 20,
+                lowNoiseSteps=low_steps_v or 1,
+                boundaryRatio=(float(high_steps_v or 20) / max(1.0, float((high_steps_v or 20) + (low_steps_v or 1)))),
+                highNoiseLoraId=high_lora_v or "",
+                highNoiseLoraScale=high_lora_scale_v or 1.0,
+                lowNoiseLoraId=low_lora_v or "",
+                lowNoiseLoraScale=low_lora_scale_v or 1.0,
+                vaeId=vae_v or "",
+                textEncoderPath=text_encoder_v or "",
+                wanOffload=offload_v or "balanced",
+                wanSigmaType=sigma_type_v or "simple",
+                wanSampler=sampler_v or "unipc",
+                wanFlowShift=flow_v or 5.0,
+                imageGuidanceScale=image_guidance_scale_v or 1.0,
+                extra={
+                    "temporalChunks": {"enabled": bool(temporal_chunks_v), "chunkSize": chunk_size_v or 24, "overlap": chunk_overlap_v or 0},
+                    "postChain": {
+                        "rife": {"enabled": bool(rife_enabled_v), "targetFps": rife_target_fps_v or 30, "checkpoint": rife_ckpt_v or ""},
+                        "vsr": {"enabled": bool(vsr_enabled_v), "scale": vsr_scale_v or 2.0, "mode": vsr_mode_v or 3},
+                        "audio": {"enabled": bool(audio_enabled_v), "prompt": audio_prompt_v or "", "kind": audio_kind_v or "", "model": audio_model_v or ""},
+                    },
+                },
+            )
+            return gr.update(value=json_text, visible=True), "**Workflow captured** — Wan model pack, LoRA stack, offload, and post-chain settings saved. No video was generated."
+
+        send_workflow.click(
+            _capture_wan_workflow,
+            inputs=[
+                prompt,
+                negative,
+                offload,
+                width,
+                height,
+                num_frames,
+                fps,
+                high_steps,
+                low_steps,
+                guidance,
+                sampler,
+                sigma_type,
+                flow_shift,
+                seed,
+                runtime_mode,
+                high_noise,
+                low_noise,
+                vae_id,
+                text_encoder,
+                high_lora,
+                high_lora_scale,
+                low_lora,
+                low_lora_scale,
+                chunk_size,
+                chunk_overlap,
+                temporal_chunks,
+                image_guidance_scale,
+                rife_enabled,
+                rife_target_fps,
+                rife_ckpt,
+                vsr_enabled,
+                vsr_scale,
+                vsr_mode,
+                audio_enabled,
+                audio_prompt,
+                audio_kind,
+                audio_model,
+            ],
+            outputs=[workflow_code, status],
+            show_progress=False,
+        )
 
         run_event = run.click(
             _clear_previous_video,

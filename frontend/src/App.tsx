@@ -1,89 +1,62 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type {
-  CSSProperties,
-  ChangeEvent as ReactChangeEvent,
-  Dispatch,
-  KeyboardEvent as ReactKeyboardEvent,
-  MouseEvent as ReactMouseEvent,
-  PointerEvent as ReactPointerEvent,
-  ReactNode,
-  SetStateAction,
-} from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  ArrowLeftRight,
   Boxes,
   Brush,
-  CircleHelp,
   Database,
-  Cpu,
   FileImage,
+  FolderOpen,
+  GitBranch,
+  Grid2x2,
   Hand,
   HardDrive,
-  Highlighter,
   Image,
-  Layers2,
+  Layers3,
+  LayoutDashboard,
   Maximize2,
   Monitor,
   PanelLeft,
-  Rows3,
-  ScanSearch,
+  Play,
   RefreshCcw,
   Settings,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Video,
-  Wand2,
   X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
-  fetchProData,
   fetchProBootstrap,
-  fetchProCapabilities,
-  fetchProDownloads,
-  fetchProLogs,
   fetchProRuntime,
-  fetchProSettings,
-  fetchVideoLabStatus,
   formatApiError,
-  generateAutoMask,
   generateProOutput,
-  runFaceSwap,
-  runVideoLab,
-  uploadVideoLabFile,
   getFallbackBootstrap,
   getFallbackRuntime,
-  ProApiError,
-  reportProClientError,
-  reportProClientEvent,
-  requestProRestart,
-  saveProSettings,
-  streamProRuntime,
-  stopProGeneration,
 } from './api'
-import type { VideoLabProbe, VideoLabStatus } from './api'
 import type {
   AspectRatioOption,
   CreationMode,
-  EngineId,
-  EngineSummary,
   GenerationSettings,
-  GenerationProgressEvent,
-  ProCapabilitiesStatus,
-  ProDataStatus,
-  ProDownloadsStatus,
-  ProLogStatus,
-  ProModelOption,
   ProBootstrap,
   ProMode,
-  ProReadinessItem,
-  ProReadinessStatus,
-  PromptInsight,
   ProRuntimeStatus,
-  ProSettingsStatus,
-  ResourceMetric,
   RecentOutput,
+  ResourceMetric,
+  ProModelOption,
 } from './types'
+import { PipelineAtlasPaidLayout } from './layouts/paid/PipelineAtlasPaidLayout'
+import { MediaFoundryImagePaidLayout } from './layouts/paid/MediaFoundryImagePaidLayout'
+import { AudioStudioPaidLayout } from './layouts/paid/AudioStudioPaidLayout'
+import { AgenticChatPaidLayout } from './layouts/paid/AgenticChatPaidLayout'
+import { ExtensionsHubPaidLayout } from './layouts/paid/ExtensionsHubPaidLayout'
+import { PluginWorkspacePaidLayout } from './layouts/paid/PluginWorkspacePaidLayout'
+import { SettingsArsenalPaidLayout } from './layouts/paid/SettingsArsenalPaidLayout'
+import { ProjectCenterPaidLayout } from './layouts/paid/ProjectCenterPaidLayout'
+import { CommandPalettePaid } from './layouts/paid/CommandPalettePaid'
+import { ModelFamilyMatrixPaidLayout } from './layouts/paid/ModelFamilyMatrixPaidLayout'
+import type { PaidUserTab, PaidWorkflowCodeBlock } from './layouts/paid/PaidLayoutTypes'
+import { autosavePaidProject, buildAutosavePayload, fetchPaidUserTabs, loadPaidUserTabsFromStorage, savePaidUserTabsToStorage } from './layouts/paid/paidApiClient'
+import { createWorkflowBlocksFromSettings, loadWorkflowBlocksFromStorage, renumberWorkflowBlocks, saveWorkflowBlocksToStorage } from './layouts/paid/workflowBlocks'
 import './styles.css'
 
 interface IconItem<T extends string> {
@@ -91,49 +64,6 @@ interface IconItem<T extends string> {
   label: string
   icon: LucideIcon
 }
-
-type ToolModalId = 'segmentation' | 'hires' | 'reactor' | 'about' | null
-type MenuBarId = 'file' | 'edit' | 'view' | 'options' | 'help' | null
-type DragTarget = 'left' | 'right' | 'bottom'
-
-interface DragState {
-  target: DragTarget
-  origin: number
-  size: number
-}
-
-interface ToolLaneAction {
-  label: string
-  onClick?: () => void
-  disabled?: boolean
-}
-
-interface ToolLaneCard {
-  id: string
-  title: string
-  summary: string
-  stats: string[]
-  actions: ToolLaneAction[]
-  note?: string
-}
-
-interface LayoutPreferences {
-  leftPanelWidth: number
-  rightPanelWidth: number
-  bottomDockHeight: number
-  bottomDockVisible: boolean
-}
-
-const DEFAULT_LAYOUT_PREFERENCES: LayoutPreferences = {
-  leftPanelWidth: 380,
-  rightPanelWidth: 320,
-  bottomDockHeight: 196,
-  bottomDockVisible: true,
-}
-
-const PRO_APP_ICON = '/app-icon.png'
-
-const LAYOUT_STORAGE_KEY = 'aiwf.pro.layout.v1'
 
 const MODE_TABS: IconItem<ProMode>[] = [
   { id: 'image', label: 'Image', icon: Image },
@@ -143,715 +73,129 @@ const MODE_TABS: IconItem<ProMode>[] = [
   { id: 'data', label: 'Data', icon: Database },
 ]
 
-const RAIL_ITEMS: IconItem<string>[] = [
+const BASE_RAIL_ITEMS: IconItem<string>[] = [
+  { id: 'explore', label: 'Explore', icon: LayoutDashboard },
   { id: 'create', label: 'Create', icon: Sparkles },
+  { id: 'project', label: 'Project', icon: FolderOpen },
+  { id: 'pipeline', label: 'Pipeline', icon: GitBranch },
+  { id: 'foundry', label: 'Foundry', icon: Layers3 },
+  { id: 'audio', label: 'Audio', icon: SlidersHorizontal },
+  { id: 'agent', label: 'Agent', icon: Sparkles },
+  { id: 'extensions', label: 'Extensions', icon: Boxes },
+  { id: 'canvas', label: 'Canvas', icon: Grid2x2 },
+  { id: 'batch', label: 'Batch', icon: Layers3 },
+  { id: 'workflows', label: 'Workflows', icon: Boxes },
   { id: 'models', label: 'Models', icon: Boxes },
-  { id: 'tools', label: 'Tools', icon: Wand2 },
+  { id: 'families', label: 'Families', icon: ShieldCheck },
   { id: 'data', label: 'Data', icon: Database },
-  { id: 'monitor', label: 'Monitor', icon: Monitor },
   { id: 'logs', label: 'Logs', icon: FileImage },
   { id: 'settings', label: 'Settings', icon: Settings },
 ]
 
-const RAIL_IDS = new Set(RAIL_ITEMS.map((item) => item.id))
-
-const SANA_QUANTIZATION_OPTIONS = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'fp8_layerwise', label: 'FP8 layerwise' },
-  { value: 'bnb_int8', label: 'BNB 8-bit' },
-  { value: 'bnb_nf4', label: 'BNB NF4' },
-  { value: 'bnb_fp4', label: 'BNB FP4' },
-  { value: 'bf16', label: 'BF16' },
-]
-
-const SANA_VAE_TILING_OPTIONS = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'off', label: 'Off' },
-  { value: 'always', label: 'Always' },
-]
-
-const EMPTY_READINESS: ProReadinessStatus = {
-  counts: {
-    working: 0,
-    'metadata-only': 0,
-    'blocked-cleanly': 0,
-    'broken-runtime': 0,
-    'unsupported-no-route': 0,
-  },
-  families: [],
-  working: [],
-  needsWork: [],
-  metadataOnlyCount: 0,
-  total: 0,
-  error: '',
-}
-
-const EMPTY_CAPABILITIES: ProCapabilitiesStatus = {
-  gradioTabs: [],
-  tools: [],
-  counts: {
-    gradioTabs: 0,
-    reactRails: RAIL_ITEMS.length,
-    checkpoints: 0,
-    blockedCheckpoints: 0,
-    loras: 0,
-    controlnet: 0,
-    sam: 0,
-    reactor: 0,
-    enhance: 0,
-    sanaVideo: 0,
-    wan: 0,
-  },
-  readiness: EMPTY_READINESS,
-  notes: ['Capabilities are loading.'],
-}
-
-const SCHEDULER_OPTIONS = [
-  { id: 'automatic', label: 'Automatic' },
-  { id: 'uniform', label: 'Uniform' },
-  { id: 'karras', label: 'Karras' },
-  { id: 'exponential', label: 'Exponential' },
-  { id: 'sgm_uniform', label: 'SGM Uniform' },
-  { id: 'beta', label: 'Beta' },
-]
-
-const OUTPUT_FORMAT_OPTIONS = [
-  { id: 'png', label: 'PNG' },
-  { id: 'jpg', label: 'JPG' },
-  { id: 'webp', label: 'WebP' },
-]
-
-const WAN_OFFLOAD_OPTIONS = [
-  { id: 'balanced', label: 'Balanced (recommended on 16 GB)' },
-  { id: 'model', label: 'Model swap' },
-  { id: 'group', label: 'Group (block-level)' },
-  { id: 'streamed', label: 'Streamed group' },
-  { id: 'sequential', label: 'Sequential (slowest, least VRAM)' },
-  { id: 'resident', label: 'Resident (24 GB+)' },
-  { id: 'none', label: 'None' },
-]
-
-const LTX_DTYPE_OPTIONS = [
-  { id: 'bf16', label: 'bfloat16 (recommended)' },
-  { id: 'fp16', label: 'float16 (pre-Ampere fallback)' },
-]
-
-const LTX_OFFLOAD_OPTIONS = [
-  { id: 'auto', label: 'Auto (resident when it fits)' },
-  { id: 'model', label: 'Always model offload' },
-  { id: 'none', label: 'Never offload (keep on GPU)' },
-]
-
-type SettingsSectionId = 'generation' | 'interface' | 'output' | 'video' | 'system' | 'about'
-
-const SETTINGS_SECTIONS: Array<{ id: SettingsSectionId; label: string; hint: string }> = [
-  { id: 'generation', label: 'Generation', hint: 'Default model, sampler, and quality values' },
-  { id: 'interface', label: 'Interface', hint: 'Previews, gallery, and layout memory' },
-  { id: 'output', label: 'Output & Metadata', hint: 'File formats, filenames, and infotext' },
-  { id: 'video', label: 'Video & Performance', hint: 'Wan/LTX precision, offload, and VRAM strategy' },
-  { id: 'system', label: 'System & Launch', hint: 'Paths, runtime flags, and API policy' },
-  { id: 'about', label: 'About', hint: 'Build and credits' },
-]
-
-const WAN_SAMPLER_OPTIONS = [
-  { id: 'unipc', label: 'UniPC' },
-  { id: 'euler', label: 'Euler' },
-  { id: 'heun', label: 'Heun' },
-]
-
-const WAN_RUNTIME_MODE_OPTIONS = [
-  { id: 'fast_5b', label: 'Fast 5B' },
-  { id: 'high_low', label: 'High / low split' },
-]
-
-const RUNTIME_BACKEND_OPTIONS = [
-  { id: 'diffusers', label: 'Diffusers' },
-  { id: 'onnx', label: 'ONNX' },
-]
-
-const RUNTIME_ATTENTION_OPTIONS = [
-  { id: 'sage_sdpa', label: 'Sage SDPA' },
-  { id: 'sdpa', label: 'SDPA' },
-  { id: 'xformers', label: 'xFormers' },
-  { id: 'none', label: 'None' },
-]
-
-const ONNX_PROVIDER_OPTIONS = [
-  { id: 'auto', label: 'Auto' },
-  { id: 'cuda', label: 'CUDA' },
-  { id: 'directml', label: 'DirectML' },
-  { id: 'cpu', label: 'CPU' },
-]
-
-const RESOLUTION_PRESETS = [
-  { id: '480', label: '480', shortEdge: 480 },
-  { id: '512', label: '512', shortEdge: 512 },
-  { id: '720', label: '720', shortEdge: 720 },
-  { id: '1024', label: '1024', shortEdge: 1024 },
-]
+const SYSTEM_NOTES = [
+  ['Run locally, stay private', 'Everything runs on your machine. Your data never leaves.'],
+  ['Optional service tabs', 'Enable integrations only when you need them.'],
+  ['Hidden tool tabs', 'Advanced tabs stay tucked away by default.'],
+  ['Models and datasets', 'Manage local models and datasets with full control.'],
+  ['Safety by default', 'Local processing. You own your outputs and prompts.'],
+] as const
 
 function App() {
   const fallbackBootstrap = useMemo(() => getFallbackBootstrap(), [])
   const fallbackRuntime = useMemo(() => getFallbackRuntime(), [])
-  const initialLayout = useMemo(() => readLayoutPreferences(), [])
   const [bootstrap, setBootstrap] = useState<ProBootstrap>(fallbackBootstrap)
   const [runtime, setRuntime] = useState<ProRuntimeStatus>(fallbackRuntime)
-  const [runtimeStreamConnected, setRuntimeStreamConnected] = useState(false)
   const [settings, setSettings] = useState<GenerationSettings>(fallbackBootstrap.defaults)
-  const [dataStatus, setDataStatus] = useState<ProDataStatus | null>(null)
-  const [downloadsStatus, setDownloadsStatus] = useState<ProDownloadsStatus | null>(null)
-  const [capabilitiesStatus, setCapabilitiesStatus] = useState<ProCapabilitiesStatus | null>(null)
-  const [logStatus, setLogStatus] = useState<ProLogStatus | null>(null)
-  const [settingsStatus, setSettingsStatus] = useState<ProSettingsStatus | null>(null)
-  const [settingsSaveStatus, setSettingsSaveStatus] = useState('')
-  const [promptInsight, setPromptInsight] = useState<PromptInsight>({
-    status: 'idle',
-    summary: 'Run browser-side analysis to check prompt structure before generating.',
-    modelLabel: 'Not run',
-    modelScore: 0,
-    modelId: 'Transformers.js lazy load',
-    progress: 0,
-    signals: [],
-    suggestions: ['Use this for lightweight prompt help; it does not start backend inference.'],
-  })
-  const [promptInsightBusy, setPromptInsightBusy] = useState(false)
-  const [generationProgress, setGenerationProgress] = useState<GenerationProgressEvent[]>([])
-  const [generationTimings, setGenerationTimings] = useState<Record<string, number>>({})
-  const [generationReceiptPath, setGenerationReceiptPath] = useState('')
-  const [generationError, setGenerationError] = useState('')
   const [activeMode, setActiveMode] = useState<ProMode>('image')
-  const [activeRail, setActiveRail] = useState(readInitialRail)
-  const [previews, setPreviews] = useState<Partial<Record<CreationMode, RecentOutput | null>>>({
-    image: fallbackBootstrap.recentOutputs[0] ?? null,
-  })
-  const activeCreationMode: CreationMode = isCreationMode(activeMode) ? activeMode : settings.mode
-  const preview = previews[activeCreationMode] ?? null
-  // Each creation mode keeps its own canvas/preview; outputs land in the canvas
-  // that matches their mode instead of overwriting whatever tab is open.
-  const setPreview = useCallback(
-    (value: RecentOutput | null | ((current: RecentOutput | null) => RecentOutput | null)) => {
-      setPreviews((current) => {
-        if (typeof value === 'function') {
-          return { ...current, image: value(current.image ?? null) }
-        }
-        const targetMode: CreationMode =
-          value && (value.mode === 'image' || value.mode === 'video' || value.mode === 'inpaint')
-            ? value.mode
-            : 'image'
-        return { ...current, [targetMode]: value }
-      })
-    },
-    [],
+  const [activeRail, setActiveRail] = useState('explore')
+  const [recentOutputs, setRecentOutputs] = useState<RecentOutput[]>(
+    fallbackBootstrap.recentOutputs,
   )
+  const [preview, setPreview] = useState<RecentOutput | null>(
+    fallbackBootstrap.recentOutputs[0] ?? null,
+  )
+  const [showOnboarding, setShowOnboarding] = useState(!fallbackBootstrap.onboardingSeen)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [statusMessage, setStatusMessage] = useState('Ready.')
   const [isGenerating, setIsGenerating] = useState(false)
-  const [backendConnected, setBackendConnected] = useState(false)
-  const [backendRecovering, setBackendRecovering] = useState(false)
-  const [engineFilter, setEngineFilter] = useState<EngineId>('all')
-  const [leftPanelWidth, setLeftPanelWidth] = useState(initialLayout.leftPanelWidth)
-  const [rightPanelWidth, setRightPanelWidth] = useState(initialLayout.rightPanelWidth)
-  const [bottomDockVisible, setBottomDockVisible] = useState(initialLayout.bottomDockVisible)
-  const [bottomDockHeight, setBottomDockHeight] = useState(initialLayout.bottomDockHeight)
-  const [activeModal, setActiveModal] = useState<ToolModalId>(null)
-  const [openMenu, setOpenMenu] = useState<MenuBarId>(null)
-  const [dragState, setDragState] = useState<DragState | null>(null)
-  const [hiresEnabled, setHiresEnabled] = useState(false)
-  const [hiresScale, setHiresScale] = useState(1.75)
-  const [hiresDenoise, setHiresDenoise] = useState(0.3)
-  const [segmentationMode, setSegmentationMode] = useState('Auto mask')
-  const [reactorSourceDataUrl, setReactorSourceDataUrl] = useState('')
-  const [reactorBusy, setReactorBusy] = useState(false)
-  const [reactorMessage, setReactorMessage] = useState('')
-  const generationAbortRef = useRef<AbortController | null>(null)
-  const runtimeErrorLoggedRef = useRef(false)
-  const auxiliaryErrorLoggedRef = useRef<Record<string, boolean>>({})
-  const auxiliaryFingerprintRef = useRef<Record<string, string>>({})
-  const auxiliaryFetchInFlightRef = useRef<Record<string, boolean>>({})
-  const runtimeJobActive = isRuntimeJobActive(runtime.job)
-  const generationActive = isGenerating || runtime.state.toLowerCase() === 'running' || runtimeJobActive
+  const [paidTabs, setPaidTabs] = useState<PaidUserTab[]>(() => loadPaidUserTabsFromStorage())
+  const [workflowBlocks, setWorkflowBlocks] = useState<PaidWorkflowCodeBlock[]>(() => loadWorkflowBlocksFromStorage())
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
 
-  const setDisconnectedRuntime = useCallback((message: string) => {
-    setRuntime({
-      ...fallbackRuntime,
-      state: backendRecovering ? 'Recovering' : 'Disconnected',
-      backend: 'Backend unreachable',
-      device: 'Waiting for runtime',
-      job: { ...fallbackRuntime.job, message },
-      resources: fallbackRuntime.resources.map((metric) => ({ ...metric })),
-      loadedModel: { ...fallbackRuntime.loadedModel },
-    })
-  }, [backendRecovering, fallbackRuntime])
+  const railItems = useMemo<IconItem<string>[]>(() => [
+    ...BASE_RAIL_ITEMS,
+    ...paidTabs
+      .filter((tab) => !tab.hidden)
+      .map((tab) => ({ id: tab.id, label: tab.label, icon: Boxes })),
+  ], [paidTabs])
 
-  const markBackendDisconnected = useCallback((message: string) => {
-    setBackendConnected(false)
-    setRuntimeStreamConnected(false)
-    setDisconnectedRuntime(message)
-    setCapabilitiesStatus(null)
-    setDataStatus(null)
-    setDownloadsStatus(null)
-    setLogStatus(null)
-    setSettingsStatus(null)
-    setStatusMessage(message)
-  }, [setDisconnectedRuntime])
-
-  const handleSaveProSettings = useCallback(async () => {
-    setSettingsSaveStatus('Saving settings...')
-    try {
-      const nextStatus = await saveProSettings(
-        settings,
-        settingsStatus?.ui,
-        settingsStatus?.output,
-        settingsStatus?.video,
-        settingsStatus?.runtime,
-      )
-      setSettingsStatus(nextStatus)
-      setBootstrap((current) => ({
-        ...current,
-        defaults: {
-          ...current.defaults,
-          ...nextStatus.generationDefaults,
-        },
-      }))
-      setStatusMessage('Settings saved.')
-      setSettingsSaveStatus('Saved.')
-    } catch (error: unknown) {
-      const message = formatApiError(error)
-      setStatusMessage(message)
-      setSettingsSaveStatus(message)
-      reportProClientError({
-        kind: 'api',
-        message,
-        source: 'settings-save',
-        context: { route: '/api/pro/settings' },
-      })
-    }
-  }, [settings, settingsStatus])
+  const updatePaidTabs = useCallback((tabs: PaidUserTab[]) => {
+    setPaidTabs(tabs)
+    savePaidUserTabsToStorage(tabs)
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
     fetchProBootstrap(controller.signal)
       .then((nextBootstrap) => {
         setBootstrap(nextBootstrap)
+        setRecentOutputs(nextBootstrap.recentOutputs)
         setPreview((currentPreview) => currentPreview ?? nextBootstrap.recentOutputs[0] ?? null)
-        setSettings((current) => {
-          const merged = settingsMatch(current, fallbackBootstrap.defaults)
-            ? nextBootstrap.defaults
-            : mergeBootstrapDefaults(current, nextBootstrap)
-          const model = nextBootstrap.models.find((item) => item.id === merged.modelId)
-          return applyModelPresetSettings(merged, model, nextBootstrap.aspectRatios)
-        })
-        setBackendConnected(true)
-        setBackendRecovering(false)
+        setShowOnboarding(!nextBootstrap.onboardingSeen)
+        setSettings((current) => mergeBootstrapDefaults(current, nextBootstrap))
         setStatusMessage('Connected to /api/pro/bootstrap.')
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
           return
         }
-        reportProClientError({
-          kind: 'api',
-          message: formatApiError(error),
-          source: 'bootstrap',
-          context: { route: '/api/pro/bootstrap' },
-        })
-        setStatusMessage('Using the local workspace view while the backend finishes starting.')
+        setStatusMessage(`Using local shell defaults. ${formatApiError(error)}`)
       })
 
     return () => controller.abort()
-  }, [fallbackBootstrap.defaults])
+  }, [])
 
   useEffect(() => {
-    return streamProRuntime(
-      (nextRuntime) => {
-        setRuntime(nextRuntime)
-        setBackendConnected(true)
-        if (backendRecovering) {
-          setBackendRecovering(false)
-          setStatusMessage('Backend reconnected.')
-        }
-      },
-      (connected) => {
-        setRuntimeStreamConnected(connected)
-      },
-    )
-  }, [backendRecovering])
+    fetchPaidUserTabs().then(setPaidTabs).catch(() => undefined)
+  }, [])
 
   useEffect(() => {
-    let disposed = false
-    let requestController: AbortController | null = null
-    let requestTimeoutId: number | null = null
-    let inFlight = false
-    // While the SSE stream is healthy it is the single source of runtime
-    // state; the GET poll only checks liveness. Applying poll responses while
-    // streaming caused stale data (older step / older preview) to overwrite
-    // newer stream ticks — visible as progress jumping backwards and live
-    // previews flickering.
-    const applyPollResults = !runtimeStreamConnected
-    const intervalMs = runtimeStreamConnected ? 30000 : generationActive ? 1000 : 5000
+    const autosaveId = window.setInterval(() => {
+      void autosavePaidProject(buildAutosavePayload(settings, activeRail, recentOutputs))
+    }, 8000)
+    return () => window.clearInterval(autosaveId)
+  }, [activeRail, recentOutputs, settings])
+
+  useEffect(() => {
+    saveWorkflowBlocksToStorage(workflowBlocks)
+  }, [workflowBlocks])
+
+  useEffect(() => {
+    const controller = new AbortController()
     const refreshRuntime = () => {
-      if (disposed || inFlight) {
-        return
-      }
-      inFlight = true
-      const activeController = new AbortController()
-      let timedOut = false
-      requestController = activeController
-      requestTimeoutId = window.setTimeout(() => {
-        timedOut = true
-        activeController.abort()
-      }, 4000)
-      fetchProRuntime(activeController.signal)
-        .then((nextRuntime) => {
-          if (!disposed) {
-            runtimeErrorLoggedRef.current = false
-            setBackendConnected(true)
-            setBackendRecovering(false)
-            if (applyPollResults) {
-              setRuntime(nextRuntime)
-            }
-          }
-        })
+      fetchProRuntime(controller.signal)
+        .then(setRuntime)
         .catch((error: unknown) => {
-          if (!disposed && (timedOut || !isAbortError(error))) {
-            if (!runtimeErrorLoggedRef.current) {
-              runtimeErrorLoggedRef.current = true
-              reportProClientError({
-                kind: 'api',
-                message: timedOut ? 'Runtime refresh timed out after 4 seconds.' : formatApiError(error),
-                source: 'runtime-refresh',
-                context: { route: '/api/pro/runtime', timedOut },
-              })
-            }
-            markBackendDisconnected(
-              timedOut
-                ? 'Backend communication timed out. Pro is holding your place and waiting to reconnect.'
-                : 'Backend communication broke. Pro is waiting for the local runtime to come back.',
-            )
-          }
-        })
-        .finally(() => {
-          if (requestTimeoutId !== null) {
-            window.clearTimeout(requestTimeoutId)
-            requestTimeoutId = null
-          }
-          inFlight = false
-          if (requestController === activeController) {
-            requestController = null
+          if (!isAbortError(error)) {
+            setStatusMessage(`Runtime status unavailable. ${formatApiError(error)}`)
           }
         })
     }
 
     refreshRuntime()
-    const intervalId = window.setInterval(refreshRuntime, intervalMs)
-    return () => {
-      disposed = true
-      requestController?.abort()
-      if (requestTimeoutId !== null) {
-        window.clearTimeout(requestTimeoutId)
-      }
-      window.clearInterval(intervalId)
-    }
-  }, [generationActive, markBackendDisconnected, runtimeStreamConnected])
-
-  useEffect(() => {
-    const onError = (event: ErrorEvent) => {
-      reportProClientError({
-        kind: 'window-error',
-        message: event.message || 'Unhandled browser error',
-        stack: event.error instanceof Error ? event.error.stack : undefined,
-        source: event.filename ? `${event.filename}:${event.lineno}:${event.colno}` : 'window',
-      })
-    }
-    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
-      reportProClientError({
-        kind: 'unhandledrejection',
-        message: formatApiError(event.reason),
-        stack: event.reason instanceof Error ? event.reason.stack : undefined,
-        source: 'promise',
-      })
-    }
-    window.addEventListener('error', onError)
-    window.addEventListener('unhandledrejection', onUnhandledRejection)
-    return () => {
-      window.removeEventListener('error', onError)
-      window.removeEventListener('unhandledrejection', onUnhandledRejection)
-    }
-  }, [])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    const runWorkspaceFetch = <T,>(
-      key: string,
-      fetcher: (signal?: AbortSignal) => Promise<T>,
-      setter: (value: T | null) => void,
-      timeoutMs: number,
-      route: string,
-      emptyMessage: string,
-    ) => {
-      if (auxiliaryFetchInFlightRef.current[key]) {
-        return
-      }
-      auxiliaryFetchInFlightRef.current[key] = true
-      const requestController = new AbortController()
-      const timeoutId = window.setTimeout(() => requestController.abort(), timeoutMs)
-      const abortRelay = () => requestController.abort()
-      controller.signal.addEventListener('abort', abortRelay, { once: true })
-      void fetcher(requestController.signal)
-        .then((value) => {
-          auxiliaryErrorLoggedRef.current[key] = false
-          // Skip the state update (and the full-shell re-render it causes)
-          // when the payload is byte-identical to the previous refresh.
-          const fingerprint = JSON.stringify(value)
-          if (auxiliaryFingerprintRef.current[key] === fingerprint) {
-            return
-          }
-          auxiliaryFingerprintRef.current[key] = fingerprint
-          setter(value)
-        })
-        .catch((error: unknown) => {
-          if (!isAbortError(error)) {
-            setter(null)
-          } else if (!controller.signal.aborted) {
-            setter(null)
-          }
-          if (controller.signal.aborted) {
-            return
-          }
-          if (!auxiliaryErrorLoggedRef.current[key]) {
-            auxiliaryErrorLoggedRef.current[key] = true
-            reportProClientError({
-              kind: 'api',
-              message: isAbortError(error) ? `${route} timed out after ${timeoutMs} ms.` : formatApiError(error),
-              source: key,
-              context: { route, timeoutMs },
-            })
-          }
-          setStatusMessage(emptyMessage)
-        })
-        .finally(() => {
-          auxiliaryFetchInFlightRef.current[key] = false
-          window.clearTimeout(timeoutId)
-          controller.signal.removeEventListener('abort', abortRelay)
-        })
-    }
-    const refreshWorkspaceData = () => {
-      if (generationActive) {
-        return
-      }
-      runWorkspaceFetch('data', fetchProData, setDataStatus, 6000, '/api/pro/data', 'Workspace data is temporarily unavailable.')
-      runWorkspaceFetch(
-        'downloads',
-        fetchProDownloads,
-        setDownloadsStatus,
-        6000,
-        '/api/pro/downloads',
-        'Download catalog refresh failed. Pro is keeping the current session alive.',
-      )
-      runWorkspaceFetch(
-        'capabilities',
-        fetchProCapabilities,
-        setCapabilitiesStatus,
-        45000,
-        '/api/pro/capabilities',
-        'Capability inventory is still scanning. Pro will keep the workspace available.',
-      )
-      runWorkspaceFetch('logs', fetchProLogs, setLogStatus, 6000, '/api/pro/logs', 'Runtime logs are temporarily unavailable.')
-      runWorkspaceFetch(
-        'settings',
-        fetchProSettings,
-        setSettingsStatus,
-        6000,
-        '/api/pro/settings',
-        'Settings data is temporarily unavailable until the backend replies again.',
-      )
-    }
-
-    refreshWorkspaceData()
-    // Inventory data moves slowly; a fast poll here caused repeated multi-MB
-    // payload parses and full-shell re-renders that made the UI feel laggy.
-    const intervalId = window.setInterval(refreshWorkspaceData, 45000)
+    const intervalId = window.setInterval(refreshRuntime, 10000)
     return () => {
       controller.abort()
       window.clearInterval(intervalId)
     }
-  }, [generationActive])
-
-  useEffect(() => {
-    const job = runtime.job
-    if (!isRuntimeJobActive(job) || !job.previewUrl || settings.mode !== 'image') {
-      return
-    }
-    setPreview({
-      id: `runtime-preview-${job.id}-${job.step}`,
-      url: job.previewUrl,
-      thumbnailUrl: job.previewUrl,
-      prompt: settings.prompt || job.message || 'Live preview',
-      width: settings.width,
-      height: settings.height,
-      createdAt: new Date().toISOString(),
-      mode: 'image',
-      modelName: settings.modelId,
-      status: 'preview',
-      source: 'runtime-preview',
-    })
-  }, [
-    runtime.job.id,
-    runtime.job.message,
-    runtime.job.previewUrl,
-    runtime.job.step,
-    settings.height,
-    settings.mode,
-    settings.modelId,
-    settings.prompt,
-    settings.width,
-  ])
-
-  const handleRecoverBackend = useCallback(async () => {
-    setBackendRecovering(true)
-    setStatusMessage('Restart requested. Waiting for the Pro backend to come back on the same port.')
-    markBackendDisconnected('Restart requested. Waiting for the Pro backend to come back on the same port.')
-    try {
-      await requestProRestart()
-    } catch (error) {
-      setBackendRecovering(false)
-      setStatusMessage(`Backend restart request failed: ${formatApiError(error)}`)
-      reportProClientError({
-        kind: 'api',
-        message: formatApiError(error),
-        source: 'restart',
-        context: { route: '/api/pro/restart' },
-      })
-    }
-  }, [markBackendDisconnected])
-
-  useEffect(() => {
-    if (!dragState) {
-      return
-    }
-    const onMove = (event: MouseEvent) => {
-      if (dragState.target === 'left') {
-        setLeftPanelWidth(clamp(event.clientX, 300, 520))
-      } else if (dragState.target === 'right') {
-        setRightPanelWidth(clamp(window.innerWidth - event.clientX, 260, 420))
-      } else {
-        setBottomDockHeight(clamp(dragState.size + (dragState.origin - event.clientY), 120, 360))
-      }
-    }
-    const onUp = () => setDragState(null)
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-    }
-  }, [dragState])
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setOpenMenu(null)
-        setActiveModal(null)
-      }
-    }
-    const onPointerDown = () => setOpenMenu(null)
-    window.addEventListener('keydown', onKeyDown)
-    window.addEventListener('pointerdown', onPointerDown)
-    return () => {
-      window.removeEventListener('keydown', onKeyDown)
-      window.removeEventListener('pointerdown', onPointerDown)
-    }
   }, [])
 
-  useEffect(() => {
-    const onHashChange = () => {
-      const nextRail = readInitialRail()
-      setActiveRail(nextRail)
-      if (nextRail === 'models') {
-        setActiveMode('models')
-      } else if (nextRail === 'data') {
-        setActiveMode('data')
-      } else if (nextRail === 'create') {
-        setActiveMode('image')
-      }
-    }
-    window.addEventListener('hashchange', onHashChange)
-    return () => window.removeEventListener('hashchange', onHashChange)
-  }, [])
-
-  useEffect(() => {
-    const nextPreferences: LayoutPreferences = {
-      leftPanelWidth,
-      rightPanelWidth,
-      bottomDockHeight,
-      bottomDockVisible,
-    }
-    try {
-      window.localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(nextPreferences))
-    } catch {
-      // Layout persistence is a convenience; the app should stay usable if storage is blocked.
-    }
-  }, [bottomDockHeight, bottomDockVisible, leftPanelWidth, rightPanelWidth])
-
-  useEffect(() => {
-    return () => {
-      void import('./ml/promptInsight').then(({ disposePromptInsightModel }) => {
-        void disposePromptInsightModel()
-      })
-    }
-  }, [])
-
-  const creationModels = useMemo(
-    () => modelsForCreationMode(bootstrap.models, activeCreationMode),
-    [activeCreationMode, bootstrap.models],
+  const selectedModel = useMemo(
+    () =>
+      bootstrap.models.find((model) => model.id === settings.modelId) ??
+      bootstrap.models[0],
+    [bootstrap.models, settings.modelId],
   )
-
-  const creationEngines = useMemo(
-    () => summarizeEnginesForModels(bootstrap.engines, creationModels),
-    [bootstrap.engines, creationModels],
-  )
-
-  const filteredModels = useMemo(
-    () => creationModels.filter((model) => matchesEngineFilter(model, engineFilter)),
-    [creationModels, engineFilter],
-  )
-
-  const selectedModel = useMemo(() => {
-    return (
-      filteredModels.find((model) => model.id === settings.modelId) ??
-      filteredModels[0] ??
-      creationModels[0]
-    )
-  }, [creationModels, filteredModels, settings.modelId])
-
-  useEffect(() => {
-    if (creationModels.length === 0) {
-      return
-    }
-    const filterHasModels = creationModels.some((model) => matchesEngineFilter(model, engineFilter))
-    if (!filterHasModels && engineFilter !== 'all') {
-      setEngineFilter('all')
-    }
-    if (creationModels.some((model) => model.id === settings.modelId)) {
-      return
-    }
-    const replacement = creationModels[0]
-    setSettings((current) =>
-      applyModelPresetSettings(
-        {
-          ...current,
-          modelId: replacement.id,
-        },
-        replacement,
-        bootstrap.aspectRatios,
-      ),
-    )
-  }, [bootstrap.aspectRatios, creationModels, engineFilter, settings.modelId])
-
-  const recentOutputs = useMemo(() => {
-    const source = dataStatus?.recentOutputs.length ? dataStatus.recentOutputs : bootstrap.recentOutputs
-    return source.slice(0, 8)
-  }, [bootstrap.recentOutputs, dataStatus])
 
   const activeRatio = useMemo(
     () =>
@@ -863,72 +207,26 @@ function App() {
   const handleModeSelect = useCallback((mode: ProMode) => {
     setActiveMode(mode)
     if (isCreationMode(mode)) {
-      if (mode === 'video') {
-        const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
-        const videoModels = modelsForCreationMode(bootstrap.models, 'video')
-        const currentIsVideo = currentModel ? modelFitsCreationMode(currentModel, 'video') : false
-        const videoModel = currentIsVideo
-          ? currentModel
-          : videoModels.find((model) => model.engineId === 'wan') ??
-            videoModels.find((model) => model.engineId === 'sana_video') ??
-            videoModels[0]
-        setEngineFilter(videoModel?.engineId ?? 'sana_video')
-        setSettings((current) => ({
-          ...current,
-          mode,
-          modelId: videoModel?.id ?? current.modelId,
-          aspectRatioId: '16:9',
-          width: 832,
-          height: 480,
-          batchSize: 1,
-        }))
-      } else {
-        const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
-        const routeModels = modelsForCreationMode(bootstrap.models, mode)
-        const routeModel = currentModel && modelFitsCreationMode(currentModel, mode) ? currentModel : routeModels[0]
-        setEngineFilter(routeModel?.engineId ?? 'all')
-        setSettings((current) => {
-          const next = {
-            ...current,
-            mode,
-            modelId: routeModel?.id ?? current.modelId,
-          }
-          return routeModel ? applyModelPresetSettings(next, routeModel, bootstrap.aspectRatios) : next
-        })
-      }
+      setSettings((current) => ({ ...current, mode }))
       setActiveRail('create')
     } else {
       setActiveRail(mode)
     }
-  }, [bootstrap.aspectRatios, bootstrap.models, settings.modelId])
+  }, [])
 
   const handleRailSelect = useCallback((id: string) => {
     setActiveRail(id)
-    if (window.location.hash !== `#${id}`) {
-      window.history.replaceState(null, '', `#${id}`)
-    }
     if (id === 'models') {
       setActiveMode('models')
     } else if (id === 'data') {
       setActiveMode('data')
-    } else if (id === 'tools') {
+    } else if (id === 'project' || id === 'pipeline' || id === 'foundry' || id === 'audio' || id === 'agent' || id === 'extensions' || id === 'families' || paidTabs.some((tab) => tab.id === id)) {
       setActiveMode('image')
     } else if (id === 'create') {
       setActiveMode('image')
-      const imageModels = modelsForCreationMode(bootstrap.models, 'image')
-      const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
-      const imageModel = currentModel && modelFitsCreationMode(currentModel, 'image') ? currentModel : imageModels[0]
-      setEngineFilter(imageModel?.engineId ?? 'all')
-      setSettings((current) => {
-        const next = {
-          ...current,
-          mode: 'image' as CreationMode,
-          modelId: imageModel?.id ?? current.modelId,
-        }
-        return imageModel ? applyModelPresetSettings(next, imageModel, bootstrap.aspectRatios) : next
-      })
+      setSettings((current) => ({ ...current, mode: 'image' }))
     }
-  }, [bootstrap.aspectRatios, bootstrap.models, settings.modelId])
+  }, [paidTabs])
 
   const handleRatioSelect = useCallback((ratio: AspectRatioOption) => {
     setSettings((current) => ({
@@ -939,321 +237,67 @@ function App() {
     }))
   }, [])
 
-  const handleEngineFilterChange = useCallback(
-    (nextFilter: EngineId) => {
-      setEngineFilter(nextFilter)
-      const nextModels = creationModels.filter((model) => matchesEngineFilter(model, nextFilter))
-      if (nextModels.length === 0) {
-        return
-      }
-      setSettings((current) => {
-        const selected = nextModels.find((model) => model.id === current.modelId) ?? nextModels[0]
-        if (nextFilter === 'all' && selected.id === current.modelId) {
-          return current
-        }
-        return applyModelPresetSettings(
-          selected.id === current.modelId ? current : { ...current, modelId: selected.id },
-          selected,
-          bootstrap.aspectRatios,
-        )
-      })
-    },
-    [bootstrap.aspectRatios, creationModels],
-  )
-
-  const handleModelSelect = useCallback(
-    (modelId: string) => {
-      const model = creationModels.find((item) => item.id === modelId) ?? bootstrap.models.find((item) => item.id === modelId)
-      setSettings((current) => applyModelPresetSettings({ ...current, modelId }, model, bootstrap.aspectRatios))
-      if (model?.engineId) {
-        setEngineFilter(model.engineId)
-      }
-      setStatusMessage(
-        model
-          ? `${model.name} selected. Runtime loads it when generation starts.`
-          : `${modelId} selected. Runtime loads it when generation starts.`,
-      )
-    },
-    [bootstrap.aspectRatios, bootstrap.models, creationModels],
-  )
-
   const handleGenerate = useCallback(async () => {
-    if (generationAbortRef.current) {
-      if (generationActive) {
-        setStatusMessage('Generation is already running.')
-        return
-      }
-      generationAbortRef.current = null
-    }
-    if (generationActive) {
-      setStatusMessage('Generation is already running in the backend.')
+    const selectedStatus = (selectedModel?.status ?? '').toLowerCase()
+    if (['broken-runtime', 'blocked-cleanly', 'unsupported-no-route'].includes(selectedStatus)) {
+      setStatusMessage(`Generation blocked by model family gate: ${selectedModel?.reason || selectedModel?.status}`)
       return
     }
     if (!settings.prompt.trim()) {
       setStatusMessage('Enter a prompt before generating.')
       return
     }
-    const requestedModel = bootstrap.models.find((model) => model.id === settings.modelId)
-    if (requestedModel && !modelFitsCreationMode(requestedModel, settings.mode)) {
-      const message =
-        settings.mode === 'video'
-          ? 'Pick a Wan or Sana Video model before generating video.'
-          : 'Video models are only available from the Video tab.'
-      setGenerationError(message)
-      setStatusMessage(message)
-      return
-    }
-    if (settings.mode === 'inpaint') {
-      if (!settings.initImageDataUrl) {
-        setStatusMessage('Load an image into the inpaint canvas first.')
-        return
-      }
-      if (!settings.maskImageDataUrl) {
-        setStatusMessage('Paint a mask over the area you want to regenerate.')
-        return
-      }
-      if (selectedModel && !['sd15', 'sdxl', 'flux_fill'].includes(selectedModel.engineId ?? 'unknown')) {
-        const message = 'Inpainting supports SD 1.5, SDXL, and Flux Fill checkpoints. Pick one of those models.'
-        setGenerationError(message)
-        setStatusMessage(message)
-        return
-      }
-    }
-    if (isModelBlocked(selectedModel)) {
-      const message = modelBlockedMessage(selectedModel)
-      setGenerationError(message)
-      setStatusMessage(message)
-      return
-    }
-    if (!bootstrap.models.some((model) => model.id === settings.modelId)) {
-      const message = 'Selected model is not available in the current Pro model list.'
-      setGenerationError(message)
-      setStatusMessage(message)
-      return
-    }
 
     const controller = new AbortController()
-    generationAbortRef.current = controller
     setIsGenerating(true)
-    setGenerationProgress([])
-    setGenerationTimings({})
-    setGenerationReceiptPath('')
-    setGenerationError('')
     setStatusMessage('Submitting to /api/pro/generate...')
-    reportProClientEvent({
-      action: 'pro-generate-submit',
-      detail: `${settings.mode} ${settings.width}x${settings.height}`,
-      context: {
-        mode: settings.mode,
-        modelId: settings.modelId,
-        steps: settings.steps,
-      },
-    })
     try {
-      const result = await generateProOutput(
-        {
-          ...settings,
-          enableHires: hiresEnabled,
-          hiresScale,
-          hiresDenoise,
-        },
-        controller.signal,
-      )
-      setGenerationProgress(result.progress)
-      setGenerationTimings(result.timings)
-      setGenerationReceiptPath(result.receiptPath ?? '')
-      const sessionOutputs =
-        result.recentOutputs.length > 0
-          ? result.recentOutputs
-          : result.output
-            ? [result.output]
-            : []
-      const stampedOutputs = sessionOutputs.map((item) => ({
-        ...item,
-        modelName: item.modelName || selectedModel?.name || settings.modelId,
-      }))
-      if (stampedOutputs.length > 0) {
-        setPreview(stampedOutputs[stampedOutputs.length - 1])
-        setBootstrap((current) => ({
-          ...current,
-          recentOutputs: mergeRecentOutputs(stampedOutputs, current.recentOutputs),
-        }))
-        setDataStatus((current) =>
-          current
-            ? {
-                ...current,
-                counts: {
-                  ...current.counts,
-                  recentOutputs: Math.max(
-                    current.counts.recentOutputs,
-                    mergeRecentOutputs(stampedOutputs, current.recentOutputs).length,
-                  ),
-                },
-                recentOutputs: mergeRecentOutputs(stampedOutputs, current.recentOutputs),
-              }
-            : current,
-        )
+      const result = await generateProOutput(settings, controller.signal)
+      const nextOutput = result.output
+      if (nextOutput) {
+        setPreview(nextOutput)
+        setRecentOutputs((current) => dedupeOutputs([nextOutput, ...result.recentOutputs, ...current]))
       }
       setStatusMessage(result.message || `Generation ${result.status}.`)
-      setGenerationError('')
     } catch (error: unknown) {
-      if (isGenerationCancelResult(error)) {
-        setGenerationError('')
-        setStatusMessage('Generation stop requested.')
-      } else {
-        const nextMessage = `Generation failed: ${formatApiError(error)}`
-        setGenerationError(nextMessage)
-        setStatusMessage(nextMessage)
-        reportProClientError({
-          kind: 'generation',
-          message: nextMessage,
-          stack: error instanceof Error ? error.stack : undefined,
-          source: 'handleGenerate',
-          context: {
-            mode: settings.mode,
-            modelId: settings.modelId,
-            route: '/api/pro/generate',
-          },
-        })
-      }
+      setStatusMessage(`Generate failed. ${formatApiError(error)}`)
     } finally {
-      if (generationAbortRef.current === controller) {
-        generationAbortRef.current = null
-      }
       setIsGenerating(false)
-      void fetchProRuntime().then(setRuntime).catch(() => undefined)
-      void fetchProLogs().then(setLogStatus).catch(() => undefined)
     }
-  }, [bootstrap.models, generationActive, hiresDenoise, hiresEnabled, hiresScale, selectedModel, settings])
+  }, [selectedModel, settings])
 
-  const handleStopGenerate = useCallback(() => {
-    const controller = generationAbortRef.current
-    if (!controller && !generationActive) {
-      setStatusMessage('No active generation to stop.')
-      return
-    }
-    setStatusMessage('Stopping generation...')
-    reportProClientEvent({
-      action: 'pro-generate-stop',
-      detail: 'Stop requested',
-      context: { runtimeState: runtime.state, jobId: runtime.job.id },
-    })
-    void stopProGeneration()
-      .then((result) => {
-        setStatusMessage(result.videoJobId ? 'Stop requested for active video job.' : 'Stop requested for active generation.')
-        void fetchProRuntime().then(setRuntime).catch(() => undefined)
-        void fetchProLogs().then(setLogStatus).catch(() => undefined)
-      })
-      .catch((error: unknown) => {
-        const nextMessage = `Stop requested locally; backend interrupt failed: ${formatApiError(error)}`
-        setStatusMessage(nextMessage)
-        reportProClientError({
-          kind: 'generation-stop',
-          message: nextMessage,
-          source: 'handleStopGenerate',
-          context: { route: '/api/pro/interrupt' },
-        })
-      })
-    controller?.abort()
-  }, [generationActive, runtime.job.id, runtime.state])
-
-  const handlePromptAnalyze = useCallback(async () => {
-    setPromptInsightBusy(true)
-    setPromptInsight((current) => ({
-      ...current,
-      status: 'loading',
-      summary: 'Loading browser-side prompt helper...',
-      progress: 5,
-    }))
-    try {
-      const { analyzePromptWithTransformers } = await import('./ml/promptInsight')
-      const nextInsight = await analyzePromptWithTransformers(
-        settings.prompt,
-        settings.negativePrompt,
-        (message, progress) => {
-          setPromptInsight((current) => ({
-            ...current,
-            status: 'loading',
-            summary: message,
-            progress,
-          }))
+  const handleSendToWorkflow = useCallback((source = 'Create panel') => {
+    setWorkflowBlocks((current) => {
+      const nextBlocks = createWorkflowBlocksFromSettings(
+        {
+          settings,
+          bootstrap,
+          runtime,
+          selectedModel,
+          selectedModelName: selectedModel?.name ?? settings.modelId,
+          source,
         },
+        current.length,
       )
-      setPromptInsight(nextInsight)
-      setStatusMessage('Prompt helper analysis complete.')
-    } finally {
-      setPromptInsightBusy(false)
-    }
-  }, [settings.negativePrompt, settings.prompt])
-
-  const handleApplyOutputSettings = useCallback((output: RecentOutput) => {
-    setSettings((current) => ({
-      ...current,
-      mode: output.mode === 'video' ? current.mode : output.mode,
-      prompt: output.prompt || current.prompt,
-      negativePrompt: output.negativePrompt ?? current.negativePrompt,
-      width: output.width || current.width,
-      height: output.height || current.height,
-      steps: typeof output.steps === 'number' ? output.steps : current.steps,
-      cfgScale: typeof output.cfgScale === 'number' ? output.cfgScale : current.cfgScale,
-      clipSkip: typeof output.clipSkip === 'number' ? output.clipSkip : current.clipSkip,
-      sampler: output.sampler || current.sampler,
-      scheduler: output.scheduler || current.scheduler,
-      seed: typeof output.seed === 'number' ? output.seed : current.seed,
-    }))
-    setStatusMessage('Output settings applied to the current generation controls.')
-  }, [])
-
-  const handleLayoutReset = useCallback(() => {
-    setLeftPanelWidth(380)
-    setRightPanelWidth(320)
-    setBottomDockHeight(196)
-    setBottomDockVisible(true)
-  }, [])
-
-  const startHorizontalDrag = useCallback(
-    (target: 'left' | 'right') => {
-      setDragState({
-        target,
-        origin: 0,
-        size: target === 'left' ? leftPanelWidth : rightPanelWidth,
-      })
-    },
-    [leftPanelWidth, rightPanelWidth],
-  )
-
-  const startBottomDrag = useCallback(
-    (event: ReactMouseEvent<HTMLButtonElement>) => {
-      event.preventDefault()
-      setDragState({
-        target: 'bottom',
-        origin: event.clientY,
-        size: bottomDockHeight,
-      })
-    },
-    [bottomDockHeight],
-  )
-
-  const workspaceStyle = activeRail === 'models'
-    ? undefined
-    : ({
-        '--left-panel-width': `${leftPanelWidth}px`,
-        '--right-panel-width': `${rightPanelWidth}px`,
-      } as CSSProperties)
+      return renumberWorkflowBlocks([...current, ...nextBlocks])
+    })
+    setActiveRail('pipeline')
+    setStatusMessage('Current settings were captured as a movable workflow code block.')
+  }, [bootstrap, runtime, selectedModel, settings])
 
   return (
-    <div className="aiwf-pro-shell theme-preset-1" data-mode={activeMode}>
+    <div className="aiwf-pro-shell" data-mode={activeMode} data-rail={activeRail}>
       <aside className="pro-rail" aria-label="Primary navigation">
         <button
           type="button"
           className="pro-logo-button"
           aria-label="AIWF Studio home"
-          onClick={() => handleRailSelect('create')}
+          onClick={() => handleRailSelect('explore')}
         >
-          <img className="pro-logo-image" src={PRO_APP_ICON} alt="" />
+          <span className="pro-logo-mark">A</span>
         </button>
         <nav className="pro-rail-nav">
-          {RAIL_ITEMS.map((item) => (
+          {railItems.map((item) => (
             <RailButton
               key={item.id}
               item={item}
@@ -1271,475 +315,218 @@ function App() {
       </aside>
 
       <main className="pro-main">
-        <MenuBar
-          openMenu={openMenu}
-          onMenuChange={setOpenMenu}
-          onAction={(action) => {
-            setOpenMenu(null)
-            if (action === 'toggle-dock') {
-              setBottomDockVisible((value) => !value)
-            } else if (action === 'reset-layout') {
-              handleLayoutReset()
-            } else if (action === 'open-hires') {
-              setActiveModal('hires')
-            } else if (action === 'open-segmentation') {
-              setActiveModal('segmentation')
-            } else if (action === 'open-reactor') {
-              setActiveModal('reactor')
-            } else if (action === 'copy-last') {
-              void navigator.clipboard?.writeText(settings.prompt)
-              setStatusMessage('Prompt copied to clipboard.')
-            } else if (action === 'new-prompt') {
-              setSettings((current) => ({ ...current, prompt: '', negativePrompt: '' }))
-              setStatusMessage('Prompt cleared.')
-            } else if (action === 'open-models') {
-              handleRailSelect('models')
-            } else if (action === 'open-data') {
-              handleRailSelect('data')
-            } else if (action === 'open-tools') {
-              handleRailSelect('tools')
-            } else if (action === 'open-monitor') {
-              handleRailSelect('monitor')
-            } else if (action === 'open-settings') {
-              handleRailSelect('settings')
-            } else if (action === 'open-help') {
-              setActiveModal('about')
-            }
-          }}
-        />
         <TopBar
           bootstrap={bootstrap}
           runtime={runtime}
-          isGenerating={generationActive}
-          statusMessage={statusMessage}
-          generationError={generationError}
-          selectedModelName={selectedModel?.name ?? settings.modelId}
-          generationProgress={generationProgress}
-          backendConnected={backendConnected}
-          backendRecovering={backendRecovering}
-          onRecoverBackend={handleRecoverBackend}
           onOpenSettings={() => handleRailSelect('settings')}
         />
-        <ModeTabs activeMode={activeMode} onSelect={handleModeSelect} />
+        {['project', 'pipeline', 'foundry', 'audio', 'agent', 'extensions', 'families', 'settings'].includes(activeRail) || paidTabs.some((tab) => tab.id === activeRail) ? null : (
+          <ModeTabs activeMode={activeMode} onSelect={handleModeSelect} />
+        )}
 
-        <section
-          className="pro-workspace"
-          aria-label="AIWF Pro workspace"
-          style={workspaceStyle}
-        >
-          {activeRail === 'models' ? (
-            <ModelsWorkspace
-              engineFilter={engineFilter}
-              engines={bootstrap.engines}
-              models={bootstrap.models}
-              downloadsStatus={downloadsStatus}
-              selectedModelId={settings.modelId}
-              onEngineFilterChange={handleEngineFilterChange}
-              onModelSelect={handleModelSelect}
+        <section className="pro-workspace" aria-label="AIWF Pro workspace">
+          {activeRail === 'project' ? (
+            <ProjectCenterPaidLayout
+              settings={settings}
+              bootstrap={bootstrap}
+              runtime={runtime}
+              recentOutputs={recentOutputs}
+              preview={preview}
+              selectedModel={selectedModel}
+              selectedModelName={selectedModel?.name ?? settings.modelId}
+              statusMessage={statusMessage}
+              isGenerating={isGenerating}
+              onSettingsChange={setSettings}
+              onGenerate={handleGenerate}
+              onSendToWorkflow={handleSendToWorkflow}
+              workflowBlocks={workflowBlocks}
+              onWorkflowBlocksChange={setWorkflowBlocks}
+              onPreviewSelect={setPreview}
+              onOpenModels={() => handleRailSelect('models')}
+              onOpenSettings={() => handleRailSelect('settings')}
             />
-          ) : activeRail === 'data' ? (
-            <>
-              <DataControlPanel
-                bootstrap={bootstrap}
-                runtime={runtime}
-                dataStatus={dataStatus}
-                recentOutputs={recentOutputs}
-                selectedModelName={selectedModel?.name ?? settings.modelId}
-                onOpenModels={() => handleRailSelect('models')}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
-              />
-              <DataWorkspace
-                bootstrap={bootstrap}
-                runtime={runtime}
-                dataStatus={dataStatus}
-                recentOutputs={recentOutputs}
-                selectedModelName={selectedModel?.name ?? settings.modelId}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
-              />
-            </>
-          ) : activeRail === 'tools' ? (
-            <>
-              <ToolsControlPanel
-                capabilitiesStatus={capabilitiesStatus}
-                runtime={runtime}
-                onOpenCreate={() => handleRailSelect('create')}
-                onOpenVideo={() => {
-                  handleRailSelect('create')
-                  handleModeSelect('video')
-                }}
-                onOpenData={() => handleRailSelect('data')}
-                onOpenSegmentation={() => setActiveModal('segmentation')}
-                onOpenReactor={() => setActiveModal('reactor')}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
-              />
-              <ToolsWorkspace
-                capabilitiesStatus={capabilitiesStatus}
-                runtime={runtime}
-                wanModels={bootstrap.models.filter((model) => (model.engineId ?? 'unknown') === 'wan')}
-                onOpenCreate={() => handleRailSelect('create')}
-                onOpenVideo={() => {
-                  handleRailSelect('create')
-                  handleModeSelect('video')
-                }}
-                onOpenData={() => handleRailSelect('data')}
-                onOpenSegmentation={() => setActiveModal('segmentation')}
-                onOpenReactor={() => setActiveModal('reactor')}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
-              />
-            </>
-          ) : activeRail === 'monitor' ? (
-            <>
-              <MonitorControlPanel
-                runtime={runtime}
-                logStatus={logStatus}
-                statusMessage={statusMessage}
-                recentOutputs={recentOutputs}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
-              />
-              <MonitorWorkspace
-                runtime={runtime}
-                logStatus={logStatus}
-                statusMessage={statusMessage}
-                recentOutputs={recentOutputs}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
-              />
-            </>
-          ) : activeRail === 'logs' ? (
-            <>
-              <LogsControlPanel
-                runtime={runtime}
-                logStatus={logStatus}
-                statusMessage={statusMessage}
-                recentOutputs={recentOutputs}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
-              />
-              <LogsWorkspace
-                runtime={runtime}
-                logStatus={logStatus}
-                statusMessage={statusMessage}
-                generationError={generationError}
-                recentOutputs={recentOutputs}
-                selectedModelName={selectedModel?.name ?? settings.modelId}
-                generationProgress={generationProgress}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
-              />
-            </>
+          ) : activeRail === 'pipeline' ? (
+            <PipelineAtlasPaidLayout
+              settings={settings}
+              bootstrap={bootstrap}
+              runtime={runtime}
+              recentOutputs={recentOutputs}
+              preview={preview}
+              selectedModel={selectedModel}
+              selectedModelName={selectedModel?.name ?? settings.modelId}
+              statusMessage={statusMessage}
+              isGenerating={isGenerating}
+              onSettingsChange={setSettings}
+              onGenerate={handleGenerate}
+              onSendToWorkflow={handleSendToWorkflow}
+              workflowBlocks={workflowBlocks}
+              onWorkflowBlocksChange={setWorkflowBlocks}
+              onPreviewSelect={setPreview}
+              onOpenModels={() => handleRailSelect('models')}
+              onOpenSettings={() => handleRailSelect('settings')}
+            />
+          ) : activeRail === 'foundry' ? (
+            <MediaFoundryImagePaidLayout
+              settings={settings}
+              bootstrap={bootstrap}
+              runtime={runtime}
+              recentOutputs={recentOutputs}
+              preview={preview}
+              selectedModel={selectedModel}
+              selectedModelName={selectedModel?.name ?? settings.modelId}
+              statusMessage={statusMessage}
+              isGenerating={isGenerating}
+              onSettingsChange={setSettings}
+              onGenerate={handleGenerate}
+              onSendToWorkflow={handleSendToWorkflow}
+              onPreviewSelect={setPreview}
+              onOpenModels={() => handleRailSelect('models')}
+              onOpenSettings={() => handleRailSelect('settings')}
+            />
+          ) : activeRail === 'audio' ? (
+            <AudioStudioPaidLayout
+              settings={settings}
+              bootstrap={bootstrap}
+              runtime={runtime}
+              recentOutputs={recentOutputs}
+              preview={preview}
+              selectedModel={selectedModel}
+              selectedModelName={selectedModel?.name ?? settings.modelId}
+              statusMessage={statusMessage}
+              isGenerating={isGenerating}
+              onSettingsChange={setSettings}
+              onGenerate={handleGenerate}
+              onSendToWorkflow={handleSendToWorkflow}
+              onPreviewSelect={setPreview}
+              onOpenModels={() => handleRailSelect('models')}
+              onOpenSettings={() => handleRailSelect('settings')}
+            />
+          ) : activeRail === 'agent' ? (
+            <AgenticChatPaidLayout
+              settings={settings}
+              bootstrap={bootstrap}
+              runtime={runtime}
+              recentOutputs={recentOutputs}
+              preview={preview}
+              selectedModel={selectedModel}
+              selectedModelName={selectedModel?.name ?? settings.modelId}
+              statusMessage={statusMessage}
+              isGenerating={isGenerating}
+              onSettingsChange={setSettings}
+              onGenerate={handleGenerate}
+              onSendToWorkflow={handleSendToWorkflow}
+              onPreviewSelect={setPreview}
+              onOpenModels={() => handleRailSelect('models')}
+              onOpenSettings={() => handleRailSelect('settings')}
+            />
+          ) : activeRail === 'extensions' ? (
+            <ExtensionsHubPaidLayout
+              paidTabs={paidTabs}
+              onPaidTabsChange={updatePaidTabs}
+              onOpenTab={handleRailSelect}
+            />
+          ) : activeRail === 'families' ? (
+            <ModelFamilyMatrixPaidLayout
+              settings={settings}
+              bootstrap={bootstrap}
+              runtime={runtime}
+              recentOutputs={recentOutputs}
+              preview={preview}
+              selectedModel={selectedModel}
+              selectedModelName={selectedModel?.name ?? settings.modelId}
+              statusMessage={statusMessage}
+              isGenerating={isGenerating}
+              onSettingsChange={setSettings}
+              onGenerate={handleGenerate}
+              onSendToWorkflow={handleSendToWorkflow}
+              onPreviewSelect={setPreview}
+              onOpenModels={() => handleRailSelect('models')}
+              onOpenSettings={() => handleRailSelect('settings')}
+            />
           ) : activeRail === 'settings' ? (
-            <>
-              <SettingsControlPanel
-                bootstrap={bootstrap}
-                runtime={runtime}
-                settings={settings}
-                settingsStatus={settingsStatus}
-                recentOutputs={recentOutputs}
-                leftPanelWidth={leftPanelWidth}
-                rightPanelWidth={rightPanelWidth}
-                bottomDockHeight={bottomDockHeight}
-                bottomDockVisible={bottomDockVisible}
-                showAdvanced={showAdvanced}
-                onBottomDockVisibleChange={setBottomDockVisible}
-                onShowAdvancedChange={setShowAdvanced}
-                onLayoutReset={handleLayoutReset}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
-              />
-              <SettingsWorkspace
-                bootstrap={bootstrap}
-                runtime={runtime}
-                settings={settings}
-                settingsStatus={settingsStatus}
-                recentOutputs={recentOutputs}
-                onSettingsChange={setSettings}
-                onSettingsStatusChange={setSettingsStatus}
-                onSaveSettings={handleSaveProSettings}
-                settingsSaveStatus={settingsSaveStatus}
-                leftPanelWidth={leftPanelWidth}
-                rightPanelWidth={rightPanelWidth}
-                bottomDockHeight={bottomDockHeight}
-                bottomDockVisible={bottomDockVisible}
-                showAdvanced={showAdvanced}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
-              />
-            </>
+            <SettingsArsenalPaidLayout
+              settings={settings}
+              bootstrap={bootstrap}
+              runtime={runtime}
+              recentOutputs={recentOutputs}
+              preview={preview}
+              selectedModel={selectedModel}
+              selectedModelName={selectedModel?.name ?? settings.modelId}
+              statusMessage={statusMessage}
+              isGenerating={isGenerating}
+              onSettingsChange={setSettings}
+              onGenerate={handleGenerate}
+              onSendToWorkflow={handleSendToWorkflow}
+              onPreviewSelect={setPreview}
+              onOpenModels={() => handleRailSelect('models')}
+              onOpenSettings={() => handleRailSelect('settings')}
+              paidTabs={paidTabs}
+              onPaidTabsChange={updatePaidTabs}
+            />
+          ) : paidTabs.some((tab) => tab.id === activeRail) ? (
+            <PluginWorkspacePaidLayout
+              tab={paidTabs.find((tab) => tab.id === activeRail) ?? paidTabs[0]}
+              onOpenExtensions={() => handleRailSelect('extensions')}
+            />
           ) : (
             <>
               <PromptPanel
                 settings={settings}
                 bootstrap={bootstrap}
-                filteredModels={filteredModels}
-                engineFilter={engineFilter}
-                engines={creationEngines}
+                selectedModel={selectedModel}
                 selectedModelName={selectedModel?.name ?? settings.modelId}
                 activeRatio={activeRatio}
                 showAdvanced={showAdvanced}
-                isGenerating={generationActive}
-                recentOutputs={recentOutputs}
-                promptInsight={promptInsight}
-                promptInsightBusy={promptInsightBusy}
-                generationProgress={generationProgress}
-                generationTimings={generationTimings}
-                generationReceiptPath={generationReceiptPath}
+                isGenerating={isGenerating}
                 onSettingsChange={setSettings}
-                onEngineFilterChange={handleEngineFilterChange}
-                onModelSelect={handleModelSelect}
                 onRatioSelect={handleRatioSelect}
-                onPreviewSelect={setPreview}
                 onGenerate={handleGenerate}
-                onStopGenerate={handleStopGenerate}
+                onSendToWorkflow={handleSendToWorkflow}
                 onToggleAdvanced={() => setShowAdvanced((value) => !value)}
-                onOpenSegmentation={() => setActiveModal('segmentation')}
-                onOpenHires={() => setActiveModal('hires')}
-                onOpenReactor={() => setActiveModal('reactor')}
-                onPromptAnalyze={handlePromptAnalyze}
-                bottomDockVisible={bottomDockVisible}
               />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
+              <CanvasPreview
+                activeMode={activeMode}
+                preview={preview}
+                statusMessage={statusMessage}
+                width={settings.width}
+                height={settings.height}
               />
-              <div className="pro-center-column">
-                {activeMode === 'inpaint' ? (
-                  <InpaintCanvas
-                    settings={settings}
-                    onSettingsChange={setSettings}
-                    statusMessage={statusMessage}
-                    preview={preview}
-                    onOpenSegmentation={() => setActiveModal('segmentation')}
-                  />
-                ) : (
-                  <CanvasPreview
-                    activeMode={activeMode}
-                    preview={preview}
-                    statusMessage={statusMessage}
-                    width={settings.width}
-                    height={settings.height}
-                    onOpenSegmentation={() => setActiveModal('segmentation')}
-                    onOpenHires={() => setActiveModal('hires')}
-                    onOpenReactor={() => setActiveModal('reactor')}
-                    bottomDockVisible={bottomDockVisible}
-                    onToggleBottomDock={() => setBottomDockVisible((value) => !value)}
-                  />
-                )}
-                <BottomDock
-                  visible={bottomDockVisible}
-                  height={bottomDockVisible ? bottomDockHeight : 0}
-                  recentOutputs={recentOutputs}
-                  selectedOutput={preview}
-                  statusMessage={statusMessage}
-                  generationError={generationError}
-                  selectedModelName={selectedModel?.name ?? settings.modelId}
-                  onPreviewSelect={setPreview}
-                  onApplyOutputSettings={handleApplyOutputSettings}
-                  onResizeStart={startBottomDrag}
-                  onToggleVisible={() => setBottomDockVisible((value) => !value)}
-                />
-              </div>
-              <ResizeHandle
-                axis="vertical"
-                label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
-              />
+              <RuntimePanel runtime={runtime} selectedModelName={selectedModel?.name ?? settings.modelId} />
             </>
           )}
-          <RuntimePanel runtime={runtime} selectedModelName={selectedModel?.name ?? settings.modelId} />
         </section>
 
+        {['project', 'pipeline', 'foundry', 'audio', 'agent', 'extensions', 'families', 'settings'].includes(activeRail) || paidTabs.some((tab) => tab.id === activeRail) ? null : (
+          <RecentRail
+            outputs={recentOutputs}
+            activeOutputId={preview?.id}
+            onSelect={setPreview}
+            onOpenFolder={() => setStatusMessage('Recent outputs are served by the local backend.')}
+          />
+        )}
       </main>
 
-      <ToolModal open={activeModal === 'segmentation'} title="Segmentation" onClose={() => setActiveModal(null)}>
-        <div className="pro-modal-form">
-          <label className="pro-field">
-            <FieldLabel
-              label="Mask route"
-              tooltip="Choose the route first. Use quick masking for ordinary subject isolation and keep the full segmentation stack for controlled edits."
-            />
-            <select value={segmentationMode} onChange={(event) => setSegmentationMode(event.target.value)}>
-              <option>Auto mask</option>
-              <option>Paint and refine</option>
-              <option>Box then segment</option>
-            </select>
-          </label>
-        </div>
-      </ToolModal>
+      <CommandPalettePaid
+        open={commandPaletteOpen}
+        onOpenChange={setCommandPaletteOpen}
+        onNavigate={handleRailSelect}
+        onGenerate={handleGenerate}
+      />
 
-      <ToolModal open={activeModal === 'hires'} title="High-res fix" onClose={() => setActiveModal(null)}>
-        <div className="pro-modal-form">
-          <label className="pro-toggle">
-            <input type="checkbox" checked={hiresEnabled} onChange={(event) => setHiresEnabled(event.target.checked)} />
-            <span>Enable high-res pass</span>
-          </label>
-          <RangeField label="Scale" min={1} max={3} step={0.05} value={hiresScale} onChange={setHiresScale} />
-          <RangeField label="Denoise" min={0} max={1} step={0.05} value={hiresDenoise} onChange={setHiresDenoise} />
-        </div>
-      </ToolModal>
-
-      <ToolModal open={activeModal === 'reactor'} title="ReActor" onClose={() => setActiveModal(null)}>
-        <div className="pro-modal-form">
-          <label className="pro-field">
-            <FieldLabel label="Source face" tooltip="Upload a clear photo of the face to transplant onto the current preview image." />
-            <input
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              onChange={(event) => {
-                const file = event.target.files?.[0]
-                event.target.value = ''
-                if (!file) {
-                  return
-                }
-                const reader = new FileReader()
-                reader.onload = () => {
-                  if (typeof reader.result === 'string') {
-                    setReactorSourceDataUrl(reader.result)
-                    setReactorMessage(`Source face loaded: ${file.name}`)
-                  }
-                }
-                reader.readAsDataURL(file)
-              }}
-              disabled={reactorBusy}
-            />
-          </label>
-          {reactorSourceDataUrl ? (
-            <img className="pro-video-source-preview" src={reactorSourceDataUrl} alt="Source face" />
-          ) : null}
-          <button
-            type="button"
-            className="pro-primary-button"
-            disabled={reactorBusy || !reactorSourceDataUrl || !preview?.url}
-            onClick={async () => {
-              if (!preview?.url || !reactorSourceDataUrl) {
-                return
-              }
-              setReactorBusy(true)
-              setReactorMessage('Swapping face…')
-              try {
-                let targetDataUrl = preview.url
-                if (!targetDataUrl.startsWith('data:')) {
-                  const blob = await (await fetch(targetDataUrl)).blob()
-                  targetDataUrl = await new Promise<string>((resolve, reject) => {
-                    const reader = new FileReader()
-                    reader.onload = () => resolve(reader.result as string)
-                    reader.onerror = () => reject(new Error('Could not read the preview image.'))
-                    reader.readAsDataURL(blob)
-                  })
-                }
-                const result = await runFaceSwap(targetDataUrl, reactorSourceDataUrl)
-                if (result.image) {
-                  const swapped: RecentOutput = {
-                    ...preview,
-                    id: `${preview.id}-reactor-${Date.now()}`,
-                    url: result.image,
-                    thumbnailUrl: result.image,
-                    createdAt: new Date().toISOString(),
-                  }
-                  setPreview(swapped)
-                  setBootstrap((current) => ({
-                    ...current,
-                    recentOutputs: mergeRecentOutputs([swapped], current.recentOutputs),
-                  }))
-                }
-                setReactorMessage(result.message || 'Face swap complete.')
-              } catch (error: unknown) {
-                setReactorMessage(`Face swap failed: ${formatApiError(error)}`)
-              } finally {
-                setReactorBusy(false)
-              }
-            }}
-          >
-            {reactorBusy ? 'Swapping…' : 'Swap onto current preview'}
-          </button>
-          {reactorMessage ? <p className="pro-field-note">{reactorMessage}</p> : null}
-          {!preview?.url ? <p className="pro-field-note">Generate or select an image first — the swap targets the current preview.</p> : null}
-        </div>
-      </ToolModal>
-
-      <ToolModal open={activeModal === 'about'} title="AIWF Studio" onClose={() => setActiveModal(null)}>
-        <div className="pro-about-panel">
-          <strong>Local creative control for open image and video models.</strong>
-          <span>{bootstrap.version}</span>
-        </div>
-      </ToolModal>
-
-    </div>
-  )
-}
-
-function MenuBar({
-  openMenu,
-  onMenuChange,
-  onAction,
-}: {
-  openMenu: MenuBarId
-  onMenuChange: (value: MenuBarId) => void
-  onAction: (value: string) => void
-}) {
-  return (
-    <div
-      className="pro-menu-bar"
-      role="menubar"
-      aria-label="Application menu"
-      onPointerDown={(event) => event.stopPropagation()}
-    >
-      {MENU_BAR_ITEMS.map((item) => (
-        <div key={item.id} className="pro-menu-group">
-          <button
-            type="button"
-            className={openMenu === item.id ? 'pro-menu-button pro-menu-button-active' : 'pro-menu-button'}
-            onClick={() => onMenuChange(openMenu === item.id ? null : item.id)}
-          >
-            {item.label}
-          </button>
-          {openMenu === item.id ? (
-            <div className="pro-menu-dropdown">
-              {item.items.map((entry) => (
-                <button key={entry.id} type="button" className="pro-menu-item" onClick={() => onAction(entry.id)}>
-                  <span>{entry.label}</span>
-                  {entry.hint ? <small>{entry.hint}</small> : null}
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ))}
+      {showOnboarding ? (
+        <OnboardingModal
+          onClose={() => setShowOnboarding(false)}
+          onShowAdvanced={() => {
+            setShowAdvanced(true)
+            setShowOnboarding(false)
+          }}
+          onOpenData={() => {
+            setActiveMode('data')
+            setActiveRail('data')
+            setShowOnboarding(false)
+          }}
+        />
+      ) : null}
     </div>
   )
 }
@@ -1747,63 +534,19 @@ function MenuBar({
 function TopBar({
   bootstrap,
   runtime,
-  isGenerating,
-  statusMessage,
-  generationError,
-  selectedModelName,
-  generationProgress,
-  backendConnected,
-  backendRecovering,
-  onRecoverBackend,
   onOpenSettings,
 }: {
   bootstrap: ProBootstrap
   runtime: ProRuntimeStatus
-  isGenerating: boolean
-  statusMessage: string
-  generationError: string
-  selectedModelName: string
-  generationProgress: GenerationProgressEvent[]
-  backendConnected: boolean
-  backendRecovering: boolean
-  onRecoverBackend: () => void
   onOpenSettings: () => void
 }) {
-  const latestProgress = generationProgress[generationProgress.length - 1]
-  const runtimeJob = runtime.job
-  const activeError = generationError || runtimeJob.error
-  const runtimeJobActive = isRuntimeJobActive(runtimeJob)
-  const progressMessage = activeError || latestProgress?.message || runtimeJob.message || statusMessage
-  const progressPercent = runtimeJobActive
-    ? clampPercent(runtimeJob.progress)
-    : latestProgress
-      ? clampPercent(Math.round(latestProgress.progress * 100))
-      : clampPercent(runtimeJob.progress)
-  const progressStep = runtimeJobActive && runtimeJob.totalSteps
-    ? `${runtimeJob.step}/${runtimeJob.totalSteps}`
-    : latestProgress?.total
-      ? `${latestProgress.step}/${latestProgress.total}`
-      : ''
-  const active = isGenerating || runtime.state.toLowerCase() === 'running' || runtimeJobActive
+  const vram = runtime.resources.find((metric) => metric.label.toLowerCase() === 'vram')
 
   return (
     <header className="pro-topbar">
       <div className="pro-titlebar">
-        <h1>{bootstrap.workspaceName || 'AIWF Studio'}</h1>
-        <span>Local generation workspace</span>
-      </div>
-      <div className="pro-generation-strip" data-active={active} data-error={Boolean(activeError)}>
-        <div className="pro-generation-copy">
-          <span>{activeError ? 'Generation error' : active ? 'Generating' : 'Generation info'}</span>
-          <strong className="pro-generation-status-text">{progressMessage}</strong>
-        </div>
-        <div className="pro-generation-meter" aria-label={`Generation progress ${progressPercent}%`}>
-          <span style={{ width: `${progressPercent}%` }} />
-        </div>
-        <div className="pro-generation-meta">
-          {progressStep ? <span>{progressStep}</span> : null}
-          <span>{selectedModelName}</span>
-        </div>
+        <h1>{bootstrap.workspaceName}</h1>
+        <span>{bootstrap.subtitle}</span>
       </div>
       <div className="pro-topbar-status">
         <div className="pro-engine-status" data-state={runtime.state.toLowerCase()}>
@@ -1811,16 +554,7 @@ function TopBar({
           <span>Local Engine</span>
           <strong>{runtime.state}</strong>
         </div>
-        {!backendConnected || backendRecovering ? (
-          <button
-            type="button"
-            className="pro-icon-button"
-            aria-label="Restart backend"
-            onClick={onRecoverBackend}
-          >
-            <RefreshCcw size={18} aria-hidden="true" />
-          </button>
-        ) : null}
+        {vram ? <MiniMetric metric={vram} /> : null}
         <button
           type="button"
           className="pro-icon-button"
@@ -1871,170 +605,43 @@ function ModeTabs({
 function PromptPanel({
   settings,
   bootstrap,
-  filteredModels,
-  engineFilter,
-  engines,
+  selectedModel,
   selectedModelName,
   activeRatio,
   showAdvanced,
   isGenerating,
-  recentOutputs,
-  promptInsight,
-  promptInsightBusy,
-  generationProgress,
-  generationTimings,
-  generationReceiptPath,
   onSettingsChange,
-  onEngineFilterChange,
-  onModelSelect,
   onRatioSelect,
-  onPreviewSelect,
   onGenerate,
-  onStopGenerate,
+  onSendToWorkflow,
   onToggleAdvanced,
-  onOpenSegmentation,
-  onOpenHires,
-  onOpenReactor,
-  onPromptAnalyze,
-  bottomDockVisible,
 }: {
   settings: GenerationSettings
   bootstrap: ProBootstrap
-  filteredModels: ProModelOption[]
-  engineFilter: EngineId
-  engines: EngineSummary[]
+  selectedModel: ProModelOption | undefined
   selectedModelName: string
   activeRatio: AspectRatioOption | undefined
   showAdvanced: boolean
   isGenerating: boolean
-  recentOutputs: RecentOutput[]
-  promptInsight: PromptInsight
-  promptInsightBusy: boolean
-  generationProgress: GenerationProgressEvent[]
-  generationTimings: Record<string, number>
-  generationReceiptPath: string
   onSettingsChange: (value: GenerationSettings | ((current: GenerationSettings) => GenerationSettings)) => void
-  onEngineFilterChange: (value: EngineId) => void
-  onModelSelect: (modelId: string) => void
   onRatioSelect: (ratio: AspectRatioOption) => void
-  onPreviewSelect: (value: RecentOutput) => void
   onGenerate: () => void
-  onStopGenerate: () => void
+  onSendToWorkflow: (source?: string) => void
   onToggleAdvanced: () => void
-  onOpenSegmentation: () => void
-  onOpenHires: () => void
-  onOpenReactor: () => void
-  onPromptAnalyze: () => void
-  bottomDockVisible: boolean
 }) {
-  const handlePromptKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== 'Enter' || !event.shiftKey || event.nativeEvent.isComposing) {
-      return
-    }
-    event.preventDefault()
-    onGenerate()
-  }
-  const selectedModel =
-    filteredModels.find((model) => model.id === settings.modelId) ?? filteredModels[0]
-  const selectedEngine = selectedModel?.engineId ?? 'unknown'
-  const selectedModelBlocked = isModelBlocked(selectedModel)
-  const selectedModelUnavailable = !selectedModel
-  const selectedModelWarning = selectedModelBlocked
-    ? modelBlockedMessage(selectedModel)
-    : selectedModelUnavailable
-      ? 'Selected model is not available in the current Pro model list.'
-      : ''
-  // Flow-match DiT families run their own scheduler; the sampler picker has no effect.
-  const samplerIgnored = ['flux', 'flux2', 'zimage', 'sd35', 'qwen', 'sana'].includes(selectedEngine)
-  // Flux.2 Klein is step-distilled; classifier-free guidance is ignored by the pipeline.
-  const cfgIgnored = selectedEngine === 'flux2'
-  const modelHelper = useMemo(
-    () => buildModelHelper(selectedModel, selectedEngine, samplerIgnored, cfgIgnored),
-    [cfgIgnored, samplerIgnored, selectedEngine, selectedModel],
-  )
-  const resolutionOptions = useMemo(() => {
-    const aspect = imageAspect(settings.width, settings.height, activeRatio)
-    return RESOLUTION_PRESETS.map((preset) => ({
-      ...preset,
-      dimensions: dimensionsForShortEdge(aspect, preset.shortEdge),
-      active: Math.abs(Math.min(settings.width, settings.height) - preset.shortEdge) <= 8,
-    }))
-  }, [activeRatio, settings.height, settings.width])
-
-  const handleResolutionSelect = useCallback(
-    (shortEdge: number) => {
-      onSettingsChange((current) => {
-        const dimensions = dimensionsForShortEdge(
-          imageAspect(current.width, current.height, activeRatio),
-          shortEdge,
-        )
-        return {
-          ...current,
-          width: dimensions.width,
-          height: dimensions.height,
-        }
-      })
-    },
-    [activeRatio, onSettingsChange],
-  )
-
-  const handleAspectSwap = useCallback(() => {
-    onSettingsChange((current) => {
-      const swappedRatio = findMatchingAspectRatio(bootstrap.aspectRatios, current.height, current.width)
-      return {
-        ...current,
-        aspectRatioId: swappedRatio?.id ?? current.aspectRatioId,
-        width: current.height,
-        height: current.width,
-      }
-    })
-  }, [bootstrap.aspectRatios, onSettingsChange])
-
-  const handleVideoSourceChange = (event: ReactChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file) {
-      return
-    }
-    const reader = new FileReader()
-    reader.onload = () => {
-      const value = typeof reader.result === 'string' ? reader.result : ''
-      if (!value) {
-        return
-      }
-      onSettingsChange((current) => ({
-        ...current,
-        sourceImageDataUrl: value,
-        sourceImageName: file.name,
-      }))
-    }
-    reader.readAsDataURL(file)
-  }
-
-  const handleAddModelHelperToPrompt = useCallback(() => {
-    if (!modelHelper.promptText) {
-      return
-    }
-    onSettingsChange((current) => ({
-      ...current,
-      prompt: appendPromptText(current.prompt, modelHelper.promptText),
-    }))
-  }, [modelHelper.promptText, onSettingsChange])
+  const selectedStatus = (selectedModel?.status ?? '').toLowerCase()
+  const modelBlocked = ['broken-runtime', 'blocked-cleanly', 'unsupported-no-route'].includes(selectedStatus)
+  const modelWarning = ['metadata-only', 'needs-smoke', 'experimental', 'candidate'].includes(selectedStatus)
 
   return (
     <aside className="pro-prompt-panel" aria-label="Prompt and generation settings">
       <PanelHeader title="Prompt" actionLabel="Prompt tools" icon={PanelLeft} />
       <label className="pro-field pro-prompt-field">
-        <FieldLabel
-          label="Prompt"
-          tooltip="Describe the scene, subject, or shot intent first. Start with the route goal, then add detail only when it changes the result you need."
-        />
+        <span>Prompt</span>
         <textarea
           value={settings.prompt}
           maxLength={1500}
           rows={5}
-          aria-keyshortcuts="Shift+Enter"
-          onKeyDown={handlePromptKeyDown}
           onChange={(event) =>
             onSettingsChange((current) => ({ ...current, prompt: event.target.value }))
           }
@@ -2043,10 +650,7 @@ function PromptPanel({
       </label>
 
       <label className="pro-field">
-        <FieldLabel
-          label="Negative prompt"
-          tooltip="Use this to remove failure patterns, not to rewrite the whole image. Keep it short and only exclude things you consistently do not want."
-        />
+        <span>Negative prompt</span>
         <textarea
           value={settings.negativePrompt}
           maxLength={1500}
@@ -2061,185 +665,39 @@ function PromptPanel({
         <small>{settings.negativePrompt.length} / 1500</small>
       </label>
 
-      {settings.mode === 'video' ? (
-        <section className="pro-video-source-card" aria-label="Video source image">
-          <div className="pro-video-source-copy">
-            <FileImage size={17} aria-hidden="true" />
-            <div>
-              <strong>Source image</strong>
-              <span>{settings.sourceImageName || 'Optional first frame for image-to-video.'}</span>
-            </div>
-          </div>
-          {settings.sourceImageDataUrl ? (
-            <img className="pro-video-source-preview" src={settings.sourceImageDataUrl} alt="" />
-          ) : (
-            <div className="pro-video-source-empty">No image selected</div>
-          )}
-          <div className="pro-video-source-actions">
-            <label className="pro-secondary-button" htmlFor="pro-video-source-input">
-              <FileImage size={15} aria-hidden="true" />
-              <span>Upload image</span>
-            </label>
-            <input
-              id="pro-video-source-input"
-              className="pro-file-input-hidden"
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              onChange={handleVideoSourceChange}
-            />
-            {settings.sourceImageDataUrl ? (
-              <button
-                type="button"
-                className="pro-secondary-button ghost"
-                onClick={() =>
-                  onSettingsChange((current) => ({
-                    ...current,
-                    sourceImageDataUrl: '',
-                    sourceImageName: '',
-                  }))
-                }
-              >
-                Clear
-              </button>
-            ) : null}
-          </div>
-        </section>
-      ) : null}
-
-      <div className="pro-prompt-actions" aria-label="Prompt actions">
-        <button
-          type="button"
-          className={
-            isGenerating
-              ? 'pro-generate-button pro-generate-button-stop'
-              : selectedModelWarning
-                ? 'pro-generate-button pro-generate-button-disabled'
-                : 'pro-generate-button'
-          }
-          disabled={!isGenerating && Boolean(selectedModelWarning)}
-          onClick={isGenerating ? onStopGenerate : onGenerate}
-          title={!isGenerating && selectedModelWarning ? selectedModelWarning : undefined}
-        >
-          {isGenerating ? <X size={18} aria-hidden="true" /> : <Sparkles size={18} aria-hidden="true" />}
-          <span>{isGenerating ? 'Stop' : settings.mode === 'video' ? 'Generate video' : 'Generate image'}</span>
-        </button>
-        <button
-          type="button"
-          className="pro-secondary-button"
-          disabled={promptInsightBusy}
-          onClick={onPromptAnalyze}
-        >
-          {promptInsightBusy ? 'Analyzing...' : 'Analyze prompt'}
-        </button>
-      </div>
-      {selectedModelWarning ? (
-        <div className="pro-model-readiness-note" role="alert">
-          <strong>{selectedModelBlocked ? 'Model not ready' : 'Model unavailable'}</strong>
-          <span>{selectedModelWarning}</span>
-          {selectedModel?.suggestedAction ? <small>{selectedModel.suggestedAction}</small> : null}
-        </div>
-      ) : null}
-
-      <section className="pro-prompt-insight-card" aria-label="Prompt helper">
-        <div className="pro-prompt-insight-header">
-          <div>
-            <strong>Prompt helper</strong>
-            <span>{modelHelper.summary}</span>
-          </div>
-          <button
-            type="button"
-            className="pro-secondary-button pro-prompt-helper-add"
-            onClick={handleAddModelHelperToPrompt}
-            disabled={!modelHelper.promptText}
-          >
-            Add to prompt
-          </button>
-        </div>
-        <div className="pro-model-helper-grid">
-          {modelHelper.lines.map((line) => (
-            <span key={line}>{line}</span>
-          ))}
-        </div>
-        <div className="pro-prompt-insight-meter" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={promptInsight.progress}>
-          <span style={{ width: `${promptInsight.progress}%` }} />
-        </div>
-        <p>{promptInsight.summary}</p>
-        <div className="pro-prompt-insight-meta">
-          <span>{promptInsight.modelLabel}</span>
-          <span>{Math.round(promptInsight.modelScore * 100)}%</span>
-        </div>
-        {promptInsight.signals.length > 0 ? (
-          <div className="pro-prompt-signal-grid">
-            {promptInsight.signals.map((signal) => (
-              <div key={signal.label} className={`pro-prompt-signal pro-prompt-signal-${signal.tone}`}>
-                <span>{signal.label}</span>
-                <strong>{signal.value}</strong>
-              </div>
-            ))}
-          </div>
-        ) : null}
-        <ul className="pro-prompt-suggestions">
-          {promptInsight.suggestions.map((suggestion) => (
-            <li key={suggestion}>{suggestion}</li>
-          ))}
-        </ul>
-      </section>
-
       <label className="pro-field">
-        <FieldLabel
-          label="Engine"
-          tooltip="Choose the route first. Engines filter the model list down to the families that actually fit that workflow."
-        />
-        <select
-          value={engineFilter}
-          onChange={(event) => onEngineFilterChange(event.target.value as EngineId)}
-        >
-          {buildEngineFilterOptions(engines).map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="pro-field">
-        <FieldLabel
-          label="Model"
-          tooltip="Pick the model after the route. Use one model long enough to learn its defaults before you start comparing families."
-        />
+        <span>Model</span>
         <div className="pro-select-row">
           <select
             value={settings.modelId}
-            onChange={(event) => onModelSelect(event.target.value)}
+            onChange={(event) =>
+              onSettingsChange((current) => ({ ...current, modelId: event.target.value }))
+            }
           >
-            {filteredModels.map((model) => (
-              <option key={model.id} value={model.id}>
-                {formatModelOptionLabel(model)}
-              </option>
-            ))}
+            {bootstrap.models.map((model) => {
+              const status = (model.status ?? '').toLowerCase()
+              const blocked = ['broken-runtime', 'blocked-cleanly', 'unsupported-no-route'].includes(status)
+              const label = model.status ? `${model.name} · ${model.status}` : model.name
+              return (
+                <option key={model.id} value={model.id} disabled={blocked}>
+                  {label}
+                </option>
+              )
+            })}
           </select>
           <button type="button" className="pro-icon-button" aria-label="Refresh models">
             <RefreshCcw size={16} aria-hidden="true" />
           </button>
         </div>
+        {modelBlocked || modelWarning ? (
+          <small className={modelBlocked ? 'pro-model-gate pro-model-gate-block' : 'pro-model-gate pro-model-gate-warn'}>
+            {modelBlocked ? 'Blocked from normal selection' : 'Needs smoke receipt'}: {selectedModel?.reason || selectedModel?.suggestedAction || selectedModel?.status}
+          </small>
+        ) : null}
       </label>
 
       <fieldset className="pro-aspect-group">
-        <legend>
-          <FieldLabel
-            label="Aspect ratio"
-            tooltip="Set working shape early. Changing ratio late can hide composition problems by turning a prompt problem into a crop problem."
-          />
-        </legend>
-        <button
-          type="button"
-          className="pro-icon-button pro-aspect-swap"
-          onClick={handleAspectSwap}
-          aria-label="Swap aspect ratio"
-          title="Swap aspect ratio"
-        >
-          <ArrowLeftRight size={16} aria-hidden="true" />
-        </button>
+        <legend>Aspect ratio</legend>
         <div className="pro-aspect-chips">
           {bootstrap.aspectRatios.map((ratio) => {
             const active = activeRatio?.id === ratio.id
@@ -2258,153 +716,41 @@ function PromptPanel({
         </div>
       </fieldset>
 
-      <fieldset className="pro-aspect-group pro-resolution-group">
-        <legend>
-          <FieldLabel
-            label="Resolution"
-            tooltip="Choose the short edge for the active shape. Width and height stay editable below."
-          />
-        </legend>
-        <div className="pro-aspect-chips">
-          {resolutionOptions.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              className={option.active ? 'pro-chip pro-chip-active pro-resolution-chip' : 'pro-chip pro-resolution-chip'}
-              aria-pressed={option.active}
-              onClick={() => handleResolutionSelect(option.shortEdge)}
-            >
-              <span>{option.label}</span>
-              <small>{option.dimensions.width}x{option.dimensions.height}</small>
-            </button>
-          ))}
-        </div>
-      </fieldset>
-
       <div className="pro-settings-block">
-        <div className="pro-section-label">
-          {settings.mode === 'video'
-            ? selectedEngine === 'wan'
-              ? 'Wan video settings'
-              : 'Sana video settings'
-            : 'Image settings'}
-        </div>
+        <div className="pro-section-label">Image settings</div>
         <RangeField
           label="Steps"
-          tooltip="Steps control how long the model refines the image. Raise this slowly and only when the current model clearly benefits."
           min={1}
-          max={settings.mode === 'video' ? 100 : 80}
+          max={80}
           step={1}
           value={settings.steps}
           onChange={(value) => onSettingsChange((current) => ({ ...current, steps: value }))}
         />
         <RangeField
           label="CFG scale"
-          tooltip="Guidance strength pushes the model harder toward the prompt. More is not automatically better, especially on distilled or speed-focused models."
           min={0}
           max={20}
           step={0.5}
           value={settings.cfgScale}
           onChange={(value) => onSettingsChange((current) => ({ ...current, cfgScale: value }))}
         />
-        {cfgIgnored ? (
-          <p className="pro-field-note">Flux.2 Klein is distilled - CFG has no effect on this model.</p>
-        ) : null}
-        {settings.mode === 'video' ? (
-          <>
-            <RangeField
-              label="Frames"
-              tooltip="Frame count controls video duration and denoise work. Wan normalizes to 4k+1 frames (e.g. 81). Keep smoke tests short, then increase after timing receipts look sane."
-              min={5}
-              max={257}
-              step={1}
-              value={settings.frames}
-              onChange={(value) => onSettingsChange((current) => ({ ...current, frames: value }))}
-            />
-            <RangeField
-              label="FPS"
-              tooltip="FPS changes playback duration without changing denoise frame count. Use it as a delivery setting after the motion looks right."
-              min={1}
-              max={60}
-              step={1}
-              value={settings.fps}
-              onChange={(value) => onSettingsChange((current) => ({ ...current, fps: value }))}
-            />
-            {selectedEngine === 'wan' ? (
-              <p className="pro-field-note">
-                Wan sampler, flow shift, and offload strategy come from Settings → Video &amp; Performance. The
-                source image above is the first frame for image-to-video.
-              </p>
-            ) : null}
-            {selectedEngine !== 'wan' ? (
-            <>
-            <label className="pro-field pro-compact-field">
-              <FieldLabel
-                label="Quantization"
-                tooltip="Auto uses the fastest safe Sana path AIWF can load. FP8 and BNB modes are explicit override paths for VRAM pressure."
-              />
-              <select
-                value={settings.sanaQuantization}
-                onChange={(event) =>
-                  onSettingsChange((current) => ({ ...current, sanaQuantization: event.target.value }))
-                }
-              >
-                {SANA_QUANTIZATION_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="pro-field pro-compact-field">
-              <FieldLabel
-                label="VAE tiling"
-                tooltip="Auto keeps decode fast, then retries with tiling only after an out-of-memory error. Always is slower but safer."
-              />
-              <select
-                value={settings.sanaVaeTiling}
-                onChange={(event) =>
-                  onSettingsChange((current) => ({ ...current, sanaVaeTiling: event.target.value }))
-                }
-              >
-                {SANA_VAE_TILING_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            </>
-            ) : null}
-          </>
-        ) : (
-          <label className="pro-field pro-compact-field">
-            <FieldLabel
-              label="Sampler"
-              tooltip="Sampler changes the route the denoiser takes through the same request. Change this one variable at a time so you can see what it actually did."
-            />
-            <select
-              value={settings.sampler}
-              onChange={(event) =>
-                onSettingsChange((current) => ({ ...current, sampler: event.target.value }))
-              }
-            >
-              {bootstrap.samplers.map((sampler) => (
-                <option key={sampler} value={sampler}>
-                  {sampler}
-                </option>
-              ))}
-            </select>
-            {samplerIgnored ? (
-              <p className="pro-field-note">This model family uses its own flow-match scheduler - sampler choice is ignored.</p>
-            ) : null}
-          </label>
-        )}
         <label className="pro-field pro-compact-field">
-          <FieldLabel
-            label="Seed"
-            tooltip="Seed is your receipt for repeatability. Keep a good seed when testing one control at a time so the comparison stays honest."
-          />
+          <span>Sampler</span>
+          <select
+            value={settings.sampler}
+            onChange={(event) =>
+              onSettingsChange((current) => ({ ...current, sampler: event.target.value }))
+            }
+          >
+            {bootstrap.samplers.map((sampler) => (
+              <option key={sampler} value={sampler}>
+                {sampler}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="pro-field pro-compact-field">
+          <span>Seed</span>
           <input
             type="number"
             value={settings.seed}
@@ -2416,84 +762,42 @@ function PromptPanel({
             }
           />
         </label>
-        <label className="pro-field pro-compact-field">
-          <FieldLabel
-            label="Width"
-            tooltip="Resolution belongs up front because it changes often. Set working size before you judge detail, speed, or memory use."
-          />
-          <input
-            type="number"
-            min={256}
-            step={8}
-            value={settings.width}
-            onChange={(event) =>
-              onSettingsChange((current) => ({
-                ...current,
-                width: Number(event.target.value),
-              }))
-            }
-          />
-        </label>
-        <label className="pro-field pro-compact-field">
-          <FieldLabel
-            label="Height"
-            tooltip="Keep working dimensions visible. If the output feels wrong, confirm size and ratio before you keep changing prompts."
-          />
-          <input
-            type="number"
-            min={256}
-            step={8}
-            value={settings.height}
-            onChange={(event) =>
-              onSettingsChange((current) => ({
-                ...current,
-                height: Number(event.target.value),
-              }))
-            }
-          />
-        </label>
-        {settings.mode === 'video' ? (
-          <div className="pro-video-toggle-grid">
-            <label className="pro-toggle">
-              <input
-                type="checkbox"
-                checked={settings.useSageAttention}
-                onChange={(event) =>
-                  onSettingsChange((current) => ({ ...current, useSageAttention: event.target.checked }))
-                }
-              />
-              <span>Sage attention</span>
-            </label>
-            <label className="pro-toggle">
-              <input
-                type="checkbox"
-                checked={settings.offloadTextEncoderAfterEncode}
-                onChange={(event) =>
-                  onSettingsChange((current) => ({
-                    ...current,
-                    offloadTextEncoderAfterEncode: event.target.checked,
-                  }))
-                }
-              />
-              <span>Free text encoder</span>
-            </label>
-            <label className="pro-toggle">
-              <input
-                type="checkbox"
-                checked={settings.generateAudio}
-                onChange={(event) =>
-                  onSettingsChange((current) => ({ ...current, generateAudio: event.target.checked }))
-                }
-              />
-              <span>Add audio</span>
-            </label>
-          </div>
-        ) : (
+      </div>
+
+      {showAdvanced ? (
+        <div className="pro-advanced-panel">
           <label className="pro-field pro-compact-field">
-            <FieldLabel
-              label="Batch"
-              tooltip="Batch controls are front-and-center because they can change every run. Use them deliberately and keep receipts when you compare outputs."
+            <span>Width</span>
+            <input
+              type="number"
+              min={256}
+              step={8}
+              value={settings.width}
+              onChange={(event) =>
+                onSettingsChange((current) => ({
+                  ...current,
+                  width: Number(event.target.value),
+                }))
+              }
             />
+          </label>
+          <label className="pro-field pro-compact-field">
+            <span>Height</span>
+            <input
+              type="number"
+              min={256}
+              step={8}
+              value={settings.height}
+              onChange={(event) =>
+                onSettingsChange((current) => ({
+                  ...current,
+                  height: Number(event.target.value),
+                }))
+              }
+            />
+          </label>
+          <label className="pro-field pro-compact-field">
+            <span>Batch size</span>
             <input
               type="number"
               min={1}
@@ -2507,37 +811,61 @@ function PromptPanel({
               }
             />
           </label>
-        )}
-      </div>
-
-      {settings.mode === 'video' ? (
-        <SanaStageReceipt
-          events={generationProgress}
-          timings={generationTimings}
-          receiptPath={generationReceiptPath}
-        />
+        </div>
       ) : null}
 
-      <div className="pro-tool-launchers">
-        <button type="button" className="pro-tool-button" onClick={onOpenSegmentation}>
-          <ScanSearch size={15} aria-hidden="true" />
-          <span>Segmentation</span>
-        </button>
-        <button type="button" className="pro-tool-button" onClick={onOpenHires}>
-          <Highlighter size={15} aria-hidden="true" />
-          <span>High-res fix</span>
-        </button>
-        <button type="button" className="pro-tool-button" onClick={onOpenReactor}>
-          <Wand2 size={15} aria-hidden="true" />
-          <span>ReActor</span>
-        </button>
-      </div>
+      {settings.mode === 'video' ? (
+        <div className="pro-settings-block pro-wan-routing-block">
+          <div className="pro-section-label">Video / Wan wiring</div>
+          <label className="pro-field pro-compact-field">
+            <span>Runtime route</span>
+            <select value={settings.wanRuntimeMode} onChange={(event) => onSettingsChange((current) => ({ ...current, wanRuntimeMode: event.target.value }))}>
+              <option value="fast_5b">Fast 5B TI2V</option>
+              <option value="native_high_low">High/low GGUF</option>
+              <option value="native_high_low_fp8_experimental">High/low FP8 experimental</option>
+            </select>
+          </label>
+          <div className="pro-wan-grid">
+            <label className="pro-field pro-compact-field"><span>High model</span><input value={settings.highNoiseModelId} placeholder="high-noise model id/path" onChange={(event) => onSettingsChange((current) => ({ ...current, highNoiseModelId: event.target.value }))} /></label>
+            <label className="pro-field pro-compact-field"><span>Low model</span><input value={settings.lowNoiseModelId} placeholder="low-noise model id/path" onChange={(event) => onSettingsChange((current) => ({ ...current, lowNoiseModelId: event.target.value }))} /></label>
+            <label className="pro-field pro-compact-field"><span>VAE</span><input value={settings.vaeId} placeholder="Wan VAE id/path" onChange={(event) => onSettingsChange((current) => ({ ...current, vaeId: event.target.value }))} /></label>
+            <label className="pro-field pro-compact-field"><span>Text encoder</span><input value={settings.textEncoderPath} placeholder="UMT5/encoder path" onChange={(event) => onSettingsChange((current) => ({ ...current, textEncoderPath: event.target.value }))} /></label>
+            <label className="pro-field pro-compact-field"><span>High LoRA</span><input value={settings.highNoiseLoraId} placeholder="optional" onChange={(event) => onSettingsChange((current) => ({ ...current, highNoiseLoraId: event.target.value }))} /></label>
+            <label className="pro-field pro-compact-field"><span>Low LoRA</span><input value={settings.lowNoiseLoraId} placeholder="optional" onChange={(event) => onSettingsChange((current) => ({ ...current, lowNoiseLoraId: event.target.value }))} /></label>
+          </div>
+          <div className="pro-wan-grid pro-wan-grid-compact">
+            <label className="pro-field pro-compact-field"><span>High steps</span><input type="number" min={1} max={60} value={settings.highNoiseSteps} onChange={(event) => onSettingsChange((current) => ({ ...current, highNoiseSteps: Number(event.target.value) }))} /></label>
+            <label className="pro-field pro-compact-field"><span>Low steps</span><input type="number" min={1} max={60} value={settings.lowNoiseSteps} onChange={(event) => onSettingsChange((current) => ({ ...current, lowNoiseSteps: Number(event.target.value) }))} /></label>
+            <label className="pro-field pro-compact-field"><span>Boundary</span><input type="number" min={0} max={1} step={0.01} value={settings.boundaryRatio} onChange={(event) => onSettingsChange((current) => ({ ...current, boundaryRatio: Number(event.target.value) }))} /></label>
+            <label className="pro-field pro-compact-field"><span>Offload</span><select value={settings.wanOffload} onChange={(event) => onSettingsChange((current) => ({ ...current, wanOffload: event.target.value }))}><option value="balanced">balanced</option><option value="streamed">streamed</option><option value="group">group</option><option value="sequential">sequential</option><option value="resident">resident</option><option value="none">none</option></select></label>
+          </div>
+          <small>Captured into workflow code blocks as model pack, LoRA stack, and offload plan. This is wiring QA, not adapter certification.</small>
+        </div>
+      ) : null}
 
       <div className="pro-panel-actions">
         <button
           type="button"
+          className="pro-generate-button"
+          onClick={onGenerate}
+          disabled={isGenerating || modelBlocked}
+          title={modelBlocked ? 'This model is blocked by the family/readiness gate.' : undefined}
+        >
+          <Sparkles size={18} aria-hidden="true" />
+          <span>{isGenerating ? 'Generating...' : modelBlocked ? 'Blocked' : 'Generate'}</span>
+        </button>
+        <button
+          type="button"
+          className="pro-workflow-send-button"
+          onClick={() => onSendToWorkflow('Create panel')}
+        >
+          <GitBranch size={17} aria-hidden="true" />
+          <span>Send to workflow</span>
+        </button>
+        <button
+          type="button"
           className="pro-icon-button pro-sliders-button"
-          aria-label="Toggle secondary settings"
+          aria-label="Toggle advanced settings"
           aria-pressed={showAdvanced}
           onClick={onToggleAdvanced}
         >
@@ -2545,2297 +873,11 @@ function PromptPanel({
         </button>
       </div>
 
-      {showAdvanced ? (
-        <div className="pro-advanced-panel">
-          <div className="pro-advanced-note">
-            Secondary controls stay nearby, but the frequent run-to-run variables remain on the main surface.
-          </div>
-          <label className="pro-toggle">
-            <input type="checkbox" checked={bottomDockVisible} onChange={() => undefined} readOnly />
-            <span>Bottom dock visible</span>
-          </label>
-        </div>
-      ) : null}
-
       <div className="pro-selected-model" title={selectedModelName}>
         <HardDrive size={14} aria-hidden="true" />
         <span>{selectedModelName}</span>
       </div>
-
-      <div className="pro-recent-strip pro-recent-strip-hidden-desktop">
-        <div className="pro-recent-strip-header">
-          <FieldLabel
-            label="Recent outputs"
-            tooltip="Keep the native result visible. Compare from saved outputs instead of trusting memory after several prompt or setting changes."
-          />
-          <small>{recentOutputs.length} loaded</small>
-        </div>
-        <div className="pro-recent-grid">
-          {recentOutputs.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className="pro-recent-thumb"
-              onClick={() => onPreviewSelect(item)}
-              title={item.prompt}
-            >
-              <OutputMedia item={item} />
-              <span>{item.modelName ?? item.mode}</span>
-            </button>
-          ))}
-        </div>
-      </div>
     </aside>
-  )
-}
-
-function OutputMedia({ item }: { item: RecentOutput }) {
-  const mediaUrl = item.thumbnailUrl || item.url
-  const outputUrl = item.url.split('?', 1)[0].toLowerCase()
-  const thumbnailUrl = item.thumbnailUrl.split('?', 1)[0].toLowerCase()
-  const isVideo = item.mode === 'video' || isVideoUrl(outputUrl)
-  const poster = item.thumbnailUrl && item.thumbnailUrl !== item.url && !isVideoUrl(thumbnailUrl) ? item.thumbnailUrl : undefined
-  if (isVideo) {
-    return (
-      <video
-        src={item.url}
-        poster={poster}
-        muted
-        playsInline
-        preload="metadata"
-        aria-label={item.prompt}
-      />
-    )
-  }
-  return <img src={mediaUrl} alt={item.prompt} />
-}
-
-function isVideoUrl(value: string): boolean {
-  return value.endsWith('.mp4') || value.endsWith('.webm') || value.endsWith('.mov')
-}
-
-function buildOutputDetailRows(item: RecentOutput): Array<{ label: string; value: string }> {
-  return [
-    { label: 'Model', value: item.modelName || 'Not stored' },
-    { label: 'Size', value: item.width && item.height ? `${item.width}x${item.height}` : 'Not stored' },
-    { label: 'Steps', value: formatOutputSettingValue(item.steps) },
-    { label: 'CFG', value: formatOutputSettingValue(item.cfgScale) },
-    { label: 'Clip skip', value: formatOutputSettingValue(item.clipSkip) },
-    { label: 'Sampler', value: item.sampler || 'Not stored' },
-    { label: 'Seed', value: formatOutputSettingValue(item.seed) },
-  ]
-}
-
-function buildOutputStatusText(item: RecentOutput): string {
-  const prompt = item.prompt || item.infotext || 'Local output'
-  const details = [
-    item.modelName || '',
-    item.width && item.height ? `${item.width}x${item.height}` : '',
-    typeof item.steps === 'number' ? `${item.steps} steps` : '',
-    typeof item.seed === 'number' ? `seed ${item.seed}` : '',
-  ].filter((value) => value.length > 0)
-  return details.length > 0 ? `${prompt} | ${details.join(' | ')}` : prompt
-}
-
-function buildOutputButtonLabel(item: RecentOutput): string {
-  return `Show output settings for ${buildOutputStatusText(item)}`
-}
-
-function buildModelHelper(
-  model: ProModelOption | undefined,
-  engineId: EngineId,
-  samplerIgnored: boolean,
-  cfgIgnored: boolean,
-): { summary: string; lines: string[]; promptText: string } {
-  if (!model) {
-    return {
-      summary: 'Select a model to see sane settings before analysis.',
-      lines: ['No model selected'],
-      promptText: '',
-    }
-  }
-  const preset = model.generationPreset ?? {}
-  const presetParts = [
-    Number.isFinite(preset.width) && Number.isFinite(preset.height) ? `${preset.width}x${preset.height}` : '',
-    Number.isFinite(preset.steps) ? `${preset.steps} steps` : '',
-    Number.isFinite(preset.cfgScale) ? `CFG ${preset.cfgScale}` : '',
-    preset.sampler ? `${preset.sampler}` : '',
-  ].filter(Boolean)
-  const size = typeof model.sizeBytes === 'number' && model.sizeBytes > 0 ? formatBytes(model.sizeBytes) : ''
-  const sourceParts = [
-    model.engineLabel || modelEngineFallbackLabel(engineId),
-    size,
-    model.fileCount && model.fileCount > 1 ? `${model.fileCount} files` : model.assetSummary,
-  ].filter(Boolean)
-  const lines = [
-    sourceParts.join(' / ') || 'Local model',
-    presetParts.length > 0 ? `Preset: ${presetParts.join(' / ')}` : 'Preset: use current controls',
-  ]
-  if (samplerIgnored) {
-    lines.push('Sampler is ignored by this family.')
-  }
-  if (cfgIgnored) {
-    lines.push('CFG is ignored by Flux2 Klein.')
-  }
-  if (model.heavyFor12Gb) {
-    lines.push('Heavy for 12 GB VRAM; keep resolution modest.')
-  }
-  const promptText = modelPromptTextForEngine(engineId)
-  return {
-    summary: `${model.name} sane-setting hints`,
-    lines,
-    promptText,
-  }
-}
-
-function modelPromptTextForEngine(engineId: EngineId): string {
-  switch (engineId) {
-    case 'sd15':
-    case 'sdxl':
-      return 'high detail, sharp focus, natural lighting'
-    case 'flux':
-    case 'flux2':
-      return 'natural light, realistic texture, coherent anatomy'
-    case 'sana':
-      return 'clean composition, crisp subject detail, balanced color'
-    case 'wan':
-    case 'sana_video':
-      return 'smooth motion, stable subject, cinematic framing'
-    default:
-      return 'clear subject, detailed lighting, clean composition'
-  }
-}
-
-function appendPromptText(prompt: string, addition: string): string {
-  const cleanAddition = addition.trim()
-  if (!cleanAddition) {
-    return prompt
-  }
-  const cleanPrompt = prompt.trim()
-  if (!cleanPrompt) {
-    return cleanAddition
-  }
-  if (cleanPrompt.toLowerCase().includes(cleanAddition.toLowerCase())) {
-    return prompt
-  }
-  return `${cleanPrompt}, ${cleanAddition}`
-}
-
-function formatOutputSettingValue(value: number | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value) ? String(value) : 'Not stored'
-}
-
-function SanaStageReceipt({
-  events,
-  timings,
-  receiptPath,
-}: {
-  events: GenerationProgressEvent[]
-  timings: Record<string, number>
-  receiptPath: string
-}) {
-  const latest = events.length > 0 ? events[events.length - 1] : null
-  const timingRows = Object.entries(timings).filter(([, value]) => Number.isFinite(value))
-  return (
-    <section className="pro-sana-receipt" aria-label="Sana stage receipt">
-      <div className="pro-sana-receipt-head">
-        <div>
-          <strong>Sana stages</strong>
-          <span>{latest ? latest.message : 'No stage receipt yet.'}</span>
-        </div>
-        <small>{latest ? `${Math.round(latest.progress * 100)}%` : 'idle'}</small>
-      </div>
-      <div className="pro-sana-meter" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={latest ? Math.round(latest.progress * 100) : 0}>
-        <span style={{ width: `${latest ? Math.round(latest.progress * 100) : 0}%` }} />
-      </div>
-      {events.length > 0 ? (
-        <div className="pro-sana-stage-list">
-          {events.slice(-8).map((event, index) => (
-            <div key={`${event.stage}-${index}-${event.seconds}`} className="pro-sana-stage-row">
-              <span>{event.stage}</span>
-              <strong>{event.total ? `${event.step}/${event.total}` : `${Math.round(event.progress * 100)}%`}</strong>
-              <small>{event.seconds.toFixed(2)}s</small>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {timingRows.length > 0 ? (
-        <div className="pro-sana-timing-grid">
-          {timingRows.map(([key, value]) => (
-            <span key={key}>
-              <strong>{key}</strong>
-              <small>{value.toFixed(2)}s</small>
-            </span>
-          ))}
-        </div>
-      ) : null}
-      {receiptPath ? <div className="pro-sana-receipt-path" title={receiptPath}>{receiptPath}</div> : null}
-    </section>
-  )
-}
-
-function ModelsWorkspace({
-  engineFilter,
-  engines,
-  models,
-  downloadsStatus,
-  selectedModelId,
-  onEngineFilterChange,
-  onModelSelect,
-}: {
-  engineFilter: EngineId
-  engines: EngineSummary[]
-  models: ProModelOption[]
-  downloadsStatus: ProDownloadsStatus | null
-  selectedModelId: string
-  onEngineFilterChange: (value: EngineId) => void
-  onModelSelect: (modelId: string) => void
-}) {
-  const visibleModels = models.filter((model) => matchesEngineFilter(model, engineFilter))
-  const groupedModels = groupModelsByEngine(visibleModels, engines)
-  const downloadSummary = summarizeDownloads(downloadsStatus, engineFilter)
-
-  return (
-    <section className="pro-models-workspace" aria-label="Model inventory">
-      <div className="pro-models-header">
-        <div>
-          <strong>Model inventory</strong>
-          <span>Choose an engine to see only the models that route supports.</span>
-        </div>
-        <label className="pro-models-filter">
-          <FieldLabel
-            label="Engine"
-            tooltip="This inventory is grouped by route, not by hype. Use the engine filter to avoid comparing models that do not belong to the same workflow."
-          />
-          <select
-            value={engineFilter}
-            onChange={(event) => onEngineFilterChange(event.target.value as EngineId)}
-          >
-            {buildEngineFilterOptions(engines).map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      <section className="pro-download-status-card" aria-label="Download catalog status">
-        <div>
-          <strong>Download catalog</strong>
-          <span>{downloadSummary.subtitle}</span>
-        </div>
-        <div className="pro-download-stat-row">
-          <StatTile label="Catalog" value={`${downloadSummary.total}`} hint="known entries" />
-          <StatTile label="Installed" value={`${downloadSummary.installed}`} hint="ready locally" />
-          <StatTile label="Route" value={`${downloadSummary.routeTotal}`} hint={downloadSummary.routeLabel} />
-        </div>
-        <div className="pro-download-chip-row">
-          {downloadSummary.items.map((item) =>
-            item.hfUrl ? (
-              <a
-                key={item.key}
-                className={item.installed ? 'pro-download-chip pro-download-chip-ready' : 'pro-download-chip pro-download-chip-link'}
-                href={item.hfUrl}
-                target="_blank"
-                rel="noreferrer"
-                title={`${item.destination}${item.notes ? ` — ${item.notes}` : ''}`}
-              >
-                <strong>{item.title}</strong>
-                <small>{item.installed ? 'Installed' : `${item.category} · Hugging Face ↗`}</small>
-              </a>
-            ) : (
-              <span
-                key={item.key}
-                className={item.installed ? 'pro-download-chip pro-download-chip-ready' : 'pro-download-chip'}
-                title={item.destination}
-              >
-                <strong>{item.title}</strong>
-                <small>{item.installed ? 'Installed' : item.category}</small>
-              </span>
-            ),
-          )}
-        </div>
-      </section>
-
-      {downloadsStatus && downloadsStatus.civitaiLinks.length > 0 ? (
-        <section className="pro-download-status-card" aria-label="CivitAI browse links">
-          <div>
-            <strong>Find more on CivitAI</strong>
-            <span>Pre-filtered searches that only show models AIWF's routes can run.</span>
-          </div>
-          <div className="pro-download-chip-row">
-            {downloadsStatus.civitaiLinks
-              .filter((link) => engineFilter === 'all' || link.engine === engineFilter)
-              .map((link) => (
-                <a
-                  key={link.url}
-                  className="pro-download-chip pro-download-chip-link"
-                  href={link.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={link.note}
-                >
-                  <strong>{link.label}</strong>
-                  <small>CivitAI ↗</small>
-                </a>
-              ))}
-          </div>
-        </section>
-      ) : null}
-
-      <div className="pro-model-groups">
-        {groupedModels.length > 0 ? (
-          groupedModels.map((group) => (
-            <section key={group.id} className="pro-model-group">
-              <div className="pro-model-group-header">
-                <strong>{group.label}</strong>
-                <small>{group.models.length} models</small>
-              </div>
-              <div className="pro-model-card-grid">
-                {group.models.map((model) => {
-                  const active = model.id === selectedModelId
-                  return (
-                    <button
-                      key={model.id}
-                      type="button"
-                      className={active ? 'pro-model-card pro-model-card-active' : 'pro-model-card'}
-                      onClick={() => onModelSelect(model.id)}
-                    >
-                      <div className="pro-model-card-top">
-                        <span>{model.engineLabel ?? group.label}</span>
-                        <small>{model.status ?? 'Available'}</small>
-                      </div>
-                      <strong>{model.name}</strong>
-                      <div className="pro-model-card-meta">
-                        <span>{model.architecture ?? 'Unknown architecture'}</span>
-                        <small>{model.assetSummary && !model.name.includes(model.assetSummary) ? model.assetSummary : 'Local asset'}</small>
-                      </div>
-                      {model.heavyFor12Gb ? (
-                        <div className="pro-model-card-vram-flag" title={`Estimated ~${model.estVramGb ?? '?'} GB of VRAM in use - may exceed 12 GB GPUs`}>
-                          High VRAM · ~{model.estVramGb} GB
-                        </div>
-                      ) : null}
-                    </button>
-                  )
-                })}
-              </div>
-            </section>
-          ))
-        ) : (
-          <div className="pro-empty-preview">
-            <Boxes size={42} aria-hidden="true" />
-            <span>No models found for this engine.</span>
-          </div>
-        )}
-      </div>
-    </section>
-  )
-}
-
-function DataControlPanel({
-  bootstrap,
-  runtime,
-  dataStatus,
-  recentOutputs,
-  selectedModelName,
-  onOpenModels,
-}: {
-  bootstrap: ProBootstrap
-  runtime: ProRuntimeStatus
-  dataStatus: ProDataStatus | null
-  recentOutputs: RecentOutput[]
-  selectedModelName: string
-  onOpenModels: () => void
-}) {
-  const outputs = dataStatus?.recentOutputs.length ? dataStatus.recentOutputs : recentOutputs
-  const summary = summarizeRecentOutputs(outputs)
-  return (
-    <aside className="pro-prompt-panel" aria-label="Data controls">
-      <PanelHeader title="Data" actionLabel="Data actions" icon={Database} />
-      <div className="pro-workspace-stack">
-        <InfoCard title="Library state" subtitle="The shell now treats data as a workspace with paths, receipts, and inventory.">
-          <div className="pro-signal-grid">
-            <div className="pro-signal-card">
-              <span>Ratios</span>
-              <strong>{bootstrap.aspectRatios.length}</strong>
-            </div>
-            <div className="pro-signal-card">
-              <span>Outputs</span>
-              <strong>{dataStatus?.counts.recentOutputs ?? outputs.length}</strong>
-            </div>
-          </div>
-        </InfoCard>
-        <InfoCard title="Receipt health" subtitle="Use this page to judge whether the shell has enough local receipts to support later dataset work.">
-          <dl className="pro-runtime-list">
-            <MetricRow label="Selected model" value={selectedModelName} />
-            <MetricRow label="Unique models" value={`${summary.uniqueModels}`} />
-            <MetricRow label="Latest receipt" value={summary.latestCreatedAt} />
-            <MetricRow label="Queue state" value={`${runtime.queueCount} waiting`} />
-            <MetricRow label="Output root" value={dataStatus?.outputRoot || 'Backend not connected'} />
-          </dl>
-        </InfoCard>
-        <InfoCard title="Model linkage" subtitle="Keep data views close to model families and route context.">
-          <button type="button" className="pro-secondary-button" onClick={onOpenModels}>
-            Open model inventory
-          </button>
-        </InfoCard>
-      </div>
-    </aside>
-  )
-}
-
-function DataWorkspace({
-  bootstrap,
-  runtime,
-  dataStatus,
-  recentOutputs,
-  selectedModelName,
-}: {
-  bootstrap: ProBootstrap
-  runtime: ProRuntimeStatus
-  dataStatus: ProDataStatus | null
-  recentOutputs: RecentOutput[]
-  selectedModelName: string
-}) {
-  const outputs = dataStatus?.recentOutputs.length ? dataStatus.recentOutputs : recentOutputs
-  const modeCounts = countOutputsByMode(outputs)
-  const summary = summarizeRecentOutputs(outputs)
-  const modelBuckets = buildOutputModelBuckets(outputs, selectedModelName)
-  const aspectBuckets = buildAspectBuckets(outputs)
-  return (
-    <section className="pro-workspace-surface" aria-label="Data workspace">
-      <WorkspaceHeader
-        eyebrow="Data"
-        title="Dataset and artifact staging"
-        description="This page now has a dedicated surface for samples, routing buckets, and future manifests."
-      />
-      <div className="pro-workspace-grid">
-        <InfoCard title="Artifact buckets" subtitle="Recent output receipts grouped by route for later monitor and eval hooks.">
-          <div className="pro-stat-grid">
-            <StatTile label="Image" value={`${modeCounts.image}`} hint="recent items" />
-            <StatTile label="Video" value={`${modeCounts.video}`} hint="recent items" />
-            <StatTile label="Inpaint" value={`${modeCounts.inpaint}`} hint="recent items" />
-            <StatTile label="Unique models" value={`${summary.uniqueModels}`} hint="in receipts" />
-          </div>
-        </InfoCard>
-        <InfoCard title="Output families" subtitle="Recent artifacts grouped by model so you can see whether receipts are broad or overfit to one route.">
-          <div className="pro-token-grid">
-            {modelBuckets.map((bucket) => (
-              <div key={bucket.label} className="pro-token-card">
-                <strong>{bucket.label}</strong>
-                <span>{bucket.count} receipts</span>
-              </div>
-            ))}
-          </div>
-        </InfoCard>
-        <InfoCard title="Aspect presets" subtitle="Ratios stay visible here so export and curation flows share the same vocabulary.">
-          <div className="pro-chip-grid">
-            {bootstrap.aspectRatios.map((ratio) => (
-              <div key={ratio.id} className="pro-static-chip">
-                <strong>{ratio.label}</strong>
-                <span>{ratio.width}x{ratio.height}</span>
-              </div>
-            ))}
-          </div>
-        </InfoCard>
-        <InfoCard title="Observed resolutions" subtitle="The shell now shows the actual output shapes it has seen, not only the configured presets.">
-          <div className="pro-token-grid">
-            {aspectBuckets.map((bucket) => (
-              <div key={bucket.label} className="pro-token-card">
-                <strong>{bucket.label}</strong>
-                <span>{bucket.count} outputs</span>
-              </div>
-            ))}
-          </div>
-        </InfoCard>
-        <InfoCard title="Artifact routing" subtitle="Runtime context and local receipt state stay visible alongside dataset prep work.">
-          <div className="pro-stat-grid">
-            <StatTile label="Queue" value={`${runtime.queueCount}`} hint="tasks waiting" />
-            <StatTile label="Backend" value={runtime.backend} hint="active runtime" />
-            <StatTile label="Selected model" value={selectedModelName} hint="current route" />
-            <StatTile label="Latest receipt" value={summary.latestCreatedAt} hint="recent artifact" />
-          </div>
-        </InfoCard>
-        <InfoCard title="Recent files" subtitle="Scroll-safe artifact list for samples, checks, and dataset handoff.">
-          <div className="pro-output-list">
-            {outputs.map((item) => (
-              <article key={item.id} className="pro-output-row">
-                <OutputMedia item={item} />
-                <div>
-                  <strong>{item.modelName ?? item.mode}</strong>
-                  <span>{truncateText(item.prompt, 140)}</span>
-                </div>
-                <small>{formatDisplayDate(item.createdAt)} / {item.width}x{item.height}</small>
-              </article>
-            ))}
-          </div>
-        </InfoCard>
-      </div>
-    </section>
-  )
-}
-
-function ToolsControlPanel({
-  capabilitiesStatus,
-  runtime,
-  onOpenCreate,
-  onOpenVideo,
-  onOpenData,
-  onOpenSegmentation,
-  onOpenReactor,
-}: {
-  capabilitiesStatus: ProCapabilitiesStatus | null
-  runtime: ProRuntimeStatus
-  onOpenCreate: () => void
-  onOpenVideo: () => void
-  onOpenData: () => void
-  onOpenSegmentation: () => void
-  onOpenReactor: () => void
-}) {
-  const status = capabilitiesStatus ?? EMPTY_CAPABILITIES
-  const readyCount = status.readiness.counts.working ?? 0
-  const pendingCount = status.readiness.counts['metadata-only'] ?? 0
-  const blockedCount =
-    (status.readiness.counts['blocked-cleanly'] ?? 0) +
-    (status.readiness.counts['broken-runtime'] ?? 0) +
-    (status.readiness.counts['unsupported-no-route'] ?? 0)
-  return (
-    <aside className="pro-prompt-panel" aria-label="Tool controls">
-      <PanelHeader title="Tools" actionLabel="Tool bench" icon={Wand2} />
-      <div className="pro-workspace-stack">
-        <InfoCard title="Tonight QA" subtitle="Open the main lanes first. The detailed coverage check is in the workspace drawer.">
-          <div className="pro-stat-grid">
-            <StatTile label="Models" value={`${status.counts.checkpoints}`} hint="base checkpoints" />
-            <StatTile label="LoRAs" value={`${status.counts.loras}`} hint="local adapters" />
-            <StatTile label="Ready" value={`${readyCount}`} hint="smoked routes" />
-            <StatTile label="Blocked" value={`${blockedCount}`} hint="needs wiring" />
-          </div>
-          <div className="pro-inline-controls pro-wrap-controls">
-            <button type="button" className="pro-primary-button" onClick={onOpenCreate}>Create</button>
-            <button type="button" className="pro-secondary-button" onClick={onOpenVideo}>Sana Video</button>
-            <button type="button" className="pro-secondary-button" onClick={onOpenData}>Data</button>
-            <button type="button" className="pro-secondary-button" onClick={onOpenSegmentation}>Segment</button>
-            <button type="button" className="pro-secondary-button" onClick={onOpenReactor}>ReActor</button>
-          </div>
-        </InfoCard>
-        <InfoCard title="Asset counts" subtitle="Read-only checks. This panel does not load a model.">
-          <dl className="pro-runtime-list">
-            <MetricRow label="ControlNet" value={`${status.counts.controlnet}`} />
-            <MetricRow label="SAM" value={`${status.counts.sam}`} />
-            <MetricRow label="ReActor" value={`${status.counts.reactor}`} />
-            <MetricRow label="Enhance" value={`${status.counts.enhance}`} />
-            <MetricRow label="Sana Video" value={`${status.counts.sanaVideo}`} />
-            <MetricRow label="Wan" value={`${status.counts.wan}`} />
-            <MetricRow label="Pending smoke" value={`${pendingCount}`} />
-            <MetricRow label="Runtime" value={runtime.backend} />
-          </dl>
-        </InfoCard>
-      </div>
-    </aside>
-  )
-}
-
-type VideoLabOp = 'vsr' | 'rife' | 'audio' | 'extend'
-
-function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
-  const [labStatus, setLabStatus] = useState<VideoLabStatus | null>(null)
-  const [source, setSource] = useState<VideoLabProbe | null>(null)
-  const [op, setOp] = useState<VideoLabOp>('vsr')
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState('')
-  const [resultUrl, setResultUrl] = useState('')
-  const [vsrScale, setVsrScale] = useState(2)
-  const [vsrMode, setVsrMode] = useState(0)
-  const [rifeMultiplier, setRifeMultiplier] = useState(2)
-  const [audioPrompt, setAudioPrompt] = useState('')
-  const [extendPrompt, setExtendPrompt] = useState('')
-  const [extendFrames, setExtendFrames] = useState(81)
-  const [extendModelId, setExtendModelId] = useState('')
-
-  useEffect(() => {
-    const controller = new AbortController()
-    fetchVideoLabStatus(controller.signal)
-      .then(setLabStatus)
-      .catch(() => setLabStatus(null))
-    return () => controller.abort()
-  }, [])
-
-  useEffect(() => {
-    if (!extendModelId && wanModels.length > 0) {
-      setExtendModelId(wanModels[0].id)
-    }
-  }, [extendModelId, wanModels])
-
-  const handleUpload = async (event: ReactChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file) {
-      return
-    }
-    setBusy(true)
-    setMessage(`Uploading ${file.name}…`)
-    setResultUrl('')
-    try {
-      const probe = await uploadVideoLabFile(file)
-      setSource(probe)
-      setMessage(
-        `Loaded ${file.name}: ${probe.width}x${probe.height}, ${probe.frameCount} frames @ ${probe.fps.toFixed(1)} fps.`,
-      )
-    } catch (error: unknown) {
-      setMessage(`Upload failed: ${formatApiError(error)}`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const handleRun = async () => {
-    if (!source) {
-      setMessage('Upload a video first.')
-      return
-    }
-    setBusy(true)
-    setResultUrl('')
-    setMessage(
-      op === 'extend'
-        ? 'Extending video (generates a Wan continuation, then stitches — this takes a while)…'
-        : 'Running…',
-    )
-    try {
-      const result = await runVideoLab({
-        op,
-        videoPath: source.path,
-        scale: vsrScale,
-        mode: vsrMode,
-        multiplier: rifeMultiplier,
-        audioPrompt,
-        prompt: extendPrompt,
-        frames: extendFrames,
-        checkpointId: extendModelId,
-      })
-      setResultUrl(result.url)
-      setMessage(result.message || 'Done.')
-    } catch (error: unknown) {
-      setMessage(`Failed: ${formatApiError(error)}`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const opChoices: Array<{ id: VideoLabOp; label: string; enabled: boolean; hint: string }> = [
-    {
-      id: 'vsr',
-      label: 'VSR upscale',
-      enabled: Boolean(labStatus?.vsr.available),
-      hint: labStatus?.vsr.available
-        ? `NVIDIA VideoFX ready (${labStatus.vsr.modelCount} model packs)`
-        : 'NVIDIA VideoFX SDK not detected — run the installer.',
-    },
-    {
-      id: 'rife',
-      label: 'RIFE interpolation',
-      enabled: Boolean(labStatus?.rife.available),
-      hint: labStatus?.rife.available
-        ? `Checkpoints: ${labStatus.rife.checkpoints.join(', ')}`
-        : 'RIFE checkpoints not found under models/rife.',
-    },
-    {
-      id: 'audio',
-      label: 'Add audio',
-      enabled: true,
-      hint:
-        (labStatus?.audio.videoAudioModels.length ?? 0) > 0
-          ? 'Video-conditioned audio (MMAudio) available.'
-          : 'Falls back to text-to-music audio muxed over the clip.',
-    },
-    {
-      id: 'extend',
-      label: 'Extend video',
-      enabled: wanModels.length > 0,
-      hint:
-        wanModels.length > 0
-          ? labStatus?.extend.note || 'Continues motion from the last frame via Wan 5B.'
-          : 'No Wan video models detected.',
-    },
-  ]
-  const activeChoice = opChoices.find((choice) => choice.id === op)
-
-  return (
-    <InfoCard
-      title="Video Lab"
-      subtitle="Upload any video, then upscale it with NVIDIA VSR, smooth it with RIFE, extend it with Wan, or add a soundtrack."
-    >
-      <div className="pro-form-stack">
-        <div className="pro-video-source-actions">
-          <label className="pro-secondary-button" htmlFor="pro-video-lab-upload">
-            <FileImage size={15} aria-hidden="true" />
-            <span>{source ? 'Replace video' : 'Upload video'}</span>
-          </label>
-          <input
-            id="pro-video-lab-upload"
-            className="pro-file-input-hidden"
-            type="file"
-            accept="video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo"
-            onChange={handleUpload}
-            disabled={busy}
-          />
-          {source ? (
-            <span className="pro-muted">
-              {source.width}x{source.height} · {source.frameCount} frames · {source.fps.toFixed(1)} fps
-            </span>
-          ) : null}
-        </div>
-        <label className="pro-field">
-          <FieldLabel label="Operation" />
-          <select value={op} onChange={(event) => setOp(event.target.value as VideoLabOp)} disabled={busy}>
-            {opChoices.map((choice) => (
-              <option key={choice.id} value={choice.id} disabled={!choice.enabled}>
-                {choice.label}
-                {choice.enabled ? '' : ' (unavailable)'}
-              </option>
-            ))}
-          </select>
-          {activeChoice ? <p className="pro-field-note">{activeChoice.hint}</p> : null}
-        </label>
-        {op === 'vsr' ? (
-          <div className="pro-control-grid">
-            <label className="pro-field">
-              <FieldLabel label="Scale" />
-              <select value={vsrScale} onChange={(event) => setVsrScale(Number(event.target.value))} disabled={busy}>
-                <option value={1.3333333}>1.33x</option>
-                <option value={1.5}>1.5x</option>
-                <option value={2}>2x</option>
-                <option value={3}>3x</option>
-                <option value={4}>4x</option>
-              </select>
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="Mode" tooltip="0 keeps detail conservative; higher modes trade artifacts for sharpness. Modes 8-15 are same-resolution cleanup." />
-              <input
-                type="number"
-                min={0}
-                max={19}
-                value={vsrMode}
-                onChange={(event) => setVsrMode(clamp(Number(event.target.value) || 0, 0, 19))}
-                disabled={busy}
-              />
-            </label>
-          </div>
-        ) : null}
-        {op === 'rife' ? (
-          <label className="pro-field">
-            <FieldLabel label="Frame multiplier" />
-            <select
-              value={rifeMultiplier}
-              onChange={(event) => setRifeMultiplier(Number(event.target.value))}
-              disabled={busy}
-            >
-              <option value={2}>2x frames</option>
-              <option value={4}>4x frames</option>
-              <option value={8}>8x frames</option>
-            </select>
-          </label>
-        ) : null}
-        {op === 'audio' ? (
-          <label className="pro-field">
-            <FieldLabel label="Audio prompt" />
-            <input
-              value={audioPrompt}
-              onChange={(event) => setAudioPrompt(event.target.value)}
-              placeholder="e.g. gentle rain with distant thunder"
-              disabled={busy}
-            />
-          </label>
-        ) : null}
-        {op === 'extend' ? (
-          <>
-            <label className="pro-field">
-              <FieldLabel label="Motion prompt" tooltip="Describe how the scene should continue. The clip's last frame is the starting image." />
-              <input
-                value={extendPrompt}
-                onChange={(event) => setExtendPrompt(event.target.value)}
-                placeholder="e.g. the camera keeps panning right across the skyline"
-                disabled={busy}
-              />
-            </label>
-            <div className="pro-control-grid">
-              <label className="pro-field">
-                <FieldLabel label="Extra frames" />
-                <input
-                  type="number"
-                  min={5}
-                  max={257}
-                  step={4}
-                  value={extendFrames}
-                  onChange={(event) => setExtendFrames(clamp(Number(event.target.value) || 81, 5, 257))}
-                  disabled={busy}
-                />
-              </label>
-              <label className="pro-field">
-                <FieldLabel label="Wan model" />
-                <select value={extendModelId} onChange={(event) => setExtendModelId(event.target.value)} disabled={busy}>
-                  {wanModels.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          </>
-        ) : null}
-        <div className="pro-settings-actions">
-          <button
-            type="button"
-            className="pro-primary-button"
-            onClick={handleRun}
-            disabled={busy || !source || !(activeChoice?.enabled ?? false)}
-          >
-            {busy ? 'Working…' : 'Run'}
-          </button>
-          <span>{message}</span>
-        </div>
-        {resultUrl ? (
-          <video className="pro-video-lab-result" src={resultUrl} controls loop />
-        ) : null}
-      </div>
-    </InfoCard>
-  )
-}
-
-function ToolsWorkspace({
-  capabilitiesStatus,
-  runtime,
-  wanModels,
-  onOpenCreate,
-  onOpenVideo,
-  onOpenData,
-  onOpenSegmentation,
-  onOpenReactor,
-}: {
-  capabilitiesStatus: ProCapabilitiesStatus | null
-  runtime: ProRuntimeStatus
-  wanModels: ProModelOption[]
-  onOpenCreate: () => void
-  onOpenVideo: () => void
-  onOpenData: () => void
-  onOpenSegmentation: () => void
-  onOpenReactor: () => void
-}) {
-  const status = capabilitiesStatus ?? EMPTY_CAPABILITIES
-  const readiness = status.readiness
-  const readyCount = readiness.counts.working ?? 0
-  const metadataOnlyCount = readiness.counts['metadata-only'] ?? readiness.metadataOnlyCount
-  const blockedCount = countBlockedReadiness(readiness.counts)
-  const needsWorkCount = Math.max(0, readiness.total - readyCount)
-  const readinessFamilies = readiness.families.slice(0, 6)
-  const readinessIssues = readiness.needsWork.slice(0, 5)
-  const lanes: ToolLaneCard[] = [
-    {
-      id: 'create',
-      title: 'Create',
-      summary: 'Image generation, inpaint, prompt help, and model selection.',
-      stats: [`${status.counts.checkpoints} checkpoints`, `${status.counts.loras} LoRAs`],
-      actions: [{ label: 'Open Create', onClick: onOpenCreate }],
-    },
-    {
-      id: 'image',
-      title: 'Image Tools',
-      summary: 'ControlNet, SAM, Enhance, and ReActor checks grouped together.',
-      stats: [
-        `${status.counts.controlnet} ControlNet`,
-        `${status.counts.sam} SAM`,
-        `${status.counts.enhance} enhance`,
-        `${status.counts.reactor} ReActor`,
-      ],
-      actions: [
-        { label: 'Segment', onClick: onOpenSegmentation },
-        { label: 'ReActor', onClick: onOpenReactor },
-      ],
-    },
-    {
-      id: 'video',
-      title: 'Video Tools',
-      summary: 'Sana generation is wired in React; Wan/LTX and post stages remain visible for Gradio routes.',
-      stats: [`${status.counts.sanaVideo} Sana`, `${status.counts.wan} Wan models`],
-      note: status.counts.sanaVideo > 0 ? 'Sana snapshot detected.' : 'Sana snapshot not detected yet.',
-      actions: [{ label: 'Open Sana', onClick: onOpenVideo }],
-    },
-    {
-      id: 'data',
-      title: 'Data',
-      summary: 'Library, PNG Info, history, receipts, and logs for QA work.',
-      stats: [`${status.counts.gradioTabs} existing tabs`, `${status.counts.reactRails} React rails`],
-      actions: [{ label: 'Open Data', onClick: onOpenData }],
-    },
-  ]
-
-  return (
-    <section className="pro-workspace-surface" aria-label="Tools workspace">
-      <WorkspaceHeader
-        eyebrow="Tools"
-        title="Tool bench"
-        description="Four QA lanes for the current Studio surface. React controls stay up front; raw coverage stays in one drawer."
-      />
-      <div className="pro-workspace-grid">
-        <VideoLabCard wanModels={wanModels} />
-        <InfoCard title="Current surface" subtitle="Inventory only. This view does not load models or start generation.">
-          <div className="pro-stat-grid">
-            <StatTile label="Backend" value={runtime.backend} hint="active route" />
-            <StatTile label="Device" value={runtime.device} hint="local machine" />
-            <StatTile label="Models" value={`${status.counts.checkpoints}`} hint="base checkpoints" />
-            <StatTile label="Tool paths" value={`${status.tools.length}`} hint="mapped checks" />
-          </div>
-        </InfoCard>
-        <InfoCard title="Release readiness" subtitle="Pipeline ledger from local metadata and existing smoke receipts.">
-          <div className="pro-stat-grid">
-            <StatTile label="Ready" value={`${readyCount}`} hint="smoked routes" />
-            <StatTile label="Pending" value={`${metadataOnlyCount}`} hint="metadata only" />
-            <StatTile label="Blocked" value={`${blockedCount}`} hint="route gaps" />
-            <StatTile label="Total" value={`${readiness.total}`} hint="ledger rows" />
-          </div>
-          {readiness.error ? (
-            <div className="pro-readiness-alert">{readiness.error}</div>
-          ) : null}
-          <div className="pro-readiness-layout">
-            <div className="pro-readiness-section">
-              <strong>Families</strong>
-              <div className="pro-readiness-family-list">
-                {readinessFamilies.length > 0 ? (
-                  readinessFamilies.map((family) => (
-                    <div key={family.family} className="pro-readiness-family-row">
-                      <span>{formatReadinessLabel(family.family)}</span>
-                      <small>{family.total} assets</small>
-                      <em>
-                        {family.counts.working ?? 0} ready / {family.counts['metadata-only'] ?? 0} pending /{' '}
-                        {countBlockedReadiness(family.counts)} blocked
-                      </em>
-                    </div>
-                  ))
-                ) : (
-                  <span className="pro-readiness-empty">No readiness rows loaded.</span>
-                )}
-              </div>
-            </div>
-            <div className="pro-readiness-section">
-              <strong>Needs work</strong>
-              <div className="pro-readiness-issue-list">
-                {readinessIssues.length > 0 ? (
-                  readinessIssues.map((item) => (
-                    <div key={`${item.status}-${item.id}`} className="pro-readiness-issue">
-                      <div>
-                        <strong>{item.label || item.id}</strong>
-                        <span>{formatReadinessDetail(item)}</span>
-                      </div>
-                      <small className={`pro-readiness-status pro-readiness-status-${readinessStatusTone(item.status)}`}>
-                        {formatReadinessLabel(item.status)}
-                      </small>
-                    </div>
-                  ))
-                ) : (
-                  <span className="pro-readiness-empty">
-                    {needsWorkCount > 0 ? `${needsWorkCount} rows need work.` : 'No needs-work rows loaded.'}
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-        </InfoCard>
-        <div className="pro-simple-tool-grid">
-          {lanes.map((lane) => (
-            <article key={lane.id} className="pro-simple-tool-card">
-              <div className="pro-simple-tool-head">
-                <span>{lane.id}</span>
-                <strong>{lane.title}</strong>
-              </div>
-              <p>{lane.summary}</p>
-              <div className="pro-tool-mini-grid">
-                {lane.stats.map((stat) => (
-                  <span key={stat}>{stat}</span>
-                ))}
-              </div>
-              {lane.note ? <small className="pro-tool-note">{lane.note}</small> : null}
-              <div className="pro-simple-tool-actions">
-                {lane.actions.map((action, index) => (
-                  <button
-                    key={action.label}
-                    type="button"
-                    className={index === 0 ? 'pro-primary-button' : 'pro-secondary-button'}
-                    onClick={action.onClick}
-                    disabled={action.disabled}
-                  >
-                    {action.label}
-                  </button>
-                ))}
-              </div>
-            </article>
-          ))}
-        </div>
-        <details className="pro-tool-detail-toggle">
-          <summary>
-            <span>Show coverage comparison</span>
-            <small>{status.counts.gradioTabs} existing tabs / {status.tools.length} mapped paths</small>
-          </summary>
-          <div className="pro-tab-list">
-            {status.gradioTabs.map((tab) => (
-              <div key={tab.id} className="pro-tab-row">
-                <span>{tab.group}</span>
-                <strong>{tab.label}</strong>
-                <small>{tab.tab ?? tab.summary}</small>
-              </div>
-            ))}
-          </div>
-        </details>
-      </div>
-    </section>
-  )
-}
-
-function MonitorControlPanel({
-  runtime,
-  logStatus,
-  statusMessage,
-  recentOutputs,
-}: {
-  runtime: ProRuntimeStatus
-  logStatus: ProLogStatus | null
-  statusMessage: string
-  recentOutputs: RecentOutput[]
-}) {
-  const summary = summarizeRecentOutputs(recentOutputs)
-  return (
-    <aside className="pro-prompt-panel" aria-label="Monitor controls">
-      <PanelHeader title="Monitor" actionLabel="Monitor actions" icon={Monitor} />
-      <div className="pro-workspace-stack">
-        <InfoCard title="Runtime watch" subtitle="Studio status without starting training or external viewers.">
-          <div className="pro-log-summary">
-            <strong>{runtime.state}</strong>
-            <span>{statusMessage}</span>
-            <small>{logStatus?.events.length ?? 0} events loaded</small>
-          </div>
-        </InfoCard>
-        <InfoCard title="Local scope" subtitle="Studio monitoring stays focused on generation and UI runtime health.">
-          <dl className="pro-runtime-list">
-            <MetricRow label="Runtime" value={runtime.backend} />
-            <MetricRow label="Device" value={runtime.device} />
-            <MetricRow label="Queue" value={`${runtime.queueCount} tasks`} />
-            <MetricRow label="Latest output" value={summary.latestCreatedAt} />
-          </dl>
-        </InfoCard>
-        <InfoCard title="Log coverage" subtitle="Backend-discovered files and event rows feed this view.">
-          <dl className="pro-runtime-list">
-            <MetricRow label="Files" value={`${logStatus?.files.length ?? 0}`} />
-            <MetricRow label="Events" value={`${logStatus?.events.length ?? 0}`} />
-            <MetricRow label="Resources" value={`${runtime.resources.length}`} />
-          </dl>
-        </InfoCard>
-      </div>
-    </aside>
-  )
-}
-
-function MonitorWorkspace({
-  runtime,
-  logStatus,
-  statusMessage,
-  recentOutputs,
-}: {
-  runtime: ProRuntimeStatus
-  logStatus: ProLogStatus | null
-  statusMessage: string
-  recentOutputs: RecentOutput[]
-}) {
-  const summary = summarizeRecentOutputs(recentOutputs)
-  const recentEvents = (logStatus?.events ?? []).slice(0, 8)
-  return (
-    <section className="pro-workspace-surface" aria-label="Runtime monitor">
-      <WorkspaceHeader
-        eyebrow="Monitor"
-        title="Studio runtime monitor"
-        description="Live app status, resource meters, queue state, and recent receipts for QA without opening another tool."
-      />
-      <div className="pro-workspace-grid">
-        <InfoCard title="System pulse" subtitle="Fast read on whether the Studio shell and generation backend are healthy.">
-          <div className="pro-stat-grid">
-            <StatTile label="State" value={runtime.state} hint="current runtime" />
-            <StatTile label="Backend" value={runtime.backend} hint="app runtime" />
-            <StatTile label="Queue" value={`${runtime.queueCount}`} hint="tasks waiting" />
-            <StatTile label="Events" value={`${logStatus?.events.length ?? 0}`} hint="loaded rows" />
-          </div>
-        </InfoCard>
-        <InfoCard title="Resource meters" subtitle="Display-only local machine state. GPU stays reserved for generation.">
-          <div className="pro-resource-stack">
-            {runtime.resources.map((metric) => (
-              <ResourceBar key={metric.label} metric={metric} />
-            ))}
-          </div>
-        </InfoCard>
-        <InfoCard title="Operator notes" subtitle="The monitor is intentionally scoped to Studio QA and generation readiness.">
-          <div className="pro-settings-columns">
-            <div className="pro-settings-note">
-              <strong>Current status</strong>
-              <span>{statusMessage}</span>
-            </div>
-            <div className="pro-settings-note">
-              <strong>Loaded model</strong>
-              <span>{runtime.loadedModel.name || 'Unavailable'}</span>
-            </div>
-            <div className="pro-settings-note">
-              <strong>Latest receipt</strong>
-              <span>{summary.latestCreatedAt}</span>
-            </div>
-          </div>
-        </InfoCard>
-        <InfoCard title="Recent monitor events" subtitle="Latest runtime rows from backend logs and generation receipts.">
-          {recentEvents.length > 0 ? (
-            <div className="pro-log-table">
-              {recentEvents.map((event) => (
-                <article key={event.id} className="pro-log-row">
-                  <span>{event.source}</span>
-                  <strong>{event.title}</strong>
-                  <p>{event.detail}</p>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <div className="pro-empty-preview">
-              <Monitor size={42} aria-hidden="true" />
-              <strong>No monitor events loaded yet</strong>
-              <span>Run a generation or open Logs to inspect backend file discovery.</span>
-            </div>
-          )}
-        </InfoCard>
-      </div>
-    </section>
-  )
-}
-
-function LogsControlPanel({
-  runtime,
-  logStatus,
-  statusMessage,
-  recentOutputs,
-}: {
-  runtime: ProRuntimeStatus
-  logStatus: ProLogStatus | null
-  statusMessage: string
-  recentOutputs: RecentOutput[]
-}) {
-  const summary = summarizeRecentOutputs(recentOutputs)
-  return (
-    <aside className="pro-prompt-panel" aria-label="Log controls">
-      <PanelHeader title="Logs" actionLabel="Log view" icon={FileImage} />
-      <div className="pro-workspace-stack">
-        <InfoCard title="Stream status" subtitle="Operational feedback now has a dedicated home instead of living only in the canvas footer.">
-          <div className="pro-log-summary">
-            <strong>{runtime.state}</strong>
-            <span>{statusMessage}</span>
-            <small>{logStatus?.events.length ?? recentOutputs.length} events loaded</small>
-          </div>
-        </InfoCard>
-        <InfoCard title="Operator summary" subtitle="Enough live state to judge whether the shell is healthy before deeper logging endpoints exist.">
-          <dl className="pro-runtime-list">
-            <MetricRow label="Backend" value={runtime.backend} />
-            <MetricRow label="Queue" value={`${runtime.queueCount} tasks`} />
-            <MetricRow label="Loaded model" value={runtime.loadedModel.name || 'Unavailable'} />
-            <MetricRow label="Latest receipt" value={summary.latestCreatedAt} />
-            <MetricRow label="Log files" value={`${logStatus?.files.length ?? 0}`} />
-          </dl>
-        </InfoCard>
-      </div>
-    </aside>
-  )
-}
-
-function LogsWorkspace({
-  runtime,
-  logStatus,
-  statusMessage,
-  generationError,
-  recentOutputs,
-  selectedModelName,
-  generationProgress,
-}: {
-  runtime: ProRuntimeStatus
-  logStatus: ProLogStatus | null
-  statusMessage: string
-  generationError: string
-  recentOutputs: RecentOutput[]
-  selectedModelName: string
-  generationProgress: GenerationProgressEvent[]
-}) {
-  const currentErrorRows = generationError
-    ? [{
-        id: 'current-generation-error',
-        title: 'Current generation error',
-        detail: generationError,
-        meta: runtime.state,
-      }]
-    : []
-  const backendRows = logStatus?.events.length
-    ? logStatus.events.map((event) => ({
-        id: event.id,
-        title: event.title,
-        detail: event.detail,
-        meta: event.time || event.source,
-      }))
-    : buildLogRows(runtime, statusMessage, selectedModelName, recentOutputs, generationProgress)
-  const logRows = [...currentErrorRows, ...backendRows]
-  const summary = summarizeRecentOutputs(recentOutputs)
-  return (
-    <section className="pro-workspace-surface" aria-label="Runtime logs">
-      <WorkspaceHeader
-        eyebrow="Logs"
-        title="Operational receipts"
-        description="The rail now opens a page built for scrolling and later backend log wiring."
-      />
-      <div className="pro-workspace-grid">
-        <InfoCard title="Runtime receipt" subtitle="Keep the current backend state visible at the top of the log surface.">
-          <div className="pro-stat-grid">
-            <StatTile label="State" value={runtime.state} hint="current status" />
-            <StatTile label="Queue" value={`${runtime.queueCount}`} hint="tasks waiting" />
-            <StatTile label="Device" value={runtime.device} hint="execution target" />
-            <StatTile label="Latest receipt" value={summary.latestCreatedAt} hint="artifact time" />
-          </div>
-        </InfoCard>
-        <InfoCard title="Resource snapshot" subtitle="These are the same runtime metrics, but presented in the log workspace where operators expect them.">
-          <div className="pro-resource-stack">
-            {runtime.resources.map((metric) => (
-              <ResourceBar key={metric.label} metric={metric} />
-            ))}
-          </div>
-        </InfoCard>
-        <InfoCard title="Log files" subtitle="Backend-discovered log and JSONL files from the local output directory.">
-          <div className="pro-token-grid">
-            {(logStatus?.files ?? []).map((file) => (
-              <div key={file.path || file.name} className="pro-token-card">
-                <strong>{file.name}</strong>
-                <span>{formatBytes(file.sizeBytes)} / {formatDisplayDate(file.modifiedAt)}</span>
-              </div>
-            ))}
-            {logStatus?.files.length === 0 ? (
-              <div className="pro-token-card">
-                <strong>No log files yet</strong>
-                <span>Client event and generation logs will appear here after activity.</span>
-              </div>
-            ) : null}
-          </div>
-        </InfoCard>
-        <InfoCard title="Event stream" subtitle="Synthetic rows for now, shaped like the monitor table this shell needs.">
-          <div className="pro-log-table">
-            {logRows.map((row) => (
-              <article key={row.id} className="pro-log-row">
-                <div>
-                  <strong>{row.title}</strong>
-                  <span>{row.detail}</span>
-                </div>
-                <small>{row.meta}</small>
-              </article>
-            ))}
-          </div>
-        </InfoCard>
-      </div>
-    </section>
-  )
-}
-
-function SettingsControlPanel({
-  bootstrap,
-  runtime,
-  settings,
-  settingsStatus,
-  recentOutputs,
-  leftPanelWidth,
-  rightPanelWidth,
-  bottomDockHeight,
-  bottomDockVisible,
-  showAdvanced,
-  onBottomDockVisibleChange,
-  onShowAdvancedChange,
-  onLayoutReset,
-}: {
-  bootstrap: ProBootstrap
-  runtime: ProRuntimeStatus
-  settings: GenerationSettings
-  settingsStatus: ProSettingsStatus | null
-  recentOutputs: RecentOutput[]
-  leftPanelWidth: number
-  rightPanelWidth: number
-  bottomDockHeight: number
-  bottomDockVisible: boolean
-  showAdvanced: boolean
-  onBottomDockVisibleChange: (value: boolean) => void
-  onShowAdvancedChange: (value: boolean) => void
-  onLayoutReset: () => void
-}) {
-  const summary = summarizeRecentOutputs(recentOutputs)
-  return (
-    <aside className="pro-prompt-panel" aria-label="Workspace settings controls">
-      <PanelHeader title="Settings" actionLabel="Workspace settings" icon={Settings} />
-      <div className="pro-workspace-stack">
-        <InfoCard title="Shell preferences" subtitle="Frequent visibility toggles stay reachable without clipping.">
-          <label className="pro-toggle">
-            <input
-              type="checkbox"
-              checked={bottomDockVisible}
-              onChange={(event) => onBottomDockVisibleChange(event.target.checked)}
-            />
-            <span>Bottom dock visible</span>
-          </label>
-          <label className="pro-toggle">
-            <input
-              type="checkbox"
-              checked={showAdvanced}
-              onChange={(event) => onShowAdvancedChange(event.target.checked)}
-            />
-            <span>Secondary controls expanded</span>
-          </label>
-          <button type="button" className="pro-secondary-button" onClick={onLayoutReset}>
-            Reset saved layout
-          </button>
-        </InfoCard>
-        <InfoCard title="Current working set" subtitle="The settings page reflects live shell state instead of a placeholder.">
-          <dl className="pro-runtime-list">
-            <MetricRow label="Workspace" value={bootstrap.workspaceName} />
-            <MetricRow label="Mode" value={settings.mode} />
-            <MetricRow label="Backend" value={runtime.backend} />
-            <MetricRow label="Left panel" value={`${leftPanelWidth}px`} />
-            <MetricRow label="Right panel" value={`${rightPanelWidth}px`} />
-            <MetricRow label="Bottom dock" value={`${bottomDockHeight}px`} />
-            <MetricRow label="Settings file" value={settingsStatus?.paths.settings || 'Backend not connected'} />
-          </dl>
-        </InfoCard>
-        <InfoCard title="Session scope" subtitle="Show what the shell is actually carrying right now before persistence is expanded.">
-          <dl className="pro-runtime-list">
-            <MetricRow label="Loaded model" value={runtime.loadedModel.name || settings.modelId} />
-            <MetricRow label="Recent receipts" value={`${recentOutputs.length}`} />
-            <MetricRow label="Unique models" value={`${summary.uniqueModels}`} />
-            <MetricRow label="Persistence key" value={LAYOUT_STORAGE_KEY} />
-            <MetricRow label="Output path" value={settingsStatus?.paths.outputs || 'Unknown'} />
-          </dl>
-        </InfoCard>
-      </div>
-    </aside>
-  )
-}
-
-function SettingsWorkspace({
-  bootstrap,
-  runtime,
-  settings,
-  settingsStatus,
-  recentOutputs,
-  onSettingsChange,
-  onSettingsStatusChange,
-  onSaveSettings,
-  settingsSaveStatus,
-  leftPanelWidth,
-  rightPanelWidth,
-  bottomDockHeight,
-  bottomDockVisible,
-  showAdvanced,
-}: {
-  bootstrap: ProBootstrap
-  runtime: ProRuntimeStatus
-  settings: GenerationSettings
-  settingsStatus: ProSettingsStatus | null
-  recentOutputs: RecentOutput[]
-  onSettingsChange: Dispatch<SetStateAction<GenerationSettings>>
-  onSettingsStatusChange: Dispatch<SetStateAction<ProSettingsStatus | null>>
-  onSaveSettings: () => void
-  settingsSaveStatus: string
-  leftPanelWidth: number
-  rightPanelWidth: number
-  bottomDockHeight: number
-  bottomDockVisible: boolean
-  showAdvanced: boolean
-}) {
-  const summary = summarizeRecentOutputs(recentOutputs)
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>('generation')
-  const [settingsQuery, setSettingsQuery] = useState('')
-  const show = useCallback(
-    (section: SettingsSectionId, keywords: string) => {
-      const query = settingsQuery.trim().toLowerCase()
-      if (query) {
-        return keywords.toLowerCase().includes(query)
-      }
-      return activeSection === section
-    },
-    [activeSection, settingsQuery],
-  )
-  const uiSettings = settingsStatus?.ui ?? {
-    accentPreset: 'mint',
-    galleryColumns: 2,
-    galleryHeight: 480,
-    livePreview: true,
-    showProgressEveryNSteps: 5,
-    livePreviewDecoder: 'vae',
-    hiddenTabs: [],
-  }
-  const outputSettings = settingsStatus?.output ?? {
-    imageFormat: 'png',
-    imageQuality: 95,
-    embedMetadata: true,
-    saveGrid: false,
-    saveSidecarTxt: false,
-    filenamePattern: '[datetime]',
-    saveBeforeHires: false,
-    saveInterrupted: false,
-    metadataIncludeModelHash: true,
-    metadataIncludeVaeHash: true,
-    metadataIncludeLoraHashes: true,
-    metadataIncludeAppVersion: true,
-    metadataIncludeOptimizationProfile: true,
-    optimizationProfileId: 'balanced_sdpa_fp16',
-  }
-  const videoSettings = settingsStatus?.video ?? {
-    wanHigh: '',
-    wanLow: '',
-    wanVae: '',
-    wanTextEncoder: '',
-    wanOffload: 'balanced',
-    wanSampler: 'unipc',
-    wanFlowShift: 5,
-    wanRuntimeMode: 'fast_5b',
-    ltxDtype: 'bf16',
-    ltxCpuOffload: 'auto',
-    wanGroupOffloadStream: true,
-    wanGroupOffloadBlocks: 4,
-    ggufCudaKernels: false,
-  }
-  const runtimeSettings = settingsStatus?.runtime ?? {
-    port: 7860,
-    listen: false,
-    share: false,
-    autolaunch: false,
-    api: false,
-    genlog: false,
-    backend: 'diffusers',
-    onnxProvider: 'auto',
-    attention: 'sage_sdpa',
-    xformers: false,
-    optSdpAttention: false,
-    optSplitAttention: false,
-    asyncOffload: true,
-    pinnedMemory: true,
-    cudaMalloc: false,
-    medvram: false,
-    lowvram: false,
-    noHalf: false,
-    fp8: false,
-    fluxFp8: false,
-    directml: false,
-    cpu: false,
-    cudaGraphs: false,
-    torchao: false,
-    fp8Quant: false,
-    torchCompile: false,
-    channelsLast: false,
-    nvenc: false,
-    hevc: false,
-    blockPrivateDownloadUrls: true,
-    apiCorsOrigins: '',
-    apiRateLimitPerMinute: 0,
-    theme: 'dark',
-    modelsDir: '',
-    checkpointDir: '',
-    outputDir: '',
-    extraModelDirs: '',
-    extraCheckpointDirs: '',
-  }
-  const settingsModelOptions = modelsForCreationMode(bootstrap.models, settings.mode)
-
-  const updateGenerationSetting = useCallback(
-    (patch: Partial<GenerationSettings>) => {
-      onSettingsChange((current) => ({ ...current, ...patch }))
-    },
-    [onSettingsChange],
-  )
-
-  const updateUiSetting = useCallback(
-    (patch: Partial<ProSettingsStatus['ui']>) => {
-      onSettingsStatusChange((current) =>
-        current
-          ? {
-              ...current,
-              ui: {
-                ...current.ui,
-                ...patch,
-              },
-            }
-          : current,
-      )
-    },
-    [onSettingsStatusChange],
-  )
-
-  const updateOutputSetting = useCallback(
-    (patch: Partial<ProSettingsStatus['output']>) => {
-      onSettingsStatusChange((current) =>
-        current
-          ? {
-              ...current,
-              output: {
-                ...current.output,
-                ...patch,
-              },
-            }
-          : current,
-      )
-    },
-    [onSettingsStatusChange],
-  )
-
-  const updateVideoSetting = useCallback(
-    (patch: Partial<ProSettingsStatus['video']>) => {
-      onSettingsStatusChange((current) =>
-        current
-          ? {
-              ...current,
-              video: {
-                ...current.video,
-                ...patch,
-              },
-            }
-          : current,
-      )
-    },
-    [onSettingsStatusChange],
-  )
-
-  const updateRuntimeSetting = useCallback(
-    (patch: Partial<ProSettingsStatus['runtime']>) => {
-      onSettingsStatusChange((current) =>
-        current
-          ? {
-              ...current,
-              runtime: {
-                ...current.runtime,
-                ...patch,
-              },
-            }
-          : current,
-      )
-    },
-    [onSettingsStatusChange],
-  )
-
-  const outputToggles: Array<{ key: keyof ProSettingsStatus['output']; label: string }> = [
-    { key: 'embedMetadata', label: 'Embed metadata' },
-    { key: 'saveSidecarTxt', label: 'Write sidecar txt' },
-    { key: 'saveGrid', label: 'Save grids' },
-    { key: 'saveBeforeHires', label: 'Save before hi-res' },
-    { key: 'saveInterrupted', label: 'Save interrupted images' },
-    { key: 'metadataIncludeModelHash', label: 'Include model hash' },
-    { key: 'metadataIncludeVaeHash', label: 'Include VAE hash' },
-    { key: 'metadataIncludeLoraHashes', label: 'Include LoRA hashes' },
-    { key: 'metadataIncludeAppVersion', label: 'Include app version' },
-    { key: 'metadataIncludeOptimizationProfile', label: 'Include optimization profile' },
-  ]
-
-  const runtimeToggles: Array<{ key: keyof ProSettingsStatus['runtime']; label: string }> = [
-    { key: 'listen', label: 'Listen on LAN' },
-    { key: 'api', label: 'Enable API' },
-    { key: 'genlog', label: 'Generation log' },
-    { key: 'share', label: 'Public share link' },
-    { key: 'autolaunch', label: 'Auto launch browser' },
-    { key: 'blockPrivateDownloadUrls', label: 'Block private download URLs' },
-    { key: 'medvram', label: 'Med VRAM' },
-    { key: 'lowvram', label: 'Low VRAM' },
-    { key: 'asyncOffload', label: 'Async offload' },
-    { key: 'pinnedMemory', label: 'Pinned memory' },
-    { key: 'cudaMalloc', label: 'CUDA malloc tuning' },
-    { key: 'noHalf', label: 'Disable half precision' },
-    { key: 'fp8', label: 'FP8 mode' },
-    { key: 'fluxFp8', label: 'Flux FP8' },
-    { key: 'directml', label: 'DirectML' },
-    { key: 'cpu', label: 'Force CPU' },
-    { key: 'xformers', label: 'xFormers flag' },
-    { key: 'optSdpAttention', label: 'SDP attention flag' },
-    { key: 'optSplitAttention', label: 'Split attention flag' },
-    { key: 'cudaGraphs', label: 'CUDA graphs' },
-    { key: 'torchao', label: 'TorchAO' },
-    { key: 'fp8Quant', label: 'TorchAO FP8 quant' },
-    { key: 'torchCompile', label: 'Torch compile' },
-    { key: 'channelsLast', label: 'Channels last' },
-    { key: 'nvenc', label: 'NVENC' },
-    { key: 'hevc', label: 'HEVC' },
-  ]
-
-  return (
-    <section className="pro-workspace-surface" aria-label="Workspace settings">
-      <WorkspaceHeader
-        eyebrow="Settings"
-        title="Workspace controls"
-        description="Saved defaults, display behavior, paths, and runtime policy for the Pro shell."
-      />
-      <div className="pro-settings-toolbar" role="tablist" aria-label="Settings sections">
-        <nav className="pro-settings-nav">
-          {SETTINGS_SECTIONS.map((section) => (
-            <button
-              key={section.id}
-              type="button"
-              role="tab"
-              aria-selected={!settingsQuery && activeSection === section.id}
-              className={`pro-settings-nav-item${!settingsQuery && activeSection === section.id ? ' is-active' : ''}`}
-              title={section.hint}
-              onClick={() => {
-                setSettingsQuery('')
-                setActiveSection(section.id)
-              }}
-            >
-              {section.label}
-            </button>
-          ))}
-        </nav>
-        <input
-          type="search"
-          className="pro-settings-search"
-          placeholder="Search settings…"
-          value={settingsQuery}
-          onChange={(event) => setSettingsQuery(event.target.value)}
-          aria-label="Search settings"
-        />
-      </div>
-      <div className="pro-workspace-grid">
-        {show('generation', 'generation defaults model sampler scheduler steps cfg clip skip width height negative prompt save images') && (
-        <InfoCard title="Generation defaults" subtitle="Saved through the Pro backend settings file.">
-          <div className="pro-form-stack">
-            <label className="pro-field">
-              <FieldLabel label="Default model" />
-              <select
-                value={settings.modelId}
-                onChange={(event) => updateGenerationSetting({ modelId: event.target.value })}
-              >
-                {settingsModelOptions.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="Default sampler" />
-              <select
-                value={settings.sampler}
-                onChange={(event) => updateGenerationSetting({ sampler: event.target.value })}
-              >
-                {bootstrap.samplers.map((sampler) => (
-                  <option key={sampler} value={sampler}>
-                    {sampler}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="Default scheduler" />
-              <select
-                value={settings.scheduler}
-                onChange={(event) => updateGenerationSetting({ scheduler: event.target.value })}
-              >
-                {SCHEDULER_OPTIONS.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="pro-control-grid">
-              <label className="pro-field">
-                <FieldLabel label="Width" />
-                <input
-                  type="number"
-                  min={64}
-                  max={2048}
-                  step={64}
-                  value={settings.width}
-                  onChange={(event) => updateGenerationSetting({ width: clamp(Number(event.target.value) || 64, 64, 2048) })}
-                />
-              </label>
-              <label className="pro-field">
-                <FieldLabel label="Height" />
-                <input
-                  type="number"
-                  min={64}
-                  max={2048}
-                  step={64}
-                  value={settings.height}
-                  onChange={(event) => updateGenerationSetting({ height: clamp(Number(event.target.value) || 64, 64, 2048) })}
-                />
-              </label>
-            </div>
-            <RangeField
-              label="Steps"
-              min={1}
-              max={80}
-              step={1}
-              value={settings.steps}
-              onChange={(value) => updateGenerationSetting({ steps: value })}
-            />
-            <RangeField
-              label="CFG scale"
-              min={0}
-              max={20}
-              step={0.5}
-              value={settings.cfgScale}
-              onChange={(value) => updateGenerationSetting({ cfgScale: value })}
-            />
-            <RangeField
-              label="Clip skip"
-              min={1}
-              max={12}
-              step={1}
-              value={settings.clipSkip}
-              onChange={(value) => updateGenerationSetting({ clipSkip: value })}
-            />
-            <label className="pro-field">
-              <FieldLabel label="Default negative prompt" />
-              <textarea
-                value={settings.negativePrompt}
-                onChange={(event) => updateGenerationSetting({ negativePrompt: event.target.value })}
-              />
-            </label>
-            <label className="pro-toggle">
-              <input
-                type="checkbox"
-                checked={settings.saveImages}
-                onChange={(event) => updateGenerationSetting({ saveImages: event.target.checked })}
-              />
-              <span>Save generated images to outputs</span>
-            </label>
-            <div className="pro-settings-actions">
-              <button type="button" className="pro-primary-button" onClick={onSaveSettings} disabled={!settingsStatus}>
-                Save settings
-              </button>
-              <span>{settingsSaveStatus || (settingsStatus ? 'Connected' : 'Backend not connected')}</span>
-            </div>
-          </div>
-        </InfoCard>
-        )}
-        {show('interface', 'ui interface live preview gallery columns dock height decoder progress steps') && (
-        <InfoCard title="UI defaults" subtitle="Live preview and output dock behavior.">
-          <div className="pro-form-stack">
-            <label className="pro-toggle">
-              <input
-                type="checkbox"
-                checked={uiSettings.livePreview}
-                onChange={(event) => updateUiSetting({ livePreview: event.target.checked })}
-                disabled={!settingsStatus}
-              />
-              <span>Live preview enabled</span>
-            </label>
-            <RangeField
-              label="Preview every N steps"
-              min={1}
-              max={20}
-              step={1}
-              value={uiSettings.showProgressEveryNSteps}
-              onChange={(value) => updateUiSetting({ showProgressEveryNSteps: value })}
-            />
-            <div className="pro-control-grid">
-              <RangeField
-                label="Gallery columns"
-                min={1}
-                max={8}
-                step={1}
-                value={uiSettings.galleryColumns}
-                onChange={(value) => updateUiSetting({ galleryColumns: value })}
-              />
-              <RangeField
-                label="Dock height"
-                min={160}
-                max={1200}
-                step={20}
-                value={uiSettings.galleryHeight}
-                onChange={(value) => updateUiSetting({ galleryHeight: value })}
-              />
-            </div>
-            <label className="pro-field">
-              <FieldLabel label="Preview decoder" />
-              <select
-                value={uiSettings.livePreviewDecoder}
-                onChange={(event) => updateUiSetting({ livePreviewDecoder: event.target.value })}
-                disabled={!settingsStatus}
-              >
-                <option value="vae">VAE</option>
-              </select>
-              <p className="pro-field-note">Live previews currently decode SD 1.5 and SDXL image routes only.</p>
-            </label>
-          </div>
-        </InfoCard>
-        )}
-        {show('output', 'output metadata image format quality filename pattern sidecar grid hash infotext png jpg webp') && (
-        <InfoCard title="Output and metadata" subtitle="Saved image format, filenames, sidecars, and infotext fields.">
-          <div className="pro-form-stack">
-            <div className="pro-control-grid">
-              <label className="pro-field">
-                <FieldLabel label="Image format" />
-                <select
-                  value={outputSettings.imageFormat}
-                  onChange={(event) => updateOutputSetting({ imageFormat: event.target.value })}
-                  disabled={!settingsStatus}
-                >
-                  {OUTPUT_FORMAT_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="pro-field">
-                <FieldLabel label="Image quality" />
-                <input
-                  type="number"
-                  min={10}
-                  max={100}
-                  step={1}
-                  value={outputSettings.imageQuality}
-                  onChange={(event) => updateOutputSetting({ imageQuality: clamp(Number(event.target.value) || 95, 10, 100) })}
-                  disabled={!settingsStatus}
-                />
-              </label>
-            </div>
-            <label className="pro-field">
-              <FieldLabel label="Filename pattern" tooltip="Tokens include [datetime], [date], [time], [seed], [model_name], [width], [height], and [seq]." />
-              <input
-                value={outputSettings.filenamePattern}
-                onChange={(event) => updateOutputSetting({ filenamePattern: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="Optimization profile id" />
-              <input
-                value={outputSettings.optimizationProfileId}
-                onChange={(event) => updateOutputSetting({ optimizationProfileId: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-            <div className="pro-settings-columns pro-settings-columns-compact">
-              {outputToggles.map((item) => (
-                <label className="pro-toggle" key={item.key}>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(outputSettings[item.key])}
-                    onChange={(event) =>
-                      updateOutputSetting({ [item.key]: event.target.checked } as Partial<ProSettingsStatus['output']>)
-                    }
-                    disabled={!settingsStatus}
-                  />
-                  <span>{item.label}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-        </InfoCard>
-        )}
-        {show('video', 'video performance ltx precision bfloat16 float16 dtype cpu offload streamed group blocks gguf cuda kernels vram wan speed') && (
-        <InfoCard
-          title="Video engine performance"
-          subtitle="Precision and VRAM strategy for the Wan and LTX pipelines. Changes apply to the next generation — no restart needed."
-        >
-          <div className="pro-form-stack">
-            <div className="pro-control-grid">
-              <label className="pro-field">
-                <FieldLabel
-                  label="LTX precision"
-                  tooltip="LTX-Video is calibrated in bfloat16; float16 can overflow and cause artifacts. Use float16 only on GPUs without bf16 support (pre-Ampere)."
-                />
-                <select
-                  value={videoSettings.ltxDtype}
-                  onChange={(event) => updateVideoSetting({ ltxDtype: event.target.value })}
-                  disabled={!settingsStatus}
-                >
-                  {LTX_DTYPE_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="pro-field">
-                <FieldLabel
-                  label="LTX CPU offload"
-                  tooltip="Auto keeps small checkpoints fully on the GPU (fastest) and offloads only when the model would not fit."
-                />
-                <select
-                  value={videoSettings.ltxCpuOffload}
-                  onChange={(event) => updateVideoSetting({ ltxCpuOffload: event.target.value })}
-                  disabled={!settingsStatus}
-                >
-                  {LTX_OFFLOAD_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <label className="pro-toggle">
-              <input
-                type="checkbox"
-                checked={videoSettings.wanGroupOffloadStream}
-                onChange={(event) => updateVideoSetting({ wanGroupOffloadStream: event.target.checked })}
-                disabled={!settingsStatus}
-              />
-              <span>Streamed Wan group offload (overlap block transfers with compute)</span>
-            </label>
-            <RangeField
-              label="Wan offload blocks per group"
-              min={1}
-              max={40}
-              step={1}
-              value={videoSettings.wanGroupOffloadBlocks}
-              onChange={(value) => updateVideoSetting({ wanGroupOffloadBlocks: value })}
-            />
-            <label className="pro-toggle">
-              <input
-                type="checkbox"
-                checked={videoSettings.ggufCudaKernels}
-                onChange={(event) => updateVideoSetting({ ggufCudaKernels: event.target.checked })}
-                disabled={!settingsStatus}
-              />
-              <span>GGUF optimized CUDA kernels (needs the `kernels` package; Linux only, ignored on Windows)</span>
-            </label>
-            <p className="pro-field-note">
-              Tip for 16 GB cards: in NVIDIA Control Panel set CUDA Sysmem Fallback Policy to "Prefer No Sysmem
-              Fallback" so an over-budget run fails fast instead of silently paging at 10x slower speed.
-            </p>
-          </div>
-        </InfoCard>
-        )}
-        {show('video', 'wan video defaults runtime mode offload sampler flow shift high low model vae text encoder') && (
-        <InfoCard title="Wan video defaults" subtitle="Restore the default Wan split, sampler, and offload choices when the video tab opens.">
-          <div className="pro-form-stack">
-            <div className="pro-control-grid">
-              <label className="pro-field">
-                <FieldLabel label="Runtime mode" />
-                <select
-                  value={videoSettings.wanRuntimeMode}
-                  onChange={(event) => updateVideoSetting({ wanRuntimeMode: event.target.value })}
-                  disabled={!settingsStatus}
-                >
-                  {WAN_RUNTIME_MODE_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="pro-field">
-                <FieldLabel label="Offload" />
-                <select
-                  value={videoSettings.wanOffload}
-                  onChange={(event) => updateVideoSetting({ wanOffload: event.target.value })}
-                  disabled={!settingsStatus}
-                >
-                  {WAN_OFFLOAD_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="pro-control-grid">
-              <label className="pro-field">
-                <FieldLabel label="Sampler" />
-                <select
-                  value={videoSettings.wanSampler}
-                  onChange={(event) => updateVideoSetting({ wanSampler: event.target.value })}
-                  disabled={!settingsStatus}
-                >
-                  {WAN_SAMPLER_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="pro-field">
-                <FieldLabel label="Flow shift" />
-                <input
-                  type="number"
-                  min={0}
-                  max={20}
-                  step={0.1}
-                  value={videoSettings.wanFlowShift}
-                  onChange={(event) => updateVideoSetting({ wanFlowShift: clamp(Number(event.target.value) || 0, 0, 20) })}
-                  disabled={!settingsStatus}
-                />
-              </label>
-            </div>
-            <label className="pro-field">
-              <FieldLabel label="High model" />
-              <input
-                value={videoSettings.wanHigh}
-                onChange={(event) => updateVideoSetting({ wanHigh: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="Low model" />
-              <input
-                value={videoSettings.wanLow}
-                onChange={(event) => updateVideoSetting({ wanLow: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="VAE" />
-              <input
-                value={videoSettings.wanVae}
-                onChange={(event) => updateVideoSetting({ wanVae: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="Text encoder" />
-              <input
-                value={videoSettings.wanTextEncoder}
-                onChange={(event) => updateVideoSetting({ wanTextEncoder: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-          </div>
-        </InfoCard>
-        )}
-        {show('system', 'advanced launch port backend attention onnx theme api cors rate limit vram fp8 directml cpu torch compile nvenc hevc paths directories') && (
-        <InfoCard title="Advanced launch controls" subtitle="Saved to launch profile. Bad choices can break startup until changed back.">
-          <div className="pro-form-stack">
-            <p className="pro-muted">Most changes apply on restart. Loaded models are not rebuilt just because a flag is saved.</p>
-            <div className="pro-control-grid">
-              <label className="pro-field">
-                <FieldLabel label="Port" />
-                <input
-                  type="number"
-                  min={1024}
-                  max={65535}
-                  step={1}
-                  value={runtimeSettings.port}
-                  onChange={(event) => updateRuntimeSetting({ port: clamp(Number(event.target.value) || 7860, 1024, 65535) })}
-                  disabled={!settingsStatus}
-                />
-              </label>
-              <label className="pro-field">
-                <FieldLabel label="Backend" />
-                <select
-                  value={runtimeSettings.backend}
-                  onChange={(event) => updateRuntimeSetting({ backend: event.target.value })}
-                  disabled={!settingsStatus}
-                >
-                  {RUNTIME_BACKEND_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="pro-control-grid">
-              <label className="pro-field">
-                <FieldLabel label="Attention" />
-                <select
-                  value={runtimeSettings.attention}
-                  onChange={(event) => updateRuntimeSetting({ attention: event.target.value })}
-                  disabled={!settingsStatus}
-                >
-                  {RUNTIME_ATTENTION_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="pro-field">
-                <FieldLabel label="ONNX provider" />
-                <select
-                  value={runtimeSettings.onnxProvider}
-                  onChange={(event) => updateRuntimeSetting({ onnxProvider: event.target.value })}
-                  disabled={!settingsStatus}
-                >
-                  {ONNX_PROVIDER_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="pro-control-grid">
-              <label className="pro-field">
-                <FieldLabel label="Theme" />
-                <select
-                  value={runtimeSettings.theme}
-                  onChange={(event) => updateRuntimeSetting({ theme: event.target.value })}
-                  disabled={!settingsStatus}
-                >
-                  <option value="dark">Dark</option>
-                  <option value="light">Light</option>
-                </select>
-              </label>
-              <label className="pro-field">
-                <FieldLabel label="API rate limit" />
-                <input
-                  type="number"
-                  min={0}
-                  max={6000}
-                  step={1}
-                  value={runtimeSettings.apiRateLimitPerMinute}
-                  onChange={(event) => updateRuntimeSetting({ apiRateLimitPerMinute: clamp(Number(event.target.value) || 0, 0, 6000) })}
-                  disabled={!settingsStatus}
-                />
-              </label>
-            </div>
-            <label className="pro-field">
-              <FieldLabel label="API CORS origins" />
-              <input
-                value={runtimeSettings.apiCorsOrigins}
-                onChange={(event) => updateRuntimeSetting({ apiCorsOrigins: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-            <div className="pro-settings-columns pro-settings-columns-compact">
-              {runtimeToggles.map((item) => (
-                <label className="pro-toggle" key={item.key}>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(runtimeSettings[item.key])}
-                    onChange={(event) =>
-                      updateRuntimeSetting({ [item.key]: event.target.checked } as Partial<ProSettingsStatus['runtime']>)
-                    }
-                    disabled={!settingsStatus}
-                  />
-                  <span>{item.label}</span>
-                </label>
-              ))}
-            </div>
-            <label className="pro-field">
-              <FieldLabel label="Models directory" />
-              <input
-                value={runtimeSettings.modelsDir}
-                onChange={(event) => updateRuntimeSetting({ modelsDir: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="Checkpoint directory" />
-              <input
-                value={runtimeSettings.checkpointDir}
-                onChange={(event) => updateRuntimeSetting({ checkpointDir: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="Output directory" />
-              <input
-                value={runtimeSettings.outputDir}
-                onChange={(event) => updateRuntimeSetting({ outputDir: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="Extra model directories" />
-              <textarea
-                value={runtimeSettings.extraModelDirs}
-                onChange={(event) => updateRuntimeSetting({ extraModelDirs: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-            <label className="pro-field">
-              <FieldLabel label="Extra checkpoint directories" />
-              <textarea
-                value={runtimeSettings.extraCheckpointDirs}
-                onChange={(event) => updateRuntimeSetting({ extraCheckpointDirs: event.target.value })}
-                disabled={!settingsStatus}
-              />
-            </label>
-          </div>
-        </InfoCard>
-        )}
-        {show('generation', 'saved defaults snapshot model sampler resolution version') && (
-        <InfoCard title="Saved defaults snapshot" subtitle="Current backend values after the last settings refresh.">
-          <div className="pro-stat-grid">
-            <StatTile label="Default model" value={settingsStatus?.generationDefaults.modelId ?? settings.modelId} hint="saved default" />
-            <StatTile label="Sampler" value={settingsStatus?.generationDefaults.sampler ?? settings.sampler} hint="saved default" />
-            <StatTile label="Resolution" value={`${settingsStatus?.generationDefaults.width ?? settings.width}x${settingsStatus?.generationDefaults.height ?? settings.height}`} hint="saved default" />
-            <StatTile label="Version" value={bootstrap.version} hint="shell build" />
-          </div>
-        </InfoCard>
-        )}
-        {show('system', 'backend paths config launch profile models checkpoints outputs') && (
-        <InfoCard title="Backend paths" subtitle="Real paths reported by the Pro API for tonight's QA pass.">
-          <dl className="pro-runtime-list">
-            <MetricRow label="Config" value={settingsStatus?.paths.settings || 'Unavailable'} />
-            <MetricRow label="Launch profile" value={settingsStatus?.paths.launch || 'Unavailable'} />
-            <MetricRow label="Models" value={settingsStatus?.paths.models || 'Unavailable'} />
-            <MetricRow label="Checkpoints" value={settingsStatus?.paths.checkpoints || 'Unavailable'} />
-            <MetricRow label="Outputs" value={settingsStatus?.paths.outputs || 'Unavailable'} />
-          </dl>
-        </InfoCard>
-        )}
-        {show('interface', 'layout memory panel width dock height advanced') && (
-        <InfoCard title="Layout memory" subtitle="Local shell layout is already persisted; this page makes those values obvious.">
-          <dl className="pro-runtime-list">
-            <MetricRow label="Left panel width" value={`${leftPanelWidth}px`} />
-            <MetricRow label="Right panel width" value={`${rightPanelWidth}px`} />
-            <MetricRow label="Bottom dock height" value={`${bottomDockHeight}px`} />
-            <MetricRow label="Bottom dock visible" value={bottomDockVisible ? 'Yes' : 'No'} />
-            <MetricRow label="Advanced panel open" value={showAdvanced ? 'Yes' : 'No'} />
-          </dl>
-        </InfoCard>
-        )}
-        {show('interface', 'local persistence boundary browser saved runtime session') && (
-        <InfoCard title="Local persistence boundary" subtitle="Distinguish between what is saved in the browser and what is just current runtime/bootstrap state.">
-          <div className="pro-settings-columns">
-            <div className="pro-settings-column">
-              <strong>Saved locally</strong>
-              <ul className="pro-bullet-list">
-                <li>Left and right panel widths.</li>
-                <li>Bottom dock visibility and saved dock height.</li>
-                <li>The shell layout record under `{LAYOUT_STORAGE_KEY}`.</li>
-              </ul>
-            </div>
-            <div className="pro-settings-column">
-              <strong>Live session/runtime</strong>
-              <ul className="pro-bullet-list">
-                <li>Current backend status, queue count, and loaded model.</li>
-                <li>Current prompt route defaults from bootstrap/runtime.</li>
-                <li>Recent local receipts shown in the data and logs pages.</li>
-              </ul>
-            </div>
-          </div>
-        </InfoCard>
-        )}
-        {show('system', 'workspace inventory models samplers receipts') && (
-        <InfoCard title="Workspace inventory" subtitle="The settings page now doubles as a concise shell inventory.">
-          <div className="pro-stat-grid">
-            <StatTile label="Models" value={`${bootstrap.models.length}`} hint="available routes" />
-            <StatTile label="Samplers" value={`${bootstrap.samplers.length}`} hint="loaded options" />
-            <StatTile label="Receipts" value={`${recentOutputs.length}`} hint="local artifacts" />
-            <StatTile label="Latest receipt" value={summary.latestCreatedAt} hint="recent output" />
-          </div>
-        </InfoCard>
-        )}
-        {show('system', 'runtime policy device precision telemetry') && (
-        <InfoCard title="Runtime policy" subtitle="CPU-side surface effects are fine here; GPU cycles stay reserved for model execution.">
-          <ul className="pro-bullet-list">
-            <li>Use CSS glow and pulse on threshold classes rather than shader effects.</li>
-            <li>Keep timers and loading bars driven from sampled runtime state updates.</li>
-            <li>Bound graph refresh cadence so telemetry stays light during runs.</li>
-            <li>Runtime currently reports {runtime.device} with {runtime.precision} execution.</li>
-          </ul>
-        </InfoCard>
-        )}
-        {show('about', 'credits about version build ai embedded systems') && (
-        <InfoCard title="Credits" subtitle="Local-first AI tools for consumers.">
-          <p className="pro-muted">
-            Engineered by <a href="https://www.ai-embedded-systems.com" target="_blank" rel="noreferrer">AI Embedded Systems</a>.
-          </p>
-        </InfoCard>
-        )}
-      </div>
-    </section>
   )
 }
 
@@ -4845,100 +887,19 @@ function CanvasPreview({
   statusMessage,
   width,
   height,
-  onOpenSegmentation,
-  onOpenHires,
-  onOpenReactor,
-  bottomDockVisible,
-  onToggleBottomDock,
 }: {
   activeMode: ProMode
   preview: RecentOutput | null
   statusMessage: string
   width: number
   height: number
-  onOpenSegmentation: () => void
-  onOpenHires: () => void
-  onOpenReactor: () => void
-  bottomDockVisible: boolean
-  onToggleBottomDock: () => void
 }) {
-  const frameWidth = Math.max(1, preview?.width ?? width)
-  const frameHeight = Math.max(1, preview?.height ?? height)
-  const aspectRatio = `${frameWidth} / ${frameHeight}`
-  const previewStageRef = useRef<HTMLDivElement>(null)
-  const [previewFrameSize, setPreviewFrameSize] = useState({ width: 0, height: 0 })
-  const previewIsVideo = preview?.mode === 'video'
-  useEffect(() => {
-    const stage = previewStageRef.current
-    if (!stage) {
-      return
-    }
-
-    const updateFrameSize = () => {
-      const style = getComputedStyle(stage)
-      const horizontalPadding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
-      const verticalPadding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
-      const availableWidth = Math.max(1, stage.clientWidth - horizontalPadding)
-      const availableHeight = Math.max(1, stage.clientHeight - verticalPadding)
-      const targetAspect = frameWidth / frameHeight
-      let nextWidth = Math.min(availableWidth, 1040)
-      let nextHeight = nextWidth / targetAspect
-
-      if (nextHeight > availableHeight) {
-        nextHeight = availableHeight
-        nextWidth = nextHeight * targetAspect
-      }
-
-      setPreviewFrameSize((current) =>
-        Math.abs(current.width - nextWidth) < 1 && Math.abs(current.height - nextHeight) < 1
-          ? current
-          : { width: nextWidth, height: nextHeight },
-      )
-    }
-
-    updateFrameSize()
-
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', updateFrameSize)
-      return () => window.removeEventListener('resize', updateFrameSize)
-    }
-
-    const observer = new ResizeObserver(updateFrameSize)
-    observer.observe(stage)
-    return () => observer.disconnect()
-  }, [frameHeight, frameWidth])
-
-  const outputFrameStyle = useMemo<CSSProperties>(() => {
-    if (previewFrameSize.width <= 0 || previewFrameSize.height <= 0) {
-      return { aspectRatio }
-    }
-    return {
-      aspectRatio,
-      width: `${previewFrameSize.width}px`,
-      height: `${previewFrameSize.height}px`,
-    }
-  }, [aspectRatio, previewFrameSize.height, previewFrameSize.width])
-
+  const aspectRatio = `${Math.max(1, width)} / ${Math.max(1, height)}`
   return (
     <section className="pro-canvas" aria-label="Canvas and output preview">
       <div className="pro-canvas-header">
-        <div className="pro-canvas-title">
-          <strong>Canvas</strong>
-          <small>{frameWidth}x{frameHeight}</small>
-        </div>
+        <span>Canvas / output preview</span>
         <div className="pro-canvas-tools" aria-label="Canvas tools">
-          <button type="button" className="pro-tool-chip" onClick={onOpenSegmentation}>
-            <ScanSearch size={14} aria-hidden="true" />
-            <span>Segment</span>
-          </button>
-          <button type="button" className="pro-tool-chip" onClick={onOpenHires}>
-            <Highlighter size={14} aria-hidden="true" />
-            <span>Hi-res</span>
-          </button>
-          <button type="button" className="pro-tool-chip" onClick={onOpenReactor}>
-            <Wand2 size={14} aria-hidden="true" />
-            <span>ReActor</span>
-          </button>
           <button type="button" className="pro-icon-button" aria-label="Pan preview">
             <Hand size={16} aria-hidden="true" />
           </button>
@@ -4946,657 +907,28 @@ function CanvasPreview({
             <Maximize2 size={16} aria-hidden="true" />
           </button>
           <button type="button" className="pro-zoom-button">100%</button>
-          <button type="button" className="pro-tool-chip" onClick={onToggleBottomDock}>
-            {bottomDockVisible ? <Rows3 size={14} aria-hidden="true" /> : <Layers2 size={14} aria-hidden="true" />}
-            <span>{bottomDockVisible ? 'Hide dock' : 'Show dock'}</span>
-          </button>
         </div>
       </div>
 
-      <div className="pro-preview-stage" ref={previewStageRef}>
-        <div className="pro-output-frame" style={outputFrameStyle}>
-          {previewIsVideo ? (
-            <video src={preview.url} controls playsInline />
-          ) : preview ? (
+      <div className="pro-preview-stage">
+        <div className="pro-output-frame" style={{ aspectRatio }}>
+          {preview ? (
             <img src={preview.url} alt={preview.prompt} />
           ) : (
-            <div className="pro-empty-preview pro-stage-empty">
+            <div className="pro-empty-preview">
               <Monitor size={42} aria-hidden="true" />
-              <strong>{activeMode === 'video' ? 'Video preview' : 'Image preview'}</strong>
-              <span>Ready for the next render.</span>
+              <span>{activeMode === 'video' ? 'Video preview' : 'Image preview'}</span>
             </div>
           )}
         </div>
       </div>
 
       <div className="pro-canvas-footer">
-        <span>{frameWidth}x{frameHeight}</span>
+        <span>{width}x{height}</span>
         <span>{preview?.modelName ?? 'Local model'}</span>
         <span>{statusMessage}</span>
       </div>
     </section>
-  )
-}
-
-function InpaintCanvas({
-  settings,
-  onSettingsChange,
-  statusMessage,
-  preview,
-  onOpenSegmentation,
-}: {
-  settings: GenerationSettings
-  onSettingsChange: Dispatch<SetStateAction<GenerationSettings>>
-  statusMessage: string
-  preview: RecentOutput | null
-  onOpenSegmentation: () => void
-}) {
-  const imageCanvasRef = useRef<HTMLCanvasElement>(null)
-  const maskCanvasRef = useRef<HTMLCanvasElement>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const [brushSize, setBrushSize] = useState(48)
-  const [zoom, setZoom] = useState(1)
-  const [erasing, setErasing] = useState(false)
-  const [imageSize, setImageSize] = useState({ width: 0, height: 0 })
-  const paintingRef = useRef(false)
-  const lastPointRef = useRef<{ x: number; y: number } | null>(null)
-  const hasStrokesRef = useRef(false)
-
-  const loadImage = useCallback(
-    (dataUrl: string) => {
-      const img = new window.Image()
-      img.onload = () => {
-        setImageSize({ width: img.naturalWidth, height: img.naturalHeight })
-        requestAnimationFrame(() => {
-          const canvas = imageCanvasRef.current
-          const mask = maskCanvasRef.current
-          if (!canvas || !mask) {
-            return
-          }
-          canvas.width = img.naturalWidth
-          canvas.height = img.naturalHeight
-          mask.width = img.naturalWidth
-          mask.height = img.naturalHeight
-          canvas.getContext('2d')?.drawImage(img, 0, 0)
-          mask.getContext('2d')?.clearRect(0, 0, mask.width, mask.height)
-          let exported = dataUrl
-          if (!dataUrl.startsWith('data:')) {
-            try {
-              exported = canvas.toDataURL('image/png')
-            } catch {
-              exported = dataUrl
-            }
-          }
-          onSettingsChange((current) => ({ ...current, initImageDataUrl: exported, maskImageDataUrl: '' }))
-        })
-        hasStrokesRef.current = false
-      }
-      img.src = dataUrl
-    },
-    [onSettingsChange],
-  )
-
-  useEffect(() => {
-    if (settings.initImageDataUrl) {
-      loadImage(settings.initImageDataUrl)
-    }
-    // Restore any previously loaded init image when the inpaint tab mounts.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const handleFileChange = useCallback(
-    (event: ReactChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0]
-      if (!file) {
-        return
-      }
-      const reader = new FileReader()
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          loadImage(reader.result)
-        }
-      }
-      reader.readAsDataURL(file)
-      event.target.value = ''
-    },
-    [loadImage],
-  )
-
-  const exportMask = useCallback(() => {
-    const mask = maskCanvasRef.current
-    if (!mask || mask.width === 0) {
-      return
-    }
-    if (!hasStrokesRef.current) {
-      onSettingsChange((current) => (current.maskImageDataUrl ? { ...current, maskImageDataUrl: '' } : current))
-      return
-    }
-    const exportCanvas = document.createElement('canvas')
-    exportCanvas.width = mask.width
-    exportCanvas.height = mask.height
-    const ctx = exportCanvas.getContext('2d')
-    if (!ctx) {
-      return
-    }
-    ctx.fillStyle = '#000000'
-    ctx.fillRect(0, 0, exportCanvas.width, exportCanvas.height)
-    ctx.drawImage(mask, 0, 0)
-    const dataUrl = exportCanvas.toDataURL('image/png')
-    onSettingsChange((current) => ({ ...current, maskImageDataUrl: dataUrl }))
-  }, [onSettingsChange])
-
-  const [autoMaskBusy, setAutoMaskBusy] = useState(false)
-  const [autoMaskStatus, setAutoMaskStatus] = useState('')
-
-  const handleGenerateAutoMask = useCallback(async () => {
-    if (!settings.initImageDataUrl) {
-      setAutoMaskStatus('Load an image first.')
-      return
-    }
-    const prompt = settings.autoMaskPrompt.trim()
-    if (!prompt) {
-      setAutoMaskStatus('Enter a SAM + DINO prompt first.')
-      return
-    }
-    setAutoMaskBusy(true)
-    setAutoMaskStatus('Segmenting…')
-    try {
-      const result = await generateAutoMask(settings.initImageDataUrl, prompt, settings.autoMaskBoxThreshold)
-      const mask = maskCanvasRef.current
-      const ctx = mask?.getContext('2d')
-      if (!mask || !ctx || !result.mask) {
-        setAutoMaskStatus('Segmentation returned an empty mask.')
-        return
-      }
-      const img = new window.Image()
-      await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve()
-        img.onerror = () => reject(new Error('Mask image could not be decoded.'))
-        img.src = result.mask
-      })
-      // Convert the returned luminance mask into the white-with-alpha strokes
-      // the paint canvas uses, so brush edits still compose with it.
-      const off = document.createElement('canvas')
-      off.width = mask.width
-      off.height = mask.height
-      const offCtx = off.getContext('2d')
-      if (!offCtx) {
-        setAutoMaskStatus('Canvas is unavailable.')
-        return
-      }
-      offCtx.drawImage(img, 0, 0, mask.width, mask.height)
-      const data = offCtx.getImageData(0, 0, mask.width, mask.height)
-      const px = data.data
-      for (let i = 0; i < px.length; i += 4) {
-        const lum = px[i]
-        px[i] = 255
-        px[i + 1] = 255
-        px[i + 2] = 255
-        px[i + 3] = lum
-      }
-      offCtx.putImageData(data, 0, 0)
-      ctx.clearRect(0, 0, mask.width, mask.height)
-      ctx.globalCompositeOperation = 'source-over'
-      ctx.drawImage(off, 0, 0)
-      hasStrokesRef.current = true
-      exportMask()
-      setAutoMaskStatus(result.status || 'Auto mask applied — refine with the brush if needed.')
-    } catch (error: unknown) {
-      setAutoMaskStatus(formatApiError(error))
-    } finally {
-      setAutoMaskBusy(false)
-    }
-  }, [exportMask, settings.autoMaskBoxThreshold, settings.autoMaskPrompt, settings.initImageDataUrl])
-
-  const canvasPoint = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
-    const mask = maskCanvasRef.current
-    if (!mask) {
-      return null
-    }
-    const rect = mask.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) {
-      return null
-    }
-    return {
-      x: ((event.clientX - rect.left) * mask.width) / rect.width,
-      y: ((event.clientY - rect.top) * mask.height) / rect.height,
-    }
-  }, [])
-
-  const paintTo = useCallback(
-    (point: { x: number; y: number }) => {
-      const mask = maskCanvasRef.current
-      const ctx = mask?.getContext('2d')
-      if (!mask || !ctx) {
-        return
-      }
-      const scale = mask.getBoundingClientRect().width > 0 ? mask.width / mask.getBoundingClientRect().width : 1
-      ctx.globalCompositeOperation = erasing ? 'destination-out' : 'source-over'
-      ctx.strokeStyle = '#ffffff'
-      ctx.fillStyle = '#ffffff'
-      ctx.lineCap = 'round'
-      ctx.lineJoin = 'round'
-      ctx.lineWidth = brushSize * scale
-      const last = lastPointRef.current
-      ctx.beginPath()
-      if (last) {
-        ctx.moveTo(last.x, last.y)
-        ctx.lineTo(point.x, point.y)
-        ctx.stroke()
-      } else {
-        ctx.arc(point.x, point.y, (brushSize * scale) / 2, 0, Math.PI * 2)
-        ctx.fill()
-      }
-      lastPointRef.current = point
-      if (!erasing) {
-        hasStrokesRef.current = true
-      }
-    },
-    [brushSize, erasing],
-  )
-
-  const handlePointerDown = useCallback(
-    (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      event.currentTarget.setPointerCapture(event.pointerId)
-      paintingRef.current = true
-      lastPointRef.current = null
-      const point = canvasPoint(event)
-      if (point) {
-        paintTo(point)
-      }
-    },
-    [canvasPoint, paintTo],
-  )
-
-  const handlePointerMove = useCallback(
-    (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      if (!paintingRef.current) {
-        return
-      }
-      const point = canvasPoint(event)
-      if (point) {
-        paintTo(point)
-      }
-    },
-    [canvasPoint, paintTo],
-  )
-
-  const handlePointerUp = useCallback(() => {
-    if (!paintingRef.current) {
-      return
-    }
-    paintingRef.current = false
-    lastPointRef.current = null
-    exportMask()
-  }, [exportMask])
-
-  const clearMask = useCallback(() => {
-    const mask = maskCanvasRef.current
-    const ctx = mask?.getContext('2d')
-    if (mask && ctx) {
-      ctx.clearRect(0, 0, mask.width, mask.height)
-    }
-    hasStrokesRef.current = false
-    onSettingsChange((current) => ({ ...current, maskImageDataUrl: '' }))
-  }, [onSettingsChange])
-
-  const usePreviewImage = useCallback(() => {
-    if (preview?.url) {
-      loadImage(preview.url)
-    }
-  }, [loadImage, preview])
-
-  const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
-    if (imageSize.width <= 0) {
-      return
-    }
-    event.preventDefault()
-    const direction = event.deltaY < 0 ? 0.1 : -0.1
-    setZoom((current) => clamp(Number((current + direction).toFixed(2)), 0.25, 4))
-  }, [imageSize.width])
-
-  const canvasDisplayStyle = useMemo<CSSProperties>(() => {
-    if (imageSize.width <= 0 || imageSize.height <= 0) {
-      return {}
-    }
-    return {
-      width: `${imageSize.width * zoom}px`,
-      height: `${imageSize.height * zoom}px`,
-    }
-  }, [imageSize.height, imageSize.width, zoom])
-
-  return (
-    <section className="pro-canvas" aria-label="Inpaint canvas">
-      <div className="pro-canvas-header">
-        <div className="pro-canvas-title">
-          <strong>Inpaint</strong>
-          <small>{imageSize.width > 0 ? `${imageSize.width}x${imageSize.height}` : 'load an image'}</small>
-        </div>
-        <div className="pro-canvas-tools" aria-label="Inpaint tools">
-          <button type="button" className="pro-tool-chip" onClick={() => fileInputRef.current?.click()}>
-            <FileImage size={14} aria-hidden="true" />
-            <span>Load image</span>
-          </button>
-          <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={handleFileChange} />
-          {preview ? (
-            <button type="button" className="pro-tool-chip" onClick={usePreviewImage}>
-              <Image size={14} aria-hidden="true" />
-              <span>Use preview</span>
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="pro-tool-chip"
-            aria-pressed={!erasing}
-            onClick={() => setErasing(false)}
-          >
-            <Brush size={14} aria-hidden="true" />
-            <span>Brush</span>
-          </button>
-          <button
-            type="button"
-            className="pro-tool-chip"
-            aria-pressed={erasing}
-            onClick={() => setErasing(true)}
-          >
-            <X size={14} aria-hidden="true" />
-            <span>Eraser</span>
-          </button>
-          <label className="pro-tool-chip">
-            <span>Size {brushSize}px</span>
-            <input
-              type="range"
-              min={4}
-              max={160}
-              value={brushSize}
-              onChange={(event) => setBrushSize(Number(event.target.value))}
-            />
-          </label>
-          <button type="button" className="pro-tool-chip" onClick={clearMask}>
-            <RefreshCcw size={14} aria-hidden="true" />
-            <span>Clear mask</span>
-          </button>
-          <button type="button" className="pro-tool-chip" onClick={() => setZoom(1)}>
-            <Maximize2 size={14} aria-hidden="true" />
-            <span>{Math.round(zoom * 100)}%</span>
-          </button>
-        </div>
-      </div>
-
-      <div className="pro-inpaint-auto-mask">
-        <label className="pro-toggle">
-          <input
-            type="checkbox"
-            checked={settings.autoMaskEnabled}
-            onChange={(event) => onSettingsChange((current) => ({ ...current, autoMaskEnabled: event.target.checked }))}
-          />
-          <span>Auto mask</span>
-        </label>
-        <label className="pro-field">
-          <FieldLabel label="SAM + DINO prompt" compact />
-          <input
-            list="pro-auto-mask-prompts"
-            value={settings.autoMaskPrompt}
-            placeholder="person, face, shirt, hands..."
-            onChange={(event) => onSettingsChange((current) => ({ ...current, autoMaskPrompt: event.target.value }))}
-          />
-          <datalist id="pro-auto-mask-prompts">
-            <option value="person" />
-            <option value="face" />
-            <option value="hands" />
-            <option value="clothing" />
-            <option value="background" />
-          </datalist>
-        </label>
-        <label className="pro-field">
-          <FieldLabel label="Auto mask route" compact />
-          <input
-            list="pro-auto-mask-routes"
-            value={settings.autoMaskModel}
-            onChange={(event) => onSettingsChange((current) => ({ ...current, autoMaskModel: event.target.value }))}
-          />
-          <datalist id="pro-auto-mask-routes">
-            <option value="sam+dino" />
-            <option value="sam" />
-            <option value="grounding-dino" />
-          </datalist>
-        </label>
-        <button
-          type="button"
-          className="pro-secondary-button"
-          onClick={handleGenerateAutoMask}
-          disabled={autoMaskBusy || !settings.initImageDataUrl}
-        >
-          <ScanSearch size={14} aria-hidden="true" />
-          {autoMaskBusy ? 'Segmenting…' : 'Generate mask'}
-        </button>
-        <button type="button" className="pro-secondary-button" onClick={onOpenSegmentation}>
-          <SlidersHorizontal size={14} aria-hidden="true" />
-          Mask settings
-        </button>
-        {autoMaskStatus ? <span className="pro-muted">{autoMaskStatus}</span> : null}
-      </div>
-
-      <div className="pro-preview-stage pro-inpaint-stage" onWheel={handleWheel}>
-        {imageSize.width > 0 ? (
-          <div className="pro-inpaint-canvas-stack" style={canvasDisplayStyle}>
-            <canvas
-              ref={imageCanvasRef}
-              style={{ display: 'block', width: '100%', height: '100%', borderRadius: 8 }}
-            />
-            <canvas
-              ref={maskCanvasRef}
-              style={{
-                position: 'absolute',
-                inset: 0,
-                width: '100%',
-                height: '100%',
-                opacity: settings.inpaintMaskOpacity,
-                touchAction: 'none',
-                cursor: 'crosshair',
-                borderRadius: 8,
-              }}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              onPointerLeave={handlePointerUp}
-            />
-          </div>
-        ) : (
-          <div className="pro-empty-preview pro-stage-empty">
-            <Brush size={42} aria-hidden="true" />
-            <strong>Inpaint canvas</strong>
-            <span>Load an image, then paint the area to regenerate. SD 1.5 and SDXL routes are shown.</span>
-          </div>
-        )}
-      </div>
-
-      <div className="pro-canvas-footer">
-        <label className="pro-toggle">
-          <input
-            type="checkbox"
-            checked={settings.inpaintOnlyMasked}
-            onChange={(event) => onSettingsChange((current) => ({ ...current, inpaintOnlyMasked: event.target.checked }))}
-          />
-          <span>Only masked</span>
-        </label>
-        <label className="pro-tool-chip">
-          <span>Padding {settings.inpaintMaskedPadding}px</span>
-          <input
-            type="range"
-            min={0}
-            max={256}
-            value={settings.inpaintMaskedPadding}
-            onChange={(event) => onSettingsChange((current) => ({ ...current, inpaintMaskedPadding: Number(event.target.value) }))}
-          />
-        </label>
-        <label className="pro-tool-chip">
-          <span>Opacity {Math.round(settings.inpaintMaskOpacity * 100)}%</span>
-          <input
-            type="range"
-            min={0.15}
-            max={0.9}
-            step={0.01}
-            value={settings.inpaintMaskOpacity}
-            onChange={(event) => onSettingsChange((current) => ({ ...current, inpaintMaskOpacity: Number(event.target.value) }))}
-          />
-        </label>
-        <label className="pro-field pro-inpaint-content-field">
-          <FieldLabel label="Masked content" compact />
-          <select
-            value={settings.inpaintMaskContent}
-            onChange={(event) => onSettingsChange((current) => ({ ...current, inpaintMaskContent: event.target.value }))}
-          >
-            <option value="original">Original</option>
-            <option value="fill">Fill</option>
-            <option value="latent noise">Latent noise</option>
-            <option value="latent nothing">Latent nothing</option>
-          </select>
-        </label>
-        <label className="pro-tool-chip">
-          <span>Denoise {settings.denoisingStrength.toFixed(2)}</span>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.01}
-            value={settings.denoisingStrength}
-            onChange={(event) =>
-              onSettingsChange((current) => ({ ...current, denoisingStrength: Number(event.target.value) }))
-            }
-          />
-        </label>
-        <label className="pro-tool-chip">
-          <span>Mask blur {settings.maskBlur}px</span>
-          <input
-            type="range"
-            min={0}
-            max={64}
-            value={settings.maskBlur}
-            onChange={(event) => onSettingsChange((current) => ({ ...current, maskBlur: Number(event.target.value) }))}
-          />
-        </label>
-        <span>{statusMessage}</span>
-      </div>
-    </section>
-  )
-}
-
-function BottomDock({
-  visible,
-  height,
-  recentOutputs,
-  selectedOutput,
-  statusMessage,
-  generationError,
-  selectedModelName,
-  onPreviewSelect,
-  onApplyOutputSettings,
-  onResizeStart,
-  onToggleVisible,
-}: {
-  visible: boolean
-  height: number
-  recentOutputs: RecentOutput[]
-  selectedOutput: RecentOutput | null
-  statusMessage: string
-  generationError: string
-  selectedModelName: string
-  onPreviewSelect: (value: RecentOutput) => void
-  onApplyOutputSettings: (value: RecentOutput) => void
-  onResizeStart: (event: ReactMouseEvent<HTMLButtonElement>) => void
-  onToggleVisible: () => void
-}) {
-  const [copyStatus, setCopyStatus] = useState('')
-  const selectedOutputDetails = useMemo(
-    () => (selectedOutput ? buildOutputDetailRows(selectedOutput) : []),
-    [selectedOutput],
-  )
-  const outputStatusText = selectedOutput
-    ? buildOutputStatusText(selectedOutput)
-    : statusMessage
-
-  useEffect(() => {
-    setCopyStatus('')
-  }, [selectedOutput?.id])
-
-  useEffect(() => {
-    if (!copyStatus) {
-      return undefined
-    }
-    const timeoutId = window.setTimeout(() => setCopyStatus(''), 1800)
-    return () => window.clearTimeout(timeoutId)
-  }, [copyStatus])
-
-  const handleApplySettings = useCallback(() => {
-    if (!selectedOutput) {
-      return
-    }
-    onApplyOutputSettings(selectedOutput)
-    setCopyStatus('Applied.')
-  }, [onApplyOutputSettings, selectedOutput])
-
-  return (
-    <div className={visible ? 'pro-bottom-dock' : 'pro-bottom-dock pro-bottom-dock-hidden'} style={{ height }}>
-      <button
-        type="button"
-        className="pro-bottom-resize"
-        onMouseDown={onResizeStart}
-        aria-label="Resize bottom dock"
-      />
-      <div className="pro-bottom-header">
-        <div>
-          <strong>Output dock</strong>
-          <span>{selectedModelName}</span>
-        </div>
-        <button type="button" className="pro-icon-button" onClick={onToggleVisible} aria-label="Hide bottom dock">
-          <X size={16} aria-hidden="true" />
-        </button>
-      </div>
-      <div className="pro-bottom-body">
-        <div className="pro-bottom-status-card" data-error={Boolean(generationError)}>
-          <span>{generationError ? 'Generation error' : selectedOutput ? 'Selected output' : 'Status'}</span>
-          <strong>{generationError || outputStatusText}</strong>
-          {!generationError && selectedOutput ? (
-            <>
-              <div className="pro-bottom-output-meta">
-                {selectedOutputDetails.map((detail) => (
-                  <small key={detail.label}>
-                    <span>{detail.label}</span>
-                    <strong>{detail.value}</strong>
-                  </small>
-                ))}
-              </div>
-              <button
-                type="button"
-                className="pro-secondary-button pro-bottom-copy-button"
-                onClick={handleApplySettings}
-                disabled={!selectedOutput}
-              >
-                <SlidersHorizontal size={14} aria-hidden="true" />
-                Apply settings
-              </button>
-              {copyStatus ? <small className="pro-bottom-copy-status">{copyStatus}</small> : null}
-            </>
-          ) : null}
-        </div>
-        <div className="pro-bottom-gallery">
-          {recentOutputs.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={selectedOutput?.id === item.id ? 'pro-bottom-thumb pro-bottom-thumb-active' : 'pro-bottom-thumb'}
-              onClick={() => onPreviewSelect(item)}
-              aria-pressed={selectedOutput?.id === item.id}
-              aria-label={buildOutputButtonLabel(item)}
-              title={buildOutputStatusText(item)}
-            >
-              <OutputMedia item={item} />
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
   )
 }
 
@@ -5607,30 +939,14 @@ function RuntimePanel({
   runtime: ProRuntimeStatus
   selectedModelName: string
 }) {
-  const loadedModelName = runtime.loadedModel.loaded ? runtime.loadedModel.name : 'No model loaded'
   return (
     <aside className="pro-status-panel" aria-label="Runtime status">
       <div className="pro-status-heading">
-        <span>System</span>
+        <span>Runtime status</span>
         <strong>
           <span className="pro-status-dot" aria-hidden="true" />
           {runtime.state}
         </strong>
-      </div>
-
-      <div className="pro-signal-grid">
-        <div className="pro-signal-card">
-          <span>Workspace</span>
-          <strong>Local</strong>
-        </div>
-        <div className="pro-signal-card">
-          <span>Control</span>
-          <strong>Manual</strong>
-        </div>
-        <div className="pro-signal-card">
-          <span>History</span>
-          <strong>On</strong>
-        </div>
       </div>
 
       <dl className="pro-runtime-list">
@@ -5651,16 +967,10 @@ function RuntimePanel({
       <div className="pro-loaded-model">
         <span className="pro-section-label">Loaded model</span>
         <div className="pro-loaded-model-title">
-          <strong>{loadedModelName}</strong>
-          <span>{runtime.loadedModel.loaded ? 'Loaded' : 'Loads on generate'}</span>
-        </div>
-        <div className="pro-loaded-model-banner">
-          <Cpu size={14} aria-hidden="true" />
-          <span>{runtime.backend}</span>
-          <small>{runtime.attention}</small>
+          <strong>{runtime.loadedModel.name || selectedModelName}</strong>
+          <span>{runtime.loadedModel.loaded ? 'Loaded' : 'Not loaded'}</span>
         </div>
         <dl className="pro-runtime-list">
-          <MetricRow label="Selected model" value={selectedModelName} />
           <MetricRow label="Type" value={runtime.loadedModel.type} />
           <MetricRow label="Base model" value={runtime.loadedModel.baseModel} />
           <MetricRow label="Size on disk" value={runtime.loadedModel.sizeOnDisk} />
@@ -5669,7 +979,7 @@ function RuntimePanel({
           <MetricRow label="Text encoder" value={runtime.loadedModel.textEncoder} />
           <MetricRow label="UNet" value={runtime.loadedModel.unet} />
         </dl>
-        <button type="button" className="pro-unload-button" disabled>Unload model</button>
+        <button type="button" className="pro-unload-button">Unload model</button>
       </div>
 
       <div className="pro-queue-row">
@@ -5680,195 +990,112 @@ function RuntimePanel({
   )
 }
 
-function buildEngineFilterOptions(engines: EngineSummary[]): Array<{ value: EngineId; label: string }> {
-  return [
-    { value: 'all', label: 'All engines' },
-    ...engines.map((engine) => ({
-      value: engine.id,
-      label: `${engine.label} (${engine.count})`,
-    })),
-  ]
-}
-
-function modelFitsCreationMode(model: ProModelOption, mode: CreationMode): boolean {
-  const engineId = model.engineId ?? 'unknown'
-  const kind = `${model.kind ?? ''}`.toLowerCase()
-  const isVideoModel = kind === 'video' || engineId === 'sana_video' || engineId === 'wan'
-  if (mode === 'video') {
-    return isVideoModel
-  }
-  if (engineId === 'unknown') {
-    return false
-  }
-  if (mode === 'inpaint') {
-    return !isVideoModel && (engineId === 'sd15' || engineId === 'sdxl' || engineId === 'flux_fill')
-  }
-  // Flux Fill is an inpaint-only checkpoint; keep it out of plain txt2img.
-  return !isVideoModel && engineId !== 'flux_fill'
-}
-
-function modelsForCreationMode(models: ProModelOption[], mode: CreationMode): ProModelOption[] {
-  return models.filter((model) => modelFitsCreationMode(model, mode))
-}
-
-function summarizeEnginesForModels(engines: EngineSummary[], models: ProModelOption[]): EngineSummary[] {
-  const labels = new Map<EngineId, string>()
-  for (const engine of engines) {
-    labels.set(engine.id, engine.label)
-  }
-  const counts = new Map<EngineId, number>()
-  for (const model of models) {
-    const id = (model.engineId ?? 'unknown') as EngineId
-    counts.set(id, (counts.get(id) ?? 0) + 1)
-  }
-  return Array.from(counts.entries())
-    .map(([id, count]) => ({
-      id,
-      label: labels.get(id) ?? modelEngineFallbackLabel(id),
-      count,
-    }))
-    .sort((left, right) => left.label.localeCompare(right.label))
-}
-
-function modelEngineFallbackLabel(engineId: EngineId): string {
-  switch (engineId) {
-    case 'flux':
-      return 'Flux'
-    case 'flux_fill':
-      return 'Flux Fill (inpaint)'
-    case 'flux2':
-      return 'Flux.2 Klein'
-    case 'sana_video':
-      return 'Sana Video'
-    case 'wan':
-      return 'Wan Video'
-    case 'sd15':
-      return 'Stable Diffusion 1.5'
-    case 'sdxl':
-      return 'Stable Diffusion XL'
-    case 'sd35':
-      return 'Stable Diffusion 3.5'
-    case 'zimage':
-      return 'Z-Image'
-    case 'qwen':
-      return 'Qwen Image'
-    case 'sana':
-      return 'Sana'
-    default:
-      return 'Other'
-  }
-}
-
-function matchesEngineFilter(model: ProModelOption, filter: EngineId): boolean {
-  if (filter === 'all') {
-    return true
-  }
-  if (model.engineId) {
-    return model.engineId === filter
-  }
-  const architecture = `${model.architecture ?? ''} ${model.name ?? ''} ${model.id}`.toLowerCase()
-  switch (filter) {
-    case 'flux':
-      return architecture.includes('flux') && !architecture.includes('flux2') && !architecture.includes('klein')
-    case 'flux2':
-      return architecture.includes('flux2') || architecture.includes('flux.2') || architecture.includes('klein')
-    case 'sana_video':
-      return architecture.includes('sana') && architecture.includes('video')
-    case 'wan':
-      return architecture.includes('wan')
-    case 'sd15':
-      return architecture.includes('sd15') || architecture.includes('sd1.5') || architecture.includes('stable diffusion 1.5')
-    case 'sdxl':
-      return architecture.includes('sdxl') || architecture.includes('stable diffusion xl')
-    case 'sd35':
-      return architecture.includes('sd35') || architecture.includes('sd3.5') || architecture.includes('stable diffusion 3.5')
-    case 'zimage':
-      return architecture.includes('z-image') || architecture.includes('z image') || architecture.includes('zimage')
-    case 'qwen':
-      return architecture.includes('qwen')
-    case 'sana':
-      return architecture.includes('sana') && !architecture.includes('video')
-    default:
-      return true
-  }
-}
-
-function formatModelOptionLabel(model: ProModelOption): string {
-  if (model.assetSummary && !model.name.includes(model.assetSummary)) {
-    return `${model.name} (${model.assetSummary})`
-  }
-  return model.name
-}
-
-function isModelBlocked(model: ProModelOption | undefined): boolean {
-  if (!model?.status) {
-    return false
-  }
-  return ['blocked-cleanly', 'broken-runtime', 'unsupported-no-route'].includes(model.status)
-}
-
-function modelBlockedMessage(model: ProModelOption | undefined): string {
-  if (!model) {
-    return 'Selected model is not available in the current Pro model list.'
-  }
-  const reason = model.reason?.trim()
-  if (reason) {
-    return reason
-  }
-  return `${model.name} is not ready for Pro generation.`
-}
-
-function groupModelsByEngine(models: ProModelOption[], engines: EngineSummary[]) {
-  const labels = new Map<EngineId, string>()
-  labels.set('unknown', 'Other')
-  for (const engine of engines) {
-    labels.set(engine.id, engine.label)
-  }
-  const groups = new Map<string, { id: EngineId; label: string; models: ProModelOption[] }>()
-  for (const model of models) {
-    const id = (model.engineId ?? 'unknown') as EngineId
-    const existing = groups.get(id)
-    if (existing) {
-      existing.models.push(model)
-    } else {
-      groups.set(id, {
-        id,
-        label: model.engineLabel ?? labels.get(id) ?? 'Other',
-        models: [model],
-      })
-    }
-  }
-  return Array.from(groups.values()).sort((left, right) => left.label.localeCompare(right.label))
-}
-
-function summarizeDownloads(downloadsStatus: ProDownloadsStatus | null, engineFilter: EngineId) {
-  const routeLabel = engineFilter === 'all' ? 'all engines' : engineFilter
-  if (!downloadsStatus) {
-    return {
-      subtitle: 'Waiting for /api/pro/downloads.',
-      total: 0,
-      installed: 0,
-      routeTotal: 0,
-      routeLabel,
-      items: [] as ProDownloadsStatus['catalog'],
-    }
-  }
-  const routeItems = downloadsStatus.catalog.filter(
-    (item) => engineFilter === 'all' || item.engineId === engineFilter,
+function RecentRail({
+  outputs,
+  activeOutputId,
+  onSelect,
+  onOpenFolder,
+}: {
+  outputs: RecentOutput[]
+  activeOutputId: string | undefined
+  onSelect: (output: RecentOutput) => void
+  onOpenFolder: () => void
+}) {
+  return (
+    <section className="pro-recent-rail" aria-label="Recent outputs">
+      <div className="pro-recent-header">
+        <span>Recent outputs</span>
+        <div className="pro-recent-actions">
+          <button type="button" className="pro-folder-button" onClick={onOpenFolder}>
+            <FolderOpen size={14} aria-hidden="true" />
+            <span>Open folder</span>
+          </button>
+          <button type="button" className="pro-icon-button" aria-label="Grid view">
+            <Grid2x2 size={15} aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+      <div className="pro-recent-strip">
+        {outputs.map((output) => {
+          const active = activeOutputId === output.id
+          return (
+            <button
+              key={output.id}
+              type="button"
+              className={active ? 'pro-recent-thumb pro-recent-thumb-active' : 'pro-recent-thumb'}
+              aria-pressed={active}
+              onClick={() => onSelect(output)}
+            >
+              <img src={output.thumbnailUrl} alt={output.prompt} />
+              <span>{output.width}x{output.height}</span>
+              <small>{output.createdAt}</small>
+            </button>
+          )
+        })}
+      </div>
+    </section>
   )
-  const items = routeItems
-    .slice()
-    .sort((left, right) => Number(right.installed) - Number(left.installed) || left.title.localeCompare(right.title))
-    .slice(0, 8)
+}
 
-  return {
-    subtitle: 'Local install state from the guarded model download service.',
-    total: downloadsStatus.counts.catalog,
-    installed: downloadsStatus.counts.installed,
-    routeTotal: routeItems.length,
-    routeLabel,
-    items,
-  }
+function OnboardingModal({
+  onClose,
+  onShowAdvanced,
+  onOpenData,
+}: {
+  onClose: () => void
+  onShowAdvanced: () => void
+  onOpenData: () => void
+}) {
+  return (
+    <div className="pro-modal" role="dialog" aria-modal="true" aria-labelledby="pro-modal-title">
+      <div className="pro-modal-card">
+        <button
+          type="button"
+          className="pro-modal-close"
+          aria-label="Dismiss onboarding"
+          onClick={onClose}
+        >
+          <X size={18} aria-hidden="true" />
+        </button>
+        <div className="pro-modal-brand" aria-hidden="true">A</div>
+        <div className="pro-modal-copy">
+          <h2 id="pro-modal-title">Welcome to AIWF Studio</h2>
+          <p>AIWF Studio is a local-first workstation for open-source image and video generation.</p>
+        </div>
+        <div className="pro-modal-points">
+          {SYSTEM_NOTES.map(([title, copy]) => (
+            <div key={title} className="pro-modal-point">
+              <ShieldCheck size={20} aria-hidden="true" />
+              <div>
+                <strong>{title}</strong>
+                <span>{copy}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="pro-modal-account">
+          <div className="pro-avatar" aria-hidden="true" />
+          <div>
+            <strong>nawnie</strong>
+            <span>GitHub account</span>
+          </div>
+        </div>
+        <div className="pro-modal-actions">
+          <button type="button" className="pro-primary-action" onClick={onClose}>
+            <span>Get started</span>
+            <Play size={16} aria-hidden="true" />
+          </button>
+          <button type="button" className="pro-secondary-action" onClick={onShowAdvanced}>
+            Show advanced tools
+          </button>
+          <button type="button" className="pro-secondary-action" onClick={onOpenData}>
+            Open dataset reference
+          </button>
+        </div>
+        <small>You can change preferences anytime in Settings.</small>
+      </div>
+    </div>
+  )
 }
 
 function PanelHeader({
@@ -5887,25 +1114,6 @@ function PanelHeader({
         <Icon size={15} aria-hidden="true" />
       </button>
     </div>
-  )
-}
-
-function ResizeHandle({
-  axis,
-  label,
-  onMouseDown,
-}: {
-  axis: 'vertical' | 'horizontal'
-  label: string
-  onMouseDown: () => void
-}) {
-  return (
-    <button
-      type="button"
-      className={axis === 'vertical' ? 'pro-resize-handle pro-resize-handle-vertical' : 'pro-resize-handle'}
-      aria-label={label}
-      onMouseDown={onMouseDown}
-    />
   )
 }
 
@@ -5934,7 +1142,6 @@ function RailButton({
 
 function RangeField({
   label,
-  tooltip,
   min,
   max,
   step,
@@ -5942,7 +1149,6 @@ function RangeField({
   onChange,
 }: {
   label: string
-  tooltip?: string
   min: number
   max: number
   step: number
@@ -5951,7 +1157,7 @@ function RangeField({
 }) {
   return (
     <label className="pro-range-field">
-      <FieldLabel label={label} tooltip={tooltip} compact />
+      <span>{label}</span>
       <input
         type="range"
         min={min}
@@ -5965,62 +1171,19 @@ function RangeField({
   )
 }
 
-function FieldLabel({
-  label,
-  tooltip,
-  compact = false,
-}: {
-  label: string
-  tooltip?: string
-  compact?: boolean
-}) {
+function MiniMetric({ metric }: { metric: ResourceMetric }) {
   return (
-    <span className={compact ? 'pro-field-label pro-field-label-compact' : 'pro-field-label'}>
-      <span>{label}</span>
-      {tooltip ? (
-        <TooltipBadge label={label} text={tooltip} />
-      ) : null}
-    </span>
-  )
-}
-
-function TooltipBadge({ label, text }: { label: string; text: string }) {
-  return (
-    <span className="pro-tooltip">
-      <button type="button" className="pro-tooltip-button" aria-label={`${label} help`}>
-        <CircleHelp size={13} aria-hidden="true" />
-      </button>
-      <span className="pro-tooltip-bubble" role="tooltip">
-        {text}
-      </span>
-    </span>
-  )
-}
-
-function ToolModal({
-  open,
-  title,
-  children,
-  onClose,
-}: {
-  open: boolean
-  title: string
-  children: ReactNode
-  onClose: () => void
-}) {
-  if (!open) {
-    return null
-  }
-  return (
-    <div className="pro-modal-backdrop" onClick={onClose}>
-      <div className="pro-modal" onClick={(event) => event.stopPropagation()}>
-        <div className="pro-modal-header">
-          <h2 className="pro-modal-title">{title}</h2>
-          <button type="button" className="pro-icon-button" onClick={onClose} aria-label={`Close ${title}`}>
-            <X size={16} aria-hidden="true" />
-          </button>
-        </div>
-        <div className="pro-modal-body">{children}</div>
+    <div className="pro-mini-metric">
+      <span>{metric.label}</span>
+      <strong>{metric.value}</strong>
+      <div
+        className={`pro-meter pro-meter-${metric.tone}`}
+        role="meter"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={metric.percent}
+      >
+        <span style={{ width: `${metric.percent}%` }} />
       </div>
     </div>
   )
@@ -6056,254 +1219,11 @@ function MetricRow({ label, value }: { label: string; value: string }) {
   )
 }
 
-function countBlockedReadiness(counts: ProReadinessStatus['counts']): number {
-  return (
-    (counts['blocked-cleanly'] ?? 0) +
-    (counts['broken-runtime'] ?? 0) +
-    (counts['unsupported-no-route'] ?? 0)
-  )
-}
-
-function formatReadinessLabel(value: string): string {
-  return value
-    .split(/[-_./]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ')
-}
-
-function readinessStatusTone(status: string): string {
-  if (status === 'working') {
-    return 'ready'
-  }
-  if (status === 'metadata-only') {
-    return 'pending'
-  }
-  return 'blocked'
-}
-
-function formatReadinessDetail(item: ProReadinessItem): string {
-  return truncateText(
-    item.suggestedAction || item.reason || item.smokeCommand || item.route || 'No readiness note.',
-    116,
-  )
-}
-
-function WorkspaceHeader({
-  eyebrow,
-  title,
-  description,
-}: {
-  eyebrow: string
-  title: string
-  description: string
-}) {
-  return (
-    <header className="pro-workspace-header">
-      <span>{eyebrow}</span>
-      <div>
-        <strong>{title}</strong>
-        <p>{description}</p>
-      </div>
-    </header>
-  )
-}
-
-function InfoCard({
-  title,
-  subtitle,
-  children,
-}: {
-  title: string
-  subtitle: string
-  children: ReactNode
-}) {
-  return (
-    <section className="pro-info-card">
-      <div className="pro-info-card-header">
-        <strong>{title}</strong>
-        <span>{subtitle}</span>
-      </div>
-      <div className="pro-info-card-body">{children}</div>
-    </section>
-  )
-}
-
-function StatTile({ label, value, hint }: { label: string; value: string; hint: string }) {
-  return (
-    <div className="pro-stat-tile">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <small>{hint}</small>
-    </div>
-  )
-}
-
-function summarizeRecentOutputs(recentOutputs: RecentOutput[]) {
-  const uniqueModels = new Set(
-    recentOutputs.map((item) => item.modelName || item.mode).filter((value) => value.length > 0),
-  ).size
-  return {
-    uniqueModels,
-    latestCreatedAt: formatDisplayDate(recentOutputs[0]?.createdAt || ''),
-  }
-}
-
-function mergeRecentOutputs(nextOutputs: RecentOutput[], currentOutputs: RecentOutput[]) {
-  const seen = new Set<string>()
-  const merged: RecentOutput[] = []
-  for (const item of [...nextOutputs, ...currentOutputs]) {
-    const key = item.path || item.id || item.url
-    if (seen.has(key)) {
-      continue
-    }
-    seen.add(key)
-    merged.push(item)
-    if (merged.length >= 8) {
-      break
-    }
-  }
-  return merged
-}
-
-function buildOutputModelBuckets(recentOutputs: RecentOutput[], fallbackModelName: string) {
-  const counts = new Map<string, number>()
-  for (const item of recentOutputs) {
-    const label = item.modelName || fallbackModelName
-    counts.set(label, (counts.get(label) ?? 0) + 1)
-  }
-  return Array.from(counts.entries())
-    .map(([label, count]) => ({ label, count }))
-    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label))
-}
-
-function buildAspectBuckets(recentOutputs: RecentOutput[]) {
-  const counts = new Map<string, number>()
-  for (const item of recentOutputs) {
-    const label = `${item.width}x${item.height}`
-    counts.set(label, (counts.get(label) ?? 0) + 1)
-  }
-  return Array.from(counts.entries())
-    .map(([label, count]) => ({ label, count }))
-    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label))
-}
-
-function truncateText(value: string, maxLength: number) {
-  if (value.length <= maxLength) {
-    return value
-  }
-  return `${value.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`
-}
-
-function formatDisplayDate(value: string) {
-  if (!value) {
-    return 'No receipts'
-  }
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return value
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date)
-}
-
-function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value <= 0) {
-    return '0 B'
-  }
-  const units = ['B', 'KB', 'MB', 'GB']
-  let nextValue = value
-  let unitIndex = 0
-  while (nextValue >= 1024 && unitIndex < units.length - 1) {
-    nextValue /= 1024
-    unitIndex += 1
-  }
-  return `${nextValue >= 10 || unitIndex === 0 ? nextValue.toFixed(0) : nextValue.toFixed(1)} ${units[unitIndex]}`
-}
-
-function countOutputsByMode(recentOutputs: RecentOutput[]) {
-  return recentOutputs.reduce(
-    (counts, item) => {
-      counts[item.mode] += 1
-      return counts
-    },
-    { image: 0, video: 0, inpaint: 0 } as Record<CreationMode, number>,
-  )
-}
-
-function buildLogRows(
-  runtime: ProRuntimeStatus,
-  statusMessage: string,
-  selectedModelName: string,
-  recentOutputs: RecentOutput[],
-  generationProgress: GenerationProgressEvent[],
-) {
-  const progressRows = generationProgress.slice(-6).reverse().map((event, index) => ({
-    id: `generation-progress-${index}-${event.stage}-${event.step}`,
-    title: event.stage || 'Generation progress',
-    detail: event.message || `${Math.round(event.progress * 100)}%`,
-    meta: event.total ? `${event.step}/${event.total} steps` : `${Math.round(event.progress * 100)}%`,
-  }))
-  const runtimeRows = runtime.resources.map((metric, index) => ({
-    id: `metric-${metric.label}-${index}`,
-    title: `${metric.label} monitor`,
-    detail: `${metric.value} at ${metric.percent}%`,
-    meta: runtime.state,
-  }))
-  const outputRows = recentOutputs.map((item) => ({
-    id: item.id,
-    title: item.modelName ?? selectedModelName,
-    detail: item.prompt,
-    meta: item.createdAt,
-  }))
-
-  return [
-    {
-      id: 'status',
-      title: 'Workspace status',
-      detail: statusMessage,
-      meta: runtime.backend,
-    },
-    {
-      id: 'runtime-job',
-      title: runtime.job.state === 'idle' ? 'Generation job' : `Generation ${runtime.job.state}`,
-      detail: runtime.job.message || 'No active generation job.',
-      meta: runtime.job.totalSteps ? `${runtime.job.step}/${runtime.job.totalSteps} steps` : `${runtime.job.progress}%`,
-    },
-    {
-      id: 'queue',
-      title: 'Queue depth',
-      detail: `${runtime.queueCount} tasks waiting`,
-      meta: runtime.device,
-    },
-    ...progressRows,
-    ...runtimeRows,
-    ...outputRows,
-  ]
-}
-
-function clampPercent(value: number): number {
-  if (!Number.isFinite(value)) {
-    return 0
-  }
-  return Math.max(0, Math.min(100, Math.round(value)))
-}
-
-function isRuntimeJobActive(job: ProRuntimeStatus['job']): boolean {
-  const state = job.state.toLowerCase()
-  return state !== 'idle' && state !== 'completed' && state !== 'failed' && state !== 'cancelled' && state !== 'canceled'
-}
-
 function mergeBootstrapDefaults(
   current: GenerationSettings,
   nextBootstrap: ProBootstrap,
 ): GenerationSettings {
-  const routeModels = modelsForCreationMode(nextBootstrap.models, current.mode)
-  const modelStillExists = routeModels.some((model) => model.id === current.modelId)
+  const modelStillExists = nextBootstrap.models.some((model) => model.id === current.modelId)
   const samplerStillExists = nextBootstrap.samplers.includes(current.sampler)
   const ratioStillExists = nextBootstrap.aspectRatios.some((ratio) => ratio.id === current.aspectRatioId)
   const ratio = ratioStillExists
@@ -6312,7 +1232,7 @@ function mergeBootstrapDefaults(
 
   return {
     ...current,
-    modelId: modelStillExists ? current.modelId : routeModels[0]?.id ?? nextBootstrap.defaults.modelId,
+    modelId: modelStillExists ? current.modelId : nextBootstrap.defaults.modelId,
     sampler: samplerStillExists ? current.sampler : nextBootstrap.defaults.sampler,
     aspectRatioId: ratio?.id ?? nextBootstrap.defaults.aspectRatioId,
     width: ratio?.width ?? current.width,
@@ -6320,104 +1240,17 @@ function mergeBootstrapDefaults(
   }
 }
 
-function applyModelPresetSettings(
-  current: GenerationSettings,
-  model: ProModelOption | undefined,
-  ratios: AspectRatioOption[],
-): GenerationSettings {
-  const preset = model?.generationPreset
-  if (!preset) {
-    return current
-  }
-  const next: GenerationSettings = { ...current }
-  if (Number.isFinite(preset.steps) && Number(preset.steps) > 0) {
-    next.steps = Number(preset.steps)
-  }
-  if (Number.isFinite(preset.cfgScale) && Number(preset.cfgScale) >= 0) {
-    next.cfgScale = Number(preset.cfgScale)
-  }
-  if (preset.sampler) {
-    next.sampler = preset.sampler
-  }
-  if (preset.scheduler) {
-    next.scheduler = preset.scheduler
-  }
-  if (Number.isFinite(preset.clipSkip) && Number(preset.clipSkip) >= 1) {
-    next.clipSkip = Number(preset.clipSkip)
-  }
-  const width = Number(preset.width)
-  const height = Number(preset.height)
-  if (Number.isFinite(width) && width >= 64 && Number.isFinite(height) && height >= 64) {
-    next.width = width
-    next.height = height
-    next.aspectRatioId = findMatchingAspectRatio(ratios, width, height)?.id ?? current.aspectRatioId
-  }
-  return next
-}
-
-function settingsMatch(current: GenerationSettings, expected: GenerationSettings): boolean {
-  return (
-    current.mode === expected.mode &&
-    current.prompt === expected.prompt &&
-    current.negativePrompt === expected.negativePrompt &&
-    current.modelId === expected.modelId &&
-    current.aspectRatioId === expected.aspectRatioId &&
-    current.width === expected.width &&
-    current.height === expected.height &&
-    current.steps === expected.steps &&
-    current.cfgScale === expected.cfgScale &&
-    current.sampler === expected.sampler &&
-    current.scheduler === expected.scheduler &&
-    current.seed === expected.seed &&
-    current.clipSkip === expected.clipSkip &&
-    current.batchSize === expected.batchSize &&
-    current.batchCount === expected.batchCount &&
-    current.sourceImageDataUrl === expected.sourceImageDataUrl &&
-    current.sourceImageName === expected.sourceImageName
-  )
-}
-
-function imageAspect(width: number, height: number, fallback?: AspectRatioOption): number {
-  if (width > 0 && height > 0) {
-    return width / height
-  }
-  if (fallback && fallback.width > 0 && fallback.height > 0) {
-    return fallback.width / fallback.height
-  }
-  return 1
-}
-
-function dimensionsForShortEdge(aspect: number, shortEdge: number): { width: number; height: number } {
-  const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1
-  let width = safeAspect >= 1 ? roundModelDimension(shortEdge * safeAspect) : roundModelDimension(shortEdge)
-  let height = safeAspect >= 1 ? roundModelDimension(shortEdge) : roundModelDimension(shortEdge / safeAspect)
-  const maxDimension = Math.max(width, height)
-  if (maxDimension > 2048) {
-    const scale = 2048 / maxDimension
-    width = roundModelDimension(width * scale)
-    height = roundModelDimension(height * scale)
-  }
-  return { width, height }
-}
-
-function roundModelDimension(value: number): number {
-  return clamp(Math.round(value / 16) * 16, 64, 2048)
-}
-
-function findMatchingAspectRatio(
-  ratios: AspectRatioOption[],
-  width: number,
-  height: number,
-): AspectRatioOption | undefined {
-  const target = imageAspect(width, height)
-  let best: { ratio: AspectRatioOption; distance: number } | null = null
-  for (const ratio of ratios) {
-    const distance = Math.abs(imageAspect(ratio.width, ratio.height) - target)
-    if (!best || distance < best.distance) {
-      best = { ratio, distance }
+function dedupeOutputs(outputs: RecentOutput[]): RecentOutput[] {
+  const seen = new Set<string>()
+  const unique: RecentOutput[] = []
+  for (const output of outputs) {
+    if (seen.has(output.id)) {
+      continue
     }
+    seen.add(output.id)
+    unique.push(output)
   }
-  return best && best.distance <= 0.04 ? best.ratio : undefined
+  return unique.slice(0, 16)
 }
 
 function isCreationMode(mode: ProMode): mode is CreationMode {
@@ -6427,90 +1260,5 @@ function isCreationMode(mode: ProMode): mode is CreationMode {
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError'
 }
-
-function isGenerationCancelResult(error: unknown): boolean {
-  return isAbortError(error) || (error instanceof ProApiError && error.status === 499)
-}
-
-function readInitialRail(): string {
-  const hash = window.location.hash.replace(/^#/, '').trim()
-  return RAIL_IDS.has(hash) ? hash : 'create'
-}
-
-function readLayoutPreferences(): LayoutPreferences {
-  try {
-    const raw = window.localStorage.getItem(LAYOUT_STORAGE_KEY)
-    if (!raw) {
-      return DEFAULT_LAYOUT_PREFERENCES
-    }
-    const parsed = JSON.parse(raw) as Partial<LayoutPreferences>
-    return {
-      leftPanelWidth: clamp(Number(parsed.leftPanelWidth) || 380, 300, 520),
-      rightPanelWidth: clamp(Number(parsed.rightPanelWidth) || 320, 260, 420),
-      bottomDockHeight: clamp(Number(parsed.bottomDockHeight) || 196, 120, 360),
-      bottomDockVisible:
-        typeof parsed.bottomDockVisible === 'boolean'
-          ? parsed.bottomDockVisible
-          : DEFAULT_LAYOUT_PREFERENCES.bottomDockVisible,
-    }
-  } catch {
-    return DEFAULT_LAYOUT_PREFERENCES
-  }
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value))
-}
-
-const MENU_BAR_ITEMS: Array<{
-  id: Exclude<MenuBarId, null>
-  label: string
-  items: Array<{ id: string; label: string; hint?: string }>
-}> = [
-  {
-    id: 'file',
-    label: 'File',
-    items: [
-      { id: 'new-prompt', label: 'New prompt' },
-      { id: 'copy-last', label: 'Copy prompt' },
-    ],
-  },
-  {
-    id: 'edit',
-    label: 'Edit',
-    items: [
-      { id: 'copy-last', label: 'Copy prompt' },
-      { id: 'reset-layout', label: 'Reset workspace' },
-    ],
-  },
-  {
-    id: 'view',
-    label: 'View',
-    items: [
-      { id: 'toggle-dock', label: 'Output dock' },
-      { id: 'open-models', label: 'Model inventory' },
-      { id: 'open-tools', label: 'Tools' },
-      { id: 'open-data', label: 'Data view' },
-      { id: 'open-monitor', label: 'Monitor' },
-    ],
-  },
-  {
-    id: 'options',
-    label: 'Options',
-    items: [
-      { id: 'open-settings', label: 'Settings' },
-      { id: 'open-segmentation', label: 'Segmentation' },
-      { id: 'open-hires', label: 'High-res fix' },
-      { id: 'open-reactor', label: 'ReActor' },
-    ],
-  },
-  {
-    id: 'help',
-    label: 'Help',
-    items: [
-      { id: 'open-help', label: 'About AIWF Studio' },
-    ],
-  },
-]
 
 export default App
