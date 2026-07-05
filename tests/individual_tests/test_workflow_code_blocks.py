@@ -1,10 +1,10 @@
 import json
 
-from aiwf.web import paid_worker
-from aiwf.web.paid_ext_api import _node_registry, _validate_workflow_payload
+from aiwf.web import ext_worker
+from aiwf.web.ext_api import _node_registry, _validate_workflow_payload
 
 
-def test_paid_node_registry_includes_linear_code_block_nodes():
+def test_node_registry_includes_linear_code_block_nodes():
     ids = {node["id"] for node in _node_registry()}
     assert "generation-request" in ids
     assert "template-reference" in ids
@@ -53,4 +53,4 @@ def test_existing_stage_validator_still_checks_stage_requirements():
 
 
 def test_workflow_plan_executor_is_validation_only_registered():
-    assert "workflow-plan" in paid_worker.registered_kinds()
+    assert "workflow-plan" in ext_worker.registered_kinds()
