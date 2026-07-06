@@ -1,0 +1,66 @@
+{
+  "schema": "aiwf.media-project.v1",
+  "id": "default",
+  "name": "AIWF Media Project",
+  "createdAt": "2026-07-06T18:39:34.485189+00:00",
+  "updatedAt": "2026-07-06T18:39:34.485189+00:00",
+  "activeWorkflowId": "main",
+  "scenes": [
+    {
+      "id": "scene-01",
+      "title": "Opening image",
+      "status": "draft",
+      "assetIds": [],
+      "notes": "First scene card."
+    },
+    {
+      "id": "scene-02",
+      "title": "Motion pass",
+      "status": "planned",
+      "assetIds": [],
+      "notes": "Image to video or extend."
+    }
+  ],
+  "tracks": [
+    {
+      "id": "video",
+      "label": "Video",
+      "type": "video",
+      "items": []
+    },
+    {
+      "id": "image",
+      "label": "Image",
+      "type": "image",
+      "items": []
+    },
+    {
+      "id": "audio",
+      "label": "Audio",
+      "type": "audio",
+      "items": []
+    },
+    {
+      "id": "metadata",
+      "label": "Receipts",
+      "type": "metadata",
+      "items": []
+    }
+  ],
+  "versions": [],
+  "promptStudio": {
+    "subject": "",
+    "style": "",
+    "camera": "",
+    "lighting": "",
+    "world": "",
+    "negative": "",
+    "assembledPrompt": ""
+  },
+  "characters": [],
+  "ui": {
+    "zoom": 1,
+    "activeDock": "tracks",
+    "hiddenTabs": []
+  }
+}
