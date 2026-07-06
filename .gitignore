@@ -144,7 +144,7 @@ Thumbs.db
 
 
 # AIWF PAID Layout 2+3 v4 media center local state
-extensions/paid-media-center-v4/
+extensions/
 projects/*.aiwf/
 projects/*.aiwf.zip
 *.aiwf.zip
