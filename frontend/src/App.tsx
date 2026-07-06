@@ -47,6 +47,11 @@ import {
 } from './workflow/workflowBlocks'
 import type { WorkflowCodeBlock } from './types'
 import { ModelFamilyMatrixLayout } from './layouts/studio/ModelFamilyMatrixLayout'
+import { ProjectCenterLayout } from './layouts/studio/ProjectCenterLayout'
+import { AgenticChatLayout } from './layouts/studio/AgenticChatLayout'
+import { PipelineAtlasLayout } from './layouts/studio/PipelineAtlasLayout'
+import { MediaFoundryImageLayout } from './layouts/studio/MediaFoundryImageLayout'
+import { AudioStudioLayout } from './layouts/studio/AudioStudioLayout'
 import type { LayoutProps } from './layouts/studio/LayoutTypes'
 import {
   fetchProData,
@@ -199,6 +204,11 @@ const RAIL_ITEMS: IconItem<string>[] = [
   { id: 'workflow', label: 'Workflow', icon: WorkflowIcon },
   { id: 'models', label: 'Models', icon: Boxes },
   { id: 'families', label: 'Families', icon: Database },
+  { id: 'foundry', label: 'Foundry', icon: Image },
+  { id: 'pipeline', label: 'Pipeline', icon: WorkflowIcon },
+  { id: 'projects', label: 'Projects', icon: Boxes },
+  { id: 'assistant', label: 'Assistant', icon: Sparkles },
+  { id: 'audiolab', label: 'Audio', icon: Wand2 },
   { id: 'tools', label: 'Tools', icon: Wand2 },
   { id: 'data', label: 'Data', icon: Database },
   { id: 'monitor', label: 'Monitor', icon: Monitor },
@@ -1978,6 +1988,16 @@ function App() {
         >
           {activeRail === 'families' ? (
             <ModelFamilyMatrixLayout {...buildLayoutProps()} />
+          ) : activeRail === 'foundry' ? (
+            <MediaFoundryImageLayout {...buildLayoutProps()} />
+          ) : activeRail === 'pipeline' ? (
+            <PipelineAtlasLayout {...buildLayoutProps()} />
+          ) : activeRail === 'projects' ? (
+            <ProjectCenterLayout {...buildLayoutProps()} />
+          ) : activeRail === 'assistant' ? (
+            <AgenticChatLayout {...buildLayoutProps()} />
+          ) : activeRail === 'audiolab' ? (
+            <AudioStudioLayout {...buildLayoutProps()} />
           ) : activeRail === 'workflow' ? (
             <section className="pro-workspace-surface" aria-label="Workflow">
               <WorkspaceHeader
