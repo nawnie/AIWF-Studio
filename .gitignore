@@ -168,3 +168,6 @@ node_modules/
 .env.*
 *.tmp
 *.bak
+
+# Local research output (not runtime)
+research runs/
