@@ -13,6 +13,8 @@ from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX_FILL,
     ARCH_FLUX_KONTEXT,
     ARCH_FLUX2_KLEIN,
+    ARCH_ANIMA,
+    ARCH_KREA2,
     ARCH_QWEN_IMAGE,
     ARCH_QWEN_IMAGE_NUNCHAKU,
     ARCH_SANA,
@@ -228,8 +230,8 @@ def scan_from_flags(flags: RuntimeFlags) -> list[Checkpoint]:
         ARCH_FLUX_KONTEXT,
         ARCH_FLUX2_KLEIN,
         ARCH_Z_IMAGE,
+        ARCH_KREA2,
         ARCH_QWEN_IMAGE,
-        ARCH_QWEN_IMAGE_NUNCHAKU,
         ARCH_SANA,
     }
     non_image_runtime_arches = {ARCH_SANA_VIDEO}
@@ -334,6 +336,10 @@ def _checkpoint_from_inventory(record: ModelInventoryRecord) -> Checkpoint:
         kind = "flux2"
     elif is_runtime_asset and architecture == ARCH_Z_IMAGE:
         kind = "z-image"
+    elif is_runtime_asset and architecture == ARCH_KREA2:
+        kind = "krea2"
+    elif is_runtime_asset and architecture == ARCH_ANIMA:
+        kind = "anima"
     elif is_runtime_asset and architecture == ARCH_QWEN_IMAGE_NUNCHAKU:
         kind = "qwen-nunchaku"
     elif is_runtime_asset and architecture == ARCH_QWEN_IMAGE:

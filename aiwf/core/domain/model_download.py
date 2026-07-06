@@ -33,6 +33,13 @@ ModelCategory = Literal[
     "z_image_unet_safetensor",
     "z_image_unet_gguf",
     "z_image_components",
+    "krea2_unet_safetensor",
+    "krea2_text_encoder",
+    "krea2_vae",
+    "krea2_diffusers",
+    "anima_unet_safetensor",
+    "anima_text_encoder",
+    "anima_vae",
     "qwen_image_diffusers",
     "qwen_image_nunchaku",
     "sana_diffusers",
@@ -76,6 +83,7 @@ class CatalogEntry:
     # Hugging Face snapshot downloads are directory-shaped assets; ordinary
     # entries resolve to a single file under the category destination.
     snapshot: bool = False
+    coming_soon: bool = False
 
     def choice_label(self, *, installed: bool = False) -> str:
         size = f" · {self.size_mb}MB" if self.size_mb else ""

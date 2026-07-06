@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Command, GitBranch, Image, Library, MessageSquare, Play, Settings, Sparkles, Volume2 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import './paidLayouts.css'
+import './studioLayouts.css'
 
 interface CommandItem {
   id: string
@@ -12,7 +12,7 @@ interface CommandItem {
   action: () => void
 }
 
-export function CommandPalettePaid({
+export function CommandPalette({
   open,
   onOpenChange,
   onNavigate,
@@ -55,10 +55,10 @@ export function CommandPalettePaid({
   }
 
   return (
-    <div className="paid-command-backdrop" role="dialog" aria-modal="true" aria-label="Command palette" onMouseDown={() => onOpenChange(false)}>
-      <div className="paid-command-panel" onMouseDown={(event) => event.stopPropagation()}>
-        <label className="paid-command-input"><Command size={18} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search actions, workspaces, tools..." /></label>
-        <div className="paid-command-list">
+    <div className="studio-command-backdrop" role="dialog" aria-modal="true" aria-label="Command palette" onMouseDown={() => onOpenChange(false)}>
+      <div className="studio-command-panel" onMouseDown={(event) => event.stopPropagation()}>
+        <label className="studio-command-input"><Command size={18} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search actions, workspaces, tools..." /></label>
+        <div className="studio-command-list">
           {filtered.map((item) => {
             const Icon = item.icon
             return <button type="button" key={item.id} onClick={() => { item.action(); onOpenChange(false) }}><Icon size={16} /><div><strong>{item.label}</strong><small>{item.group} · {item.hint}</small></div></button>

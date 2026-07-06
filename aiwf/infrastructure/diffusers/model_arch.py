@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import struct
 from pathlib import Path
 
@@ -25,6 +26,8 @@ ARCH_FLUX_FILL = "flux_fill"
 ARCH_FLUX_KONTEXT = "flux_kontext"
 ARCH_FLUX2_KLEIN = "flux2_klein"
 ARCH_Z_IMAGE = "z_image"
+ARCH_KREA2 = "krea2"
+ARCH_ANIMA = "anima"
 ARCH_QWEN_IMAGE = "qwen_image"
 ARCH_QWEN_IMAGE_NUNCHAKU = "qwen_image_nunchaku"
 ARCH_SANA = "sana"
@@ -39,9 +42,31 @@ def _is_qwen_nunchaku_name(text: str) -> bool:
     return any(marker in lowered for marker in _QWEN_NUNCHAKU_MARKERS)
 
 
+def _has_anima_marker(text: str) -> bool:
+    lowered = text.lower().replace("\\", "/").replace("_", "-")
+    compact = lowered.replace("-", "")
+    if "circlestone-labs/anima" in lowered or "circlestoneanima" in compact:
+        return True
+    if "anima-base" in lowered or "anima-preview" in lowered:
+        return True
+    return re.search(r"(^|[/\s.-])anima($|[/\s.-])", lowered) is not None
+
+
 def _architecture_from_name(filename: str) -> str | None:
     lower = filename.lower().replace("_", "-")
     compact = lower.replace("-", "")
+    if "refiner" in lower and (
+        "sdxl" in compact
+        or "sd-xl" in lower
+        or "sd xl" in lower
+        or "stable-diffusion-xl" in lower
+        or "stable diffusion xl" in lower
+    ):
+        return ARCH_SDXL_REFINER
+    if "krea-2" in lower or "krea2" in compact or "krea 2" in lower:
+        return ARCH_KREA2
+    if _has_anima_marker(filename):
+        return ARCH_ANIMA
     if ("qwen-image" in lower or "qwenimage" in compact or "qwen2.0" in lower) and _is_qwen_nunchaku_name(lower):
         return ARCH_QWEN_IMAGE_NUNCHAKU
     if "qwen-image" in lower or "qwenimage" in compact or "qwen2.0" in lower:
@@ -286,6 +311,8 @@ def architecture_label(architecture: str) -> str:
         ARCH_FLUX_KONTEXT: "Flux Kontext",
         ARCH_FLUX2_KLEIN: "Flux.2 Klein",
         ARCH_Z_IMAGE: "Z-Image",
+        ARCH_KREA2: "Krea 2",
+        ARCH_ANIMA: "Anima",
         ARCH_QWEN_IMAGE: "Qwen Image",
         ARCH_QWEN_IMAGE_NUNCHAKU: "Qwen Image Nunchaku",
         ARCH_SANA: "Sana",
@@ -328,6 +355,14 @@ def is_z_image_architecture(architecture: str) -> bool:
     return (architecture or "").lower() == ARCH_Z_IMAGE
 
 
+def is_krea2_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() == ARCH_KREA2
+
+
+def is_anima_architecture(architecture: str) -> bool:
+    return (architecture or "").lower() == ARCH_ANIMA
+
+
 def is_qwen_image_architecture(architecture: str) -> bool:
     return (architecture or "").lower() in {ARCH_QWEN_IMAGE, ARCH_QWEN_IMAGE_NUNCHAKU}
 
@@ -350,6 +385,8 @@ def is_transformer_image_architecture(architecture: str) -> bool:
         ARCH_FLUX_KONTEXT,
         ARCH_FLUX2_KLEIN,
         ARCH_Z_IMAGE,
+        ARCH_KREA2,
+        ARCH_ANIMA,
         ARCH_QWEN_IMAGE,
         ARCH_QWEN_IMAGE_NUNCHAKU,
         ARCH_SANA,

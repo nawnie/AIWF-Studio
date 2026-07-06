@@ -75,6 +75,7 @@ training/EveryDream2trainer/
 # and one-off handoff files all live under _local/ and never ship.
 _local/
 _trash/
+extention adapters/
 
 # --- Agent / assistant working files (dev-machine only) ---
 AGENTS.md

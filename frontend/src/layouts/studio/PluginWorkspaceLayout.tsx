@@ -1,20 +1,20 @@
 import { FileJson, Plug, Settings2, Sparkles } from 'lucide-react'
-import type { PaidUserTab } from './PaidLayoutTypes'
-import './paidLayouts.css'
+import type { UserTab } from './LayoutTypes'
+import './studioLayouts.css'
 
-export function PluginWorkspacePaidLayout({ tab, onOpenExtensions }: { tab: PaidUserTab; onOpenExtensions: () => void }) {
+export function PluginWorkspaceLayout({ tab, onOpenExtensions }: { tab: UserTab; onOpenExtensions: () => void }) {
   return (
-    <div className="paid-plugin-workspace paid-full-surface" aria-label={`${tab.label} plugin workspace`}>
+    <div className="studio-plugin-workspace studio-full-surface" aria-label={`${tab.label} plugin workspace`}>
       <main>
-        <section className="paid-plugin-hero">
-          <span className="paid-logo-orb"><Plug size={28} /></span>
+        <section className="studio-plugin-hero">
+          <span className="studio-logo-orb"><Plug size={28} /></span>
           <div>
-            <span className="paid-eyebrow">COMMUNITY WORKSPACE</span>
+            <span className="studio-eyebrow">COMMUNITY WORKSPACE</span>
             <h1>{tab.label}</h1>
             <p>{tab.description || 'This is an empty tab created by the extension system. Add plugin UI here when the community package is ready.'}</p>
           </div>
         </section>
-        <section className="paid-plugin-grid">
+        <section className="studio-plugin-grid">
           <article>
             <FileJson size={20} />
             <strong>Manifest</strong>
@@ -31,10 +31,10 @@ export function PluginWorkspacePaidLayout({ tab, onOpenExtensions }: { tab: Paid
             <p>Drop a real React workspace here later without changing the backend contract.</p>
           </article>
         </section>
-        <button type="button" className="paid-run-button" onClick={onOpenExtensions}>Open Extension Manager</button>
+        <button type="button" className="studio-run-button" onClick={onOpenExtensions}>Open Extension Manager</button>
       </main>
       <aside>
-        <span className="paid-eyebrow">Workspace JSON</span>
+        <span className="studio-eyebrow">Workspace JSON</span>
         <pre>{JSON.stringify(tab, null, 2)}</pre>
       </aside>
     </div>

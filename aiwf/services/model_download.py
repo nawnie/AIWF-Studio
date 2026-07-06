@@ -56,6 +56,13 @@ CATEGORY_LABELS: dict[ModelCategory, str] = {
     "z_image_unet_safetensor": "Z-Image transformer (.safetensors)",
     "z_image_unet_gguf": "Z-Image transformer (.gguf)",
     "z_image_components": "Z-Image components",
+    "krea2_unet_safetensor": "Krea 2 transformer (.safetensors)",
+    "krea2_text_encoder": "Krea 2 Qwen3-VL text encoder",
+    "krea2_vae": "Krea 2 Qwen Image VAE",
+    "krea2_diffusers": "Krea 2 Diffusers pipeline",
+    "anima_unet_safetensor": "Anima transformer (.safetensors)",
+    "anima_text_encoder": "Anima Qwen text encoder",
+    "anima_vae": "Anima Qwen Image VAE",
     "qwen_image_diffusers": "Qwen Image Diffusers pipeline",
     "qwen_image_nunchaku": "Qwen Image Nunchaku transformer",
     "sana_diffusers": "Sana Diffusers pipeline",
@@ -104,6 +111,13 @@ CATEGORY_FOLDERS: dict[ModelCategory, tuple[str, ...]] = {
     "z_image_unet_safetensor": ("z-image", "UNet"),
     "z_image_unet_gguf": ("z-image", "GGUF"),
     "z_image_components": ("z-image", "Components"),
+    "krea2_unet_safetensor": ("krea2", "UNet"),
+    "krea2_text_encoder": ("krea2", "Textencoder"),
+    "krea2_vae": ("krea2", "VAE"),
+    "krea2_diffusers": ("krea2", "Diffusers"),
+    "anima_unet_safetensor": ("anima", "UNet"),
+    "anima_text_encoder": ("anima", "Textencoder"),
+    "anima_vae": ("anima", "VAE"),
     "qwen_image_diffusers": ("qwen-image", "Diffusers"),
     "qwen_image_nunchaku": ("qwen-image", "Nunchaku"),
     "sana_diffusers": ("sana", "Diffusers"),
@@ -151,6 +165,13 @@ CATEGORY_EXTENSION_RULES: dict[ModelCategory, tuple[str, ...]] = {
     "z_image_unet_safetensor": (".safetensors",),
     "z_image_unet_gguf": (".gguf",),
     "z_image_components": (".safetensors", ".json", ".txt"),
+    "krea2_unet_safetensor": (".safetensors",),
+    "krea2_text_encoder": (".safetensors",),
+    "krea2_vae": (".safetensors",),
+    "krea2_diffusers": (".safetensors", ".json", ".txt", ".model"),
+    "anima_unet_safetensor": (".safetensors",),
+    "anima_text_encoder": (".safetensors",),
+    "anima_vae": (".safetensors",),
     "qwen_image_diffusers": (".safetensors", ".json", ".txt", ".model"),
     "qwen_image_nunchaku": (".safetensors",),
     "sana_diffusers": (".safetensors", ".json", ".txt", ".model"),
@@ -584,7 +605,7 @@ class ModelDownloadService:
             )
 
     def list_catalog(self) -> list[CatalogEntry]:
-        return list(MODEL_DOWNLOAD_CATALOG)
+        return [item for item in MODEL_DOWNLOAD_CATALOG if not item.coming_soon]
 
     def find_catalog(self, key: str) -> CatalogEntry | None:
         for item in MODEL_DOWNLOAD_CATALOG:
@@ -659,10 +680,18 @@ class ModelDownloadService:
             "checkpoint",
             "wan_diffusers",
             "flux2_diffusers",
+            "krea2_diffusers",
             "qwen_image_diffusers",
             "sana_diffusers",
             "sana_video_diffusers",
         }:
+            if category == "krea2_diffusers":
+                try:
+                    from aiwf.infrastructure.diffusers.checkpoints import diffusers_dir_has_required_local_files
+
+                    return diffusers_dir_has_required_local_files(target)
+                except Exception:
+                    logger.debug("Could not inspect Krea 2 Diffusers snapshot completeness", exc_info=True)
             return (target / "model_index.json").is_file()
         allowed = CATEGORY_EXTENSION_RULES.get(category, ())
         if allowed:
@@ -708,6 +737,7 @@ class ModelDownloadService:
                     "flux2_components",
                     "flux2_diffusers",
                     "z_image_components",
+                    "krea2_diffusers",
                     "qwen_image_diffusers",
                     "sana_diffusers",
                     "sana_video_diffusers",
@@ -769,13 +799,14 @@ class ModelDownloadService:
                 "flux2_components",
                 "flux2_diffusers",
                 "z_image_components",
+                "krea2_diffusers",
                 "qwen_image_diffusers",
                 "sana_diffusers",
                 "sana_video_diffusers",
             }:
                 raise ValueError(
                     "Full repository downloads are only supported for checkpoint Diffusers folders, "
-                    "Wan Diffusers folders, LTX/Flux2/Z-Image/Qwen/Sana Diffusers/component folders, "
+                    "Wan Diffusers folders, LTX/Flux2/Z-Image/Krea2/Qwen/Sana Diffusers/component folders, "
                     "ControlNet, and preprocessor categories."
                 )
             path = self._download_hf_snapshot(remote, category, on_progress=on_progress)

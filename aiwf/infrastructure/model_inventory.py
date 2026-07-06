@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +14,9 @@ from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX_FILL,
     ARCH_FLUX_KONTEXT,
     ARCH_FLUX2_KLEIN,
+    ARCH_ANIMA,
     ARCH_INPAINT,
+    ARCH_KREA2,
     ARCH_QWEN_IMAGE,
     ARCH_QWEN_IMAGE_NUNCHAKU,
     ARCH_SANA,
@@ -59,7 +62,7 @@ MODEL_EXTENSIONS = {".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".o
 # Bump this whenever architecture classification logic changes: the disk
 # cache stores classified records, so stale caches would otherwise keep
 # serving old (wrong) architectures to every picker after an update.
-MODEL_INVENTORY_VERSION = 2
+MODEL_INVENTORY_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,14 @@ def _architecture_from_text(text: str) -> str:
     normalized = text.lower().replace("_", " ").replace("-", " ")
     compact = normalized.replace(" ", "")
     lowered = text.lower().replace("_", "-")
+    if "krea-2" in lowered or "krea2" in compact or "krea 2" in normalized or "krea2pipeline" in compact:
+        return ARCH_KREA2
+    if (
+        "circlestone-labs/anima" in text.lower().replace("\\", "/")
+        or "animapipeline" in compact
+        or re.search(r"(^|[\s/._-])anima($|[\s/._-])", text.lower())
+    ):
+        return ARCH_ANIMA
     if (
         ("qwenimagepipeline" in compact or "qwen image" in normalized or "qwen-image" in lowered or "qwen2.0" in lowered)
         and any(marker in lowered for marker in ("nunchaku", "svdq-int4", "lightningv", "4steps"))
@@ -217,6 +228,10 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
             return "Loras/Flux2"
         if architecture == ARCH_Z_IMAGE:
             return "Loras/Z-Image"
+        if architecture == ARCH_KREA2:
+            return "Loras/Krea2"
+        if architecture == ARCH_ANIMA:
+            return "Loras/Anima"
         if architecture == "ltx":
             return "ltx/loras"
         if architecture == "wan":
@@ -234,6 +249,10 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
         if architecture == ARCH_Z_IMAGE:
             suffix = Path(filename).suffix.lower()
             return "z-image/GGUF" if suffix == ".gguf" else "z-image/UNet"
+        if architecture == ARCH_KREA2:
+            return "krea2/UNet" if Path(filename).suffix.lower() else "krea2/Diffusers"
+        if architecture == ARCH_ANIMA:
+            return "anima/UNet" if Path(filename).suffix.lower() else "anima/Diffusers"
         if architecture == ARCH_QWEN_IMAGE_NUNCHAKU:
             return "qwen-image/Nunchaku"
         if architecture == ARCH_QWEN_IMAGE:
@@ -273,6 +292,10 @@ def _recommended_subdir(family: str, architecture: str, filename: str = "") -> s
             return "flux2/Components"
         if architecture == ARCH_Z_IMAGE:
             return "z-image/Components"
+        if architecture == ARCH_KREA2:
+            return "krea2/Textencoder"
+        if architecture == ARCH_ANIMA:
+            return "anima/Textencoder"
         if architecture == "ltx":
             return "ltx/text_encoder"
         return "Textencoder"
@@ -455,6 +478,8 @@ def classify_model_dir(path: Path, roots: list[Path]) -> ModelInventoryRecord | 
         ARCH_FLUX2_KLEIN,
         ARCH_Z_IMAGE,
         ARCH_FLUX_KONTEXT,
+        ARCH_KREA2,
+        ARCH_ANIMA,
         ARCH_QWEN_IMAGE,
         ARCH_QWEN_IMAGE_NUNCHAKU,
         ARCH_SANA,
@@ -558,6 +583,9 @@ def classify_model_file(path: Path, roots: list[Path]) -> ModelInventoryRecord |
         elif "vae" in metadata_text:
             family = "vae"
             identifiers["metadata_marker"] = "vae"
+        elif architecture in {ARCH_KREA2, ARCH_ANIMA} and path.suffix.lower() == ".safetensors":
+            family = "runtime_asset"
+            identifiers["filename_marker"] = f"{architecture} transformer"
         elif architecture == ARCH_QWEN_IMAGE_NUNCHAKU and path.suffix.lower() == ".safetensors":
             family = "runtime_asset"
             identifiers["filename_marker"] = "qwen nunchaku transformer"

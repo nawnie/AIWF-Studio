@@ -19,10 +19,10 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react'
-import type { PaidLayoutProps, PaidWorkflowCodeBlock } from './PaidLayoutTypes'
-import { displayDate } from './PaidLayoutTypes'
-import { addPaidQueueJob, fetchPaidWorkflowTemplates, savePaidWorkflow, validatePaidWorkflow } from './paidApiClient'
-import type { PaidWorkflowTemplate } from './paidApiClient'
+import type { LayoutProps, WorkflowCodeBlock } from './LayoutTypes'
+import { displayDate } from './LayoutTypes'
+import { addQueueJob, fetchWorkflowTemplates, saveWorkflow, validateWorkflow } from './studioApiClient'
+import type { WorkflowTemplate } from './studioApiClient'
 import {
   createWorkflowBlocksFromSettings,
   duplicateWorkflowBlock,
@@ -31,14 +31,14 @@ import {
   validateWorkflowBlocks,
   workflowPayloadFromBlocks,
 } from './workflowBlocks'
-import './paidLayouts.css'
+import './studioLayouts.css'
 
-function routeFromBlock(block: PaidWorkflowCodeBlock): string {
+function routeFromBlock(block: WorkflowCodeBlock): string {
   const route = block.payload.route
   return typeof route === 'string' && route.trim() ? route : block.nodeId
 }
 
-function familyFromBlock(block: PaidWorkflowCodeBlock): string {
+function familyFromBlock(block: WorkflowCodeBlock): string {
   const family = block.payload.family
   if (typeof family === 'string' && family.trim()) {
     return family
@@ -51,16 +51,16 @@ function familyFromBlock(block: PaidWorkflowCodeBlock): string {
   return 'Model family'
 }
 
-function precisionFromBlock(block: PaidWorkflowCodeBlock): string {
+function precisionFromBlock(block: WorkflowCodeBlock): string {
   const precision = block.payload.precision
   return typeof precision === 'string' && precision.trim() ? precision : 'auto'
 }
 
-function blockCodeLineCount(block: PaidWorkflowCodeBlock): number {
+function blockCodeLineCount(block: WorkflowCodeBlock): number {
   return Math.max(1, block.code.split('\n').length)
 }
 
-function makeTemplateBlock(template: PaidWorkflowTemplate, order: number): PaidWorkflowCodeBlock {
+function makeTemplateBlock(template: WorkflowTemplate, order: number): WorkflowCodeBlock {
   const payload = {
     schema: 'aiwf.workflow-template-reference.v1',
     templateId: template.id,
@@ -85,7 +85,7 @@ function makeTemplateBlock(template: PaidWorkflowTemplate, order: number): PaidW
   }
 }
 
-function fallbackImportBlock(payload: Record<string, unknown>, order: number): PaidWorkflowCodeBlock {
+function fallbackImportBlock(payload: Record<string, unknown>, order: number): WorkflowCodeBlock {
   const code = JSON.stringify(payload, null, 2)
   return {
     id: `imported-block-${Date.now()}`,
@@ -102,7 +102,7 @@ function fallbackImportBlock(payload: Record<string, unknown>, order: number): P
   }
 }
 
-export function PipelineAtlasPaidLayout({
+export function PipelineAtlasLayout({
   settings,
   bootstrap,
   runtime,
@@ -114,18 +114,18 @@ export function PipelineAtlasPaidLayout({
   onWorkflowBlocksChange,
   onOpenModels,
   onOpenSettings,
-}: PaidLayoutProps) {
-  const [internalBlocks, setInternalBlocks] = useState<PaidWorkflowCodeBlock[]>([])
+}: LayoutProps) {
+  const [internalBlocks, setInternalBlocks] = useState<WorkflowCodeBlock[]>([])
   const [selectedBlockId, setSelectedBlockId] = useState('')
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null)
   const [localMessage, setLocalMessage] = useState('Linear workflow mode: capture settings as self-contained code blocks, then drag to reorder the queue.')
-  const [workflowTemplates, setWorkflowTemplates] = useState<PaidWorkflowTemplate[]>([])
+  const [workflowTemplates, setWorkflowTemplates] = useState<WorkflowTemplate[]>([])
   const [backendErrors, setBackendErrors] = useState<string[]>([])
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const blocks = workflowBlocks ?? internalBlocks
   const setBlocks = onWorkflowBlocksChange ?? setInternalBlocks
 
-  const commitBlocks = useCallback((updater: PaidWorkflowCodeBlock[] | ((current: PaidWorkflowCodeBlock[]) => PaidWorkflowCodeBlock[])) => {
+  const commitBlocks = useCallback((updater: WorkflowCodeBlock[] | ((current: WorkflowCodeBlock[]) => WorkflowCodeBlock[])) => {
     setBlocks((current) => {
       const next = typeof updater === 'function' ? updater(current) : updater
       return renumberWorkflowBlocks(next)
@@ -133,7 +133,7 @@ export function PipelineAtlasPaidLayout({
   }, [setBlocks])
 
   useEffect(() => {
-    fetchPaidWorkflowTemplates().then(setWorkflowTemplates).catch(() => undefined)
+    fetchWorkflowTemplates().then(setWorkflowTemplates).catch(() => undefined)
   }, [])
 
   const selectedBlock = useMemo(
@@ -168,7 +168,7 @@ export function PipelineAtlasPaidLayout({
     setLocalMessage('Captured the current generate settings as a workflow code block. No render was started.')
   }
 
-  const addTemplateBlock = (template: PaidWorkflowTemplate) => {
+  const addTemplateBlock = (template: WorkflowTemplate) => {
     const block = makeTemplateBlock(template, blocks.length + 1)
     commitBlocks((current) => [...current, block])
     setSelectedBlockId(block.id)
@@ -237,7 +237,7 @@ export function PipelineAtlasPaidLayout({
     }))
   }
 
-  const copyBlockCode = async (block: PaidWorkflowCodeBlock) => {
+  const copyBlockCode = async (block: WorkflowCodeBlock) => {
     try {
       await navigator.clipboard.writeText(block.code)
       setLocalMessage(`${block.label} JSON copied to clipboard.`)
@@ -256,13 +256,13 @@ export function PipelineAtlasPaidLayout({
       return
     }
     const payload = workflowPayload()
-    const backendValidation = await validatePaidWorkflow(payload)
+    const backendValidation = await validateWorkflow(payload)
     setBackendErrors(backendValidation.errors || [])
     if (!backendValidation.valid) {
       setLocalMessage(`Backend workflow QA found issues: ${(backendValidation.errors || []).join('; ')}`)
       return
     }
-    await savePaidWorkflow('main', payload).catch(() => undefined)
+    await saveWorkflow('main', payload).catch(() => undefined)
     setLocalMessage('Workflow code-block queue saved. No pipeline execution was started.')
   }
 
@@ -278,14 +278,14 @@ export function PipelineAtlasPaidLayout({
       return
     }
     const payload = workflowPayload()
-    const backendValidation = await validatePaidWorkflow(payload)
+    const backendValidation = await validateWorkflow(payload)
     setBackendErrors(backendValidation.errors || [])
     if (!backendValidation.valid) {
       setLocalMessage(`Queue blocked by backend QA: ${(backendValidation.errors || []).join('; ')}`)
       return
     }
-    await savePaidWorkflow('main', payload).catch(() => undefined)
-    const job = await addPaidQueueJob('Workflow code block plan', payload, 'workflow-plan')
+    await saveWorkflow('main', payload).catch(() => undefined)
+    const job = await addQueueJob('Workflow code block plan', payload, 'workflow-plan')
     setLocalMessage(job ? `Queued ${job.label} as validation-only plan.` : 'Saved locally. Queue API unavailable, so nothing was run.')
   }
 
@@ -329,24 +329,24 @@ export function PipelineAtlasPaidLayout({
   const status = localValidation.valid && !backendErrors.length ? 'Ready' : 'Needs QA'
 
   return (
-    <div className="paid-atlas paid-full-surface paid-atlas-linear" aria-label="Pipeline Atlas linear workflow code-block queue">
-      <aside className="paid-atlas-sidebar paid-linear-sidebar">
-        <div className="paid-product-lockup">
-          <span className="paid-logo-orb">A</span>
+    <div className="studio-atlas studio-full-surface studio-atlas-linear" aria-label="Pipeline Atlas linear workflow code-block queue">
+      <aside className="studio-atlas-sidebar studio-linear-sidebar">
+        <div className="studio-product-lockup">
+          <span className="studio-logo-orb">A</span>
           <div>
             <strong>AIWF Studio</strong>
             <small>Pipeline Atlas · Linear Queue</small>
           </div>
         </div>
-        <button className="paid-wide-button" type="button" onClick={addCurrentSettingsBlock}>
+        <button className="studio-wide-button" type="button" onClick={addCurrentSettingsBlock}>
           <Plus size={15} /> Capture Current Settings
         </button>
-        <div className="paid-system-card">
+        <div className="studio-system-card">
           <span>Queue Status</span>
           <strong>{status}</strong>
           <small>{blocks.length} blocks · {totalLines} JSON lines</small>
         </div>
-        <div className="paid-template-card">
+        <div className="studio-template-card">
           <span>Template References</span>
           {workflowTemplates.slice(0, 6).map((template) => (
             <button type="button" key={template.id} onClick={() => addTemplateBlock(template)}>
@@ -355,7 +355,7 @@ export function PipelineAtlasPaidLayout({
             </button>
           ))}
         </div>
-        <div className="paid-system-card muted">
+        <div className="studio-system-card muted">
           <span>Runtime</span>
           <strong>{runtime.state || 'Idle'}</strong>
           <small>{runtime.device}</small>
@@ -363,14 +363,14 @@ export function PipelineAtlasPaidLayout({
         </div>
       </aside>
 
-      <main className="paid-atlas-main paid-linear-main">
-        <header className="paid-atlas-toolbar paid-linear-toolbar">
+      <main className="studio-atlas-main studio-linear-main">
+        <header className="studio-atlas-toolbar studio-linear-toolbar">
           <div>
-            <span className="paid-eyebrow">WORKFLOW CODE BLOCKS</span>
+            <span className="studio-eyebrow">WORKFLOW CODE BLOCKS</span>
             <strong>{routeSummary}</strong>
             <small>{localMessage} · {statusMessage}</small>
           </div>
-          <div className="paid-toolbar-actions">
+          <div className="studio-toolbar-actions">
             <button type="button" onClick={saveWorkflowJson}><Save size={14} /> Save</button>
             <button type="button" onClick={queueWorkflowPlan}><ListChecks size={14} /> Queue Plan</button>
             <button type="button" onClick={exportWorkflowJson}><Download size={14} /> Export JSON</button>
@@ -379,7 +379,7 @@ export function PipelineAtlasPaidLayout({
               ref={fileInputRef}
               type="file"
               accept="application/json,.json"
-              className="paid-hidden-input"
+              className="studio-hidden-input"
               onChange={(event: ReactChangeEvent<HTMLInputElement>) => {
                 loadWorkflowJson(event.target.files?.[0])
                 event.target.value = ''
@@ -390,8 +390,8 @@ export function PipelineAtlasPaidLayout({
           </div>
         </header>
 
-        <section className="paid-linear-queue-shell">
-          <div className="paid-linear-queue-header">
+        <section className="studio-linear-queue-shell">
+          <div className="studio-linear-queue-header">
             <div>
               <GitBranch size={18} />
               <strong>Drag/drop queue</strong>
@@ -401,23 +401,23 @@ export function PipelineAtlasPaidLayout({
           </div>
 
           {blocks.length ? (
-            <div className="paid-linear-block-list">
+            <div className="studio-linear-block-list">
               {blocks.map((block) => {
                 const selected = selectedBlock?.id === block.id
                 const blockValidation = validateWorkflowBlocks([block])
                 return (
                   <article
                     key={block.id}
-                    className={`paid-linear-block ${selected ? 'selected' : ''} ${blockValidation.valid ? '' : 'blocked'}`}
+                    className={`studio-linear-block ${selected ? 'selected' : ''} ${blockValidation.valid ? '' : 'blocked'}`}
                     draggable
                     onDragStart={() => setDraggingBlockId(block.id)}
                     onDragOver={(event: ReactDragEvent<HTMLElement>) => event.preventDefault()}
                     onDrop={() => dropBlockOn(block.id)}
                     onClick={() => setSelectedBlockId(block.id)}
                   >
-                    <div className="paid-linear-grip" aria-hidden="true"><GripVertical size={18} /></div>
-                    <div className="paid-linear-block-index"><span>{block.order}</span></div>
-                    <div className="paid-linear-block-body">
+                    <div className="studio-linear-grip" aria-hidden="true"><GripVertical size={18} /></div>
+                    <div className="studio-linear-block-index"><span>{block.order}</span></div>
+                    <div className="studio-linear-block-body">
                       <header>
                         <div>
                           <strong>{block.label}</strong>
@@ -425,7 +425,7 @@ export function PipelineAtlasPaidLayout({
                         </div>
                         <em>{block.kind}</em>
                       </header>
-                      <div className="paid-linear-block-tags">
+                      <div className="studio-linear-block-tags">
                         <span>{routeFromBlock(block)}</span>
                         <span>{familyFromBlock(block)}</span>
                         <span>{precisionFromBlock(block)}</span>
@@ -433,7 +433,7 @@ export function PipelineAtlasPaidLayout({
                       </div>
                       <pre>{block.code.split('\n').slice(0, 10).join('\n')}{blockCodeLineCount(block) > 10 ? '\n  …' : ''}</pre>
                     </div>
-                    <div className="paid-linear-block-actions">
+                    <div className="studio-linear-block-actions">
                       <button type="button" title="Move up" onClick={(event) => { event.stopPropagation(); moveBlock(block.id, -1) }}><ArrowUp size={14} /></button>
                       <button type="button" title="Move down" onClick={(event) => { event.stopPropagation(); moveBlock(block.id, 1) }}><ArrowDown size={14} /></button>
                       <button type="button" title="Duplicate" onClick={(event) => { event.stopPropagation(); duplicateBlockById(block.id) }}><Copy size={14} /></button>
@@ -445,17 +445,17 @@ export function PipelineAtlasPaidLayout({
               })}
             </div>
           ) : (
-            <div className="paid-linear-empty">
+            <div className="studio-linear-empty">
               <Boxes size={44} />
               <strong>No workflow blocks yet</strong>
               <p>Use <b>Send to workflow</b> beside Generate, or capture the current settings here. The block stores the model, precision guess, prompt, dimensions, video settings, and Wan sidecar hooks as JSON.</p>
-              <button type="button" className="paid-wide-button" onClick={addCurrentSettingsBlock}><Plus size={15} /> Capture Current Settings</button>
+              <button type="button" className="studio-wide-button" onClick={addCurrentSettingsBlock}><Plus size={15} /> Capture Current Settings</button>
             </div>
           )}
         </section>
       </main>
 
-      <aside className="paid-atlas-inspector paid-linear-inspector">
+      <aside className="studio-atlas-inspector studio-linear-inspector">
         <header>
           <div>
             <FileJson size={18} />
@@ -467,8 +467,8 @@ export function PipelineAtlasPaidLayout({
         {selectedBlock ? (
           <>
             <section>
-              <span className="paid-eyebrow">Captured Route</span>
-              <div className="paid-summary-list">
+              <span className="studio-eyebrow">Captured Route</span>
+              <div className="studio-summary-list">
                 <span>Order <strong>{selectedBlock.order}</strong></span>
                 <span>Route <strong>{routeFromBlock(selectedBlock)}</strong></span>
                 <span>Family <strong>{familyFromBlock(selectedBlock)}</strong></span>
@@ -478,35 +478,35 @@ export function PipelineAtlasPaidLayout({
               </div>
             </section>
             <section>
-              <span className="paid-eyebrow">Editable Code Block</span>
+              <span className="studio-eyebrow">Editable Code Block</span>
               <textarea
-                className="paid-code-textarea"
+                className="studio-code-textarea"
                 spellCheck={false}
                 value={selectedBlock.code}
                 onChange={(event) => updateBlockCode(selectedBlock.id, event.target.value)}
               />
             </section>
             <section>
-              <span className="paid-eyebrow">QA Result</span>
+              <span className="studio-eyebrow">QA Result</span>
               {validateWorkflowBlocks([selectedBlock]).valid ? (
-                <p className="paid-ok-note"><CheckCircle2 size={15} /> JSON parses and the block has the required code payload.</p>
+                <p className="studio-ok-note"><CheckCircle2 size={15} /> JSON parses and the block has the required code payload.</p>
               ) : (
-                <p className="paid-error-note"><AlertTriangle size={15} /> {validateWorkflowBlocks([selectedBlock]).errors.join('; ')}</p>
+                <p className="studio-error-note"><AlertTriangle size={15} /> {validateWorkflowBlocks([selectedBlock]).errors.join('; ')}</p>
               )}
-              {backendErrors.length ? <p className="paid-error-note"><AlertTriangle size={15} /> {backendErrors.join('; ')}</p> : null}
-              <button type="button" className="paid-wide-button" onClick={() => void copyBlockCode(selectedBlock)}><Clipboard size={14} /> Copy Block JSON</button>
+              {backendErrors.length ? <p className="studio-error-note"><AlertTriangle size={15} /> {backendErrors.join('; ')}</p> : null}
+              <button type="button" className="studio-wide-button" onClick={() => void copyBlockCode(selectedBlock)}><Clipboard size={14} /> Copy Block JSON</button>
             </section>
           </>
         ) : (
           <section>
-            <span className="paid-eyebrow">QA Notes</span>
+            <span className="studio-eyebrow">QA Notes</span>
             <p>Nothing selected. Capture a block to inspect the exact model and settings payload.</p>
           </section>
         )}
 
         <section>
-          <span className="paid-eyebrow">Current Selection</span>
-          <div className="paid-summary-list">
+          <span className="studio-eyebrow">Current Selection</span>
+          <div className="studio-summary-list">
             <span>Model <strong>{selectedModelName}</strong></span>
             <span>Mode <strong>{settings.mode}</strong></span>
             <span>Size <strong>{settings.width}×{settings.height}</strong></span>

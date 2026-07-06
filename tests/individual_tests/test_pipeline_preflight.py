@@ -21,7 +21,9 @@ from aiwf.core.domain.ltx import (
     LtxVideoRequest,
 )
 from aiwf.services.pipeline_preflight import (
+    preflight_anima_pipeline,
     preflight_diffusers_pipeline,
+    preflight_krea2_pipeline,
     preflight_ltx_pipeline,
     preflight_onnx_pipeline,
     preflight_qwen_nunchaku_pipeline,
@@ -191,6 +193,92 @@ def test_qwen_nunchaku_preflight_blocks_missing_runtime(tmp_path: Path):
 
     assert not result.ok
     assert "engine runtime missing" in result.markdown().lower() or "missing engine runtime" in result.markdown().lower()
+
+
+def test_krea2_preflight_reports_missing_runtime_class_and_assets(tmp_path: Path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "diffusers", types.SimpleNamespace())
+
+    result = preflight_krea2_pipeline(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+
+    assert not result.ok
+    text = result.markdown()
+    assert "Krea2Pipeline" in text
+    assert "Krea 2 Diffusers folder" in text
+    assert "Krea 2 split transformer" in text
+    assert "diffusers>=0.39.0" in " ".join(result.warnings)
+    assert result.metadata["recommended_bundle"].startswith("krea2")
+
+
+def test_krea2_preflight_detects_split_sidecars(tmp_path: Path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "diffusers", types.SimpleNamespace())
+
+    models = tmp_path / "models"
+    (models / "krea2" / "UNet").mkdir(parents=True)
+    (models / "krea2" / "Textencoder").mkdir(parents=True)
+    (models / "krea2" / "VAE").mkdir(parents=True)
+    (models / "krea2" / "UNet" / "krea2_turbo_fp8_scaled.safetensors").write_bytes(b"fake")
+    (models / "krea2" / "Textencoder" / "qwen3vl_4b_fp8_scaled.safetensors").write_bytes(b"fake")
+    (models / "krea2" / "VAE" / "qwen_image_vae.safetensors").write_bytes(b"fake")
+
+    result = preflight_krea2_pipeline(RuntimeFlags(data_dir=tmp_path, models_dir=models))
+
+    assert not result.ok
+    by_name = {item.name: item for item in result.items}
+    assert by_name["Krea 2 split transformer"].ok
+    assert by_name["Qwen3-VL text encoder"].ok
+    assert by_name["Qwen Image VAE"].ok
+    assert not by_name["Krea2Pipeline"].ok
+    assert not by_name["Krea 2 Diffusers folder"].ok
+    assert "split-file loader" in " ".join(result.warnings)
+
+
+def test_krea2_preflight_accepts_complete_diffusers_folder_without_split_sidecars(tmp_path: Path, monkeypatch):
+    models = tmp_path / "models"
+    root = models / "krea2" / "Diffusers" / "Krea-2-Turbo"
+    transformer = root / "transformer"
+    transformer.mkdir(parents=True)
+    (root / "model_index.json").write_text(json.dumps({"_class_name": "Krea2Pipeline"}), encoding="utf-8")
+    (transformer / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": 1},
+                "weight_map": {
+                    "single_transformer_blocks.0.attn.to_q.weight": "diffusion_pytorch_model-00001-of-00001.safetensors"
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (transformer / "diffusion_pytorch_model-00001-of-00001.safetensors").write_bytes(b"fake")
+    monkeypatch.setitem(sys.modules, "diffusers", types.SimpleNamespace(Krea2Pipeline=object))
+
+    result = preflight_krea2_pipeline(RuntimeFlags(data_dir=tmp_path, models_dir=models))
+
+    assert result.ok
+    by_name = {item.name: item for item in result.items}
+    assert by_name["Krea2Pipeline"].ok
+    assert by_name["Krea 2 Diffusers folder"].ok
+    assert not by_name["Krea 2 split transformer"].ok
+    assert result.metadata["diffusers_folder"] == str(root)
+
+
+def test_anima_preflight_detects_split_sidecars_but_blocks_loader(tmp_path: Path):
+    models = tmp_path / "models"
+    (models / "anima" / "UNet").mkdir(parents=True)
+    (models / "anima" / "Textencoder").mkdir(parents=True)
+    (models / "anima" / "VAE").mkdir(parents=True)
+    (models / "anima" / "UNet" / "anima-base-v1.0.safetensors").write_bytes(b"fake")
+    (models / "anima" / "Textencoder" / "qwen_3_06b_base.safetensors").write_bytes(b"fake")
+    (models / "anima" / "VAE" / "qwen_image_vae.safetensors").write_bytes(b"fake")
+
+    result = preflight_anima_pipeline(RuntimeFlags(data_dir=tmp_path, models_dir=models))
+
+    assert not result.ok
+    by_name = {item.name: item for item in result.items}
+    assert not by_name["native Anima loader"].ok
+    assert by_name["Anima transformer"].ok
+    assert by_name["Qwen 0.6B text encoder"].ok
+    assert by_name["Qwen Image VAE"].ok
 
 
 def _write_fake_safetensors(path: Path) -> None:

@@ -282,6 +282,25 @@ def test_supported_image_gguf_runtime_assets_are_not_unsupported_no_route(tmp_pa
             assert "runtime path" in record.reason
 
 
+def test_krea2_and_anima_split_assets_are_blocked_until_native_loader(tmp_path: Path):
+    krea = tmp_path / "models" / "krea2" / "UNet" / "krea2_turbo_fp8_scaled.safetensors"
+    anima = tmp_path / "models" / "anima" / "UNet" / "anima-base-v1.0.safetensors"
+    krea.parent.mkdir(parents=True)
+    anima.parent.mkdir(parents=True)
+    krea.write_bytes(b"fake")
+    anima.write_bytes(b"fake")
+
+    krea_record = classify_pipeline_asset("runtime_asset", "krea2", krea)
+    anima_record = classify_pipeline_asset("runtime_asset", "anima", anima)
+
+    assert krea_record.status == "blocked-cleanly"
+    assert krea_record.route == "krea2"
+    assert "split-file Krea2 loader" in krea_record.reason
+    assert anima_record.status == "unsupported-no-route"
+    assert anima_record.route == "anima"
+    assert "native Anima loader" in anima_record.reason
+
+
 def test_collect_pipeline_readiness_includes_download_assets(tmp_path: Path):
     downloads = tmp_path / "Downloads"
     ltx = downloads / "ltx23_ltx2322bDistilled.safetensors"

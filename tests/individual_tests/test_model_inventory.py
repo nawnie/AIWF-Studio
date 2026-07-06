@@ -26,6 +26,7 @@ from aiwf.infrastructure.model_header import (
     read_model_info,
 )
 from aiwf.infrastructure.model_inventory import inventory_path, scan_and_write_model_inventory
+from aiwf.infrastructure.model_sorter import reorganize_models
 
 
 def _write_safetensors_header(path: Path, tensors: dict, metadata: dict[str, str] | None = None) -> None:
@@ -237,6 +238,22 @@ def test_flux_gguf_is_runtime_asset_and_selectable_flux_checkpoint(tmp_path: Pat
     assert checkpoints[0].kind == "flux"
 
 
+def test_reorganize_moves_confident_gguf_without_overwriting(tmp_path: Path):
+    models = tmp_path / "models"
+    misplaced = models / "Stable-diffusion" / "flux1-dev-Q5_K_M.gguf"
+    misplaced.parent.mkdir(parents=True)
+    misplaced.write_bytes(b"GGUF")
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=models)
+
+    actions = reorganize_models(flags)
+
+    moved = [action for action in actions if action.status == "moved"]
+    assert [action.filename for action in moved] == ["flux1-dev-Q5_K_M.gguf"]
+    assert moved[0].dest_subdir == "flux/GGUF"
+    assert not misplaced.exists()
+    assert (models / "flux" / "GGUF" / "flux1-dev-Q5_K_M.gguf").is_file()
+
+
 def test_flux2_klein_gguf_is_runtime_asset_and_selectable_flux2_checkpoint(tmp_path: Path):
     models = tmp_path / "models"
     klein = models / "Stable-diffusion" / "fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf"
@@ -344,6 +361,13 @@ def test_qwen_and_sana_diffusers_dirs_are_selectable_runtime_assets(tmp_path: Pa
             "sana/Diffusers",
             "sana",
         ),
+        (
+            models / "krea2" / "Diffusers" / "Krea-2-Turbo",
+            "Krea2Pipeline",
+            "krea2",
+            "krea2/Diffusers",
+            "krea2",
+        ),
     ]
     for root, class_name, _, _, _ in specs:
         root.mkdir(parents=True)
@@ -413,7 +437,7 @@ def test_sana_video_diffusers_dir_is_video_runtime_asset_not_image_checkpoint(tm
     assert all(checkpoint.id != "SANA-Video_2B_480p_diffusers" for checkpoint in checkpoints)
 
 
-def test_qwen_nunchaku_transformer_is_selectable_runtime_asset(tmp_path: Path):
+def test_qwen_nunchaku_transformer_is_tracked_but_not_selectable_in_v1(tmp_path: Path):
     models = tmp_path / "models"
     transformer = models / "qwen-image" / "Nunchaku" / "svdq-int4_r32-qwen-image-lightningv1.0-4steps.safetensors"
     transformer.parent.mkdir(parents=True)
@@ -437,8 +461,7 @@ def test_qwen_nunchaku_transformer_is_selectable_runtime_asset(tmp_path: Path):
     assert record.architecture == "qwen_image_nunchaku"
     assert record.current_subdir == "qwen-image/Nunchaku"
     assert record.recommended_subdir == "qwen-image/Nunchaku"
-    assert [checkpoint.id for checkpoint in checkpoints] == ["svdq-int4_r32-qwen-image-lightningv1.0-4steps"]
-    assert checkpoints[0].kind == "qwen-nunchaku"
+    assert all(checkpoint.id != "svdq-int4_r32-qwen-image-lightningv1.0-4steps" for checkpoint in checkpoints)
 
 
 def test_flux2_and_z_image_component_dirs_are_support_assets_not_checkpoints(tmp_path: Path):

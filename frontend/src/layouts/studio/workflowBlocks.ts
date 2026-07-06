@@ -1,7 +1,7 @@
 import type { GenerationSettings, ProBootstrap, ProModelOption, ProRuntimeStatus } from '../../types'
-import type { PaidWorkflowCodeBlock } from './PaidLayoutTypes'
+import type { WorkflowCodeBlock } from './LayoutTypes'
 
-export const WORKFLOW_BLOCK_STORAGE_KEY = 'aiwf.paid.workflowCodeBlocks.v12'
+export const WORKFLOW_BLOCK_STORAGE_KEY = 'aiwf.workflowCodeBlocks.v12'
 
 interface WorkflowBlockSource {
   settings: GenerationSettings
@@ -247,7 +247,7 @@ function payloadFor({ settings, bootstrap, runtime, selectedModel, selectedModel
   return basePayload
 }
 
-export function createWorkflowBlocksFromSettings(sourceData: WorkflowBlockSource, existingCount: number): PaidWorkflowCodeBlock[] {
+export function createWorkflowBlocksFromSettings(sourceData: WorkflowBlockSource, existingCount: number): WorkflowCodeBlock[] {
   const payload = payloadFor(sourceData)
   const route = String(payload.route || 'generation-request')
   const family = String(payload.family || 'Model family')
@@ -255,7 +255,7 @@ export function createWorkflowBlocksFromSettings(sourceData: WorkflowBlockSource
   const mode = sourceData.settings.mode
   const label = `${mode === 'video' ? 'Video' : mode === 'inpaint' ? 'Inpaint' : 'Image'} · ${family}`
   const summary = `${route} · ${sourceData.settings.width}×${sourceData.settings.height} · ${sourceData.settings.steps} steps · ${precision}`
-  const block: PaidWorkflowCodeBlock = {
+  const block: WorkflowCodeBlock = {
     id: nextId('workflow-block'),
     label,
     kind: 'generation',
@@ -271,7 +271,7 @@ export function createWorkflowBlocksFromSettings(sourceData: WorkflowBlockSource
   return [block]
 }
 
-export function normalizeWorkflowBlocks(value: unknown): PaidWorkflowCodeBlock[] {
+export function normalizeWorkflowBlocks(value: unknown): WorkflowCodeBlock[] {
   const rows = Array.isArray(value)
     ? value
     : Array.isArray((value as { blocks?: unknown })?.blocks)
@@ -285,7 +285,7 @@ export function normalizeWorkflowBlocks(value: unknown): PaidWorkflowCodeBlock[]
       return {
         id: String(item.id || nextId('workflow-block')),
         label: String(item.label || item.title || `Workflow block ${index + 1}`),
-        kind: ['generation', 'workflow', 'qa', 'export'].includes(String(item.kind)) ? String(item.kind) as PaidWorkflowCodeBlock['kind'] : 'generation',
+        kind: ['generation', 'workflow', 'qa', 'export'].includes(String(item.kind)) ? String(item.kind) as WorkflowCodeBlock['kind'] : 'generation',
         nodeId: String(item.nodeId || item.node_id || 'generation-request'),
         source: String(item.source || 'Imported JSON'),
         createdAt: String(item.createdAt || item.created_at || nowIso()),
@@ -303,7 +303,7 @@ export function normalizeWorkflowBlocks(value: unknown): PaidWorkflowCodeBlock[]
     .map((block, index) => ({ ...block, order: index + 1 }))
 }
 
-export function loadWorkflowBlocksFromStorage(): PaidWorkflowCodeBlock[] {
+export function loadWorkflowBlocksFromStorage(): WorkflowCodeBlock[] {
   if (typeof window === 'undefined') return []
   try {
     const raw = window.localStorage.getItem(WORKFLOW_BLOCK_STORAGE_KEY)
@@ -313,7 +313,7 @@ export function loadWorkflowBlocksFromStorage(): PaidWorkflowCodeBlock[] {
   }
 }
 
-export function saveWorkflowBlocksToStorage(blocks: PaidWorkflowCodeBlock[]): void {
+export function saveWorkflowBlocksToStorage(blocks: WorkflowCodeBlock[]): void {
   if (typeof window === 'undefined') return
   try {
     window.localStorage.setItem(WORKFLOW_BLOCK_STORAGE_KEY, JSON.stringify({ schema: 'aiwf.workflow-code-blocks.local.v1', blocks }, null, 2))
@@ -322,11 +322,11 @@ export function saveWorkflowBlocksToStorage(blocks: PaidWorkflowCodeBlock[]): vo
   }
 }
 
-export function renumberWorkflowBlocks(blocks: PaidWorkflowCodeBlock[]): PaidWorkflowCodeBlock[] {
+export function renumberWorkflowBlocks(blocks: WorkflowCodeBlock[]): WorkflowCodeBlock[] {
   return blocks.map((block, index) => ({ ...block, order: index + 1 }))
 }
 
-export function duplicateWorkflowBlock(block: PaidWorkflowCodeBlock, insertOrder: number): PaidWorkflowCodeBlock {
+export function duplicateWorkflowBlock(block: WorkflowCodeBlock, insertOrder: number): WorkflowCodeBlock {
   const payload = { ...block.payload } as Record<string, unknown>
   const packet = payload.packet && typeof payload.packet === 'object' ? { ...(payload.packet as Record<string, unknown>) } : undefined
   if (packet) {
@@ -348,7 +348,7 @@ export function duplicateWorkflowBlock(block: PaidWorkflowCodeBlock, insertOrder
   }
 }
 
-export function workflowPayloadFromBlocks(blocks: PaidWorkflowCodeBlock[]): Record<string, unknown> {
+export function workflowPayloadFromBlocks(blocks: WorkflowCodeBlock[]): Record<string, unknown> {
   const ordered = renumberWorkflowBlocks(blocks)
   return {
     schema: 'aiwf.workflow-code-blocks.v1',
@@ -371,7 +371,7 @@ export function workflowPayloadFromBlocks(blocks: PaidWorkflowCodeBlock[]): Reco
   }
 }
 
-export function validateWorkflowBlocks(blocks: PaidWorkflowCodeBlock[]): WorkflowBlockValidation {
+export function validateWorkflowBlocks(blocks: WorkflowCodeBlock[]): WorkflowBlockValidation {
   const errors: string[] = []
   const seen = new Set<string>()
   blocks.forEach((block, index) => {

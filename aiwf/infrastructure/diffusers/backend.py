@@ -112,6 +112,8 @@ from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
     ARCH_FLUX_KONTEXT,
     ARCH_FLUX2_KLEIN,
+    ARCH_ANIMA,
+    ARCH_KREA2,
     ARCH_QWEN_IMAGE,
     ARCH_QWEN_IMAGE_NUNCHAKU,
     ARCH_SANA,
@@ -124,6 +126,8 @@ from aiwf.infrastructure.diffusers.model_arch import (
     is_flux_architecture,
     is_flux_fill_architecture,
     is_flux_kontext_architecture,
+    is_anima_architecture,
+    is_krea2_architecture,
     is_qwen_image_architecture,
     is_qwen_nunchaku_architecture,
     is_sana_architecture,
@@ -164,7 +168,15 @@ logger = logging.getLogger(__name__)
 def _supports_runtime_lora_adapters(architecture: str | None) -> bool:
     """Return whether AIWF can apply prompt LoRA tags at generation time."""
     architecture = (architecture or "").lower()
-    if architecture in {ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE, ARCH_QWEN_IMAGE, ARCH_QWEN_IMAGE_NUNCHAKU, ARCH_SANA}:
+    if architecture in {
+        ARCH_FLUX2_KLEIN,
+        ARCH_Z_IMAGE,
+        ARCH_KREA2,
+        ARCH_ANIMA,
+        ARCH_QWEN_IMAGE,
+        ARCH_QWEN_IMAGE_NUNCHAKU,
+        ARCH_SANA,
+    }:
         return False
     return True
 
@@ -397,6 +409,9 @@ class DiffusersBackend:
         self._qwen_prompt_cache: OrderedDict[
             tuple[str, str, int, int], tuple[torch.Tensor, torch.Tensor | None]
         ] = OrderedDict()
+        self._krea2_prompt_cache: OrderedDict[
+            tuple[str, str, int, int], tuple[torch.Tensor, torch.Tensor | None]
+        ] = OrderedDict()
         self._sana_prompt_cache: OrderedDict[tuple, tuple] = OrderedDict()
         self._common_prompt_cache_warmed_for: set[str] = set()
         self._qwen_nunchaku = QwenNunchakuService(flags)
@@ -622,6 +637,73 @@ class DiffusersBackend:
 
     _AUTO_OFFLOAD_VRAM_GB = 10.0
 
+    def _high_vram_requested(self) -> bool:
+        profile = self.flags.effective_vram_profile() if hasattr(self.flags, "effective_vram_profile") else ""
+        return profile == "high" or bool(getattr(self.flags, "highvram", False))
+
+    def _krea2_needs_sequential_offload(
+        self,
+        architecture: str | None,
+        checkpoint: Checkpoint | None = None,
+        *,
+        prefer_offload: bool = False,
+    ) -> bool:
+        if architecture != ARCH_KREA2 or not (self.flags.medvram or prefer_offload):
+            return False
+        try:
+            vram = self.devices.total_vram_gb()
+        except Exception:
+            return False
+        return vram < self._offload_threshold_gb(architecture, checkpoint=checkpoint)
+
+    def _place_krea2_group_offload(self, pipe, device: torch.device) -> bool:
+        transformer = getattr(pipe, "transformer", None)
+        if transformer is None or not hasattr(transformer, "enable_group_offload"):
+            return False
+        transformer.enable_group_offload(
+            onload_device=device,
+            offload_device=torch.device("cpu"),
+            offload_type="block_level",
+            num_blocks_per_group=1,
+            use_stream=True,
+            record_stream=False,
+            low_cpu_mem_usage=True,
+        )
+        vae = getattr(pipe, "vae", None)
+        if vae is not None and hasattr(vae, "to"):
+            vae.to(device)
+        self._offload_active = True
+        logger.info("Krea 2 transformer uses streamed group offload; VAE stays resident on %s.", device)
+        return True
+
+    def _place_krea2_fp8_resident(self, pipe, device: torch.device) -> bool:
+        transformer = getattr(pipe, "transformer", None)
+        if transformer is None or not hasattr(transformer, "enable_layerwise_casting"):
+            return False
+        if not hasattr(torch, "float8_e4m3fn"):
+            return False
+        try:
+            vram = self.devices.total_vram_gb()
+        except Exception:
+            vram = 0.0
+        if vram and vram < 15.0:
+            logger.warning("Krea 2 high VRAM FP8 resident mode needs about 15 GB VRAM; using group offload instead.")
+            return False
+        transformer.enable_layerwise_casting(
+            storage_dtype=torch.float8_e4m3fn,
+            compute_dtype=self._dtype_for_architecture(ARCH_KREA2),
+        )
+        transformer.to(device)
+        vae = getattr(pipe, "vae", None)
+        if vae is not None and hasattr(vae, "to"):
+            vae.to(device)
+        if hasattr(pipe, "to"):
+            pipe.to(device)
+        pipe._aiwf_krea2_force_cpu_prompt_encode = True
+        self._offload_active = False
+        logger.info("Krea 2 high VRAM mode stores transformer weights in FP8 and keeps denoiser/VAE on %s.", device)
+        return True
+
     def _place_pipeline(
         self,
         pipe,
@@ -635,7 +717,25 @@ class DiffusersBackend:
             pipe = pipe.to(self.devices.device())
             self._offload_active = False
             return pipe
+        if self._high_vram_requested():
+            prefer_offload = False
+        krea2_sequential = self._krea2_needs_sequential_offload(
+            architecture,
+            checkpoint,
+            prefer_offload=prefer_offload,
+        )
         if self.flags.lowvram:
+            pipe.enable_sequential_cpu_offload()
+            self._offload_active = True
+        elif architecture == ARCH_KREA2 and (self.flags.medvram or prefer_offload):
+            if not self._place_krea2_group_offload(pipe, self.devices.device()):
+                logger.info("Krea 2 group offload is unavailable; falling back to sequential CPU offload.")
+                pipe.enable_sequential_cpu_offload()
+                self._offload_active = True
+        elif krea2_sequential:
+            if krea2_sequential:
+                threshold = self._offload_threshold_gb(architecture or "", checkpoint=checkpoint)
+                logger.info("Krea 2 on a <%.0f GB GPU uses sequential CPU offload.", threshold)
             pipe.enable_sequential_cpu_offload()
             self._offload_active = True
         elif self.flags.medvram:
@@ -645,6 +745,8 @@ class DiffusersBackend:
             arch_label = {
                 ARCH_FLUX2_KLEIN: "Flux.2 Klein",
                 ARCH_Z_IMAGE: "Z-Image",
+                ARCH_KREA2: "Krea 2",
+                ARCH_ANIMA: "Anima",
                 ARCH_QWEN_IMAGE: "Qwen Image",
                 ARCH_QWEN_IMAGE_NUNCHAKU: "Qwen Image Nunchaku",
                 ARCH_SANA: "Sana",
@@ -686,6 +788,23 @@ class DiffusersBackend:
         need to move to the denoise device.
         """
         device = self.devices.device()
+        if is_krea2_architecture(architecture) and device.type == "cuda" and self._high_vram_requested():
+            text_encoder = getattr(pipe, "text_encoder", None)
+            if text_encoder is not None:
+                pipe.text_encoder = None
+            try:
+                if not self._place_krea2_fp8_resident(pipe, device):
+                    self._place_krea2_group_offload(pipe, device)
+            finally:
+                if text_encoder is not None:
+                    pipe.text_encoder = text_encoder
+                    try:
+                        text_encoder.to("cpu")
+                    except Exception:
+                        logger.debug("Could not park %s text encoder on CPU", architecture, exc_info=True)
+            logger.info("%s text encoder kept on CPU.", architecture)
+            return pipe
+
         if is_qwen_image_architecture(architecture) or is_sana_architecture(architecture):
             return self._place_pipeline(
                 pipe,
@@ -693,7 +812,7 @@ class DiffusersBackend:
                 architecture=architecture,
                 checkpoint=checkpoint,
             )
-        prefer_offload = self._wants_offload(architecture, checkpoint=checkpoint)
+        prefer_offload = False if self._high_vram_requested() else self._wants_offload(architecture, checkpoint=checkpoint)
         if device.type != "cuda" or self.flags.lowvram or self.flags.medvram or prefer_offload:
             # Keep the LM text encoder OUT of the offload hook graph. Model CPU
             # offload onloads every hooked module to the GPU when its forward
@@ -812,6 +931,8 @@ class DiffusersBackend:
         if (
             getattr(self.flags, "fluxfp8", False)
             and is_transformer_image_architecture(architecture)
+            and not is_krea2_architecture(architecture)
+            and not is_anima_architecture(architecture)
             and not is_qwen_image_architecture(architecture)
             and not is_sana_architecture(architecture)
         ):
@@ -2073,6 +2194,92 @@ class DiffusersBackend:
         )
         return prompt_embeds, prompt_mask, negative_embeds, negative_mask
 
+    def _encode_krea2_prompt(
+        self,
+        pipe,
+        prompt: str,
+        device: torch.device,
+        *,
+        batch_size: int,
+        max_sequence_length: int = 512,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cache = getattr(self, "_krea2_prompt_cache", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._krea2_prompt_cache = cache
+        cache_key = (self._active_prompt_cache_scope(), prompt, int(batch_size), int(max_sequence_length))
+        cached = self._prompt_cache_get(cache, cache_key, "Krea 2")
+        if cached is not None:
+            prompt_embeds, prompt_mask = cached
+            return (
+                self._cached_tensor_to_device(prompt_embeds, device),
+                self._cached_tensor_to_device(prompt_mask, device),
+            )
+
+        def encode(target_device: torch.device) -> tuple[torch.Tensor, torch.Tensor | None]:
+            encode_t0 = time.perf_counter()
+            prompt_embeds, prompt_mask = pipe.encode_prompt(
+                prompt=prompt,
+                device=target_device,
+                num_images_per_prompt=batch_size,
+                max_sequence_length=max_sequence_length,
+            )
+            logger.info("Krea 2 prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+            return prompt_embeds, prompt_mask
+
+        if getattr(pipe, "_aiwf_krea2_force_cpu_prompt_encode", False):
+            logger.info("Krea 2 text encoder encodes on CPU (resident denoiser mode).")
+            prompt_embeds, prompt_mask = encode(torch.device("cpu"))
+        else:
+            prompt_embeds, prompt_mask = self._encode_with_text_encoder_gpu_swap(
+                pipe,
+                architecture="Krea 2",
+                device=device,
+                encode=encode,
+            )
+        self._prompt_cache_put(
+            cache,
+            cache_key,
+            (
+                self._cache_tensor(prompt_embeds),
+                self._cache_tensor(prompt_mask),
+            ),
+            "Krea 2",
+        )
+        return (
+            self._cached_tensor_to_device(prompt_embeds, device),
+            self._cached_tensor_to_device(prompt_mask, device),
+        )
+
+    def _encode_krea2_prompts(
+        self,
+        pipe,
+        prompt: str,
+        negative_prompt: str | None,
+        device: torch.device,
+        *,
+        batch_size: int,
+        guidance_scale: float,
+        max_sequence_length: int = 512,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        prompt_embeds, prompt_mask = self._encode_krea2_prompt(
+            pipe,
+            prompt,
+            device,
+            batch_size=batch_size,
+            max_sequence_length=max_sequence_length,
+        )
+        if guidance_scale <= 0.0:
+            return prompt_embeds, prompt_mask, None, None
+        negative_embeds, negative_mask = self._encode_krea2_prompt(
+            pipe,
+            negative_prompt or "",
+            device,
+            batch_size=batch_size,
+            max_sequence_length=max_sequence_length,
+        )
+        return prompt_embeds, prompt_mask, negative_embeds, negative_mask
+
     def _encode_sana_prompts(
         self,
         pipe,
@@ -2212,6 +2419,18 @@ class DiffusersBackend:
                         continue
                     self._encode_z_image_prompts(pipe, prompt, None, device)
                     warmed += 1
+            elif is_krea2_architecture(checkpoint.architecture):
+                for prompt in prompts:
+                    if _should_stop():
+                        stopped = True
+                        break
+                    if warmed and time.perf_counter() - started >= budget_seconds:
+                        break
+                    cache_key = (self._active_prompt_cache_scope(), prompt, 1, 512)
+                    if cache_key in self._krea2_prompt_cache:
+                        continue
+                    self._encode_krea2_prompt(pipe, prompt, device, batch_size=1)
+                    warmed += 1
             elif is_flux_architecture(checkpoint.architecture):
                 component_paths = getattr(pipe, "_aiwf_flux_components", None) or self._resolve_flux_component_paths()
                 self._load_flux_prompt_models({key: Path(value) for key, value in component_paths.items()})
@@ -2265,6 +2484,14 @@ class DiffusersBackend:
         return pipe.__class__.__name__ == "ZImagePipeline"
 
     @staticmethod
+    def _is_krea2_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "Krea2Pipeline"
+
+    @staticmethod
+    def _is_anima_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "AnimaPipeline"
+
+    @staticmethod
     def _is_qwen_image_pipe(pipe) -> bool:
         return pipe.__class__.__name__ == "QwenImagePipeline"
 
@@ -2305,7 +2532,14 @@ class DiffusersBackend:
         Offloaded pipelines (lowvram/medvram/SDXL auto-offload) report their
         device as 'meta'; torch.Generator and .to() need the real one.
         """
-        if self._is_flux2_pipe(pipe) or self._is_z_image_pipe(pipe) or self._is_qwen_image_pipe(pipe) or self._is_sana_pipe(pipe):
+        if (
+            self._is_flux2_pipe(pipe)
+            or self._is_z_image_pipe(pipe)
+            or self._is_krea2_pipe(pipe)
+            or self._is_anima_pipe(pipe)
+            or self._is_qwen_image_pipe(pipe)
+            or self._is_sana_pipe(pipe)
+        ):
             transformer = getattr(pipe, "transformer", None)
             if transformer is not None:
                 try:
@@ -2347,12 +2581,23 @@ class DiffusersBackend:
     def _is_sana_sprint_checkpoint(self, checkpoint: Checkpoint | None = None) -> bool:
         return "sprint" in self._checkpoint_name_blob(checkpoint)
 
+    def _is_krea2_turbo_checkpoint(self, checkpoint: Checkpoint | None = None) -> bool:
+        return "turbo" in self._checkpoint_name_blob(checkpoint)
+
     @staticmethod
     def _is_sana_sprint_pipe(pipe) -> bool:
         return pipe.__class__.__name__ == "SanaSprintPipeline"
 
     def _transformer_offload_threshold_gb(self, architecture: str, checkpoint: Checkpoint | None = None) -> float:
         size_gb = self._checkpoint_size_gb(checkpoint)
+        if is_krea2_architecture(architecture):
+            if 0.0 < size_gb <= 13.0:
+                return 18.0
+            return 24.0
+        if is_anima_architecture(architecture):
+            if 0.0 < size_gb <= 5.0:
+                return 8.0
+            return 12.0
         if is_qwen_nunchaku_architecture(architecture):
             return 12.0
         if is_sana_architecture(architecture):
@@ -2388,6 +2633,8 @@ class DiffusersBackend:
             is_flux_architecture(architecture)
             or is_flux2_klein_architecture(architecture)
             or is_z_image_architecture(architecture)
+            or is_krea2_architecture(architecture)
+            or is_anima_architecture(architecture)
             or is_qwen_image_architecture(architecture)
             or is_sana_architecture(architecture)
         ):
@@ -2399,6 +2646,8 @@ class DiffusersBackend:
         return self._AUTO_OFFLOAD_VRAM_GB
 
     def _wants_offload(self, architecture: str, *, checkpoint: Checkpoint | None = None) -> bool:
+        if self._high_vram_requested():
+            return False
         # DiT image families (Flux / Flux.2 / Z-Image / Qwen / Sana) stay GPU-resident for warm reuse.
         # CPU offload shuffles weights every generation and feels like a full reload.
         vram = self.devices.total_vram_gb()
@@ -2406,6 +2655,8 @@ class DiffusersBackend:
             is_flux_architecture(architecture)
             or is_flux2_klein_architecture(architecture)
             or is_z_image_architecture(architecture)
+            or is_krea2_architecture(architecture)
+            or is_anima_architecture(architecture)
             or is_qwen_image_architecture(architecture)
             or is_sana_architecture(architecture)
         ):
@@ -2434,10 +2685,14 @@ class DiffusersBackend:
     ) -> bool:
         if self._is_sana_sprint_pipe(pipe) or self._is_sana_sprint_checkpoint(checkpoint):
             return False
+        if self._high_vram_requested():
+            return False
         if self.flags.lowvram or self.flags.medvram or self._offload_active:
             return True
         size_gb = self._checkpoint_size_gb(checkpoint)
         if size_gb >= 12.0:
+            return True
+        if is_krea2_architecture(architecture):
             return True
         return is_qwen_image_architecture(architecture) and not is_qwen_nunchaku_architecture(architecture)
 
@@ -2572,6 +2827,9 @@ class DiffusersBackend:
             except ModelNotFoundError:
                 return False
             return path.is_file()
+        if is_krea2_architecture(checkpoint.architecture) or is_anima_architecture(checkpoint.architecture):
+            path = Path(checkpoint.path)
+            return path.is_dir() and (path / "model_index.json").is_file()
         if is_qwen_nunchaku_architecture(checkpoint.architecture):
             return self._qwen_nunchaku.status(checkpoint.path).ready
         if is_qwen_image_architecture(checkpoint.architecture) or is_sana_architecture(checkpoint.architecture):
@@ -3061,6 +3319,162 @@ class DiffusersBackend:
         self._img2img = None
         return checkpoint
 
+    def _load_krea2_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            logger.debug("Krea 2 checkpoint already warm: %s", checkpoint.title)
+            return checkpoint
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        path = Path(checkpoint.path)
+        if not path.is_dir() or not (path / "model_index.json").is_file():
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' must be a full Krea2Pipeline Diffusers folder with model_index.json. "
+                "The Comfy split Krea 2 files are catalog/preflight assets until AIWF has a split-file Krea2 loader."
+            )
+
+        try:
+            from diffusers import Krea2Pipeline
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Krea 2 support needs a Diffusers build that exposes Krea2Pipeline. "
+                "This install does not provide it yet; update the image runtime dependencies, then restart AIWF."
+            ) from exc
+
+        dtype = self._dtype_for_architecture(ARCH_KREA2)
+        logger.info("Loading Krea 2 checkpoint %s from %s", checkpoint.title, path)
+        try:
+            pipe = self._load_krea2_pipeline(path, dtype)
+        except Exception as exc:
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' failed to load as Krea 2 ({type(exc).__name__}: {exc}). "
+                "Check that the full Diffusers snapshot downloaded completely."
+            ) from exc
+
+        self._remember_base_scheduler_config(pipe)
+        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_KREA2, checkpoint=checkpoint)
+        pipe.set_progress_bar_config(disable=True)
+        self._tune_vae_memory(pipe, ARCH_KREA2, checkpoint)
+
+        self._krea2_prompt_cache.clear()
+        self._active = checkpoint
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
+    @staticmethod
+    def _component_from_pretrained(model_cls, path: Path, dtype: torch.dtype):
+        try:
+            return model_cls.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+        except TypeError:
+            return model_cls.from_pretrained(str(path), dtype=dtype, local_files_only=True)
+
+    def _load_krea2_pipeline(self, path: Path, dtype: torch.dtype):
+        from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, Krea2Pipeline, Krea2Transformer2DModel
+
+        model_index_path = path / "model_index.json"
+        model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
+        text_encoder = self._load_krea2_text_encoder(path, dtype)
+        tokenizer = self._load_krea2_tokenizer(path)
+        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            str(path / "scheduler"),
+            local_files_only=True,
+        )
+        vae = self._component_from_pretrained(AutoencoderKLQwenImage, path / "vae", dtype)
+        transformer = self._component_from_pretrained(Krea2Transformer2DModel, path / "transformer", dtype)
+        return Krea2Pipeline(
+            scheduler=scheduler,
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            transformer=transformer,
+            text_encoder_select_layers=model_index.get("text_encoder_select_layers"),
+            is_distilled=bool(model_index.get("is_distilled", False)),
+            patch_size=int(model_index.get("patch_size") or 2),
+        )
+
+    @staticmethod
+    def _normalize_qwen3vl_rope_config(config) -> bool:
+        text_config = getattr(config, "text_config", None)
+        if text_config is None or getattr(text_config, "rope_scaling", None) is not None:
+            return False
+        rope_parameters = getattr(text_config, "rope_parameters", None)
+        if not isinstance(rope_parameters, dict):
+            return False
+        text_config.rope_scaling = dict(rope_parameters)
+        return True
+
+    def _load_krea2_text_encoder(self, path: Path, dtype: torch.dtype):
+        text_encoder_path = path / "text_encoder"
+        try:
+            from transformers import Qwen3VLConfig, Qwen3VLModel
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Krea 2 support needs a Transformers build that exposes Qwen3VLModel. "
+                "Update the image runtime dependencies, then restart AIWF."
+            ) from exc
+
+        config = Qwen3VLConfig.from_pretrained(str(text_encoder_path), local_files_only=True)
+        if self._normalize_qwen3vl_rope_config(config):
+            logger.info("Krea 2 Qwen3-VL config normalized rope_parameters for this Transformers build.")
+        try:
+            return Qwen3VLModel.from_pretrained(
+                str(text_encoder_path),
+                config=config,
+                torch_dtype=dtype,
+                local_files_only=True,
+            )
+        except TypeError:
+            return Qwen3VLModel.from_pretrained(
+                str(text_encoder_path),
+                config=config,
+                dtype=dtype,
+                local_files_only=True,
+            )
+
+    def _load_krea2_tokenizer(self, path: Path):
+        tokenizer_path = path / "tokenizer"
+        config_path = tokenizer_path / "tokenizer_config.json"
+        tokenizer_file = tokenizer_path / "tokenizer.json"
+        try:
+            from transformers import Qwen2TokenizerFast
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Krea 2 support needs a Transformers build that exposes Qwen2TokenizerFast. "
+                "Update the image runtime dependencies, then restart AIWF."
+            ) from exc
+
+        try:
+            tokenizer_config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ModelNotFoundError(f"Krea 2 tokenizer config could not be read: {config_path}") from exc
+
+        extra_tokens = tokenizer_config.get("extra_special_tokens") or []
+        if not isinstance(extra_tokens, list):
+            extra_tokens = []
+        kwargs = {
+            "tokenizer_file": str(tokenizer_file),
+            "additional_special_tokens": extra_tokens,
+            "model_max_length": int(tokenizer_config.get("model_max_length") or 262144),
+            "clean_up_tokenization_spaces": bool(tokenizer_config.get("clean_up_tokenization_spaces", False)),
+        }
+        for key in ("bos_token", "eos_token", "pad_token", "unk_token"):
+            value = tokenizer_config.get(key)
+            if value is not None:
+                kwargs[key] = value
+        return Qwen2TokenizerFast(**kwargs)
+
+    def _load_anima_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        raise ModelNotFoundError(
+            "Anima assets are recognized and preflighted, but AIWF does not have a native Anima loader yet. "
+            "The current upstream release is ComfyUI-native split files; add a split-file Anima runtime before selecting it for generation."
+        )
+
     def _run_flux_kontext_txt2img_pass(
         self,
         pipe,
@@ -3211,6 +3625,10 @@ class DiffusersBackend:
             return self._load_flux2_klein_checkpoint(checkpoint)
         if is_z_image_architecture(checkpoint.architecture):
             return self._load_z_image_checkpoint(checkpoint)
+        if is_krea2_architecture(checkpoint.architecture):
+            return self._load_krea2_checkpoint(checkpoint)
+        if is_anima_architecture(checkpoint.architecture):
+            return self._load_anima_checkpoint(checkpoint)
         if is_qwen_nunchaku_architecture(checkpoint.architecture):
             return self._load_qwen_nunchaku_checkpoint(checkpoint)
         if is_qwen_image_architecture(checkpoint.architecture):
@@ -3604,6 +4022,7 @@ class DiffusersBackend:
             self._flux_prompt_cache.clear()
         self._flux2_prompt_cache.clear()
         self._z_image_prompt_cache.clear()
+        self._krea2_prompt_cache.clear()
         self._qwen_prompt_cache.clear()
         self._sana_prompt_cache.clear()
         gc.collect()
@@ -3640,6 +4059,10 @@ class DiffusersBackend:
             return
         if self._is_z_image_pipe(pipe):
             logger.info("Z-Image uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
+            return
+        if self._is_krea2_pipe(pipe):
+            logger.info("Krea 2 uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
             pipe._aiwf_scheduler_signature = scheduler_signature
             return
         if self._is_qwen_image_pipe(pipe):
@@ -4046,6 +4469,65 @@ class DiffusersBackend:
                 callback_on_step_end_tensor_inputs=["latents"],
                 width=width,
                 height=height,
+                output_type="pil",
+            )
+        finally:
+            pipe.text_encoder = text_encoder
+
+    def _run_krea2_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        device = self._execution_device(pipe)
+        guidance_scale = float(request.cfg_scale)
+        prompt_embeds, prompt_mask, negative_embeds, negative_mask = self._encode_with_progress(
+            "krea2",
+            lambda: self._encode_krea2_prompts(
+                pipe,
+                parsed_prompt,
+                request.negative_prompt or None,
+                device,
+                batch_size=request.batch_size,
+                guidance_scale=guidance_scale,
+                max_sequence_length=512,
+            ),
+            steps=steps,
+            on_progress=on_progress,
+        )
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        text_encoder = getattr(pipe, "text_encoder", None)
+        try:
+            pipe.text_encoder = None
+            return self._call_pipe(
+                pipe,
+                prompt=None,
+                negative_prompt=None,
+                prompt_embeds=prompt_embeds,
+                prompt_embeds_mask=prompt_mask,
+                negative_prompt_embeds=negative_embeds,
+                negative_prompt_embeds_mask=negative_mask,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                num_images_per_prompt=request.batch_size,
+                generator=generator,
+                callback_on_step_end=callback,
+                callback_on_step_end_tensor_inputs=["latents"],
+                width=width,
+                height=height,
+                max_sequence_length=512,
                 output_type="pil",
             )
         finally:
@@ -4500,6 +4982,8 @@ class DiffusersBackend:
         is_flux_kontext_checkpoint = is_flux_kontext_architecture(checkpoint.architecture)
         is_flux2_checkpoint = is_flux2_klein_architecture(checkpoint.architecture)
         is_z_image_checkpoint = is_z_image_architecture(checkpoint.architecture)
+        is_krea2_checkpoint = is_krea2_architecture(checkpoint.architecture)
+        is_anima_checkpoint = is_anima_architecture(checkpoint.architecture)
         is_qwen_nunchaku_checkpoint = is_qwen_nunchaku_architecture(checkpoint.architecture)
         is_qwen_image_checkpoint = is_qwen_image_architecture(checkpoint.architecture) and not is_qwen_nunchaku_checkpoint
         is_sana_checkpoint = is_sana_architecture(checkpoint.architecture)
@@ -4521,12 +5005,20 @@ class DiffusersBackend:
                     "Z-Image"
                     if is_z_image_checkpoint
                     else (
-                        "Qwen Image Nunchaku"
-                        if is_qwen_nunchaku_checkpoint
+                        "Krea 2"
+                        if is_krea2_checkpoint
                         else (
-                            "Qwen Image"
-                            if is_qwen_image_checkpoint
-                            else ("Sana" if is_sana_checkpoint else ("Flux Kontext" if is_flux_kontext_checkpoint else "Flux"))
+                            "Anima"
+                            if is_anima_checkpoint
+                            else (
+                                "Qwen Image Nunchaku"
+                                if is_qwen_nunchaku_checkpoint
+                                else (
+                                    "Qwen Image"
+                                    if is_qwen_image_checkpoint
+                                    else ("Sana" if is_sana_checkpoint else ("Flux Kontext" if is_flux_kontext_checkpoint else "Flux"))
+                                )
+                            )
                         )
                     )
                 )
@@ -4780,6 +5272,29 @@ class DiffusersBackend:
                         preview_every_n_steps=preview_every_n_steps,
                     )
                     output = self._run_z_image_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=width,
+                        height=height,
+                        steps=request.steps,
+                        on_progress=on_progress,
+                        should_cancel=should_cancel,
+                    )
+                    batch_images = output.images
+
+                elif is_krea2_checkpoint:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_krea2_txt2img_pass(
                         pipe,
                         request,
                         parsed.prompt,

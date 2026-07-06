@@ -10,12 +10,12 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react'
-import type { PaidTabsProps, PaidUserTab } from './PaidLayoutTypes'
-import { safeTabId } from './PaidLayoutTypes'
-import { savePaidUserTabs } from './paidApiClient'
-import './paidLayouts.css'
+import type { TabsProps, UserTab } from './LayoutTypes'
+import { safeTabId } from './LayoutTypes'
+import { saveUserTabs } from './studioApiClient'
+import './studioLayouts.css'
 
-const EMPTY_TAB_TEMPLATE: PaidUserTab = {
+const EMPTY_TAB_TEMPLATE: UserTab = {
   id: 'plugin-my-workspace',
   label: 'My Workspace',
   icon: 'grid',
@@ -25,47 +25,47 @@ const EMPTY_TAB_TEMPLATE: PaidUserTab = {
   description: 'Empty community workspace tab. Replace later with plugin UI.',
 }
 
-export function ExtensionsHubPaidLayout({ paidTabs, onPaidTabsChange, onOpenTab }: PaidTabsProps) {
+export function ExtensionsHubLayout({ userTabs, onTabsChange, onOpenTab }: TabsProps) {
   const [draftLabel, setDraftLabel] = useState('My Workspace')
-  const visibleCount = useMemo(() => paidTabs.filter((tab) => !tab.hidden).length, [paidTabs])
-  const persist = (tabs: PaidUserTab[]) => {
-    onPaidTabsChange(tabs)
-    void savePaidUserTabs(tabs)
+  const visibleCount = useMemo(() => userTabs.filter((tab) => !tab.hidden).length, [userTabs])
+  const persist = (tabs: UserTab[]) => {
+    onTabsChange(tabs)
+    void saveUserTabs(tabs)
   }
 
   const addEmptyTab = () => {
     const label = draftLabel.trim() || 'My Workspace'
     const id = `plugin-${safeTabId(label)}`
-    const tab: PaidUserTab = {
+    const tab: UserTab = {
       ...EMPTY_TAB_TEMPLATE,
       id,
       label,
       description: `Empty workspace created for ${label}.`,
     }
-    const nextTabs = [...paidTabs.filter((item) => item.id !== id), tab]
+    const nextTabs = [...userTabs.filter((item) => item.id !== id), tab]
     persist(nextTabs)
     onOpenTab?.(id)
   }
 
   return (
-    <div className="paid-extensions paid-full-surface" aria-label="Extensions hub paid layout">
-      <aside className="paid-extension-sidebar">
-        <div className="paid-product-lockup compact">
-          <span className="paid-logo-orb">A</span>
+    <div className="studio-extensions studio-full-surface" aria-label="Extensions hub layout">
+      <aside className="studio-extension-sidebar">
+        <div className="studio-product-lockup compact">
+          <span className="studio-logo-orb">A</span>
           <div>
             <strong>AIWF Extensions</strong>
-            <small>Community workspaces · PAID v3</small>
+            <small>Community workspaces</small>
           </div>
         </div>
-        <section className="paid-agent-card">
+        <section className="studio-agent-card">
           <header><Plus size={16} /><strong>Create Empty Tab</strong></header>
-          <label className="paid-field-mini">Tab label
+          <label className="studio-field-mini">Tab label
             <input value={draftLabel} onChange={(event) => setDraftLabel(event.target.value)} />
           </label>
-          <button type="button" className="paid-wide-button" onClick={addEmptyTab}><Plus size={14} /> Add to Left Bar</button>
+          <button type="button" className="studio-wide-button" onClick={addEmptyTab}><Plus size={14} /> Add to Left Bar</button>
           <small>Tabs are scrollable in the rail and can be hidden below.</small>
         </section>
-        <section className="paid-agent-card">
+        <section className="studio-agent-card">
           <header><Sparkles size={16} /><strong>API Surface</strong></header>
           <code>/api/pro/extensions/tabs</code>
           <code>/api/pro/extensions/register-tab</code>
@@ -74,18 +74,18 @@ export function ExtensionsHubPaidLayout({ paidTabs, onPaidTabsChange, onOpenTab 
         </section>
       </aside>
 
-      <main className="paid-extension-main">
-        <header className="paid-agent-header">
+      <main className="studio-extension-main">
+        <header className="studio-agent-header">
           <div>
-            <span className="paid-eyebrow">COMMUNITY EXTENSIONS</span>
+            <span className="studio-eyebrow">COMMUNITY EXTENSIONS</span>
             <strong>Tabs, empty workspaces, manifests, skills, and plugin settings</strong>
-            <small>{paidTabs.length} registered · {visibleCount} visible in the left bar</small>
+            <small>{userTabs.length} registered · {visibleCount} visible in the left bar</small>
           </div>
-          <button type="button" className="paid-run-button" onClick={() => void savePaidUserTabs(paidTabs)}><Save size={15} /> Save Registry</button>
+          <button type="button" className="studio-run-button" onClick={() => void saveUserTabs(userTabs)}><Save size={15} /> Save Registry</button>
         </header>
 
-        <section className="paid-extension-grid">
-          {paidTabs.length ? paidTabs.map((tab) => (
+        <section className="studio-extension-grid">
+          {userTabs.length ? userTabs.map((tab) => (
             <article key={tab.id} className={tab.hidden ? 'hidden' : ''}>
               <header>
                 <span style={{ background: tab.color || '#8b5cf6' }}><Plug size={16} /></span>
@@ -95,17 +95,17 @@ export function ExtensionsHubPaidLayout({ paidTabs, onPaidTabsChange, onOpenTab 
                 </div>
               </header>
               <p>{tab.description || 'Empty extension workspace.'}</p>
-              <div className="paid-extension-actions">
+              <div className="studio-extension-actions">
                 <button type="button" onClick={() => onOpenTab?.(tab.id)}><LayoutGrid size={14} /> Open</button>
-                <button type="button" onClick={() => persist(paidTabs.map((item) => item.id === tab.id ? { ...item, hidden: !item.hidden } : item))}>
+                <button type="button" onClick={() => persist(userTabs.map((item) => item.id === tab.id ? { ...item, hidden: !item.hidden } : item))}>
                   {tab.hidden ? <Eye size={14} /> : <EyeOff size={14} />}
                   {tab.hidden ? 'Show' : 'Hide'}
                 </button>
-                <button type="button" onClick={() => persist(paidTabs.filter((item) => item.id !== tab.id))}><Trash2 size={14} /> Remove</button>
+                <button type="button" onClick={() => persist(userTabs.filter((item) => item.id !== tab.id))}><Trash2 size={14} /> Remove</button>
               </div>
             </article>
           )) : (
-            <article className="paid-empty-extension-card">
+            <article className="studio-empty-extension-card">
               <header><span><Plug size={16} /></span><div><strong>No community tabs yet</strong><small>Create one from the sidebar.</small></div></header>
               <p>This creates a real empty workspace entry in the left rail, ready for plugin UI later.</p>
             </article>
@@ -113,10 +113,10 @@ export function ExtensionsHubPaidLayout({ paidTabs, onPaidTabsChange, onOpenTab 
         </section>
       </main>
 
-      <aside className="paid-extension-inspector">
+      <aside className="studio-extension-inspector">
         <header><Settings2 size={16} /><strong>Extension Policy</strong></header>
         <section>
-          <span className="paid-eyebrow">User Friendly Rules</span>
+          <span className="studio-eyebrow">User Friendly Rules</span>
           <ul>
             <li>Added tabs appear in the left rail automatically.</li>
             <li>Rail remains scrollable as the community grows.</li>
@@ -125,7 +125,7 @@ export function ExtensionsHubPaidLayout({ paidTabs, onPaidTabsChange, onOpenTab 
           </ul>
         </section>
         <section>
-          <span className="paid-eyebrow">Manifest Example</span>
+          <span className="studio-eyebrow">Manifest Example</span>
           <pre>{`{\n  "id": "plugin-my-workspace",\n  "label": "My Workspace",\n  "workspaceType": "empty",\n  "rail": { "visible": true }\n}`}</pre>
         </section>
       </aside>

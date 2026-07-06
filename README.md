@@ -43,6 +43,8 @@ AIWF Studio Pro.bat
 python launch_pro.py
 ```
 
+Early testers should keep [`docs/TESTER_USER_GUIDE.md`](docs/TESTER_USER_GUIDE.md) open. It covers install options, hidden terminals, support-terminal access, recovery buttons, and error reports.
+
 <p align="center">
   <img src="docs/assets/aiwf-studio-pro-sana-sprint.png" alt="AIWF Studio Pro image generation workspace" width="100%">
 </p>
@@ -186,6 +188,8 @@ This table is the quick truth source for model-family support on `main`.
 | LLM/chat | model inventory, dataset/config builders, Ollama client tests, and hidden/gated chat workspace scaffolding | No promoted Pro chat worker yet. LLM chat is intentionally outside this Pro release. llama.cpp/GGUF chat serving is a future lane |
 | Training | Kohya, ED2, and LLM training scaffolds are isolated and opt-in | Training is hidden/gated and must not be auto-started |
 
+Coming soon, hidden from the v1 app: Anima split-file generation and Qwen Image Nunchaku. Their files may still be sorted and tracked locally, but the v1 UI does not list them for download or generation until their native loaders have passing smoke receipts.
+
 ### Image Generation
 
 - txt2img, img2img, and inpaint
@@ -226,7 +230,8 @@ This table is the quick truth source for model-family support on `main`.
 - SD3.5 Diffusers-folder checkpoints are supported in `models/Stable-diffusion/`
 - Flux split-model txt2img is supported from `models/flux/GGUF/` or `models/flux/UNet/` with local CLIP-L, T5-XXL, and `ae.safetensors`
 - model aliases and trigger-word helpers
-- curated download entries for common local model folders
+- curated download entries for common local model folders, with direct buttons only for public non-auth entries
+- CivitAI browse links for model families AIWF can route; downloaded-model and installable-model browsers are coming soon
 - import helpers for model folders from another local install
 - SD/SDXL/SD3.5-style runtime LoRA loading through Diffusers adapter APIs
 - Wan stage LoRAs for supported 5B and high/low transformer routes, with runtime-aware filtering

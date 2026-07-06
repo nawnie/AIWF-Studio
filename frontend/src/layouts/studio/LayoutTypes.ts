@@ -7,7 +7,7 @@ import type {
   ProModelOption,
 } from '../../types'
 
-export interface PaidUserTab {
+export interface UserTab {
   id: string
   label: string
   icon?: string
@@ -17,7 +17,7 @@ export interface PaidUserTab {
   description?: string
 }
 
-export interface PaidWorkflowCodeBlock {
+export interface WorkflowCodeBlock {
   id: string
   label: string
   kind: 'generation' | 'workflow' | 'qa' | 'export'
@@ -34,7 +34,7 @@ export interface PaidWorkflowCodeBlock {
   code: string
 }
 
-export interface PaidLayoutProps {
+export interface LayoutProps {
   settings: GenerationSettings
   bootstrap: ProBootstrap
   runtime: ProRuntimeStatus
@@ -47,16 +47,16 @@ export interface PaidLayoutProps {
   onSettingsChange: Dispatch<SetStateAction<GenerationSettings>>
   onGenerate: () => void
   onSendToWorkflow?: (source?: string) => void
-  workflowBlocks?: PaidWorkflowCodeBlock[]
-  onWorkflowBlocksChange?: Dispatch<SetStateAction<PaidWorkflowCodeBlock[]>>
+  workflowBlocks?: WorkflowCodeBlock[]
+  onWorkflowBlocksChange?: Dispatch<SetStateAction<WorkflowCodeBlock[]>>
   onPreviewSelect: (output: RecentOutput) => void
   onOpenModels: () => void
   onOpenSettings: () => void
 }
 
-export interface PaidTabsProps {
-  paidTabs: PaidUserTab[]
-  onPaidTabsChange: (tabs: PaidUserTab[]) => void
+export interface TabsProps {
+  userTabs: UserTab[]
+  onTabsChange: (tabs: UserTab[]) => void
   onOpenTab?: (id: string) => void
 }
 

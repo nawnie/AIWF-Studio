@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Boxes, Cpu, Database, Filter, Search, ShieldCheck, Video, Zap } from 'lucide-react'
-import type { PaidLayoutProps } from './PaidLayoutTypes'
-import { fetchPaidModelFamilies, fallbackPaidModelFamilyMatrix } from './paidApiClient'
-import type { PaidModelFamily, PaidModelFamilyMatrix } from './paidApiClient'
-import './paidLayouts.css'
+import type { LayoutProps } from './LayoutTypes'
+import { fetchModelFamilies, fallbackModelFamilyMatrix } from './studioApiClient'
+import type { ModelFamily, ModelFamilyMatrix } from './studioApiClient'
+import './studioLayouts.css'
 
 type FamilyFilter = 'all' | 'image' | 'video' | 'assistant' | 'gaps'
 
@@ -15,20 +15,20 @@ function familyStatusClass(status: string): string {
   return 'neutral'
 }
 
-function statusTotal(family: PaidModelFamily, status: string): number {
+function statusTotal(family: ModelFamily, status: string): number {
   return Number(family.localReadiness?.[status] ?? 0)
 }
 
-function totalLocalRows(family: PaidModelFamily): number {
+function totalLocalRows(family: ModelFamily): number {
   return Object.values(family.localReadiness ?? {}).reduce((sum, value) => sum + Number(value || 0), 0)
 }
 
-function hasOpenGap(family: PaidModelFamily): boolean {
+function hasOpenGap(family: ModelFamily): boolean {
   const text = `${family.status} ${family.blockers.join(' ')} ${family.precisions.map((item) => item.status).join(' ')}`.toLowerCase()
   return text.includes('missing') || text.includes('blocked') || text.includes('metadata') || text.includes('not-a-current-route')
 }
 
-function familyIcon(family: PaidModelFamily) {
+function familyIcon(family: ModelFamily) {
   if (family.category === 'video') return <Video size={16} aria-hidden="true" />
   if (family.category === 'assistant') return <Cpu size={16} aria-hidden="true" />
   return <Boxes size={16} aria-hidden="true" />
@@ -41,15 +41,15 @@ function precisionStatusClass(status: string): string {
   return 'ready'
 }
 
-export function ModelFamilyMatrixPaidLayout(props: PaidLayoutProps) {
-  const [matrix, setMatrix] = useState<PaidModelFamilyMatrix>(() => fallbackPaidModelFamilyMatrix())
+export function ModelFamilyMatrixLayout(props: LayoutProps) {
+  const [matrix, setMatrix] = useState<ModelFamilyMatrix>(() => fallbackModelFamilyMatrix())
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<FamilyFilter>('all')
   const [selectedId, setSelectedId] = useState('wan')
 
   useEffect(() => {
     let active = true
-    fetchPaidModelFamilies().then((nextMatrix) => {
+    fetchModelFamilies().then((nextMatrix) => {
       if (!active) return
       setMatrix(nextMatrix)
       if (!nextMatrix.families.some((family) => family.id === selectedId)) {
@@ -83,20 +83,20 @@ export function ModelFamilyMatrixPaidLayout(props: PaidLayoutProps) {
     .reduce((sum, value) => sum + Number(value || 0), 0)
 
   return (
-    <div className="paid-full-surface paid-family-matrix">
-      <header className="paid-family-header">
-        <div className="paid-product-lockup">
-          <span className="paid-logo-orb"><ShieldCheck size={19} aria-hidden="true" /></span>
+    <div className="studio-full-surface studio-family-matrix">
+      <header className="studio-family-header">
+        <div className="studio-product-lockup">
+          <span className="studio-logo-orb"><ShieldCheck size={19} aria-hidden="true" /></span>
           <div>
             <strong>Model Family Support</strong>
             <small>{props.bootstrap.workspaceName} · code-indexed loader map</small>
           </div>
         </div>
-        <div className="paid-family-search paid-search-field">
+        <div className="studio-family-search studio-search-field">
           <Search size={15} aria-hidden="true" />
           <input value={query} placeholder="Search families, quants, loaders, blockers..." onChange={(event) => setQuery(event.target.value)} />
         </div>
-        <div className="paid-family-chip-row" aria-label="Family filters">
+        <div className="studio-family-chip-row" aria-label="Family filters">
           {(['all', 'image', 'video', 'assistant', 'gaps'] as const).map((item) => (
             <button key={item} className={filter === item ? 'active' : ''} type="button" onClick={() => setFilter(item)}>
               <Filter size={13} aria-hidden="true" /> {item}
@@ -105,24 +105,24 @@ export function ModelFamilyMatrixPaidLayout(props: PaidLayoutProps) {
         </div>
       </header>
 
-      <section className="paid-family-scoreboard" aria-label="Support overview">
+      <section className="studio-family-scoreboard" aria-label="Support overview">
         <article><span>Families</span><strong>{matrix.families.length}</strong><small>{filteredFamilies.length} visible</small></article>
         <article><span>Supported lanes</span><strong>{readyCount}</strong><small>ready or smoke-backed</small></article>
         <article><span>Open gaps</span><strong>{gapCount}</strong><small>blocked, metadata, or missing</small></article>
         <article><span>Local ledger rows</span><strong>{localRecordCount}</strong><small>{matrix.readiness?.error || 'readiness overlay'}</small></article>
       </section>
 
-      <section className="paid-family-body">
-        <aside className="paid-family-list" aria-label="Model families">
+      <section className="studio-family-body">
+        <aside className="studio-family-list" aria-label="Model families">
           {filteredFamilies.map((family) => (
             <button
               key={family.id}
               type="button"
-              className={selectedFamily?.id === family.id ? 'paid-family-card active' : 'paid-family-card'}
+              className={selectedFamily?.id === family.id ? 'studio-family-card active' : 'studio-family-card'}
               onClick={() => setSelectedId(family.id)}
             >
-              <span className={`paid-family-status-dot ${familyStatusClass(family.status)}`} />
-              <span className="paid-family-card-icon">{familyIcon(family)}</span>
+              <span className={`studio-family-status-dot ${familyStatusClass(family.status)}`} />
+              <span className="studio-family-card-icon">{familyIcon(family)}</span>
               <strong>{family.label}</strong>
               <small>{family.category} · {family.status}</small>
               <em>{totalLocalRows(family)} local rows</em>
@@ -131,28 +131,28 @@ export function ModelFamilyMatrixPaidLayout(props: PaidLayoutProps) {
         </aside>
 
         {selectedFamily ? (
-          <main className="paid-family-detail" aria-label={`${selectedFamily.label} support details`}>
-            <div className="paid-family-detail-hero">
+          <main className="studio-family-detail" aria-label={`${selectedFamily.label} support details`}>
+            <div className="studio-family-detail-hero">
               <div>
-                <span className="paid-eyebrow">{selectedFamily.category} family</span>
+                <span className="studio-eyebrow">{selectedFamily.category} family</span>
                 <h2>{selectedFamily.label}</h2>
                 <p>{selectedFamily.summary}</p>
               </div>
-              <div className={`paid-family-big-status ${familyStatusClass(selectedFamily.status)}`}>
+              <div className={`studio-family-big-status ${familyStatusClass(selectedFamily.status)}`}>
                 <Zap size={16} aria-hidden="true" />
                 {selectedFamily.status}
               </div>
             </div>
 
-            <div className="paid-family-grid">
-              <section className="paid-family-panel wide">
+            <div className="studio-family-grid">
+              <section className="studio-family-panel wide">
                 <header><strong>Precision and quant support</strong><small>{detectedPrecisionRows} local precision hits</small></header>
-                <div className="paid-precision-table" role="table">
+                <div className="studio-precision-table" role="table">
                   <div role="row" className="head"><span>Precision</span><span>Status</span><span>Loader</span><span>Notes</span></div>
                   {selectedFamily.precisions.map((precision) => (
                     <div key={`${selectedFamily.id}-${precision.name}-${precision.status}`} role="row">
                       <strong>{precision.name}</strong>
-                      <span className={`paid-status-pill ${precisionStatusClass(precision.status)}`}>{precision.status}</span>
+                      <span className={`studio-status-pill ${precisionStatusClass(precision.status)}`}>{precision.status}</span>
                       <span>{precision.loader}</span>
                       <small>{precision.notes || 'current code path'}</small>
                     </div>
@@ -160,29 +160,29 @@ export function ModelFamilyMatrixPaidLayout(props: PaidLayoutProps) {
                 </div>
               </section>
 
-              <section className="paid-family-panel">
+              <section className="studio-family-panel">
                 <header><strong>Local readiness</strong><small>from pipeline_readiness</small></header>
-                <div className="paid-family-meters">
+                <div className="studio-family-meters">
                   {['working', 'metadata-only', 'unsupported-no-route', 'blocked-cleanly', 'broken-runtime'].map((status) => (
                     <div key={status}><span>{status}</span><strong>{statusTotal(selectedFamily, status)}</strong></div>
                   ))}
                 </div>
               </section>
 
-              <section className="paid-family-panel">
+              <section className="studio-family-panel">
                 <header><strong>Storage contracts</strong><small>accepted shapes</small></header>
-                <div className="paid-family-token-wrap">
+                <div className="studio-family-token-wrap">
                   {selectedFamily.storage.map((item) => <span key={item}>{item}</span>)}
                 </div>
               </section>
 
-              <section className="paid-family-panel wide">
+              <section className="studio-family-panel wide">
                 <header><strong>Routes and loaders</strong><small>how the model is actually loaded</small></header>
-                <div className="paid-route-list">
+                <div className="studio-route-list">
                   {selectedFamily.routes.map((route) => (
                     <article key={route.id}>
                       <strong>{route.id}</strong>
-                      <span className={`paid-status-pill ${precisionStatusClass(route.status)}`}>{route.status}</span>
+                      <span className={`studio-status-pill ${precisionStatusClass(route.status)}`}>{route.status}</span>
                       <small>{route.kind}</small>
                       <code>{route.entrypoint}</code>
                       {route.notes ? <p>{route.notes}</p> : null}
@@ -191,21 +191,21 @@ export function ModelFamilyMatrixPaidLayout(props: PaidLayoutProps) {
                 </div>
               </section>
 
-              <section className="paid-family-panel">
+              <section className="studio-family-panel">
                 <header><strong>Sidecars</strong><small>required companions</small></header>
-                <div className="paid-family-token-wrap">
+                <div className="studio-family-token-wrap">
                   {selectedFamily.sidecars.map((item) => <span key={item}>{item}</span>)}
                 </div>
               </section>
 
-              <section className="paid-family-panel">
+              <section className="studio-family-panel">
                 <header><strong>LoRA policy</strong><small>adapter truth serum</small></header>
                 <p>{selectedFamily.lora}</p>
               </section>
 
-              <section className="paid-family-panel wide">
+              <section className="studio-family-panel wide">
                 <header><strong>Blockers and missing pieces</strong><small>do not expose as working</small></header>
-                <ul className="paid-family-blockers">
+                <ul className="studio-family-blockers">
                   {selectedFamily.blockers.map((item) => <li key={item}>{item}</li>)}
                 </ul>
               </section>
@@ -213,10 +213,10 @@ export function ModelFamilyMatrixPaidLayout(props: PaidLayoutProps) {
           </main>
         ) : null}
 
-        <aside className="paid-family-evidence" aria-label="Source evidence">
+        <aside className="studio-family-evidence" aria-label="Source evidence">
           <section>
             <header><Database size={15} aria-hidden="true" /><strong>Precision vocabulary</strong></header>
-            <div className="paid-family-token-wrap compact">
+            <div className="studio-family-token-wrap compact">
               {matrix.precisionVocabulary.map((item) => <span key={item}>{item}</span>)}
             </div>
           </section>

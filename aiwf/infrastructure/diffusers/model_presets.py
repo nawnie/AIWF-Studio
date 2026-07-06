@@ -13,8 +13,11 @@ from typing import Any
 
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
+    ARCH_FLUX_FILL,
     ARCH_FLUX_KONTEXT,
     ARCH_FLUX2_KLEIN,
+    ARCH_ANIMA,
+    ARCH_KREA2,
     ARCH_INPAINT,
     ARCH_QWEN_IMAGE,
     ARCH_QWEN_IMAGE_NUNCHAKU,
@@ -24,6 +27,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_SD35,
     ARCH_SDXL,
     ARCH_SDXL_INPAINT,
+    ARCH_SDXL_REFINER,
     ARCH_Z_IMAGE,
 )
 
@@ -35,11 +39,15 @@ ARCHITECTURE_PRESETS: dict[str, dict[str, Any]] = {
     ARCH_INPAINT: {"steps": 24, "cfg_scale": 7.0, "sampler": "euler_a", "scheduler": "automatic", "width": 512, "height": 512},
     ARCH_SDXL: {"steps": 28, "cfg_scale": 6.0, "sampler": "dpmpp_2m", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_SDXL_INPAINT: {"steps": 30, "cfg_scale": 6.0, "sampler": "dpmpp_2m", "scheduler": "automatic", "width": 1024, "height": 1024},
+    ARCH_SDXL_REFINER: {"steps": 10, "cfg_scale": 6.0, "sampler": "dpmpp_2m", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_SD35: {"steps": 28, "cfg_scale": 4.5, "sampler": "euler_a", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_FLUX: {"steps": 20, "cfg_scale": 0.0, "sampler": "euler_a", "scheduler": "automatic", "width": 1024, "height": 1024},
+    ARCH_FLUX_FILL: {"steps": 28, "cfg_scale": 3.5, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_FLUX_KONTEXT: {"steps": 28, "cfg_scale": 3.5, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_FLUX2_KLEIN: {"steps": 12, "cfg_scale": 1.0, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_Z_IMAGE: {"steps": 8, "cfg_scale": 1.0, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
+    ARCH_KREA2: {"steps": 8, "cfg_scale": 0.0, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
+    ARCH_ANIMA: {"steps": 36, "cfg_scale": 4.5, "sampler": "euler_a", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_QWEN_IMAGE: {"steps": 30, "cfg_scale": 4.0, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_QWEN_IMAGE_NUNCHAKU: {"steps": 4, "cfg_scale": 1.0, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_SANA: {"steps": 20, "cfg_scale": 4.5, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
@@ -58,6 +66,24 @@ SANA_SPRINT_PRESET: dict[str, Any] = {
 QWEN_NUNCHAKU_LIGHTNING_PRESET: dict[str, Any] = {
     "steps": 4,
     "cfg_scale": 1.0,
+    "sampler": "euler",
+    "scheduler": "automatic",
+    "width": 1024,
+    "height": 1024,
+}
+
+KREA2_RAW_PRESET: dict[str, Any] = {
+    "steps": 52,
+    "cfg_scale": 3.5,
+    "sampler": "euler",
+    "scheduler": "automatic",
+    "width": 1024,
+    "height": 1024,
+}
+
+KREA2_TURBO_PRESET: dict[str, Any] = {
+    "steps": 8,
+    "cfg_scale": 0.0,
     "sampler": "euler",
     "scheduler": "automatic",
     "width": 1024,
@@ -121,6 +147,11 @@ def resolve_model_preset(
         preset.update(QWEN_NUNCHAKU_LIGHTNING_PRESET)
     if architecture == ARCH_SANA and "sprint" in checkpoint_text:
         preset.update(SANA_SPRINT_PRESET)
+    if architecture == ARCH_KREA2:
+        if "raw" in checkpoint_text or "base" in checkpoint_text:
+            preset.update(KREA2_RAW_PRESET)
+        elif "turbo" in checkpoint_text:
+            preset.update(KREA2_TURBO_PRESET)
     if checkpoint_id:
         last_used = model_settings.get(checkpoint_id)
         if last_used:

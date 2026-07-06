@@ -11,6 +11,8 @@ from aiwf.runtime.bootstrap_env import apply_from_argv
 def main() -> None:
     """Prepare the shared AIWF environment, then launch the Pro React app."""
     argv = sys.argv[1:]
+    show_terminal = "--terminal" in argv
+    argv = [arg for arg in argv if arg != "--terminal"]
     sys.path.insert(0, str(launch.ROOT))
 
     apply_from_argv(argv)
@@ -33,13 +35,10 @@ def main() -> None:
 
     command = [launch.python(), str(launch.ROOT / "webui_pro.py"), *pro_argv]
     if os.name == "nt":
-        print("[AIWF Pro] Opening backend terminal. Close the Pro app window to stop the backend.")
-        proc = subprocess.Popen(
-            command,
-            cwd=str(launch.ROOT),
-            env=env,
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-        )
+        creationflags = subprocess.CREATE_NEW_CONSOLE if show_terminal else subprocess.CREATE_NO_WINDOW
+        if show_terminal:
+            print("[AIWF Pro] Opening backend terminal. Close the Pro app window to stop the backend.")
+        proc = subprocess.Popen(command, cwd=str(launch.ROOT), env=env, creationflags=creationflags)
         raise SystemExit(proc.wait())
 
     os.execvpe(launch.python(), command, env)

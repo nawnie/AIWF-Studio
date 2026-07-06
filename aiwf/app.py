@@ -5,6 +5,8 @@ import logging
 import os
 import sys
 import threading
+import time
+import webbrowser
 import warnings
 
 warnings.filterwarnings("ignore", message=".*HTTP_422_UNPROCESSABLE.*")
@@ -26,7 +28,7 @@ from aiwf.core.config.launch import (
     load_launch_settings,
     merge_launch_settings,
 )
-from aiwf.core.config.settings import RuntimeFlags
+from aiwf.core.config.settings import RuntimeFlags, normalize_vram_profile
 from aiwf.core.user_messages import STARTUP_MESSAGES
 from aiwf.core.util.access import build_network_access_info
 from aiwf.core.util.network import find_free_port
@@ -87,6 +89,17 @@ def _configure_logging(data_dir: Path) -> None:
 
 def _startup_message(message: str) -> None:
     print(f"[AIWF] {message}", flush=True)
+
+
+def _schedule_browser_open(url: str, *, delay_seconds: float = 0.75) -> None:
+    def _open() -> None:
+        time.sleep(max(0.0, delay_seconds))
+        try:
+            webbrowser.open(url)
+        except Exception:
+            logger.warning("Could not open browser for %s", url, exc_info=True)
+
+    threading.Thread(target=_open, name="aiwf-gradio-autolaunch", daemon=True).start()
 
 
 def _friendly_device_name(description: str) -> str:
@@ -241,6 +254,14 @@ def _parse_cli() -> RuntimeFlags:
     )
     parser.add_argument("--medvram", action="store_true")
     parser.add_argument("--lowvram", action="store_true")
+    parser.add_argument("--highvram", action="store_true")
+    parser.add_argument("--normalvram", action="store_true")
+    parser.add_argument(
+        "--vram-profile",
+        choices=["cpu", "low", "mid", "med", "medium", "normal", "high"],
+        default=None,
+        help="Runtime placement profile: cpu, low (4-8 GB), mid/medium (8-16 GB), normal, or high (16+ GB).",
+    )
     parser.add_argument(
         "--attention-backend",
         choices=["sage_sdpa", "sdpa", "xformers", "none"],
@@ -289,6 +310,20 @@ def _parse_cli() -> RuntimeFlags:
     parser.add_argument("--skip-prepare-environment", action="store_true")
     parser.add_argument("--ckpt", type=Path, default=None, dest="default_checkpoint")
     args = parser.parse_args()
+    if args.vram_profile:
+        vram_profile = normalize_vram_profile(args.vram_profile)
+    elif args.normalvram:
+        vram_profile = "normal"
+    elif args.cpu:
+        vram_profile = "cpu"
+    elif args.lowvram:
+        vram_profile = "low"
+    elif args.medvram:
+        vram_profile = "mid"
+    elif args.highvram:
+        vram_profile = "high"
+    else:
+        vram_profile = "normal"
 
     return RuntimeFlags(
         data_dir=args.data_dir.resolve(),
@@ -320,11 +355,13 @@ def _parse_cli() -> RuntimeFlags:
         fp8=args.fp8,
         fluxfp8=args.fluxfp8,
         directml=args.directml,
-        cpu=args.cpu,
+        cpu=vram_profile == "cpu",
         inference_backend=args.inference_backend,
         onnx_provider=args.onnx_provider,
-        medvram=args.medvram,
-        lowvram=args.lowvram,
+        vram_profile=vram_profile,
+        medvram=vram_profile == "mid",
+        lowvram=vram_profile == "low",
+        highvram=vram_profile == "high",
         attention_backend=(
             args.attention_backend
             or ("xformers" if args.xformers else "sdpa" if args.opt_sdp_attention or args.opt_split_attention else "sage_sdpa")
@@ -521,7 +558,7 @@ def run() -> None:
         server_name=server_name,
         server_port=port,
         share=flags.share,
-        inbrowser=flags.autolaunch,
+        inbrowser=False,
         auth=_auth_pairs(flags.gradio_auth),
         prevent_thread_lock=True,
         theme=theme,
@@ -542,6 +579,8 @@ def run() -> None:
 
         app.include_router(build_router(ctx))
         logger.info("API mounted at /api/v1")
+    if flags.autolaunch:
+        _schedule_browser_open(local_url)
 
     _startup_message(STARTUP_MESSAGES["ready"])
     _startup_message(STARTUP_MESSAGES["open_browser"].format(url=local_url))
@@ -553,8 +592,6 @@ def run() -> None:
         _startup_message(STARTUP_MESSAGES["share_link"].format(url=share_url))
 
     try:
-        import time
-
         while True:
             time.sleep(1)
     except KeyboardInterrupt:

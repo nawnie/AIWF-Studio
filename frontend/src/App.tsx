@@ -3,6 +3,7 @@ import type {
   CSSProperties,
   ChangeEvent as ReactChangeEvent,
   Dispatch,
+  DragEvent as ReactDragEvent,
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
@@ -50,8 +51,10 @@ import {
   fetchProBootstrap,
   fetchProCapabilities,
   fetchProDownloads,
+  downloadCatalogModel,
   fetchProLogs,
   fetchProRuntime,
+  fetchProStartup,
   fetchProExtensions,
   fetchProSettings,
   fetchVideoLabStatus,
@@ -59,12 +62,17 @@ import {
   formatApiError,
   generateAutoMask,
   generateProOutput,
+  getProApiLatencySamples,
+  openSupportTerminal,
   runFaceSwap,
   runVideoLab,
+  reorganizeModels,
+  uploadModelFile,
   uploadVideoLabFile,
   getFallbackBootstrap,
   getFallbackRuntime,
   ProApiError,
+  notifyProWindowReady,
   reportProClientError,
   reportProClientEvent,
   requestProRestart,
@@ -72,9 +80,10 @@ import {
   saveProSettings,
   streamProRuntime,
   stopProGeneration,
+  unloadProModel,
   runVsrImage,
 } from './api'
-import type { ProExtensionsStatus, VideoLabProbe, VideoLabStatus } from './api'
+import type { ProExtensionsStatus, ProModelSortResult, ProStartupStatus, VideoLabProbe, VideoLabStatus } from './api'
 import type {
   AspectRatioOption,
   CreationMode,
@@ -108,6 +117,22 @@ interface IconItem<T extends string> {
 type ToolModalId = 'segmentation' | 'hires' | 'enhance' | 'reactor' | 'about' | null
 type MenuBarId = 'file' | 'edit' | 'view' | 'options' | 'help' | null
 type DragTarget = 'left' | 'right' | 'bottom'
+
+interface SupportIssue {
+  title: string
+  message: string
+  source: string
+  createdAt: string
+  detail?: unknown
+  context?: Record<string, unknown>
+}
+
+const IMAGE_FILE_ACCEPT = 'image/*,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.avif'
+const VIDEO_FILE_ACCEPT = 'video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.wmv,.flv,.mpeg,.mpg,.ts,.mts,.m2ts,.3gp,.ogv'
+const MODEL_FILE_ACCEPT = '.safetensors,.ckpt,.pt,.pth,.bin,.gguf,.onnx'
+const IMAGE_FILE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff', '.avif'])
+const VIDEO_FILE_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v', '.wmv', '.flv', '.mpeg', '.mpg', '.ts', '.mts', '.m2ts', '.3gp', '.ogv'])
+const MODEL_FILE_EXTENSIONS = new Set(['.safetensors', '.ckpt', '.pt', '.pth', '.bin', '.gguf', '.onnx'])
 
 interface DragState {
   target: DragTarget
@@ -145,6 +170,17 @@ const DEFAULT_LAYOUT_PREFERENCES: LayoutPreferences = {
 }
 
 const PRO_APP_ICON = '/app-icon.png'
+const FALLBACK_STARTUP_STATUS: ProStartupStatus = {
+  status: 'server-ready',
+  serverReady: false,
+  windowReady: false,
+  startedAt: '',
+  serverReadyAt: '',
+  windowReadyAt: '',
+  minSplashMs: 1800,
+  readyHoldMs: 1200,
+}
+const STARTUP_SPLASH_FAILSAFE_MS = 14000
 
 const LAYOUT_STORAGE_KEY = 'aiwf.pro.layout.v1'
 
@@ -309,12 +345,36 @@ const ONNX_PROVIDER_OPTIONS = [
   { id: 'cpu', label: 'CPU' },
 ]
 
+const VRAM_PROFILE_OPTIONS = [
+  { id: 'normal', label: 'Normal VRAM' },
+  { id: 'cpu', label: 'CPU only' },
+  { id: 'low', label: 'Low VRAM (4-8 GB)' },
+  { id: 'mid', label: 'Mid VRAM (8-16 GB)' },
+  { id: 'high', label: 'High VRAM (16+ GB)' },
+]
+
 const RESOLUTION_PRESETS = [
   { id: '480', label: '480', shortEdge: 480 },
   { id: '512', label: '512', shortEdge: 512 },
   { id: '720', label: '720', shortEdge: 720 },
   { id: '1024', label: '1024', shortEdge: 1024 },
 ]
+
+function StartupSplash({ ready }: { ready: boolean }) {
+  return (
+    <div className={`pro-startup-splash${ready ? ' is-ready' : ''}`} role="status" aria-live="polite">
+      <div className="pro-startup-logo" aria-hidden="true">
+        <span className="pro-startup-logo-layer pro-startup-logo-frame" />
+        <span className="pro-startup-logo-layer pro-startup-logo-bolt" />
+        <span className="pro-startup-logo-layer pro-startup-logo-core" />
+      </div>
+      <div className="pro-startup-copy">
+        <span>{ready ? 'Ready' : 'Loading AIWF Studio'}</span>
+        <small>{ready ? 'Opening workspace' : 'Preparing local runtime'}</small>
+      </div>
+    </div>
+  )
+}
 
 function App() {
   const fallbackBootstrap = useMemo(() => getFallbackBootstrap(), [])
@@ -323,6 +383,8 @@ function App() {
   const [bootstrap, setBootstrap] = useState<ProBootstrap>(fallbackBootstrap)
   const [runtime, setRuntime] = useState<ProRuntimeStatus>(fallbackRuntime)
   const [runtimeStreamConnected, setRuntimeStreamConnected] = useState(false)
+  const [startupStatus, setStartupStatus] = useState<ProStartupStatus>(FALLBACK_STARTUP_STATUS)
+  const [startupSplashVisible, setStartupSplashVisible] = useState(true)
   const [settings, setSettings] = useState<GenerationSettings>(fallbackBootstrap.defaults)
   const [dataStatus, setDataStatus] = useState<ProDataStatus | null>(null)
   const [downloadsStatus, setDownloadsStatus] = useState<ProDownloadsStatus | null>(null)
@@ -345,6 +407,7 @@ function App() {
   const [generationTimings, setGenerationTimings] = useState<Record<string, number>>({})
   const [generationReceiptPath, setGenerationReceiptPath] = useState('')
   const [generationError, setGenerationError] = useState('')
+  const [supportIssue, setSupportIssue] = useState<SupportIssue | null>(null)
   const [activeMode, setActiveMode] = useState<ProMode>('image')
   const [activeRail, setActiveRail] = useState(readInitialRail)
   const [workflowBlocks, setWorkflowBlocks] = useState<WorkflowCodeBlock[]>(() => loadWorkflowBlocksFromStorage())
@@ -377,6 +440,7 @@ function App() {
   const [backendConnected, setBackendConnected] = useState(false)
   const [backendRecovering, setBackendRecovering] = useState(false)
   const [engineFilter, setEngineFilter] = useState<EngineId>('all')
+  const [downloadingCatalogKey, setDownloadingCatalogKey] = useState('')
   const [leftPanelWidth, setLeftPanelWidth] = useState(initialLayout.leftPanelWidth)
   const [rightPanelWidth, setRightPanelWidth] = useState(initialLayout.rightPanelWidth)
   const [bottomDockVisible, setBottomDockVisible] = useState(initialLayout.bottomDockVisible)
@@ -404,10 +468,14 @@ function App() {
   const [reactorBusy, setReactorBusy] = useState(false)
   const [reactorMessage, setReactorMessage] = useState('')
   const generationAbortRef = useRef<AbortController | null>(null)
+  const startupSplashStartedAtRef = useRef(Date.now())
+  const startupWindowReadyReportedRef = useRef(false)
   const runtimeErrorLoggedRef = useRef(false)
   const auxiliaryErrorLoggedRef = useRef<Record<string, boolean>>({})
   const auxiliaryFingerprintRef = useRef<Record<string, string>>({})
   const auxiliaryFetchInFlightRef = useRef<Record<string, boolean>>({})
+  const fileDropDepthRef = useRef(0)
+  const [fileDropActive, setFileDropActive] = useState(false)
   const runtimeJobActive = isRuntimeJobActive(runtime.job)
   const generationActive = isGenerating || runtime.state.toLowerCase() === 'running' || runtimeJobActive
 
@@ -434,6 +502,82 @@ function App() {
     setSettingsStatus(null)
     setStatusMessage(message)
   }, [setDisconnectedRuntime])
+
+  const showSupportIssue = useCallback(
+    (
+      title: string,
+      errorOrMessage: unknown,
+      source: string,
+      context: Record<string, unknown> = {},
+    ) => {
+      const message = typeof errorOrMessage === 'string' ? errorOrMessage : formatApiError(errorOrMessage)
+      const detail = errorOrMessage instanceof ProApiError ? errorOrMessage.detail : undefined
+      const apiLatency = getProApiLatencySamples().slice(-10)
+      const issue: SupportIssue = {
+        title,
+        message,
+        source,
+        createdAt: new Date().toISOString(),
+        detail,
+        context: {
+          ...context,
+          activeRail,
+          activeMode,
+          selectedModelId: settings.modelId,
+          selectedModelName: bootstrap.models.find((model) => model.id === settings.modelId)?.name ?? settings.modelId,
+          runtimeState: runtime.state,
+          backend: runtime.backend,
+          device: runtime.device,
+          apiLatency,
+          appVersion: bootstrap.version,
+          userAgent: window.navigator.userAgent,
+          url: window.location.href,
+        },
+      }
+      setSupportIssue(issue)
+      reportProClientError({
+        kind: 'support-popup',
+        message,
+        source,
+        context: issue.context,
+      })
+    },
+    [activeMode, activeRail, bootstrap.models, bootstrap.version, runtime.backend, runtime.device, runtime.state, settings.modelId],
+  )
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchProStartup(controller.signal)
+      .then(setStartupStatus)
+      .catch(() => undefined)
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    if (!startupSplashVisible) {
+      return undefined
+    }
+    const elapsedMs = Date.now() - startupSplashStartedAtRef.current
+    const minSplashMs = Math.max(0, startupStatus.minSplashMs || FALLBACK_STARTUP_STATUS.minSplashMs)
+    const readyHoldMs = Math.max(0, startupStatus.readyHoldMs || FALLBACK_STARTUP_STATUS.readyHoldMs)
+    const delayMs = backendConnected
+      ? Math.max(0, minSplashMs - elapsedMs) + readyHoldMs
+      : Math.max(1000, STARTUP_SPLASH_FAILSAFE_MS - elapsedMs)
+    const timeoutId = window.setTimeout(() => {
+      setStartupSplashVisible(false)
+    }, delayMs)
+    return () => window.clearTimeout(timeoutId)
+  }, [backendConnected, startupSplashVisible, startupStatus.minSplashMs, startupStatus.readyHoldMs])
+
+  useEffect(() => {
+    if (startupSplashVisible || startupWindowReadyReportedRef.current) {
+      return
+    }
+    startupWindowReadyReportedRef.current = true
+    notifyProWindowReady()
+      .then(setStartupStatus)
+      .catch(() => undefined)
+  }, [startupSplashVisible])
 
   const handleSaveProSettings = useCallback(async () => {
     setSettingsSaveStatus('Saving settings...')
@@ -467,6 +611,31 @@ function App() {
       })
     }
   }, [settings, settingsStatus])
+
+  const refreshWorkspaceDataNow = useCallback(async () => {
+    const [bootstrapResult, dataResult, downloadsResult, capabilitiesResult, settingsResult] = await Promise.allSettled([
+      fetchProBootstrap(),
+      fetchProData(),
+      fetchProDownloads(),
+      fetchProCapabilities(),
+      fetchProSettings(),
+    ])
+    if (bootstrapResult.status === 'fulfilled') {
+      setBootstrap(bootstrapResult.value)
+    }
+    if (dataResult.status === 'fulfilled') {
+      setDataStatus(dataResult.value)
+    }
+    if (downloadsResult.status === 'fulfilled') {
+      setDownloadsStatus(downloadsResult.value)
+    }
+    if (capabilitiesResult.status === 'fulfilled') {
+      setCapabilitiesStatus(capabilitiesResult.value)
+    }
+    if (settingsResult.status === 'fulfilled') {
+      setSettingsStatus(settingsResult.value)
+    }
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -528,7 +697,7 @@ function App() {
     // newer stream ticks — visible as progress jumping backwards and live
     // previews flickering.
     const applyPollResults = !runtimeStreamConnected
-    const intervalMs = runtimeStreamConnected ? 30000 : generationActive ? 1000 : 5000
+    const intervalMs = runtimeStreamConnected ? 30000 : backendRecovering ? 500 : generationActive ? 250 : 750
     const refreshRuntime = () => {
       if (disposed || inFlight) {
         return
@@ -540,7 +709,7 @@ function App() {
       requestTimeoutId = window.setTimeout(() => {
         timedOut = true
         activeController.abort()
-      }, 4000)
+      }, 1200)
       fetchProRuntime(activeController.signal)
         .then((nextRuntime) => {
           if (!disposed) {
@@ -558,7 +727,7 @@ function App() {
               runtimeErrorLoggedRef.current = true
               reportProClientError({
                 kind: 'api',
-                message: timedOut ? 'Runtime refresh timed out after 4 seconds.' : formatApiError(error),
+                message: timedOut ? 'Runtime refresh timed out after 1200 ms.' : formatApiError(error),
                 source: 'runtime-refresh',
                 context: { route: '/api/pro/runtime', timedOut },
               })
@@ -592,7 +761,7 @@ function App() {
       }
       window.clearInterval(intervalId)
     }
-  }, [generationActive, markBackendDisconnected, runtimeStreamConnected])
+  }, [backendRecovering, generationActive, markBackendDisconnected, runtimeStreamConnected])
 
   useEffect(() => {
     const onError = (event: ErrorEvent) => {
@@ -755,15 +924,17 @@ function App() {
       await requestProRestart()
     } catch (error) {
       setBackendRecovering(false)
-      setStatusMessage(`Backend restart request failed: ${formatApiError(error)}`)
+      const message = `Backend restart request failed: ${formatApiError(error)}`
+      setStatusMessage(message)
+      showSupportIssue('Backend restart failed', error, 'restart', { route: '/api/pro/restart' })
       reportProClientError({
         kind: 'api',
-        message: formatApiError(error),
+        message,
         source: 'restart',
         context: { route: '/api/pro/restart' },
       })
     }
-  }, [markBackendDisconnected])
+  }, [markBackendDisconnected, showSupportIssue])
 
   useEffect(() => {
     if (!dragState) {
@@ -1042,6 +1213,208 @@ function App() {
     [bootstrap.aspectRatios, bootstrap.models, creationModels],
   )
 
+  const uploadModelFilesAndRefresh = useCallback(
+    async (files: File[]) => {
+      const modelFiles = files.filter(isModelFile)
+      if (modelFiles.length === 0) {
+        throw new Error(`Choose a model file: ${MODEL_FILE_ACCEPT}.`)
+      }
+      setStatusMessage(`Sorting ${modelFiles.length} model file${modelFiles.length === 1 ? '' : 's'}...`)
+      const results: ProModelSortResult[] = []
+      for (const file of modelFiles) {
+        results.push(await uploadModelFile(file))
+      }
+      await refreshWorkspaceDataNow()
+      const totalMoved = results.reduce((sum, result) => sum + result.counts.moved, 0)
+      const totalLeft = results.reduce((sum, result) => sum + result.counts.left, 0)
+      const inventory = results[results.length - 1]?.counts.inventoryCount ?? 0
+      const message = totalMoved > 0
+        ? `Sorted ${totalMoved} model file${totalMoved === 1 ? '' : 's'}. Inventory: ${inventory}.`
+        : `${totalLeft || modelFiles.length} model file${modelFiles.length === 1 ? '' : 's'} need review in models to sort. Inventory: ${inventory}.`
+      setStatusMessage(message)
+      return message
+    },
+    [refreshWorkspaceDataNow],
+  )
+
+  const reorganizeModelFilesNow = useCallback(async () => {
+    setStatusMessage('Re-reading model headers...')
+    const result = await reorganizeModels()
+    await refreshWorkspaceDataNow()
+    const message = summarizeModelSort(result)
+    setStatusMessage(message)
+    return message
+  }, [refreshWorkspaceDataNow])
+
+  const handleCatalogDownload = useCallback(
+    async (key: string) => {
+      setDownloadingCatalogKey(key)
+      setStatusMessage('Downloading model...')
+      try {
+        const nextDownloads = await downloadCatalogModel(key)
+        setDownloadsStatus(nextDownloads)
+        await refreshWorkspaceDataNow()
+        setStatusMessage('Model downloaded and inventory refreshed.')
+      } catch (error: unknown) {
+        const message = formatApiError(error)
+        setStatusMessage(message)
+        showSupportIssue('Catalog download failed', error, 'catalog-download', {
+          route: `/api/pro/downloads/catalog/${key}`,
+          catalogKey: key,
+        })
+        reportProClientError({
+          kind: 'api',
+          message,
+          source: 'catalog-download',
+          context: { route: `/api/pro/downloads/catalog/${key}` },
+        })
+      } finally {
+        setDownloadingCatalogKey('')
+      }
+    },
+    [refreshWorkspaceDataNow, showSupportIssue],
+  )
+
+  const handleUnloadModel = useCallback(async () => {
+    setStatusMessage('Unloading current model...')
+    try {
+      const nextRuntime = await unloadProModel()
+      setRuntime(nextRuntime)
+      setStatusMessage('Current model unloaded.')
+    } catch (error: unknown) {
+      const message = formatApiError(error)
+      setStatusMessage(message)
+      showSupportIssue('Unload model failed', error, 'model-unload', { route: '/api/pro/models/unload' })
+    }
+  }, [showSupportIssue])
+
+  const handleOpenSupportTerminal = useCallback(async () => {
+    setStatusMessage('Opening support terminal...')
+    try {
+      const result = await openSupportTerminal()
+      setStatusMessage(result.cwd ? `Support terminal opened in ${result.cwd}.` : 'Support terminal opened.')
+    } catch (error: unknown) {
+      const message = formatApiError(error)
+      setStatusMessage(message)
+      showSupportIssue('Support terminal failed', error, 'support-terminal', { route: '/api/pro/support/terminal' })
+    }
+  }, [showSupportIssue])
+
+  const handleReloadFrontend = useCallback(() => {
+    window.location.reload()
+  }, [])
+
+  const handleDroppedFiles = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) {
+        return
+      }
+      const modelFiles = files.filter(isModelFile)
+      const firstImage = files.find((file) => !isModelFile(file) && isImageFile(file))
+      const firstVideo = files.find((file) => !isModelFile(file) && isVideoFile(file))
+      if (modelFiles.length > 0) {
+        await uploadModelFilesAndRefresh(modelFiles)
+      }
+      if (firstImage) {
+        const dataUrl = await readFileAsDataUrl(firstImage)
+        if (activeMode === 'video') {
+          setSettings((current) => ({
+            ...current,
+            mode: 'video',
+            sourceImageDataUrl: dataUrl,
+            sourceImageName: firstImage.name,
+          }))
+          setStatusMessage(`Loaded ${firstImage.name} as the video first frame.`)
+        } else if (activeMode === 'inpaint') {
+          setSettings((current) => ({
+            ...current,
+            mode: 'inpaint',
+            initImageDataUrl: dataUrl,
+            maskImageDataUrl: '',
+          }))
+          setStatusMessage(`Loaded ${firstImage.name} into the inpaint canvas.`)
+        } else {
+          const dimensions = await imageDimensionsFromDataUrl(dataUrl)
+          setActiveMode('image')
+          setActiveRail('create')
+          setPreview({
+            id: `local-${Date.now()}`,
+            url: dataUrl,
+            thumbnailUrl: dataUrl,
+            prompt: firstImage.name,
+            width: dimensions.width || settings.width,
+            height: dimensions.height || settings.height,
+            createdAt: new Date().toISOString(),
+            mode: 'image',
+            modelName: 'Local file',
+            source: 'upload',
+          })
+          setStatusMessage(`Loaded ${firstImage.name} into the image canvas.`)
+        }
+      } else if (firstVideo) {
+        setStatusMessage(`Uploading ${firstVideo.name} to Video Lab...`)
+        const probe = await uploadVideoLabFile(firstVideo)
+        setActiveRail('tools')
+        setActiveMode('video')
+        setStatusMessage(
+          `Uploaded ${firstVideo.name}: ${probe.width}x${probe.height}, ${probe.frameCount} frames @ ${probe.fps.toFixed(1)} fps.`,
+        )
+      }
+    },
+    [activeMode, setPreview, settings.height, settings.width, uploadModelFilesAndRefresh],
+  )
+
+  const handleFileDragEnter = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) {
+      return
+    }
+    event.preventDefault()
+    fileDropDepthRef.current += 1
+    setFileDropActive(true)
+  }, [])
+
+  const handleFileDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) {
+      return
+    }
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }, [])
+
+  const handleFileDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) {
+      return
+    }
+    event.preventDefault()
+    fileDropDepthRef.current = Math.max(0, fileDropDepthRef.current - 1)
+    if (fileDropDepthRef.current === 0) {
+      setFileDropActive(false)
+    }
+  }, [])
+
+  const handleFileDrop = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!event.dataTransfer.types.includes('Files')) {
+        return
+      }
+      event.preventDefault()
+      fileDropDepthRef.current = 0
+      setFileDropActive(false)
+      const files = Array.from(event.dataTransfer.files)
+      void handleDroppedFiles(files).catch((error: unknown) => {
+        const message = formatApiError(error)
+        setStatusMessage(message)
+        showSupportIssue('File import failed', error, 'file-drop', { fileCount: files.length })
+        reportProClientError({
+          kind: 'file-drop',
+          message,
+          source: 'handleFileDrop',
+        })
+      })
+    },
+    [handleDroppedFiles, showSupportIssue],
+  )
+
   const handleGenerate = useCallback(async () => {
     if (generationAbortRef.current) {
       if (generationActive) {
@@ -1161,6 +1534,14 @@ function App() {
         const nextMessage = `Generation failed: ${formatApiError(error)}`
         setGenerationError(nextMessage)
         setStatusMessage(nextMessage)
+        showSupportIssue('Generation failed', error, 'generate', {
+          mode: settings.mode,
+          modelId: settings.modelId,
+          route: '/api/pro/generate',
+          width: settings.width,
+          height: settings.height,
+          steps: settings.steps,
+        })
         reportProClientError({
           kind: 'generation',
           message: nextMessage,
@@ -1375,7 +1756,9 @@ function App() {
       setEnhanceMessage(result.message || 'Enhance complete.')
       setStatusMessage(result.message || 'Enhance complete.')
     } catch (error: unknown) {
-      setEnhanceMessage(`Enhance failed: ${formatApiError(error)}`)
+      const message = `Enhance failed: ${formatApiError(error)}`
+      setEnhanceMessage(message)
+      showSupportIssue('Enhance failed', error, 'enhance', { route: '/api/pro/enhance/image' })
     } finally {
       setEnhanceBusy(false)
     }
@@ -1437,7 +1820,47 @@ function App() {
       } as CSSProperties)
 
   return (
-    <div className="aiwf-pro-shell theme-preset-1" data-mode={activeMode}>
+    <div
+      className={`aiwf-pro-shell theme-preset-1${fileDropActive ? ' is-file-drop-active' : ''}`}
+      data-mode={activeMode}
+      onDragEnter={handleFileDragEnter}
+      onDragOver={handleFileDragOver}
+      onDragLeave={handleFileDragLeave}
+      onDrop={handleFileDrop}
+    >
+      {startupSplashVisible ? <StartupSplash ready={backendConnected} /> : null}
+      {fileDropActive ? (
+        <div className="pro-file-drop-overlay" aria-hidden="true">
+          <div>
+            <HardDrive size={28} aria-hidden="true" />
+            <strong>Drop files</strong>
+            <span>Images load into the current canvas. Videos go to Video Lab. Models go to the sorter.</span>
+          </div>
+        </div>
+      ) : null}
+      {supportIssue ? (
+        <SupportIssueDialog
+          issue={supportIssue}
+          onClose={() => setSupportIssue(null)}
+          onCopy={async () => {
+            await navigator.clipboard?.writeText(JSON.stringify(supportIssue, null, 2))
+            setStatusMessage('Error report copied.')
+          }}
+          onSubmit={() => {
+            reportProClientError({
+              kind: 'tester-report',
+              message: supportIssue.message,
+              source: supportIssue.source,
+              context: {
+                ...supportIssue.context,
+                detail: supportIssue.detail,
+                createdAt: supportIssue.createdAt,
+              },
+            })
+            setStatusMessage('Local error report saved. Send the copied report if Shawn asks for it.')
+          }}
+        />
+      ) : null}
       <aside className="pro-rail" aria-label="Primary navigation">
         <button
           type="button"
@@ -1548,6 +1971,8 @@ function App() {
               selectedModelId={settings.modelId}
               onEngineFilterChange={handleEngineFilterChange}
               onModelSelect={handleModelSelect}
+              onCatalogDownload={handleCatalogDownload}
+              downloadingCatalogKey={downloadingCatalogKey}
             />
           ) : activeRail === 'data' ? (
             <>
@@ -1701,6 +2126,12 @@ function App() {
                 onSettingsChange={setSettings}
                 onSettingsStatusChange={setSettingsStatus}
                 onSaveSettings={handleSaveProSettings}
+                onModelFilesUpload={uploadModelFilesAndRefresh}
+                onModelReorganize={reorganizeModelFilesNow}
+                onUnloadModel={handleUnloadModel}
+                onRestartBackend={handleRecoverBackend}
+                onReloadFrontend={handleReloadFrontend}
+                onOpenSupportTerminal={handleOpenSupportTerminal}
                 settingsSaveStatus={settingsSaveStatus}
                 leftPanelWidth={leftPanelWidth}
                 rightPanelWidth={rightPanelWidth}
@@ -1798,7 +2229,11 @@ function App() {
               />
             </>
           )}
-          <RuntimePanel runtime={runtime} selectedModelName={selectedModel?.name ?? settings.modelId} />
+          <RuntimePanel
+            runtime={runtime}
+            selectedModelName={selectedModel?.name ?? settings.modelId}
+            onUnloadModel={handleUnloadModel}
+          />
         </section>
 
       </main>
@@ -1896,7 +2331,7 @@ function App() {
                 id="pro-enhance-source-input"
                 className="pro-file-input-hidden"
                 type="file"
-                accept="image/png,image/jpeg,image/webp"
+                accept={IMAGE_FILE_ACCEPT}
                 onChange={handleEnhanceSourceChange}
                 disabled={enhanceBusy}
               />
@@ -2029,7 +2464,7 @@ function App() {
             <FieldLabel label="Source face" tooltip="Upload a clear photo of the face to transplant onto the current preview image." />
             <input
               type="file"
-              accept="image/png,image/jpeg,image/webp"
+              accept={IMAGE_FILE_ACCEPT}
               onChange={(event) => {
                 const file = event.target.files?.[0]
                 event.target.value = ''
@@ -2246,6 +2681,67 @@ function TopBar({
         </div>
       </div>
     </header>
+  )
+}
+
+function SupportIssueDialog({
+  issue,
+  onClose,
+  onCopy,
+  onSubmit,
+}: {
+  issue: SupportIssue
+  onClose: () => void
+  onCopy: () => void | Promise<void>
+  onSubmit: () => void
+}) {
+  const details = JSON.stringify({ detail: issue.detail, context: issue.context }, null, 2)
+  return (
+    <div className="pro-support-modal-backdrop" role="presentation">
+      <section className="pro-support-modal" role="dialog" aria-modal="true" aria-labelledby="support-issue-title">
+        <div className="pro-support-modal-header">
+          <div>
+            <span>Error report</span>
+            <strong id="support-issue-title">{issue.title}</strong>
+          </div>
+          <button type="button" className="pro-icon-button" aria-label="Close error report" onClick={onClose}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+        <p>{issue.message}</p>
+        <dl className="pro-support-summary">
+          <div>
+            <dt>Source</dt>
+            <dd>{issue.source}</dd>
+          </div>
+          <div>
+            <dt>Time</dt>
+            <dd>{issue.createdAt}</dd>
+          </div>
+          <div>
+            <dt>Model</dt>
+            <dd>{String(issue.context?.selectedModelName ?? issue.context?.selectedModelId ?? 'Unknown')}</dd>
+          </div>
+        </dl>
+        {issue.detail || issue.context ? (
+          <details className="pro-support-details">
+            <summary>Technical details</summary>
+            <pre>{details}</pre>
+          </details>
+        ) : null}
+        <div className="pro-settings-action-row">
+          <button type="button" className="pro-primary-button" onClick={onCopy}>
+            Copy report
+          </button>
+          <button type="button" className="pro-secondary-button" onClick={onSubmit}>
+            Save local report
+          </button>
+          <button type="button" className="pro-secondary-button" onClick={onClose}>
+            Dismiss
+          </button>
+        </div>
+      </section>
+    </div>
   )
 }
 
@@ -2519,7 +3015,7 @@ function PromptPanel({
               id="pro-video-source-input"
               className="pro-file-input-hidden"
               type="file"
-              accept="image/png,image/jpeg,image/webp"
+              accept={IMAGE_FILE_ACCEPT}
               onChange={handleVideoSourceChange}
             />
             {settings.sourceImageDataUrl ? (
@@ -3024,7 +3520,7 @@ function PromptPanel({
                 id="pro-controlnet-image-input"
                 className="pro-file-input-hidden"
                 type="file"
-                accept="image/png,image/jpeg,image/webp"
+                accept={IMAGE_FILE_ACCEPT}
                 onChange={handleControlNetImageChange}
               />
               {settings.controlNetImageDataUrl ? (
@@ -3358,6 +3854,8 @@ function ModelsWorkspace({
   selectedModelId,
   onEngineFilterChange,
   onModelSelect,
+  onCatalogDownload,
+  downloadingCatalogKey,
 }: {
   engineFilter: EngineId
   engines: EngineSummary[]
@@ -3366,6 +3864,8 @@ function ModelsWorkspace({
   selectedModelId: string
   onEngineFilterChange: (value: EngineId) => void
   onModelSelect: (modelId: string) => void
+  onCatalogDownload: (key: string) => void
+  downloadingCatalogKey: string
 }) {
   const visibleModels = models.filter((model) => matchesEngineFilter(model, engineFilter))
   const groupedModels = groupModelsByEngine(visibleModels, engines)
@@ -3407,6 +3907,59 @@ function ModelsWorkspace({
           <StatTile label="Route" value={`${downloadSummary.routeTotal}`} hint={downloadSummary.routeLabel} />
         </div>
         <div className="pro-download-chip-row">
+          {downloadSummary.items.map((item) => {
+            const linkLabel = item.source === 'civitai' ? 'Open CivitAI' : 'Open source'
+            const subtitle = item.installed
+              ? 'Installed'
+              : item.canDownload
+                ? `${item.category} | Direct download`
+                : item.hfUrl
+                  ? `${item.category} | ${linkLabel}`
+                  : item.category
+            if (item.canDownload && !item.installed) {
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className="pro-download-chip pro-download-chip-button"
+                  title={`${item.destination}${item.notes ? ` - ${item.notes}` : ''}`}
+                  onClick={() => onCatalogDownload(item.key)}
+                  disabled={downloadingCatalogKey === item.key}
+                >
+                  <strong>{item.title}</strong>
+                  <small>{downloadingCatalogKey === item.key ? 'Downloading...' : subtitle}</small>
+                </button>
+              )
+            }
+            return item.hfUrl ? (
+              <a
+                key={item.key}
+                className={item.installed ? 'pro-download-chip pro-download-chip-ready' : 'pro-download-chip pro-download-chip-link'}
+                href={item.hfUrl}
+                target="_blank"
+                rel="noreferrer"
+                title={`${item.destination}${item.notes ? ` - ${item.notes}` : ''}`}
+              >
+                <strong>{item.title}</strong>
+                <small>{subtitle}</small>
+              </a>
+            ) : (
+              <span
+                key={item.key}
+                className={item.installed ? 'pro-download-chip pro-download-chip-ready' : 'pro-download-chip'}
+                title={item.destination}
+              >
+                <strong>{item.title}</strong>
+                <small>{subtitle}</small>
+              </span>
+            )
+          })}
+        </div>
+        <p className="pro-download-note">
+          Downloaded-model and installable-model browsers are coming soon.
+        </p>
+        {false ? (
+        <div className="pro-download-chip-row">
           {downloadSummary.items.map((item) =>
             item.hfUrl ? (
               <a
@@ -3432,6 +3985,7 @@ function ModelsWorkspace({
             ),
           )}
         </div>
+        ) : null}
       </section>
 
       {downloadsStatus && downloadsStatus.civitaiLinks.length > 0 ? (
@@ -3446,13 +4000,14 @@ function ModelsWorkspace({
               .map((link) => (
                 <a
                   key={link.url}
-                  className="pro-download-chip pro-download-chip-link"
+                  className="pro-download-chip pro-download-chip-link pro-civitai-link"
                   href={link.url}
                   target="_blank"
                   rel="noreferrer"
                   title={link.note}
                 >
                   <strong>{link.label}</strong>
+                  <small>Open CivitAI</small>
                   <small>CivitAI ↗</small>
                 </a>
               ))}
@@ -3923,7 +4478,7 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
             id="pro-video-lab-upload"
             className="pro-file-input-hidden"
             type="file"
-            accept="video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo"
+            accept={VIDEO_FILE_ACCEPT}
             onChange={handleUpload}
             disabled={busy}
           />
@@ -4579,6 +5134,12 @@ function SettingsWorkspace({
   onSettingsChange,
   onSettingsStatusChange,
   onSaveSettings,
+  onModelFilesUpload,
+  onModelReorganize,
+  onUnloadModel,
+  onRestartBackend,
+  onReloadFrontend,
+  onOpenSupportTerminal,
   settingsSaveStatus,
   leftPanelWidth,
   rightPanelWidth,
@@ -4594,6 +5155,12 @@ function SettingsWorkspace({
   onSettingsChange: Dispatch<SetStateAction<GenerationSettings>>
   onSettingsStatusChange: Dispatch<SetStateAction<ProSettingsStatus | null>>
   onSaveSettings: () => void
+  onModelFilesUpload: (files: File[]) => Promise<string>
+  onModelReorganize: () => Promise<string>
+  onUnloadModel: () => void
+  onRestartBackend: () => void
+  onReloadFrontend: () => void
+  onOpenSupportTerminal: () => void
   settingsSaveStatus: string
   leftPanelWidth: number
   rightPanelWidth: number
@@ -4604,6 +5171,9 @@ function SettingsWorkspace({
   const summary = summarizeRecentOutputs(recentOutputs)
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('generation')
   const [settingsQuery, setSettingsQuery] = useState('')
+  const [modelSortBusy, setModelSortBusy] = useState(false)
+  const [modelSortStatus, setModelSortStatus] = useState('')
+  const modelUploadInputRef = useRef<HTMLInputElement>(null)
   const show = useCallback(
     (section: SettingsSectionId, keywords: string) => {
       const query = settingsQuery.trim().toLowerCase()
@@ -4677,8 +5247,10 @@ function SettingsWorkspace({
     asyncOffload: true,
     pinnedMemory: true,
     cudaMalloc: false,
+    vramProfile: 'normal',
     medvram: false,
     lowvram: false,
+    highvram: false,
     noHalf: false,
     fp8: false,
     fluxFp8: false,
@@ -4778,6 +5350,45 @@ function SettingsWorkspace({
     [onSettingsStatusChange],
   )
 
+  const updateVramProfile = useCallback(
+    (profile: string) => {
+      updateRuntimeSetting({
+        vramProfile: profile,
+        cpu: profile === 'cpu',
+        lowvram: profile === 'low',
+        medvram: profile === 'mid',
+        highvram: profile === 'high',
+      })
+    },
+    [updateRuntimeSetting],
+  )
+
+  const handleSettingsModelUpload = useCallback(
+    (event: ReactChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files ?? [])
+      event.target.value = ''
+      if (files.length === 0) {
+        return
+      }
+      setModelSortBusy(true)
+      setModelSortStatus(`Sorting ${files.length} file${files.length === 1 ? '' : 's'}...`)
+      void onModelFilesUpload(files)
+        .then(setModelSortStatus)
+        .catch((error: unknown) => setModelSortStatus(formatApiError(error)))
+        .finally(() => setModelSortBusy(false))
+    },
+    [onModelFilesUpload],
+  )
+
+  const handleSettingsModelReorganize = useCallback(() => {
+    setModelSortBusy(true)
+    setModelSortStatus('Re-reading model headers...')
+    void onModelReorganize()
+      .then(setModelSortStatus)
+      .catch((error: unknown) => setModelSortStatus(formatApiError(error)))
+      .finally(() => setModelSortBusy(false))
+  }, [onModelReorganize])
+
   const outputToggles: Array<{ key: keyof ProSettingsStatus['output']; label: string }> = [
     { key: 'embedMetadata', label: 'Embed metadata' },
     { key: 'saveSidecarTxt', label: 'Write sidecar txt' },
@@ -4798,8 +5409,6 @@ function SettingsWorkspace({
     { key: 'share', label: 'Public share link' },
     { key: 'autolaunch', label: 'Auto launch browser' },
     { key: 'blockPrivateDownloadUrls', label: 'Block private download URLs' },
-    { key: 'medvram', label: 'Med VRAM' },
-    { key: 'lowvram', label: 'Low VRAM' },
     { key: 'asyncOffload', label: 'Async offload' },
     { key: 'pinnedMemory', label: 'Pinned memory' },
     { key: 'cudaMalloc', label: 'CUDA malloc tuning' },
@@ -4807,7 +5416,6 @@ function SettingsWorkspace({
     { key: 'fp8', label: 'FP8 mode' },
     { key: 'fluxFp8', label: 'Flux FP8' },
     { key: 'directml', label: 'DirectML' },
-    { key: 'cpu', label: 'Force CPU' },
     { key: 'xformers', label: 'xFormers flag' },
     { key: 'optSdpAttention', label: 'SDP attention flag' },
     { key: 'optSplitAttention', label: 'Split attention flag' },
@@ -4856,6 +5464,27 @@ function SettingsWorkspace({
         />
       </div>
       <div className="pro-workspace-grid">
+        {show('system', 'support terminal restart backend reload frontend unload model recovery troubleshooting') && (
+        <InfoCard title="Support and recovery" subtitle="Quick actions for tester machines when something gets stuck.">
+          <div className="pro-settings-action-row">
+            <button type="button" className="pro-secondary-button" onClick={onOpenSupportTerminal}>
+              Open support terminal
+            </button>
+            <button type="button" className="pro-secondary-button" onClick={onUnloadModel}>
+              Unload model
+            </button>
+            <button type="button" className="pro-secondary-button" onClick={onRestartBackend}>
+              Restart backend
+            </button>
+            <button type="button" className="pro-secondary-button" onClick={onReloadFrontend}>
+              Reload app window
+            </button>
+          </div>
+          <p className="pro-field-note">
+            The terminal opens in this folder with the venv active. Use it for installer checks, pip fixes, and logs.
+          </p>
+        </InfoCard>
+        )}
         {show('generation', 'generation defaults model sampler scheduler steps cfg clip skip width height negative prompt save images') && (
         <InfoCard title="Generation defaults" subtitle="Saved through the Pro backend settings file.">
           <div className="pro-form-stack">
@@ -5436,6 +6065,23 @@ function SettingsWorkspace({
                 disabled={!settingsStatus}
               />
             </label>
+            <label className="pro-field">
+              <FieldLabel
+                label="VRAM profile"
+                tooltip="Low targets 4-8 GB with sequential CPU offload; mid targets 8-16 GB with model CPU offload; high targets 16+ GB resident models. Restart AIWF for this change to take effect."
+              />
+              <select
+                value={runtimeSettings.vramProfile}
+                onChange={(event) => updateVramProfile(event.target.value)}
+                disabled={!settingsStatus}
+              >
+                {VRAM_PROFILE_OPTIONS.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="pro-settings-columns pro-settings-columns-compact">
               {runtimeToggles.map((item) => (
                 <label className="pro-toggle" key={item.key}>
@@ -5516,6 +6162,42 @@ function SettingsWorkspace({
             <MetricRow label="Checkpoints" value={settingsStatus?.paths.checkpoints || 'Unavailable'} />
             <MetricRow label="Outputs" value={settingsStatus?.paths.outputs || 'Unavailable'} />
           </dl>
+        </InfoCard>
+        )}
+        {show('system', 'models upload drag drop sort reorganize reread headers gguf safetensors checkpoint inventory') && (
+        <InfoCard title="Model file sorter" subtitle="Drop or pick model files; AIWF reads headers and moves confident matches.">
+          <div className="pro-settings-action-row">
+            <button
+              type="button"
+              className="pro-secondary-button"
+              onClick={() => modelUploadInputRef.current?.click()}
+              disabled={modelSortBusy || !settingsStatus}
+            >
+              <HardDrive size={14} aria-hidden="true" />
+              Upload model files
+            </button>
+            <input
+              ref={modelUploadInputRef}
+              className="pro-file-input-hidden"
+              type="file"
+              multiple
+              accept={MODEL_FILE_ACCEPT}
+              onChange={handleSettingsModelUpload}
+            />
+            <button
+              type="button"
+              className="pro-secondary-button"
+              onClick={handleSettingsModelReorganize}
+              disabled={modelSortBusy || !settingsStatus}
+            >
+              <RefreshCcw size={14} aria-hidden="true" />
+              Reorganize models
+            </button>
+          </div>
+          <p className="pro-field-note">
+            Reorganize scans the main models directory, reads model headers, and moves confident matches without overwriting files.
+          </p>
+          {modelSortStatus ? <p className="pro-muted">{modelSortStatus}</p> : null}
         </InfoCard>
         )}
         {show('interface', 'layout memory panel width dock height advanced') && (
@@ -5804,9 +6486,7 @@ function InpaintCanvas({
     if (settings.initImageDataUrl) {
       loadImage(settings.initImageDataUrl)
     }
-    // Restore any previously loaded init image when the inpaint tab mounts.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [loadImage, settings.initImageDataUrl])
 
   const handleFileChange = useCallback(
     (event: ReactChangeEvent<HTMLInputElement>) => {
@@ -6041,7 +6721,7 @@ function InpaintCanvas({
             <FileImage size={14} aria-hidden="true" />
             <span>Load image</span>
           </button>
-          <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={handleFileChange} />
+          <input ref={fileInputRef} type="file" accept={IMAGE_FILE_ACCEPT} hidden onChange={handleFileChange} />
           {preview ? (
             <button type="button" className="pro-tool-chip" onClick={usePreviewImage}>
               <Image size={14} aria-hidden="true" />
@@ -6367,9 +7047,11 @@ function BottomDock({
 function RuntimePanel({
   runtime,
   selectedModelName,
+  onUnloadModel,
 }: {
   runtime: ProRuntimeStatus
   selectedModelName: string
+  onUnloadModel: () => void
 }) {
   const loadedModelName = runtime.loadedModel.loaded ? runtime.loadedModel.name : 'No model loaded'
   return (
@@ -6433,7 +7115,14 @@ function RuntimePanel({
           <MetricRow label="Text encoder" value={runtime.loadedModel.textEncoder} />
           <MetricRow label="UNet" value={runtime.loadedModel.unet} />
         </dl>
-        <button type="button" className="pro-unload-button" disabled>Unload model</button>
+        <button
+          type="button"
+          className="pro-unload-button"
+          onClick={onUnloadModel}
+          disabled={!runtime.loadedModel.loaded}
+        >
+          Unload model
+        </button>
       </div>
 
       <div className="pro-queue-row">
@@ -7186,6 +7875,58 @@ function findMatchingAspectRatio(
 
 function isCreationMode(mode: ProMode): mode is CreationMode {
   return mode === 'image' || mode === 'video' || mode === 'inpaint'
+}
+
+function fileExtension(file: File): string {
+  const name = file.name || ''
+  const dot = name.lastIndexOf('.')
+  return dot >= 0 ? name.slice(dot).toLowerCase() : ''
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/') || IMAGE_FILE_EXTENSIONS.has(fileExtension(file))
+}
+
+function isVideoFile(file: File): boolean {
+  return file.type.startsWith('video/') || VIDEO_FILE_EXTENSIONS.has(fileExtension(file))
+}
+
+function isModelFile(file: File): boolean {
+  return MODEL_FILE_EXTENSIONS.has(fileExtension(file))
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}.`))
+    reader.readAsDataURL(file)
+  })
+}
+
+function imageDimensionsFromDataUrl(dataUrl: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve) => {
+    const image = new window.Image()
+    image.onload = () => resolve({ width: image.naturalWidth || 0, height: image.naturalHeight || 0 })
+    image.onerror = () => resolve({ width: 0, height: 0 })
+    image.src = dataUrl
+  })
+}
+
+function summarizeModelSort(result: ProModelSortResult): string {
+  const moved = result.counts.moved
+  const left = result.counts.left
+  const inventory = result.counts.inventoryCount
+  if (moved > 0 && left > 0) {
+    return `Moved ${moved} model file${moved === 1 ? '' : 's'}; ${left} need review. Inventory: ${inventory}.`
+  }
+  if (moved > 0) {
+    return `Moved ${moved} model file${moved === 1 ? '' : 's'}. Inventory: ${inventory}.`
+  }
+  if (left > 0) {
+    return `${left} model file${left === 1 ? '' : 's'} need review. Inventory: ${inventory}.`
+  }
+  return `Model inventory refreshed. Inventory: ${inventory}.`
 }
 
 function isAbortError(error: unknown): boolean {

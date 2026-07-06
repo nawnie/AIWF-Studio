@@ -1,5 +1,5 @@
 # torch/torchvision/torchaudio installed by launch.py with CUDA wheels (cu124)
-diffusers>=0.35.0
+diffusers>=0.39.0
 transformers>=4.44.0,<5.0.0
 accelerate>=0.27.0
 peft>=0.6.0

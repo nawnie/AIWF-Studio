@@ -131,10 +131,11 @@ def _existing_pro_runtime(url: str) -> bool:
 def _open_app_window_when_ready(
     url: str,
     *,
+    ready_url: str | None = None,
     profile_dir: Path | None = None,
     shutdown_on_close: bool = False,
 ) -> None:
-    if not _wait_for_http(url):
+    if not _wait_for_http(ready_url or url):
         logger.warning("AIWF Studio Pro did not answer before the app window timeout.")
     _open_app_window(url, profile_dir=profile_dir, shutdown_on_close=shutdown_on_close)
 
@@ -142,12 +143,13 @@ def _open_app_window_when_ready(
 def _schedule_app_window_open(
     url: str,
     *,
+    ready_url: str | None = None,
     profile_dir: Path | None = None,
     shutdown_on_close: bool = False,
 ) -> None:
     threading.Thread(
         target=_open_app_window_when_ready,
-        kwargs={"url": url, "profile_dir": profile_dir, "shutdown_on_close": shutdown_on_close},
+        kwargs={"url": url, "ready_url": ready_url, "profile_dir": profile_dir, "shutdown_on_close": shutdown_on_close},
         name="aiwf-pro-autolaunch",
         daemon=True,
     ).start()
@@ -215,6 +217,16 @@ def create_app(
     frontend_dist: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(title="AIWF Studio Pro", middleware=middleware or [])
+
+    @app.middleware("http")
+    async def add_pro_timing_header(request, call_next):
+        started = time.perf_counter()
+        response = await call_next(request)
+        if request.url.path.startswith("/api/pro"):
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            response.headers["X-AIWF-Elapsed-Ms"] = f"{elapsed_ms:.1f}"
+        return response
+
     app.include_router(build_client_log_router(ctx), prefix="/api/v1")
     app.include_router(build_router(ctx))
     # User extensions: routers registered via ctx.plugins.register_api(id, router)
@@ -263,7 +275,7 @@ def run() -> None:
             logger.warning("AIWF Studio Pro is already running at %s. Reusing the existing session.", local_url)
             _startup_message(f"AIWF Studio Pro is already running at {local_url}")
             if flags.autolaunch:
-                _schedule_app_window_open(local_url)
+                _schedule_app_window_open(local_url, ready_url=f"{local_url}/api/pro/startup")
             return
         raise RuntimeError(
             f"Port {port} is already in use by another process. Close the stale listener or free the port, then relaunch Pro."
@@ -289,6 +301,7 @@ def run() -> None:
             def open_pro_app_window() -> None:
                 _schedule_app_window_open(
                     local_url,
+                    ready_url=f"{local_url}/api/pro/startup",
                     profile_dir=browser_profile_dir,
                     shutdown_on_close=True,
                 )

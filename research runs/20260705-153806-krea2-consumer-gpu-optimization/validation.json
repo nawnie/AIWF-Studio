@@ -1,0 +1,11 @@
+{
+  "counts": {
+    "claims": 10,
+    "contradictions": 1,
+    "sources": 11
+  },
+  "errors": [],
+  "run_dir": "F:\\AIWF_Studio\\research runs\\20260705-153806-krea2-consumer-gpu-optimization",
+  "status": "passed",
+  "warnings": []
+}

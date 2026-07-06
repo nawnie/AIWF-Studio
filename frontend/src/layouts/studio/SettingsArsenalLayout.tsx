@@ -13,9 +13,9 @@ import {
   Sparkles,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type { PaidLayoutProps, PaidTabsProps } from './PaidLayoutTypes'
-import { savePaidUserTabs } from './paidApiClient'
-import './paidLayouts.css'
+import type { LayoutProps, TabsProps } from './LayoutTypes'
+import { saveUserTabs } from './studioApiClient'
+import './studioLayouts.css'
 
 type SettingSection = 'generation' | 'samplers' | 'hires' | 'inpaint' | 'control' | 'lora' | 'output' | 'paths' | 'ui-tabs' | 'agent'
 
@@ -32,31 +32,31 @@ const SECTIONS: Array<{ id: SettingSection; label: string; hint: string }> = [
   { id: 'agent', label: 'Agent', hint: 'Ollama, skills, tool permissions' },
 ]
 
-export function SettingsArsenalPaidLayout({
+export function SettingsArsenalLayout({
   settings,
   bootstrap,
   runtime,
   selectedModelName,
   statusMessage,
   onSettingsChange,
-  paidTabs,
-  onPaidTabsChange,
-}: PaidLayoutProps & PaidTabsProps) {
+  userTabs,
+  onTabsChange,
+}: LayoutProps & TabsProps) {
   const [activeSection, setActiveSection] = useState<SettingSection>('generation')
-  const visibleTabs = useMemo(() => paidTabs.filter((tab) => !tab.hidden), [paidTabs])
-  const updateTabs = (nextTabs: typeof paidTabs) => {
-    onPaidTabsChange(nextTabs)
-    void savePaidUserTabs(nextTabs)
+  const visibleTabs = useMemo(() => userTabs.filter((tab) => !tab.hidden), [userTabs])
+  const updateTabs = (nextTabs: typeof userTabs) => {
+    onTabsChange(nextTabs)
+    void saveUserTabs(nextTabs)
   }
 
   return (
-    <div className="paid-settings paid-full-surface" aria-label="Advanced paid settings layout">
-      <aside className="paid-settings-nav">
-        <div className="paid-product-lockup compact">
-          <span className="paid-logo-orb"><Settings2 size={20} /></span>
+    <div className="studio-settings studio-full-surface" aria-label="Advanced paid settings layout">
+      <aside className="studio-settings-nav">
+        <div className="studio-product-lockup compact">
+          <span className="studio-logo-orb"><Settings2 size={20} /></span>
           <div>
             <strong>Settings Arsenal</strong>
-            <small>A1111-style depth · PAID v3</small>
+            <small>A1111-style depth</small>
           </div>
         </div>
         {SECTIONS.map((section) => (
@@ -67,14 +67,14 @@ export function SettingsArsenalPaidLayout({
         ))}
       </aside>
 
-      <main className="paid-settings-main">
-        <header className="paid-agent-header">
+      <main className="studio-settings-main">
+        <header className="studio-agent-header">
           <div>
-            <span className="paid-eyebrow">ADVANCED SETTINGS</span>
+            <span className="studio-eyebrow">ADVANCED SETTINGS</span>
             <strong>{SECTIONS.find((section) => section.id === activeSection)?.label}</strong>
             <small>{runtime.state} · {selectedModelName} · {statusMessage}</small>
           </div>
-          <button type="button" className="paid-run-button"><Save size={15} /> Save Settings</button>
+          <button type="button" className="studio-run-button"><Save size={15} /> Save Settings</button>
         </header>
 
         {activeSection === 'generation' ? (
@@ -128,13 +128,13 @@ export function SettingsArsenalPaidLayout({
         ) : activeSection === 'paths' ? (
           <PlaceholderSection icon={FolderOpen} title="Paths and engines" rows={['Models root', 'Checkpoint root', 'Extra model libraries', 'Outputs root', 'NVIDIA VideoFX SDK', 'Audio engine venv', 'Ollama URL']} />
         ) : activeSection === 'ui-tabs' ? (
-          <section className="paid-settings-card-grid">
-            <InfoCard icon={Plug} title="User-added tabs" text={`${paidTabs.length} community tab(s), ${visibleTabs.length} visible in the left rail.`} />
-            {paidTabs.map((tab) => (
-              <article key={tab.id} className="paid-settings-card">
+          <section className="studio-settings-card-grid">
+            <InfoCard icon={Plug} title="User-added tabs" text={`${userTabs.length} community tab(s), ${visibleTabs.length} visible in the left rail.`} />
+            {userTabs.map((tab) => (
+              <article key={tab.id} className="studio-settings-card">
                 <header><Plug size={18} /><strong>{tab.label}</strong></header>
                 <p>{tab.description || tab.id}</p>
-                <button type="button" onClick={() => updateTabs(paidTabs.map((item) => item.id === tab.id ? { ...item, hidden: !item.hidden } : item))}>
+                <button type="button" onClick={() => updateTabs(userTabs.map((item) => item.id === tab.id ? { ...item, hidden: !item.hidden } : item))}>
                   {tab.hidden ? <Eye size={14} /> : <EyeOff size={14} />}
                   {tab.hidden ? 'Show in rail' : 'Hide from rail'}
                 </button>
@@ -150,25 +150,25 @@ export function SettingsArsenalPaidLayout({
 }
 
 function SettingsGrid({ children }: { children: ReactNode }) {
-  return <section className="paid-settings-grid">{children}</section>
+  return <section className="studio-settings-grid">{children}</section>
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
-  return <label className="paid-settings-field"><span>{label}</span>{children}</label>
+  return <label className="studio-settings-field"><span>{label}</span>{children}</label>
 }
 
 function Range({ label, value, min, max, step = 1, onChange }: { label: string; value: number; min: number; max: number; step?: number; onChange: (value: number) => void }) {
-  return <label className="paid-settings-field range"><span>{label}</span><input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} /><b>{value}</b></label>
+  return <label className="studio-settings-field range"><span>{label}</span><input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} /><b>{value}</b></label>
 }
 
 function CheckField({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
-  return <label className="paid-settings-field check"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span>{label}</span></label>
+  return <label className="studio-settings-field check"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span>{label}</span></label>
 }
 
 function InfoCard({ icon: Icon, title, text }: { icon: LucideIcon; title: string; text: string }) {
-  return <article className="paid-settings-card"><header><Icon size={18} /><strong>{title}</strong></header><p>{text}</p></article>
+  return <article className="studio-settings-card"><header><Icon size={18} /><strong>{title}</strong></header><p>{text}</p></article>
 }
 
 function PlaceholderSection({ icon: Icon, title, rows }: { icon: LucideIcon; title: string; rows: string[] }) {
-  return <section className="paid-settings-card-grid"><InfoCard icon={Icon} title={title} text="Reserved UI slots are present now; backend fields can be wired one-by-one without layout churn." />{rows.map((row) => <article key={row} className="paid-settings-card"><strong>{row}</strong><p>Visible control slot ready for typed backend wiring.</p></article>)}</section>
+  return <section className="studio-settings-card-grid"><InfoCard icon={Icon} title={title} text="Reserved UI slots are present now; backend fields can be wired one-by-one without layout churn." />{rows.map((row) => <article key={row} className="studio-settings-card"><strong>{row}</strong><p>Visible control slot ready for typed backend wiring.</p></article>)}</section>
 }

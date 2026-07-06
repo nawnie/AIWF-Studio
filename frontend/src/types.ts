@@ -278,6 +278,9 @@ export interface ProDownloadCatalogItem {
   engineId?: EngineId
   engineLabel?: string
   hfUrl?: string
+  requiresAuth: boolean
+  canDownload: boolean
+  comingSoon: boolean
 }
 
 export interface CivitaiBrowseLink {
@@ -392,8 +395,10 @@ export interface ProSettingsStatus {
     asyncOffload: boolean
     pinnedMemory: boolean
     cudaMalloc: boolean
+    vramProfile: string
     medvram: boolean
     lowvram: boolean
+    highvram: boolean
     noHalf: boolean
     fp8: boolean
     fluxFp8: boolean

@@ -1,0 +1,152 @@
+{
+  "acceptance_gates": [
+    "source_plan_exists_before_search",
+    "final_claims_have_source_ids",
+    "final_claims_have_evidence_weight_and_weight_reason",
+    "scientific_claims_use_tier1_or_verified_tier0_unless_labeled",
+    "reddit_not_sole_source_for_final_claims",
+    "civitai_used_as_platform_metadata_not_scientific_authority",
+    "opensource_claims_distinguish_api_runtime_from_scientific_validity",
+    "academic_sources_record_level_and_review_status",
+    "contradictions_preserved"
+  ],
+  "created_at": "2026-07-05T15:38:06.553040-04:00",
+  "created_at_utc": "2026-07-05T19:38:06.554788+00:00",
+  "domains": [
+    "core_ai_ml",
+    "open_source_libraries",
+    "academic_sources"
+  ],
+  "excluded_sources": [
+    "generic top-10 blogs",
+    "tutorial farms unless implementation examples are requested",
+    "copied notebooks with unclear source",
+    "LLM-generated summaries",
+    "unlicensed source dumps",
+    "random forks without paper, model card, package, or maintainer link"
+  ],
+  "query_templates": [
+    "Find source-backed ways to make Krea 2 Turbo run faster on 16 GB consumer GPUs in AIWF Studio while preserving low VRAM support, including Diffusers offload modes, component placement, custom VAE/text encoder/adapters, and quantization possibilities",
+    "Find source-backed ways to make Krea 2 Turbo run faster on 16 GB consumer GPUs in AIWF Studio while preserving low VRAM support, including Diffusers offload modes, component placement, custom VAE/text encoder/adapters, and quantization possibilities arXiv",
+    "Find source-backed ways to make Krea 2 Turbo run faster on 16 GB consumer GPUs in AIWF Studio while preserving low VRAM support, including Diffusers offload modes, component placement, custom VAE/text encoder/adapters, and quantization possibilities OpenReview",
+    "Find source-backed ways to make Krea 2 Turbo run faster on 16 GB consumer GPUs in AIWF Studio while preserving low VRAM support, including Diffusers offload modes, component placement, custom VAE/text encoder/adapters, and quantization possibilities Hugging Face GitHub",
+    "Find source-backed ways to make Krea 2 Turbo run faster on 16 GB consumer GPUs in AIWF Studio while preserving low VRAM support, including Diffusers offload modes, component placement, custom VAE/text encoder/adapters, and quantization possibilities official docs GitHub release",
+    "Find source-backed ways to make Krea 2 Turbo run faster on 16 GB consumer GPUs in AIWF Studio while preserving low VRAM support, including Diffusers offload modes, component placement, custom VAE/text encoder/adapters, and quantization possibilities PyPI conda-forge package",
+    "Find source-backed ways to make Krea 2 Turbo run faster on 16 GB consumer GPUs in AIWF Studio while preserving low VRAM support, including Diffusers offload modes, component placement, custom VAE/text encoder/adapters, and quantization possibilities university graduate course notes",
+    "Find source-backed ways to make Krea 2 Turbo run faster on 16 GB consumer GPUs in AIWF Studio while preserving low VRAM support, including Diffusers offload modes, component placement, custom VAE/text encoder/adapters, and quantization possibilities thesis dissertation OSF Zenodo"
+  ],
+  "reddit_allowed": false,
+  "request": "Find source-backed ways to make Krea 2 Turbo run faster on 16 GB consumer GPUs in AIWF Studio while preserving low VRAM support, including Diffusers offload modes, component placement, custom VAE/text encoder/adapters, and quantization possibilities.",
+  "run_dir": "F:\\AIWF_Studio\\research runs\\20260705-153806-krea2-consumer-gpu-optimization",
+  "target_sources": [
+    {
+      "base_weight": 90,
+      "name": "arXiv",
+      "notes": "Use primary paper pages when possible.",
+      "source_class": "tier1_primary",
+      "use_for": "AI/ML papers and category search"
+    },
+    {
+      "base_weight": 65,
+      "name": "Hugging Face",
+      "notes": "Record license, maintainer, intended use, and update date when available.",
+      "source_class": "tier3_implementation",
+      "use_for": "model cards, dataset cards, Spaces, paper linkage"
+    },
+    {
+      "base_weight": 70,
+      "name": "GitHub/GitLab",
+      "notes": "Treat as official only when tied to authors, maintainers, packages, or papers.",
+      "source_class": "tier3_implementation",
+      "use_for": "official repos, releases, issues, code"
+    },
+    {
+      "base_weight": 88,
+      "name": "OpenReview",
+      "notes": "Use public venue records when available.",
+      "source_class": "tier1_primary",
+      "use_for": "conference submissions, reviews, venue records"
+    },
+    {
+      "base_weight": 70,
+      "name": "Semantic Scholar/OpenAlex/Crossref",
+      "notes": "Discovery only unless primary source unavailable.",
+      "source_class": "tier2_discovery",
+      "use_for": "metadata and citation graph expansion"
+    },
+    {
+      "base_weight": 80,
+      "name": "Official library docs",
+      "notes": "Best when paired with repo and release tag.",
+      "source_class": "tier3_implementation",
+      "use_for": "API/runtime behavior"
+    },
+    {
+      "base_weight": 80,
+      "name": "Official source repo",
+      "notes": "Check tags and changelog.",
+      "source_class": "tier3_implementation",
+      "use_for": "implementation status, releases, issues"
+    },
+    {
+      "base_weight": 65,
+      "name": "Package registries",
+      "notes": "Use PyPI, conda-forge, npm, crates.io, Maven, NuGet, Docker Hub, ROS Index as relevant.",
+      "source_class": "tier3_implementation",
+      "use_for": "versions, dependencies, licenses, distribution"
+    },
+    {
+      "base_weight": 70,
+      "name": "NumFOCUS/project ecosystems",
+      "notes": "Follow through to official project docs.",
+      "source_class": "tier2_discovery",
+      "use_for": "scientific software discovery"
+    },
+    {
+      "base_weight": 75,
+      "name": "University/lab/faculty pages",
+      "notes": "Weight higher when PI/lab-maintained and linked to artifacts.",
+      "source_class": "tier1_primary",
+      "use_for": "lab context, project context, publication lists"
+    },
+    {
+      "base_weight": 65,
+      "name": "Graduate course notes",
+      "notes": "Not current research consensus by default.",
+      "source_class": "tier2_academic",
+      "use_for": "background, definitions, derivations"
+    },
+    {
+      "base_weight": 70,
+      "name": "Theses/dissertations",
+      "notes": "Mark peer-review status; verify important claims.",
+      "source_class": "tier2_academic",
+      "use_for": "deep background and methods"
+    },
+    {
+      "base_weight": 70,
+      "name": "OSF/Zenodo/Dataverse/CORE/OATD",
+      "notes": "Check record-specific license.",
+      "source_class": "tier2_discovery",
+      "use_for": "research artifacts, datasets, theses, open records"
+    },
+    {
+      "base_weight": 40,
+      "name": "Student project repos/pages",
+      "notes": "Require lab/paper/advisor/release corroboration.",
+      "source_class": "tier4_practitioner",
+      "use_for": "leads and examples"
+    }
+  ],
+  "weighting_policy": {
+    "educational_background_threshold": 55,
+    "implementation_threshold": 70,
+    "model_resource_threshold": 60,
+    "practitioner_context_threshold": 25,
+    "required_fields": [
+      "evidence_weight",
+      "weight_reason"
+    ],
+    "scientific_or_engineering_threshold": 85
+  }
+}

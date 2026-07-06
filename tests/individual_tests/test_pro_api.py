@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -240,6 +242,41 @@ def _client(ctx, frontend_dist: Path | None = None):
     return TestClient(create_app(ctx, frontend_dist=frontend_dist or Path("__missing_frontend_dist__")))
 
 
+def test_runtime_endpoint_reports_warm_latency_under_budget(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+    client.get("/api/pro/runtime")
+
+    started = time.perf_counter()
+    response = client.get("/api/pro/runtime")
+    roundtrip_ms = (time.perf_counter() - started) * 1000
+
+    assert response.status_code == 200
+    server_ms = float(response.headers["X-AIWF-Elapsed-Ms"])
+    assert server_ms < 75
+    assert roundtrip_ms < 75
+
+
+def test_startup_endpoint_tracks_window_ready_callback(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    initial = client.get("/api/pro/startup")
+
+    assert initial.status_code == 200
+    assert initial.json()["serverReady"] is True
+    assert initial.json()["windowReady"] is False
+    assert initial.json()["minSplashMs"] >= 1000
+
+    ready = client.post("/api/pro/startup/window-ready")
+
+    assert ready.status_code == 200
+    data = ready.json()
+    assert data["status"] == "window-ready"
+    assert data["windowReady"] is True
+    assert data["windowReadyAt"]
+
+
 def test_bootstrap_returns_catalog_defaults_runtime_and_recent_images(tmp_path):
     ctx = _ctx(tmp_path)
     ctx.generation.submit(GenerationRequest(prompt="seed recent"))
@@ -286,7 +323,7 @@ def test_bootstrap_hides_blocked_selectable_checkpoints(tmp_path):
     assert "missing the expected CLIP text model" in data["blockedCheckpoints"][0]["reason"]
 
 
-def test_bootstrap_hides_qwen_nunchaku_when_runtime_assets_are_missing(tmp_path):
+def test_bootstrap_hides_qwen_nunchaku_from_v1_app(tmp_path):
     ctx = _ctx(tmp_path)
     qwen = Checkpoint(
         id="qwen-nunchaku",
@@ -304,11 +341,8 @@ def test_bootstrap_hides_qwen_nunchaku_when_runtime_assets_are_missing(tmp_path)
     assert response.status_code == 200
     data = response.json()
     assert "qwen-nunchaku" not in {item["id"] for item in data["checkpoints"]}
+    assert "qwen-nunchaku" not in {item["id"] for item in data["blockedCheckpoints"]}
     assert data["settings"]["checkpointId"] == "model-a"
-    blocked = next(item for item in data["blockedCheckpoints"] if item["id"] == "qwen-nunchaku")
-    assert blocked["status"] == "blocked-cleanly"
-    assert "Qwen Nunchaku is missing required files" in blocked["reason"]
-    assert "base" in blocked["suggestedAction"].lower()
 
 
 def test_bootstrap_hides_sd35_large_without_gated_config(tmp_path, monkeypatch):
@@ -334,6 +368,92 @@ def test_bootstrap_hides_sd35_large_without_gated_config(tmp_path, monkeypatch):
     blocked = next(item for item in data["blockedCheckpoints"] if item["id"] == "sd35-large")
     assert blocked["status"] == "blocked-cleanly"
     assert "gated Stability AI config files" in blocked["reason"]
+
+
+def test_model_upload_sorts_gguf_and_refreshes_inventory(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/models/upload",
+        files={"file": ("flux1-dev-Q5_K_M.gguf", b"GGUF", "application/octet-stream")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["counts"]["moved"] == 1
+    assert data["counts"]["inventoryCount"] >= 1
+    action = data["actions"][0]
+    assert action["filename"] == "flux1-dev-Q5_K_M.gguf"
+    assert action["destSubdir"] == "flux/GGUF"
+    assert (tmp_path / "models" / "flux" / "GGUF" / "flux1-dev-Q5_K_M.gguf").is_file()
+
+
+def test_model_reorganize_rereads_headers_and_moves_confident_matches(tmp_path):
+    ctx = _ctx(tmp_path)
+    models = tmp_path / "models"
+    misplaced = models / "Stable-diffusion" / "flux1-dev-Q5_K_M.gguf"
+    misplaced.parent.mkdir(parents=True)
+    misplaced.write_bytes(b"GGUF")
+    client = _client(ctx)
+
+    response = client.post("/api/pro/models/reorganize")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["counts"]["moved"] == 1
+    assert data["actions"][0]["destSubdir"] == "flux/GGUF"
+    assert not misplaced.exists()
+    assert (models / "flux" / "GGUF" / "flux1-dev-Q5_K_M.gguf").is_file()
+
+
+def test_model_unload_endpoint_calls_backend_unload(tmp_path):
+    ctx = _ctx(tmp_path)
+    calls = []
+    active = Checkpoint(
+        id="model-a",
+        title="Model A",
+        filename="model-a.safetensors",
+        path=str(tmp_path / "models" / "model-a.safetensors"),
+        architecture="sdxl",
+    )
+    ctx.generation.backend = SimpleNamespace(
+        devices=_Devices(),
+        _active=active,
+        _txt2img=object(),
+        is_checkpoint_loaded=lambda _checkpoint_id=None: True,
+        unload=lambda: calls.append("unload"),
+    )
+    client = _client(ctx)
+
+    response = client.post("/api/pro/models/unload")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "unloaded"
+    assert data["unloadedModel"]["name"] == "Model A"
+    assert calls == ["unload"]
+
+
+def test_support_terminal_endpoint_opens_windows_terminal(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    launched = []
+    monkeypatch.setattr(pro_api.os, "name", "nt")
+    monkeypatch.setattr(
+        pro_api.subprocess,
+        "Popen",
+        lambda command, **kwargs: launched.append((command, kwargs)) or SimpleNamespace(),
+    )
+    client = _client(ctx)
+
+    response = client.post("/api/pro/support/terminal")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "opened"
+    assert launched
+    assert launched[0][0][0] == "powershell.exe"
+    assert launched[0][1]["creationflags"] == subprocess.CREATE_NEW_CONSOLE
 
 
 def test_bootstrap_allows_sd35_large_when_hf_auth_is_available(tmp_path, monkeypatch):
@@ -706,8 +826,8 @@ def test_generate_rejects_runtime_blocked_qwen_nunchaku_checkpoint(tmp_path):
     assert response.status_code == 422
     assert ctx.generation.submitted == []
     detail = response.json()["detail"]
-    assert detail["status"] == "blocked-cleanly"
-    assert "Qwen Nunchaku is missing required files" in detail["reason"]
+    assert detail["status"] == "coming-soon"
+    assert "blocked for the v1 app" in detail["reason"]
 
 
 def test_generate_rejects_unbounded_batch(tmp_path):
@@ -1276,8 +1396,8 @@ def test_settings_endpoint_updates_output_video_and_launch_profile(tmp_path):
                 "backend": "onnx",
                 "onnxProvider": "cuda",
                 "attention": "sdpa",
-                "medvram": True,
-                "lowvram": True,
+                "vramProfile": "high",
+                "highvram": True,
                 "asyncOffload": False,
                 "pinnedMemory": False,
                 "cudaMalloc": True,
@@ -1304,7 +1424,10 @@ def test_settings_endpoint_updates_output_video_and_launch_profile(tmp_path):
     assert data["runtime"]["backend"] == "onnx"
     assert data["runtime"]["onnxProvider"] == "cuda"
     assert data["runtime"]["attention"] == "sdpa"
-    assert data["runtime"]["medvram"] is True
+    assert data["runtime"]["vramProfile"] == "high"
+    assert data["runtime"]["highvram"] is True
+    assert data["runtime"]["medvram"] is False
+    assert data["runtime"]["lowvram"] is False
     assert data["runtime"]["asyncOffload"] is False
     assert ctx.settings.image_format == "webp"
     assert ctx.settings.last_wan_high == "high.safetensors"
@@ -1327,7 +1450,46 @@ def test_downloads_endpoint_reports_catalog_install_state(tmp_path):
     assert data["counts"]["catalog"] > 0
     assert data["counts"]["installed"] == 0
     assert any(item["key"] == "hf-sdxl-base" for item in data["catalog"])
+    public_entry = next(item for item in data["catalog"] if item["key"] == "hf-sd15-pruned")
+    assert public_entry["canDownload"] is True
+    assert public_entry["requiresAuth"] is False
+    gated_entry = next(item for item in data["catalog"] if item["key"] == "hf-sd35-medium")
+    assert gated_entry["canDownload"] is False
+    assert gated_entry["requiresAuth"] is True
+    assert "anima-base-v1" not in {item["key"] for item in data["catalog"]}
+    assert "qwen-nunchaku-image-lightning-int4-r32" not in {item["key"] for item in data["catalog"]}
     assert data["categories"][0]["destination"]
+
+
+def test_downloads_catalog_endpoint_downloads_public_entry_and_refreshes(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    def fake_download(key: str):
+        assert key == "hf-sd15-pruned"
+        dest = tmp_path / "models" / "Stable-diffusion" / "v1-5-pruned-emaonly-fp16.safetensors"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake")
+        return dest
+
+    ctx.model_download.download_catalog = fake_download
+
+    response = client.post("/api/pro/downloads/catalog/hf-sd15-pruned")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["downloaded"]["key"] == "hf-sd15-pruned"
+    assert data["downloaded"]["path"].endswith("v1-5-pruned-emaonly-fp16.safetensors")
+
+
+def test_downloads_catalog_endpoint_blocks_gated_entries(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    response = client.post("/api/pro/downloads/catalog/hf-sd35-medium")
+
+    assert response.status_code == 422
+    assert "requires upstream access" in response.json()["detail"]
 
 
 def test_capabilities_endpoint_reports_gradio_tool_readiness(tmp_path):

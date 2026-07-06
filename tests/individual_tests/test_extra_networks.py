@@ -86,6 +86,8 @@ def test_runtime_lora_policy_allows_flux_but_blocks_unwired_transformer_families
     assert _supports_runtime_lora_adapters("sdxl") is True
     assert _supports_runtime_lora_adapters("flux2_klein") is False
     assert _supports_runtime_lora_adapters("z_image") is False
+    assert _supports_runtime_lora_adapters("krea2") is False
+    assert _supports_runtime_lora_adapters("anima") is False
 
 
 def test_apply_loras_unloads_when_prompt_has_no_loras():

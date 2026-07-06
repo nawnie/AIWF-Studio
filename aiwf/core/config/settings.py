@@ -7,6 +7,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aiwf.core.domain.prompt_style import PromptStyle
 
+VRAM_PROFILES = {"cpu", "low", "mid", "normal", "high"}
+
+
+def normalize_vram_profile(value: str | None) -> str:
+    normalized = (value or "normal").strip().lower().replace("-", "_")
+    if normalized in {"med", "medium"}:
+        normalized = "mid"
+    if normalized in {"default", "balanced"}:
+        normalized = "normal"
+    if normalized not in VRAM_PROFILES:
+        raise ValueError("vram_profile must be cpu, low, mid, normal, or high")
+    return normalized
+
 
 class RuntimeFlags(BaseSettings):
     """Process/runtime knobs sourced from env, CLI, and saved launch profiles.
@@ -44,8 +57,10 @@ class RuntimeFlags(BaseSettings):
     # Inference backend: "diffusers" (default) or "onnx"
     inference_backend: str = "diffusers"
     onnx_provider: str = "auto"   # auto | cuda | directml | cpu
+    vram_profile: str = "normal"  # cpu | low | mid | normal | high
     medvram: bool = False
     lowvram: bool = False
+    highvram: bool = False
     attention_backend: str = "sage_sdpa"
     xformers: bool = False
     opt_sdp_attention: bool = False
@@ -83,6 +98,22 @@ class RuntimeFlags(BaseSettings):
         if normalized not in {"sage_sdpa", "sdpa", "xformers", "none"}:
             raise ValueError("attention_backend must be sage_sdpa, sdpa, xformers, or none")
         return normalized
+
+    @field_validator("vram_profile")
+    @classmethod
+    def validate_vram_profile(cls, value: str) -> str:
+        return normalize_vram_profile(value)
+
+    def effective_vram_profile(self) -> str:
+        if self.cpu:
+            return "cpu"
+        if self.lowvram:
+            return "low"
+        if self.medvram:
+            return "mid"
+        if self.highvram:
+            return "high"
+        return normalize_vram_profile(self.vram_profile)
 
     def resolved_models_dir(self) -> Path:
         return (self.models_dir or self.data_dir / "models").resolve()

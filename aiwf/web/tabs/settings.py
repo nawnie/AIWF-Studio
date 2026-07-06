@@ -317,10 +317,8 @@ def _launch_component_values(settings: LaunchSettings) -> list:
         settings.share,
         settings.autolaunch,
         settings.theme,
-        settings.cpu,
+        settings.effective_vram_profile(),
         settings.attention_backend,
-        settings.medvram,
-        settings.lowvram,
         settings.no_half,
         settings.fp8,
         settings.fluxfp8,
@@ -902,9 +900,17 @@ def register_settings(registry: WebRegistry) -> None:
                     with gr.Row(equal_height=False, elem_classes=["aiwf-settings-grid"]):
                         with gr.Column(scale=1, min_width=320, elem_classes=["aiwf-panel"]):
                             gr.Markdown("Performance & memory", elem_classes=["aiwf-section-label"])
-                            launch_cpu = gr.Checkbox(
-                                label="Force CPU only (--cpu)",
-                                value=launch.cpu,
+                            launch_vram_profile = gr.Radio(
+                                label="VRAM profile",
+                                choices=[
+                                    ("Normal VRAM", "normal"),
+                                    ("Low VRAM (4-8 GB)", "low"),
+                                    ("Mid VRAM (8-16 GB)", "mid"),
+                                    ("CPU only", "cpu"),
+                                    ("High VRAM (16+ GB)", "high"),
+                                ],
+                                value=launch.effective_vram_profile(),
+                                info="Normal is the default. Low targets 4-8 GB with sequential CPU offload; mid targets 8-16 GB with model CPU offload; high targets 16+ GB and prefers resident models.",
                             )
                             launch_attention_backend = gr.Radio(
                                 label="Image attention backend",
@@ -916,14 +922,6 @@ def register_settings(registry: WebRegistry) -> None:
                                 ],
                                 value=launch.attention_backend,
                                 info="Sage is attempted only for safe CUDA attention calls; everything else falls back to PyTorch SDPA.",
-                            )
-                            launch_medvram = gr.Checkbox(
-                                label="Medium VRAM mode",
-                                value=launch.medvram,
-                            )
-                            launch_lowvram = gr.Checkbox(
-                                label="Low VRAM mode",
-                                value=launch.lowvram,
                             )
                             launch_no_half = gr.Checkbox(
                                 label="Disable half precision (FP32)",
@@ -1256,10 +1254,8 @@ def register_settings(registry: WebRegistry) -> None:
             launch_share,
             launch_autolaunch,
             launch_theme,
-            launch_cpu,
+            launch_vram_profile,
             launch_attention_backend,
-            launch_medvram,
-            launch_lowvram,
             launch_no_half,
             launch_fp8,
             launch_fluxfp8,
@@ -1576,10 +1572,8 @@ def register_settings(registry: WebRegistry) -> None:
                 share,
                 autolaunch,
                 theme,
-                cpu,
+                vram_profile,
                 attention_backend,
-                medvram,
-                lowvram,
                 no_half,
                 fp8,
                 fluxfp8,
@@ -1607,13 +1601,11 @@ def register_settings(registry: WebRegistry) -> None:
                 share=bool(share),
                 autolaunch=bool(autolaunch),
                 theme=theme,
-                cpu=bool(cpu),
+                vram_profile=vram_profile or "normal",
                 attention_backend=attention_backend or "sage_sdpa",
                 xformers=attention_backend == "xformers",
                 opt_sdp_attention=attention_backend == "sdpa",
                 opt_split_attention=False,
-                medvram=bool(medvram),
-                lowvram=bool(lowvram),
                 no_half=bool(no_half),
                 fp8=bool(fp8) if enable_experimental_settings else False,
                 fluxfp8=bool(fluxfp8),

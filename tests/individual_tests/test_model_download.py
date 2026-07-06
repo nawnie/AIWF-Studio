@@ -112,6 +112,13 @@ def test_destination_dirs(tmp_path: Path):
     assert service.destination_dir("z_image_unet_safetensor") == tmp_path / "models" / "z-image" / "UNet"
     assert service.destination_dir("z_image_unet_gguf") == tmp_path / "models" / "z-image" / "GGUF"
     assert service.destination_dir("z_image_components") == tmp_path / "models" / "z-image" / "Components"
+    assert service.destination_dir("krea2_unet_safetensor") == tmp_path / "models" / "krea2" / "UNet"
+    assert service.destination_dir("krea2_text_encoder") == tmp_path / "models" / "krea2" / "Textencoder"
+    assert service.destination_dir("krea2_vae") == tmp_path / "models" / "krea2" / "VAE"
+    assert service.destination_dir("krea2_diffusers") == tmp_path / "models" / "krea2" / "Diffusers"
+    assert service.destination_dir("anima_unet_safetensor") == tmp_path / "models" / "anima" / "UNet"
+    assert service.destination_dir("anima_text_encoder") == tmp_path / "models" / "anima" / "Textencoder"
+    assert service.destination_dir("anima_vae") == tmp_path / "models" / "anima" / "VAE"
     assert service.destination_dir("qwen_image_diffusers") == tmp_path / "models" / "qwen-image" / "Diffusers"
     assert service.destination_dir("qwen_image_nunchaku") == tmp_path / "models" / "qwen-image" / "Nunchaku"
     assert service.destination_dir("sana_diffusers") == tmp_path / "models" / "sana" / "Diffusers"
@@ -142,6 +149,10 @@ def test_ensure_dirs_creates_nested_category_folders(tmp_path: Path):
     assert (tmp_path / "models" / "flux2" / "Components").is_dir()
     assert (tmp_path / "models" / "z-image" / "GGUF").is_dir()
     assert (tmp_path / "models" / "z-image" / "Components").is_dir()
+    assert (tmp_path / "models" / "krea2" / "UNet").is_dir()
+    assert (tmp_path / "models" / "krea2" / "Textencoder").is_dir()
+    assert (tmp_path / "models" / "anima" / "UNet").is_dir()
+    assert (tmp_path / "models" / "anima" / "Textencoder").is_dir()
     assert (tmp_path / "models" / "ltx" / "checkpoints").is_dir()
     assert (tmp_path / "models" / "ltx" / "GGUF").is_dir()
     assert (tmp_path / "models" / "ltx" / "upscalers").is_dir()
@@ -218,6 +229,32 @@ def test_flux2_and_z_image_download_categories_validate_file_type(tmp_path: Path
         service.download_parsed(safetensors, category="flux2_unet_gguf")
     with pytest.raises(ValueError, match="Z-Image transformer"):
         service.download_parsed(safetensors, category="z_image_unet_gguf")
+
+
+def test_krea2_and_anima_download_categories_validate_file_type(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    safetensors = ParsedRemote(source="direct", url="https://example.com/model.safetensors", filename="model.safetensors")
+    gguf = ParsedRemote(source="direct", url="https://example.com/model.gguf", filename="model.gguf")
+
+    assert service.destination_for("krea2_unet_safetensor", safetensors.filename) == (
+        tmp_path / "models" / "krea2" / "UNet" / "model.safetensors"
+    )
+    assert service.destination_for("krea2_text_encoder", safetensors.filename) == (
+        tmp_path / "models" / "krea2" / "Textencoder" / "model.safetensors"
+    )
+    assert service.destination_for("krea2_vae", safetensors.filename) == (
+        tmp_path / "models" / "krea2" / "VAE" / "model.safetensors"
+    )
+    assert service.destination_for("anima_unet_safetensor", safetensors.filename) == (
+        tmp_path / "models" / "anima" / "UNet" / "model.safetensors"
+    )
+    assert service.destination_for("anima_text_encoder", safetensors.filename) == (
+        tmp_path / "models" / "anima" / "Textencoder" / "model.safetensors"
+    )
+    with pytest.raises(ValueError, match="Krea 2 transformer"):
+        service.download_parsed(gguf, category="krea2_unet_safetensor")
+    with pytest.raises(ValueError, match="Anima transformer"):
+        service.download_parsed(gguf, category="anima_unet_safetensor")
 
 
 def test_ltx_download_categories_validate_file_type(tmp_path: Path):
@@ -355,6 +392,7 @@ def test_hf_snapshot_allowed_for_ltx_text_encoder(tmp_path: Path, monkeypatch):
         ("flux2_components", "black-forest-labs/FLUX.2-klein-4B", ("flux2", "Components", "FLUX.2-klein-4B")),
         ("flux2_diffusers", "black-forest-labs/FLUX.2-klein-4B", ("flux2", "Diffusers", "FLUX.2-klein-4B")),
         ("z_image_components", "Tongyi-MAI/Z-Image-Turbo", ("z-image", "Components", "Z-Image-Turbo")),
+        ("krea2_diffusers", "krea/Krea-2-Turbo", ("krea2", "Diffusers", "Krea-2-Turbo")),
         ("qwen_image_diffusers", "Qwen/Qwen-Image-2512", ("qwen-image", "Diffusers", "Qwen-Image-2512")),
         (
             "sana_diffusers",
@@ -400,6 +438,24 @@ def test_snapshot_catalog_installed_requires_category_marker(tmp_path: Path):
 
     assert service.is_catalog_installed(entry) is False
     (target / "model_index.json").write_text("{}", encoding="utf-8")
+    assert service.is_catalog_installed(entry) is True
+
+
+def test_krea2_snapshot_catalog_installed_rejects_missing_shard(tmp_path: Path):
+    service = ModelDownloadService(RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models"))
+    entry = service.find_catalog("krea2-turbo-diffusers")
+    assert entry is not None
+    target = service.snapshot_destination_for(entry.category, entry.repo_id)
+    shard_dir = target / "transformer"
+    shard_dir.mkdir(parents=True)
+    (target / "model_index.json").write_text("{}", encoding="utf-8")
+    (shard_dir / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        '{"weight_map":{"layer.weight":"diffusion_pytorch_model-00001-of-00003.safetensors"}}',
+        encoding="utf-8",
+    )
+
+    assert service.is_catalog_installed(entry) is False
+    (shard_dir / "diffusion_pytorch_model-00001-of-00003.safetensors").write_bytes(b"weights")
     assert service.is_catalog_installed(entry) is True
 
 
@@ -495,6 +551,15 @@ def test_catalog_lists_entries(tmp_path: Path):
     assert "fluxtrait-klein9b-v2-q4km" in keys
     assert "fluxtrait-zimage-v2-q4" in keys
     assert "z-image-turbo-components" in keys
+    assert "krea2-turbo-diffusers" in keys
+    assert "krea2-raw-diffusers" in keys
+    assert "krea2-turbo-fp8-comfy" in keys
+    assert "krea2-turbo-nvfp4-comfy" in keys
+    assert "krea2-qwen3vl-fp8-comfy" in keys
+    assert "anima-base-v1" not in keys
+    assert "anima-qwen-06b-text-encoder" not in keys
+    assert service.find_catalog("anima-base-v1").coming_soon is True
+    assert service.find_catalog("anima-qwen-06b-text-encoder").coming_soon is True
     assert "ltx23-distilled" in keys
     assert "ltx23-upscaler-x2" in keys
     assert "ltx23-gemma-q4" in keys
@@ -580,10 +645,11 @@ def test_flux2_z_image_qwen_and_sana_quick_start_use_runtime_assets(tmp_path: Pa
     assert service.snapshot_destination_for(qwen.category, qwen.repo_id) == (
         tmp_path / "models" / "qwen-image" / "Diffusers" / "Qwen-Image-2512"
     )
-    assert QUICK_START_BUNDLES["qwen-nunchaku"] == ["qwen-nunchaku-image-lightning-int4-r32"]
+    assert "qwen-nunchaku" not in QUICK_START_BUNDLES
     qwen_nunchaku = service.find_catalog("qwen-nunchaku-image-lightning-int4-r32")
     assert qwen_nunchaku is not None
     assert qwen_nunchaku.category == "qwen_image_nunchaku"
+    assert qwen_nunchaku.coming_soon is True
     assert service.destination_for(qwen_nunchaku.category, qwen_nunchaku.filename) == (
         tmp_path
         / "models"
@@ -606,6 +672,27 @@ def test_flux2_z_image_qwen_and_sana_quick_start_use_runtime_assets(tmp_path: Pa
     assert service.snapshot_destination_for(sana_video.category, sana_video.repo_id) == (
         tmp_path / "models" / "sana-video" / "Diffusers" / "SANA-Video_2B_480p_diffusers"
     )
+
+    assert QUICK_START_BUNDLES["krea2"] == ["krea2-turbo-diffusers"]
+    assert QUICK_START_BUNDLES["krea2-low"][0] == "krea2-turbo-nvfp4-comfy"
+    assert QUICK_START_BUNDLES["krea2-mid"][0] == "krea2-turbo-fp8-comfy"
+    assert QUICK_START_BUNDLES["krea2-high"][0] == "krea2-turbo-bf16-comfy"
+    krea2 = service.find_catalog("krea2-turbo-diffusers")
+    assert krea2 is not None
+    assert krea2.category == "krea2_diffusers"
+    assert krea2.snapshot is True
+    assert service.snapshot_destination_for(krea2.category, krea2.repo_id) == (
+        tmp_path / "models" / "krea2" / "Diffusers" / "Krea-2-Turbo"
+    )
+
+    assert "anima" not in QUICK_START_BUNDLES
+    assert "anima-low" not in QUICK_START_BUNDLES
+    assert "anima-mid" not in QUICK_START_BUNDLES
+    assert "anima-high" not in QUICK_START_BUNDLES
+    anima = service.find_catalog("anima-base-v1")
+    assert anima is not None
+    assert anima.category == "anima_unet_safetensor"
+    assert anima.coming_soon is True
 
 
 def test_ltx_quick_start_uses_ltx_categories(tmp_path: Path):

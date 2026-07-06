@@ -17,9 +17,23 @@ def test_launch_settings_argv_includes_listen_and_port():
 def test_launch_settings_argv_includes_cpu_and_api_flags():
     settings = LaunchSettings(cpu=True, api=True, nowebui=True)
     argv = settings.argv()
+    assert "--vram-profile" in argv
     assert "--cpu" in argv
     assert "--api" in argv
     assert "--nowebui" in argv
+
+
+def test_launch_settings_argv_includes_vram_profile_aliases():
+    high = LaunchSettings(vram_profile="high")
+    high_argv = high.argv()
+    assert "--vram-profile" in high_argv
+    assert "high" in high_argv
+    assert "--highvram" in high_argv
+
+    mid = LaunchSettings(vram_profile="medium")
+    mid_argv = mid.argv()
+    assert "mid" in mid_argv
+    assert "--medvram" in mid_argv
 
 
 def test_launch_settings_argv_includes_attention_backend():
@@ -129,7 +143,30 @@ def test_merge_launch_settings_applies_saved_cpu_flag(tmp_path: Path):
     saved = LaunchSettings(cpu=True, api=True)
     merged = merge_launch_settings(cli, saved, explicit=set())
     assert merged.cpu is True
+    assert merged.effective_vram_profile() == "cpu"
     assert merged.api is True
+
+
+def test_merge_launch_settings_applies_saved_high_vram_profile(tmp_path: Path):
+    cli = RuntimeFlags(data_dir=tmp_path)
+    saved = LaunchSettings(vram_profile="high")
+
+    merged = merge_launch_settings(cli, saved, explicit=set())
+
+    assert merged.effective_vram_profile() == "high"
+    assert merged.highvram is True
+    assert merged.lowvram is False
+    assert merged.medvram is False
+
+
+def test_merge_launch_settings_respects_explicit_normal_vram_cli(tmp_path: Path):
+    cli = RuntimeFlags(data_dir=tmp_path, vram_profile="normal", lowvram=False, medvram=False, highvram=False)
+    saved = LaunchSettings(vram_profile="low")
+
+    merged = merge_launch_settings(cli, saved, explicit={"--normalvram"})
+
+    assert merged.effective_vram_profile() == "normal"
+    assert merged.lowvram is False
 
 
 def test_merge_launch_settings_applies_saved_attention_backend(tmp_path: Path):
