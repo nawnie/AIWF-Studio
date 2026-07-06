@@ -417,9 +417,11 @@ class GenerationService:
             if flags is not None:
                 runtime_flags = {
                     "attention_backend": getattr(flags, "attention_backend", ""),
+                    "vram_profile": flags.effective_vram_profile() if hasattr(flags, "effective_vram_profile") else "",
                     "fp8": bool(getattr(flags, "fp8", False)),
                     "medvram": bool(getattr(flags, "medvram", False)),
                     "lowvram": bool(getattr(flags, "lowvram", False)),
+                    "highvram": bool(getattr(flags, "highvram", False)),
                     "no_half": bool(getattr(flags, "no_half", False)),
                     "torch_compile": bool(getattr(flags, "torch_compile", False)),
                     "channels_last": bool(getattr(flags, "channels_last", False)),

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
+from aiwf.infrastructure.diffusers.checkpoints import diffusers_dir_has_required_local_files
 
 
 @dataclass(frozen=True)
@@ -154,17 +156,156 @@ def preflight_diffusers_pipeline() -> PipelinePreflightResult:
 
 def preflight_image_runtime_pipelines() -> PipelinePreflightResult:
     """Check optional image pipeline classes without loading model weights."""
-    items = [
+    required = [
         _diffusers_attr_check("Flux2KleinPipeline", "Required for Flux.2 Klein full-folder/single-transformer routes."),
         _diffusers_attr_check("ZImagePipeline", "Required for Z-Image full-folder/single-transformer routes."),
         _diffusers_attr_check("QwenImagePipeline", "Required for Qwen Image full-folder routes."),
         _diffusers_attr_check("SanaPipeline", "Required for standard Sana full-folder routes."),
         _diffusers_attr_check("SanaSprintPipeline", "Required for Sana Sprint full-folder routes."),
     ]
+    optional = [
+        _diffusers_attr_check("Krea2Pipeline", "Required for future Krea 2 Diffusers-folder routes."),
+    ]
+    warnings = []
+    if not optional[0].ok:
+        warnings.append("Krea 2 is blocked until the installed Diffusers package exposes Krea2Pipeline.")
     return PipelinePreflightResult(
         pipeline="Image Runtime Families",
+        ok=all(item.ok for item in required),
+        items=tuple([*required, *optional]),
+        warnings=tuple(warnings),
+    )
+
+
+def preflight_krea2_pipeline(flags: RuntimeFlags | str | Path) -> PipelinePreflightResult:
+    runtime_flags = flags if isinstance(flags, RuntimeFlags) else RuntimeFlags(data_dir=Path(flags))
+    models = runtime_flags.resolved_models_dir()
+    diffusers_folder, incomplete_diffusers_folder = _find_krea2_diffusers_folder(models)
+    transformer = _first_existing(
+        models / "krea2" / "UNet",
+        (
+            "krea2_turbo_fp8_scaled.safetensors",
+            "krea2_turbo_nvfp4.safetensors",
+            "krea2_turbo_bf16.safetensors",
+            "krea2_raw_fp8_scaled.safetensors",
+        ),
+    )
+    text_encoder = _first_existing(
+        models / "krea2" / "Textencoder",
+        ("qwen3vl_4b_fp8_scaled.safetensors", "qwen3vl_4b_bf16.safetensors"),
+    )
+    vae = _first_existing(
+        models / "krea2" / "VAE",
+        ("qwen_image_vae.safetensors",),
+    ) or _first_existing(models / "VAE", ("qwen_image_vae.safetensors",))
+    class_check = _diffusers_attr_check("Krea2Pipeline", "Required for Krea 2 Diffusers-folder loading in AIWF.")
+    diffusers_message = (
+        str(diffusers_folder)
+        if diffusers_folder
+        else f"Expected a complete Krea 2 Diffusers folder under {models / 'krea2' / 'Diffusers'}"
+    )
+    if incomplete_diffusers_folder and not diffusers_folder:
+        diffusers_message = f"Incomplete Krea 2 Diffusers folder under {incomplete_diffusers_folder}"
+    items = [
+        class_check,
+        PipelineCheckItem(
+            "Krea 2 Diffusers folder",
+            diffusers_folder is not None,
+            diffusers_message,
+            diffusers_folder or incomplete_diffusers_folder,
+        ),
+        PipelineCheckItem(
+            "Krea 2 split transformer",
+            transformer is not None,
+            str(transformer) if transformer else f"Expected Krea 2 transformer under {models / 'krea2' / 'UNet'}",
+            transformer,
+        ),
+        PipelineCheckItem(
+            "Qwen3-VL text encoder",
+            text_encoder is not None,
+            str(text_encoder) if text_encoder else f"Expected qwen3vl_4b_* sidecar under {models / 'krea2' / 'Textencoder'}",
+            text_encoder,
+        ),
+        PipelineCheckItem(
+            "Qwen Image VAE",
+            vae is not None,
+            str(vae) if vae else "Expected qwen_image_vae.safetensors under models/krea2/VAE or models/VAE.",
+            vae,
+        ),
+    ]
+    warnings: list[str] = []
+    if transformer and text_encoder and vae and diffusers_folder is None:
+        warnings.append(
+            "Krea 2 split files are present, but AIWF still needs a split-file loader before they can generate."
+        )
+    if incomplete_diffusers_folder and diffusers_folder is None:
+        warnings.append("Finish or remove the incomplete Krea 2 Diffusers snapshot before selecting it.")
+    if not class_check.ok:
+        warnings.append("Install diffusers>=0.39.0, then restart AIWF before running Krea 2.")
+    if not warnings:
+        warnings.append("Use the Krea 2 Turbo preset first; Raw is heavier and should be smoked separately.")
+    return PipelinePreflightResult(
+        pipeline="Krea 2",
+        ok=class_check.ok and diffusers_folder is not None,
+        items=tuple(items),
+        warnings=tuple(warnings),
+        metadata={
+            "default_profile": runtime_flags.effective_vram_profile(),
+            "recommended_bundle": "krea2 for the runnable Turbo Diffusers folder; krea2-low/mid/high are split-file staging bundles",
+            "diffusers_folder": str(diffusers_folder) if diffusers_folder else "",
+            "split_transformer": str(transformer) if transformer else "",
+            "split_text_encoder": str(text_encoder) if text_encoder else "",
+            "vae": str(vae) if vae else "",
+        },
+    )
+
+
+def preflight_anima_pipeline(flags: RuntimeFlags | str | Path) -> PipelinePreflightResult:
+    runtime_flags = flags if isinstance(flags, RuntimeFlags) else RuntimeFlags(data_dir=Path(flags))
+    models = runtime_flags.resolved_models_dir()
+    transformer = _first_existing(
+        models / "anima" / "UNet",
+        ("anima-base-v1.0.safetensors", "anima-preview3-base.safetensors"),
+    )
+    text_encoder = _first_existing(models / "anima" / "Textencoder", ("qwen_3_06b_base.safetensors",))
+    vae = _first_existing(
+        models / "anima" / "VAE",
+        ("qwen_image_vae.safetensors",),
+    ) or _first_existing(models / "VAE", ("qwen_image_vae.safetensors",))
+    items = [
+        PipelineCheckItem(
+            "native Anima loader",
+            False,
+            "AIWF does not yet include a native Anima loader for split files; upstream release is ComfyUI-native.",
+        ),
+        PipelineCheckItem(
+            "Anima transformer",
+            transformer is not None,
+            str(transformer) if transformer else f"Expected Anima transformer under {models / 'anima' / 'UNet'}",
+            transformer,
+        ),
+        PipelineCheckItem(
+            "Qwen 0.6B text encoder",
+            text_encoder is not None,
+            str(text_encoder) if text_encoder else f"Expected qwen_3_06b_base.safetensors under {models / 'anima' / 'Textencoder'}",
+            text_encoder,
+        ),
+        PipelineCheckItem(
+            "Qwen Image VAE",
+            vae is not None,
+            str(vae) if vae else "Expected qwen_image_vae.safetensors under models/anima/VAE or models/VAE.",
+            vae,
+        ),
+    ]
+    return PipelinePreflightResult(
+        pipeline="Anima",
         ok=all(item.ok for item in items),
         items=tuple(items),
+        warnings=("Anima is tracked as a low/mid-VRAM target, but generation is blocked until the native split-file loader exists.",),
+        metadata={
+            "default_profile": runtime_flags.effective_vram_profile(),
+            "recommended_bundle": "anima for base setup; anima-low/mid/high mirror VRAM setup profiles",
+        },
     )
 
 
@@ -543,6 +684,36 @@ def _diffusers_attr_check(attr_name: str, message: str) -> PipelineCheckItem:
         return PipelineCheckItem(attr_name, ok, message if ok else f"{message} Missing in installed diffusers.")
     except Exception as exc:
         return PipelineCheckItem(attr_name, False, f"{message} Import failed: {exc}")
+
+
+def _first_existing(root: Path, names: tuple[str, ...]) -> Path | None:
+    for name in names:
+        path = root / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _find_krea2_diffusers_folder(models: Path) -> tuple[Path | None, Path | None]:
+    root = models / "krea2" / "Diffusers"
+    incomplete: Path | None = None
+    if not root.exists():
+        return None, None
+    for index_path in sorted(root.rglob("model_index.json"), key=lambda item: str(item).lower()):
+        folder = index_path.parent
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            incomplete = incomplete or folder
+            continue
+        class_name = str(payload.get("_class_name") or "").lower().replace("_", "")
+        folder_text = folder.as_posix().lower().replace("_", "")
+        if "krea2pipeline" not in class_name and "krea2" not in folder_text and "krea-2" not in folder_text:
+            continue
+        if diffusers_dir_has_required_local_files(folder):
+            return folder, incomplete
+        incomplete = incomplete or folder
+    return None, incomplete
 
 
 def _load_available_onnx_providers(warnings: list[str]) -> list[str]:

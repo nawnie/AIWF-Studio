@@ -33,7 +33,6 @@ class PipelineRegistry:
         self.settings = settings
 
     def image_pipelines(self) -> list[PipelineInfo]:
-        qwen_nunchaku = self._qwen_nunchaku_pipeline()
         return [
             PipelineInfo(
                 id="diffusers",
@@ -45,6 +44,14 @@ class PipelineRegistry:
                 launch_backend="diffusers",
             ),
             self._diffusers_snapshot_pipeline(
+                id="krea2",
+                label="Krea 2 Diffusers pipeline",
+                summary="Krea 2 Turbo/Raw text-to-image route; split-file assets are cataloged separately.",
+                subdir=Path("krea2") / "Diffusers",
+                class_tokens=("krea2pipeline", "krea2", "krea 2", "krea-2"),
+                install_label="a complete Krea 2 Diffusers snapshot",
+            ),
+            self._diffusers_snapshot_pipeline(
                 id="qwen-image",
                 label="Qwen Image Diffusers pipeline",
                 summary="Full-folder Qwen Image 2512/2.x text-to-image route.",
@@ -52,7 +59,6 @@ class PipelineRegistry:
                 class_tokens=("qwenimagepipeline", "qwen image", "qwen-image", "qwenimage"),
                 install_label="a complete Qwen Image Diffusers snapshot",
             ),
-            qwen_nunchaku,
             self._diffusers_snapshot_pipeline(
                 id="sana",
                 label="Sana Diffusers pipeline",
@@ -105,6 +111,22 @@ class PipelineRegistry:
             ready=ready,
             message=f"model folder found at {root}" if ready else f"model folder missing: {root}",
             launch_backend="onnx",
+        )
+
+    def _anima_pipeline(self) -> PipelineInfo:
+        from aiwf.services.pipeline_preflight import preflight_anima_pipeline
+
+        preflight = preflight_anima_pipeline(self.flags)
+        missing = [item.message for item in preflight.items if not item.ok]
+        message = "; ".join(missing) if missing else "Anima assets detected"
+        return PipelineInfo(
+            id="anima",
+            label="Anima split-file pipeline",
+            kind="image",
+            engine="Studio Image Engine",
+            summary="Compact 2B anime/non-photorealistic image route planned for low and mid VRAM.",
+            ready=preflight.ok,
+            message=message or "install Anima split files and add native loader support",
         )
 
     def _onnx_root(self) -> Path:

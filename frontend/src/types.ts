@@ -38,6 +38,25 @@ export interface EngineSummary {
   count: number
 }
 
+// A single node in a user-built workflow. Created by "Send to workflow" from a
+// generation panel; ordered by `order` and manually reorderable in the UI.
+export interface WorkflowCodeBlock {
+  id: string
+  label: string
+  kind: 'generation' | 'workflow' | 'qa' | 'export'
+  nodeId: string
+  source: string
+  createdAt: string
+  summary: string
+  order: number
+  classes: {
+    requires: string[]
+    produces: string[]
+  }
+  payload: Record<string, unknown>
+  code: string
+}
+
 export interface GenerationSettings {
   mode: CreationMode
   prompt: string
@@ -68,6 +87,22 @@ export interface GenerationSettings {
   offloadTextEncoderAfterEncode: boolean
   useSageAttention: boolean
   generateAudio: boolean
+  wanRuntimeMode: string
+  highNoiseModelId: string
+  lowNoiseModelId: string
+  highNoiseSteps: number
+  lowNoiseSteps: number
+  boundaryRatio: number
+  highNoiseLoraId: string
+  highNoiseLoraScale: number
+  lowNoiseLoraId: string
+  lowNoiseLoraScale: number
+  vaeId: string
+  textEncoderPath: string
+  wanOffload: string
+  wanSigmaType: string
+  wanSampler: string
+  wanFlowShift: number
   initImageDataUrl: string
   maskImageDataUrl: string
   denoisingStrength: number
@@ -81,6 +116,15 @@ export interface GenerationSettings {
   autoMaskModel: string
   autoMaskBoxThreshold: number
   autoMaskTextThreshold: number
+  controlNetEnabled: boolean
+  controlNetModel: string
+  controlNetModule: string
+  controlNetImageDataUrl: string
+  controlNetImageName: string
+  controlNetWeight: number
+  controlNetGuidanceStart: number
+  controlNetGuidanceEnd: number
+  controlNetProcessorRes: number
   saveImages: boolean
 }
 
@@ -234,6 +278,9 @@ export interface ProDownloadCatalogItem {
   engineId?: EngineId
   engineLabel?: string
   hfUrl?: string
+  requiresAuth: boolean
+  canDownload: boolean
+  comingSoon: boolean
 }
 
 export interface CivitaiBrowseLink {
@@ -324,6 +371,13 @@ export interface ProSettingsStatus {
     wanGroupOffloadStream: boolean
     wanGroupOffloadBlocks: number
     ggufCudaKernels: boolean
+    wanSageAttention: string
+    wanNativeDenoise: boolean
+    wanManualVaeDecode: boolean
+    wanVaeChunkFrames: number
+    wanGroupOffloadRecordStream: boolean
+    wanGroupOffloadLowCpuMem: boolean
+    wanResidentMinVramGb: number
   }
   runtime: {
     port: number
@@ -341,8 +395,10 @@ export interface ProSettingsStatus {
     asyncOffload: boolean
     pinnedMemory: boolean
     cudaMalloc: boolean
+    vramProfile: string
     medvram: boolean
     lowvram: boolean
+    highvram: boolean
     noHalf: boolean
     fp8: boolean
     fluxFp8: boolean

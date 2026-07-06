@@ -62,6 +62,11 @@ class ImageWorkflowSettings(BaseModel):
     cfg_scale: float = Field(default=6.0, ge=0.0, le=30.0)
     seed: int = -1
     denoising_strength: float = Field(default=0.62, ge=0.0, le=1.0)
+    inpaint_only_masked: bool | None = None
+    inpaint_mask_content: str = "original"
+    inpaint_masked_padding: int = Field(default=32, ge=0, le=256)
+    inpaint_masked_padding_sdxl: int = Field(default=48, ge=0, le=256)
+    seam_erode: int = Field(default=2, ge=0, le=64)
 
     restore_model_id: str | None = None
     restore_visibility: float = Field(default=0.85, ge=0.0, le=1.0)

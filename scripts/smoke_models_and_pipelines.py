@@ -43,8 +43,8 @@ def _pipeline_checks(flags) -> list[Check]:
         preflight_ltx_pipeline,
         preflight_diffusers_pipeline,
         preflight_image_runtime_pipelines,
+        preflight_krea2_pipeline,
         preflight_onnx_pipeline,
-        preflight_qwen_nunchaku_pipeline,
         preflight_sana_video_pipeline,
         preflight_wan_pipeline,
     )
@@ -55,7 +55,7 @@ def _pipeline_checks(flags) -> list[Check]:
     checks = [
         _preflight_to_check(preflight_diffusers_pipeline()),
         _preflight_to_check(preflight_image_runtime_pipelines()),
-        _preflight_to_check(preflight_qwen_nunchaku_pipeline(flags)),
+        _preflight_to_check(preflight_krea2_pipeline(flags)),
         _preflight_to_check(preflight_sana_video_pipeline(flags, settings)),
         _preflight_to_check(preflight_wan_pipeline(flags, settings)),
         _preflight_to_check(preflight_ltx_pipeline(flags, settings)),
@@ -102,7 +102,18 @@ def _catalog_checks(flags) -> list[Check]:
 
     service = ModelDownloadService(flags)
     checks: list[Check] = []
-    required_bundles = ("flux2", "zimage", "qwen-image", "qwen-nunchaku", "sana", "sana-video", "ltx23")
+    required_bundles = (
+        "flux2",
+        "zimage",
+        "qwen-image",
+        "sana",
+        "sana-video",
+        "krea2",
+        "krea2-low",
+        "krea2-mid",
+        "krea2-high",
+        "ltx23",
+    )
     for bundle_key in required_bundles:
         keys = QUICK_START_BUNDLES.get(bundle_key, [])
         missing = [key for key in keys if service.find_catalog(key) is None]

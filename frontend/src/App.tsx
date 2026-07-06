@@ -3,6 +3,7 @@ import type {
   CSSProperties,
   ChangeEvent as ReactChangeEvent,
   Dispatch,
+  DragEvent as ReactDragEvent,
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
@@ -35,33 +36,61 @@ import {
   Wand2,
   X,
 } from 'lucide-react'
+import { Workflow as WorkflowIcon } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { WorkflowPanel } from './workflow/WorkflowPanel'
+import {
+  createWorkflowBlocksFromSettings,
+  loadWorkflowBlocksFromStorage,
+  renumberWorkflowBlocks,
+  saveWorkflowBlocksToStorage,
+} from './workflow/workflowBlocks'
+import type { WorkflowCodeBlock } from './types'
+import { ModelFamilyMatrixLayout } from './layouts/studio/ModelFamilyMatrixLayout'
+import { ProjectCenterLayout } from './layouts/studio/ProjectCenterLayout'
+import { AgenticChatLayout } from './layouts/studio/AgenticChatLayout'
+import { PipelineAtlasLayout } from './layouts/studio/PipelineAtlasLayout'
+import { MediaFoundryImageLayout } from './layouts/studio/MediaFoundryImageLayout'
+import { AudioStudioLayout } from './layouts/studio/AudioStudioLayout'
+import type { LayoutProps } from './layouts/studio/LayoutTypes'
 import {
   fetchProData,
   fetchProBootstrap,
   fetchProCapabilities,
   fetchProDownloads,
+  downloadCatalogModel,
   fetchProLogs,
   fetchProRuntime,
+  fetchProStartup,
+  fetchProExtensions,
   fetchProSettings,
   fetchVideoLabStatus,
+  toggleProExtension,
   formatApiError,
   generateAutoMask,
   generateProOutput,
+  getProApiLatencySamples,
+  openSupportTerminal,
   runFaceSwap,
   runVideoLab,
+  reorganizeModels,
+  uploadModelFile,
   uploadVideoLabFile,
   getFallbackBootstrap,
   getFallbackRuntime,
   ProApiError,
+  notifyProWindowReady,
   reportProClientError,
   reportProClientEvent,
   requestProRestart,
+  runEnhanceImage,
   saveProSettings,
   streamProRuntime,
   stopProGeneration,
+  unloadProModel,
+  runVsrImage,
 } from './api'
-import type { VideoLabProbe, VideoLabStatus } from './api'
+import type { ProExtensionsStatus, ProModelSortResult, ProStartupStatus, VideoLabProbe, VideoLabStatus } from './api'
 import type {
   AspectRatioOption,
   CreationMode,
@@ -92,9 +121,25 @@ interface IconItem<T extends string> {
   icon: LucideIcon
 }
 
-type ToolModalId = 'segmentation' | 'hires' | 'reactor' | 'about' | null
+type ToolModalId = 'segmentation' | 'hires' | 'enhance' | 'reactor' | 'about' | null
 type MenuBarId = 'file' | 'edit' | 'view' | 'options' | 'help' | null
 type DragTarget = 'left' | 'right' | 'bottom'
+
+interface SupportIssue {
+  title: string
+  message: string
+  source: string
+  createdAt: string
+  detail?: unknown
+  context?: Record<string, unknown>
+}
+
+const IMAGE_FILE_ACCEPT = 'image/*,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.avif'
+const VIDEO_FILE_ACCEPT = 'video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.wmv,.flv,.mpeg,.mpg,.ts,.mts,.m2ts,.3gp,.ogv'
+const MODEL_FILE_ACCEPT = '.safetensors,.ckpt,.pt,.pth,.bin,.gguf,.onnx'
+const IMAGE_FILE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff', '.avif'])
+const VIDEO_FILE_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v', '.wmv', '.flv', '.mpeg', '.mpg', '.ts', '.mts', '.m2ts', '.3gp', '.ogv'])
+const MODEL_FILE_EXTENSIONS = new Set(['.safetensors', '.ckpt', '.pt', '.pth', '.bin', '.gguf', '.onnx'])
 
 interface DragState {
   target: DragTarget
@@ -132,6 +177,17 @@ const DEFAULT_LAYOUT_PREFERENCES: LayoutPreferences = {
 }
 
 const PRO_APP_ICON = '/app-icon.png'
+const FALLBACK_STARTUP_STATUS: ProStartupStatus = {
+  status: 'server-ready',
+  serverReady: false,
+  windowReady: false,
+  startedAt: '',
+  serverReadyAt: '',
+  windowReadyAt: '',
+  minSplashMs: 1800,
+  readyHoldMs: 1200,
+}
+const STARTUP_SPLASH_FAILSAFE_MS = 14000
 
 const LAYOUT_STORAGE_KEY = 'aiwf.pro.layout.v1'
 
@@ -145,7 +201,14 @@ const MODE_TABS: IconItem<ProMode>[] = [
 
 const RAIL_ITEMS: IconItem<string>[] = [
   { id: 'create', label: 'Create', icon: Sparkles },
+  { id: 'workflow', label: 'Workflow', icon: WorkflowIcon },
   { id: 'models', label: 'Models', icon: Boxes },
+  { id: 'families', label: 'Families', icon: Database },
+  { id: 'foundry', label: 'Foundry', icon: Image },
+  { id: 'pipeline', label: 'Pipeline', icon: WorkflowIcon },
+  { id: 'projects', label: 'Projects', icon: Boxes },
+  { id: 'assistant', label: 'Assistant', icon: Sparkles },
+  { id: 'audiolab', label: 'Audio', icon: Wand2 },
   { id: 'tools', label: 'Tools', icon: Wand2 },
   { id: 'data', label: 'Data', icon: Database },
   { id: 'monitor', label: 'Monitor', icon: Monitor },
@@ -168,6 +231,18 @@ const SANA_VAE_TILING_OPTIONS = [
   { value: 'auto', label: 'Auto' },
   { value: 'off', label: 'Off' },
   { value: 'always', label: 'Always' },
+]
+
+const CONTROLNET_MODULE_OPTIONS = [
+  { value: 'none', label: 'None / passthrough' },
+  { value: 'canny', label: 'Canny' },
+  { value: 'depth', label: 'Depth' },
+  { value: 'openpose', label: 'OpenPose' },
+  { value: 'lineart', label: 'Lineart' },
+  { value: 'scribble', label: 'Scribble' },
+  { value: 'softedge', label: 'SoftEdge' },
+  { value: 'normal', label: 'Normal' },
+  { value: 'segmentation', label: 'Segmentation' },
 ]
 
 const EMPTY_READINESS: ProReadinessStatus = {
@@ -283,12 +358,36 @@ const ONNX_PROVIDER_OPTIONS = [
   { id: 'cpu', label: 'CPU' },
 ]
 
+const VRAM_PROFILE_OPTIONS = [
+  { id: 'normal', label: 'Normal VRAM' },
+  { id: 'cpu', label: 'CPU only' },
+  { id: 'low', label: 'Low VRAM (4-8 GB)' },
+  { id: 'mid', label: 'Mid VRAM (8-16 GB)' },
+  { id: 'high', label: 'High VRAM (16+ GB)' },
+]
+
 const RESOLUTION_PRESETS = [
   { id: '480', label: '480', shortEdge: 480 },
   { id: '512', label: '512', shortEdge: 512 },
   { id: '720', label: '720', shortEdge: 720 },
   { id: '1024', label: '1024', shortEdge: 1024 },
 ]
+
+function StartupSplash({ ready }: { ready: boolean }) {
+  return (
+    <div className={`pro-startup-splash${ready ? ' is-ready' : ''}`} role="status" aria-live="polite">
+      <div className="pro-startup-logo" aria-hidden="true">
+        <span className="pro-startup-logo-layer pro-startup-logo-frame" />
+        <span className="pro-startup-logo-layer pro-startup-logo-bolt" />
+        <span className="pro-startup-logo-layer pro-startup-logo-core" />
+      </div>
+      <div className="pro-startup-copy">
+        <span>{ready ? 'Ready' : 'Loading AIWF Studio'}</span>
+        <small>{ready ? 'Opening workspace' : 'Preparing local runtime'}</small>
+      </div>
+    </div>
+  )
+}
 
 function App() {
   const fallbackBootstrap = useMemo(() => getFallbackBootstrap(), [])
@@ -297,6 +396,8 @@ function App() {
   const [bootstrap, setBootstrap] = useState<ProBootstrap>(fallbackBootstrap)
   const [runtime, setRuntime] = useState<ProRuntimeStatus>(fallbackRuntime)
   const [runtimeStreamConnected, setRuntimeStreamConnected] = useState(false)
+  const [startupStatus, setStartupStatus] = useState<ProStartupStatus>(FALLBACK_STARTUP_STATUS)
+  const [startupSplashVisible, setStartupSplashVisible] = useState(true)
   const [settings, setSettings] = useState<GenerationSettings>(fallbackBootstrap.defaults)
   const [dataStatus, setDataStatus] = useState<ProDataStatus | null>(null)
   const [downloadsStatus, setDownloadsStatus] = useState<ProDownloadsStatus | null>(null)
@@ -319,8 +420,11 @@ function App() {
   const [generationTimings, setGenerationTimings] = useState<Record<string, number>>({})
   const [generationReceiptPath, setGenerationReceiptPath] = useState('')
   const [generationError, setGenerationError] = useState('')
+  const [supportIssue, setSupportIssue] = useState<SupportIssue | null>(null)
   const [activeMode, setActiveMode] = useState<ProMode>('image')
   const [activeRail, setActiveRail] = useState(readInitialRail)
+  const [workflowBlocks, setWorkflowBlocks] = useState<WorkflowCodeBlock[]>(() => loadWorkflowBlocksFromStorage())
+  const [workflowStatus, setWorkflowStatus] = useState('')
   const [previews, setPreviews] = useState<Partial<Record<CreationMode, RecentOutput | null>>>({
     image: fallbackBootstrap.recentOutputs[0] ?? null,
   })
@@ -349,6 +453,7 @@ function App() {
   const [backendConnected, setBackendConnected] = useState(false)
   const [backendRecovering, setBackendRecovering] = useState(false)
   const [engineFilter, setEngineFilter] = useState<EngineId>('all')
+  const [downloadingCatalogKey, setDownloadingCatalogKey] = useState('')
   const [leftPanelWidth, setLeftPanelWidth] = useState(initialLayout.leftPanelWidth)
   const [rightPanelWidth, setRightPanelWidth] = useState(initialLayout.rightPanelWidth)
   const [bottomDockVisible, setBottomDockVisible] = useState(initialLayout.bottomDockVisible)
@@ -356,18 +461,34 @@ function App() {
   const [activeModal, setActiveModal] = useState<ToolModalId>(null)
   const [openMenu, setOpenMenu] = useState<MenuBarId>(null)
   const [dragState, setDragState] = useState<DragState | null>(null)
-  const [hiresEnabled, setHiresEnabled] = useState(false)
-  const [hiresScale, setHiresScale] = useState(1.75)
-  const [hiresDenoise, setHiresDenoise] = useState(0.3)
+  const [enhanceSourceDataUrl, setEnhanceSourceDataUrl] = useState('')
+  const [enhanceSourceName, setEnhanceSourceName] = useState('')
+  const [enhanceMode, setEnhanceMode] = useState<'restore' | 'upscale' | 'restore-upscale' | 'vsr'>('restore')
+  const [enhanceRestoreModel, setEnhanceRestoreModel] = useState('gfpgan-v1.4')
+  const [enhanceUpscaleModel, setEnhanceUpscaleModel] = useState('realesrgan-x4plus')
+  const [enhanceRestoreVisibility, setEnhanceRestoreVisibility] = useState(1)
+  const [enhanceCodeformerWeight, setEnhanceCodeformerWeight] = useState(0.5)
+  const [enhanceUpscaleScale, setEnhanceUpscaleScale] = useState(2)
+  const [enhanceTileSize, setEnhanceTileSize] = useState(256)
+  const [enhanceTileOverlap, setEnhanceTileOverlap] = useState(32)
+  const [enhanceVsrScale, setEnhanceVsrScale] = useState(2)
+  const [enhanceVsrMode, setEnhanceVsrMode] = useState(0)
+  const [enhanceVsrStrength, setEnhanceVsrStrength] = useState(0.4)
+  const [enhanceBusy, setEnhanceBusy] = useState(false)
+  const [enhanceMessage, setEnhanceMessage] = useState('')
   const [segmentationMode, setSegmentationMode] = useState('Auto mask')
   const [reactorSourceDataUrl, setReactorSourceDataUrl] = useState('')
   const [reactorBusy, setReactorBusy] = useState(false)
   const [reactorMessage, setReactorMessage] = useState('')
   const generationAbortRef = useRef<AbortController | null>(null)
+  const startupSplashStartedAtRef = useRef(Date.now())
+  const startupWindowReadyReportedRef = useRef(false)
   const runtimeErrorLoggedRef = useRef(false)
   const auxiliaryErrorLoggedRef = useRef<Record<string, boolean>>({})
   const auxiliaryFingerprintRef = useRef<Record<string, string>>({})
   const auxiliaryFetchInFlightRef = useRef<Record<string, boolean>>({})
+  const fileDropDepthRef = useRef(0)
+  const [fileDropActive, setFileDropActive] = useState(false)
   const runtimeJobActive = isRuntimeJobActive(runtime.job)
   const generationActive = isGenerating || runtime.state.toLowerCase() === 'running' || runtimeJobActive
 
@@ -394,6 +515,82 @@ function App() {
     setSettingsStatus(null)
     setStatusMessage(message)
   }, [setDisconnectedRuntime])
+
+  const showSupportIssue = useCallback(
+    (
+      title: string,
+      errorOrMessage: unknown,
+      source: string,
+      context: Record<string, unknown> = {},
+    ) => {
+      const message = typeof errorOrMessage === 'string' ? errorOrMessage : formatApiError(errorOrMessage)
+      const detail = errorOrMessage instanceof ProApiError ? errorOrMessage.detail : undefined
+      const apiLatency = getProApiLatencySamples().slice(-10)
+      const issue: SupportIssue = {
+        title,
+        message,
+        source,
+        createdAt: new Date().toISOString(),
+        detail,
+        context: {
+          ...context,
+          activeRail,
+          activeMode,
+          selectedModelId: settings.modelId,
+          selectedModelName: bootstrap.models.find((model) => model.id === settings.modelId)?.name ?? settings.modelId,
+          runtimeState: runtime.state,
+          backend: runtime.backend,
+          device: runtime.device,
+          apiLatency,
+          appVersion: bootstrap.version,
+          userAgent: window.navigator.userAgent,
+          url: window.location.href,
+        },
+      }
+      setSupportIssue(issue)
+      reportProClientError({
+        kind: 'support-popup',
+        message,
+        source,
+        context: issue.context,
+      })
+    },
+    [activeMode, activeRail, bootstrap.models, bootstrap.version, runtime.backend, runtime.device, runtime.state, settings.modelId],
+  )
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchProStartup(controller.signal)
+      .then(setStartupStatus)
+      .catch(() => undefined)
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    if (!startupSplashVisible) {
+      return undefined
+    }
+    const elapsedMs = Date.now() - startupSplashStartedAtRef.current
+    const minSplashMs = Math.max(0, startupStatus.minSplashMs || FALLBACK_STARTUP_STATUS.minSplashMs)
+    const readyHoldMs = Math.max(0, startupStatus.readyHoldMs || FALLBACK_STARTUP_STATUS.readyHoldMs)
+    const delayMs = backendConnected
+      ? Math.max(0, minSplashMs - elapsedMs) + readyHoldMs
+      : Math.max(1000, STARTUP_SPLASH_FAILSAFE_MS - elapsedMs)
+    const timeoutId = window.setTimeout(() => {
+      setStartupSplashVisible(false)
+    }, delayMs)
+    return () => window.clearTimeout(timeoutId)
+  }, [backendConnected, startupSplashVisible, startupStatus.minSplashMs, startupStatus.readyHoldMs])
+
+  useEffect(() => {
+    if (startupSplashVisible || startupWindowReadyReportedRef.current) {
+      return
+    }
+    startupWindowReadyReportedRef.current = true
+    notifyProWindowReady()
+      .then(setStartupStatus)
+      .catch(() => undefined)
+  }, [startupSplashVisible])
 
   const handleSaveProSettings = useCallback(async () => {
     setSettingsSaveStatus('Saving settings...')
@@ -427,6 +624,31 @@ function App() {
       })
     }
   }, [settings, settingsStatus])
+
+  const refreshWorkspaceDataNow = useCallback(async () => {
+    const [bootstrapResult, dataResult, downloadsResult, capabilitiesResult, settingsResult] = await Promise.allSettled([
+      fetchProBootstrap(),
+      fetchProData(),
+      fetchProDownloads(),
+      fetchProCapabilities(),
+      fetchProSettings(),
+    ])
+    if (bootstrapResult.status === 'fulfilled') {
+      setBootstrap(bootstrapResult.value)
+    }
+    if (dataResult.status === 'fulfilled') {
+      setDataStatus(dataResult.value)
+    }
+    if (downloadsResult.status === 'fulfilled') {
+      setDownloadsStatus(downloadsResult.value)
+    }
+    if (capabilitiesResult.status === 'fulfilled') {
+      setCapabilitiesStatus(capabilitiesResult.value)
+    }
+    if (settingsResult.status === 'fulfilled') {
+      setSettingsStatus(settingsResult.value)
+    }
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -488,7 +710,7 @@ function App() {
     // newer stream ticks — visible as progress jumping backwards and live
     // previews flickering.
     const applyPollResults = !runtimeStreamConnected
-    const intervalMs = runtimeStreamConnected ? 30000 : generationActive ? 1000 : 5000
+    const intervalMs = runtimeStreamConnected ? 30000 : backendRecovering ? 500 : generationActive ? 250 : 750
     const refreshRuntime = () => {
       if (disposed || inFlight) {
         return
@@ -500,7 +722,7 @@ function App() {
       requestTimeoutId = window.setTimeout(() => {
         timedOut = true
         activeController.abort()
-      }, 4000)
+      }, 1200)
       fetchProRuntime(activeController.signal)
         .then((nextRuntime) => {
           if (!disposed) {
@@ -518,7 +740,7 @@ function App() {
               runtimeErrorLoggedRef.current = true
               reportProClientError({
                 kind: 'api',
-                message: timedOut ? 'Runtime refresh timed out after 4 seconds.' : formatApiError(error),
+                message: timedOut ? 'Runtime refresh timed out after 1200 ms.' : formatApiError(error),
                 source: 'runtime-refresh',
                 context: { route: '/api/pro/runtime', timedOut },
               })
@@ -552,7 +774,7 @@ function App() {
       }
       window.clearInterval(intervalId)
     }
-  }, [generationActive, markBackendDisconnected, runtimeStreamConnected])
+  }, [backendRecovering, generationActive, markBackendDisconnected, runtimeStreamConnected])
 
   useEffect(() => {
     const onError = (event: ErrorEvent) => {
@@ -715,15 +937,17 @@ function App() {
       await requestProRestart()
     } catch (error) {
       setBackendRecovering(false)
-      setStatusMessage(`Backend restart request failed: ${formatApiError(error)}`)
+      const message = `Backend restart request failed: ${formatApiError(error)}`
+      setStatusMessage(message)
+      showSupportIssue('Backend restart failed', error, 'restart', { route: '/api/pro/restart' })
       reportProClientError({
         kind: 'api',
-        message: formatApiError(error),
+        message,
         source: 'restart',
         context: { route: '/api/pro/restart' },
       })
     }
-  }, [markBackendDisconnected])
+  }, [markBackendDisconnected, showSupportIssue])
 
   useEffect(() => {
     if (!dragState) {
@@ -825,6 +1049,31 @@ function App() {
   }, [creationModels, filteredModels, settings.modelId])
 
   useEffect(() => {
+    saveWorkflowBlocksToStorage(workflowBlocks)
+  }, [workflowBlocks])
+
+  const handleSendToWorkflow = useCallback(
+    (source = 'Create panel') => {
+      setWorkflowBlocks((current) => {
+        const created = createWorkflowBlocksFromSettings(
+          {
+            settings,
+            bootstrap,
+            runtime,
+            selectedModel,
+            selectedModelName: selectedModel?.name ?? settings.modelId,
+            source,
+          },
+          current.length,
+        )
+        return renumberWorkflowBlocks([...current, ...created])
+      })
+      setWorkflowStatus('Captured current settings as a workflow node. Open the Workflow tab to reorder.')
+    },
+    [bootstrap, runtime, selectedModel, settings],
+  )
+
+  useEffect(() => {
     if (creationModels.length === 0) {
       return
     }
@@ -852,6 +1101,32 @@ function App() {
     const source = dataStatus?.recentOutputs.length ? dataStatus.recentOutputs : bootstrap.recentOutputs
     return source.slice(0, 8)
   }, [bootstrap.recentOutputs, dataStatus])
+
+  // Shared props bundle fed to every migrated studio layout screen. Keeps the
+  // ex-paid layouts as pure presentation over my real state + handlers.
+  const buildLayoutProps = useCallback(
+    (): LayoutProps => ({
+      settings,
+      bootstrap,
+      runtime,
+      recentOutputs,
+      preview,
+      selectedModel,
+      selectedModelName: selectedModel?.name ?? settings.modelId,
+      statusMessage,
+      isGenerating,
+      onSettingsChange: setSettings,
+      onGenerate: handleGenerate,
+      onSendToWorkflow: handleSendToWorkflow,
+      workflowBlocks,
+      onWorkflowBlocksChange: setWorkflowBlocks,
+      onPreviewSelect: setPreview,
+      onOpenModels: () => handleRailSelect('models'),
+      onOpenSettings: () => handleRailSelect('settings'),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bootstrap, isGenerating, preview, recentOutputs, runtime, selectedModel, settings, statusMessage, workflowBlocks],
+  )
 
   const activeRatio = useMemo(
     () =>
@@ -977,6 +1252,208 @@ function App() {
     [bootstrap.aspectRatios, bootstrap.models, creationModels],
   )
 
+  const uploadModelFilesAndRefresh = useCallback(
+    async (files: File[]) => {
+      const modelFiles = files.filter(isModelFile)
+      if (modelFiles.length === 0) {
+        throw new Error(`Choose a model file: ${MODEL_FILE_ACCEPT}.`)
+      }
+      setStatusMessage(`Sorting ${modelFiles.length} model file${modelFiles.length === 1 ? '' : 's'}...`)
+      const results: ProModelSortResult[] = []
+      for (const file of modelFiles) {
+        results.push(await uploadModelFile(file))
+      }
+      await refreshWorkspaceDataNow()
+      const totalMoved = results.reduce((sum, result) => sum + result.counts.moved, 0)
+      const totalLeft = results.reduce((sum, result) => sum + result.counts.left, 0)
+      const inventory = results[results.length - 1]?.counts.inventoryCount ?? 0
+      const message = totalMoved > 0
+        ? `Sorted ${totalMoved} model file${totalMoved === 1 ? '' : 's'}. Inventory: ${inventory}.`
+        : `${totalLeft || modelFiles.length} model file${modelFiles.length === 1 ? '' : 's'} need review in models to sort. Inventory: ${inventory}.`
+      setStatusMessage(message)
+      return message
+    },
+    [refreshWorkspaceDataNow],
+  )
+
+  const reorganizeModelFilesNow = useCallback(async () => {
+    setStatusMessage('Re-reading model headers...')
+    const result = await reorganizeModels()
+    await refreshWorkspaceDataNow()
+    const message = summarizeModelSort(result)
+    setStatusMessage(message)
+    return message
+  }, [refreshWorkspaceDataNow])
+
+  const handleCatalogDownload = useCallback(
+    async (key: string) => {
+      setDownloadingCatalogKey(key)
+      setStatusMessage('Downloading model...')
+      try {
+        const nextDownloads = await downloadCatalogModel(key)
+        setDownloadsStatus(nextDownloads)
+        await refreshWorkspaceDataNow()
+        setStatusMessage('Model downloaded and inventory refreshed.')
+      } catch (error: unknown) {
+        const message = formatApiError(error)
+        setStatusMessage(message)
+        showSupportIssue('Catalog download failed', error, 'catalog-download', {
+          route: `/api/pro/downloads/catalog/${key}`,
+          catalogKey: key,
+        })
+        reportProClientError({
+          kind: 'api',
+          message,
+          source: 'catalog-download',
+          context: { route: `/api/pro/downloads/catalog/${key}` },
+        })
+      } finally {
+        setDownloadingCatalogKey('')
+      }
+    },
+    [refreshWorkspaceDataNow, showSupportIssue],
+  )
+
+  const handleUnloadModel = useCallback(async () => {
+    setStatusMessage('Unloading current model...')
+    try {
+      const nextRuntime = await unloadProModel()
+      setRuntime(nextRuntime)
+      setStatusMessage('Current model unloaded.')
+    } catch (error: unknown) {
+      const message = formatApiError(error)
+      setStatusMessage(message)
+      showSupportIssue('Unload model failed', error, 'model-unload', { route: '/api/pro/models/unload' })
+    }
+  }, [showSupportIssue])
+
+  const handleOpenSupportTerminal = useCallback(async () => {
+    setStatusMessage('Opening support terminal...')
+    try {
+      const result = await openSupportTerminal()
+      setStatusMessage(result.cwd ? `Support terminal opened in ${result.cwd}.` : 'Support terminal opened.')
+    } catch (error: unknown) {
+      const message = formatApiError(error)
+      setStatusMessage(message)
+      showSupportIssue('Support terminal failed', error, 'support-terminal', { route: '/api/pro/support/terminal' })
+    }
+  }, [showSupportIssue])
+
+  const handleReloadFrontend = useCallback(() => {
+    window.location.reload()
+  }, [])
+
+  const handleDroppedFiles = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) {
+        return
+      }
+      const modelFiles = files.filter(isModelFile)
+      const firstImage = files.find((file) => !isModelFile(file) && isImageFile(file))
+      const firstVideo = files.find((file) => !isModelFile(file) && isVideoFile(file))
+      if (modelFiles.length > 0) {
+        await uploadModelFilesAndRefresh(modelFiles)
+      }
+      if (firstImage) {
+        const dataUrl = await readFileAsDataUrl(firstImage)
+        if (activeMode === 'video') {
+          setSettings((current) => ({
+            ...current,
+            mode: 'video',
+            sourceImageDataUrl: dataUrl,
+            sourceImageName: firstImage.name,
+          }))
+          setStatusMessage(`Loaded ${firstImage.name} as the video first frame.`)
+        } else if (activeMode === 'inpaint') {
+          setSettings((current) => ({
+            ...current,
+            mode: 'inpaint',
+            initImageDataUrl: dataUrl,
+            maskImageDataUrl: '',
+          }))
+          setStatusMessage(`Loaded ${firstImage.name} into the inpaint canvas.`)
+        } else {
+          const dimensions = await imageDimensionsFromDataUrl(dataUrl)
+          setActiveMode('image')
+          setActiveRail('create')
+          setPreview({
+            id: `local-${Date.now()}`,
+            url: dataUrl,
+            thumbnailUrl: dataUrl,
+            prompt: firstImage.name,
+            width: dimensions.width || settings.width,
+            height: dimensions.height || settings.height,
+            createdAt: new Date().toISOString(),
+            mode: 'image',
+            modelName: 'Local file',
+            source: 'upload',
+          })
+          setStatusMessage(`Loaded ${firstImage.name} into the image canvas.`)
+        }
+      } else if (firstVideo) {
+        setStatusMessage(`Uploading ${firstVideo.name} to Video Lab...`)
+        const probe = await uploadVideoLabFile(firstVideo)
+        setActiveRail('tools')
+        setActiveMode('video')
+        setStatusMessage(
+          `Uploaded ${firstVideo.name}: ${probe.width}x${probe.height}, ${probe.frameCount} frames @ ${probe.fps.toFixed(1)} fps.`,
+        )
+      }
+    },
+    [activeMode, setPreview, settings.height, settings.width, uploadModelFilesAndRefresh],
+  )
+
+  const handleFileDragEnter = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) {
+      return
+    }
+    event.preventDefault()
+    fileDropDepthRef.current += 1
+    setFileDropActive(true)
+  }, [])
+
+  const handleFileDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) {
+      return
+    }
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }, [])
+
+  const handleFileDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) {
+      return
+    }
+    event.preventDefault()
+    fileDropDepthRef.current = Math.max(0, fileDropDepthRef.current - 1)
+    if (fileDropDepthRef.current === 0) {
+      setFileDropActive(false)
+    }
+  }, [])
+
+  const handleFileDrop = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!event.dataTransfer.types.includes('Files')) {
+        return
+      }
+      event.preventDefault()
+      fileDropDepthRef.current = 0
+      setFileDropActive(false)
+      const files = Array.from(event.dataTransfer.files)
+      void handleDroppedFiles(files).catch((error: unknown) => {
+        const message = formatApiError(error)
+        setStatusMessage(message)
+        showSupportIssue('File import failed', error, 'file-drop', { fileCount: files.length })
+        reportProClientError({
+          kind: 'file-drop',
+          message,
+          source: 'handleFileDrop',
+        })
+      })
+    },
+    [handleDroppedFiles, showSupportIssue],
+  )
+
   const handleGenerate = useCallback(async () => {
     if (generationAbortRef.current) {
       if (generationActive) {
@@ -1050,15 +1527,7 @@ function App() {
       },
     })
     try {
-      const result = await generateProOutput(
-        {
-          ...settings,
-          enableHires: hiresEnabled,
-          hiresScale,
-          hiresDenoise,
-        },
-        controller.signal,
-      )
+      const result = await generateProOutput(settings, controller.signal)
       setGenerationProgress(result.progress)
       setGenerationTimings(result.timings)
       setGenerationReceiptPath(result.receiptPath ?? '')
@@ -1104,6 +1573,14 @@ function App() {
         const nextMessage = `Generation failed: ${formatApiError(error)}`
         setGenerationError(nextMessage)
         setStatusMessage(nextMessage)
+        showSupportIssue('Generation failed', error, 'generate', {
+          mode: settings.mode,
+          modelId: settings.modelId,
+          route: '/api/pro/generate',
+          width: settings.width,
+          height: settings.height,
+          steps: settings.steps,
+        })
         reportProClientError({
           kind: 'generation',
           message: nextMessage,
@@ -1124,7 +1601,7 @@ function App() {
       void fetchProRuntime().then(setRuntime).catch(() => undefined)
       void fetchProLogs().then(setLogStatus).catch(() => undefined)
     }
-  }, [bootstrap.models, generationActive, hiresDenoise, hiresEnabled, hiresScale, selectedModel, settings])
+  }, [bootstrap.models, generationActive, selectedModel, settings])
 
   const handleStopGenerate = useCallback(() => {
     const controller = generationAbortRef.current
@@ -1204,6 +1681,146 @@ function App() {
     setStatusMessage('Output settings applied to the current generation controls.')
   }, [])
 
+  const readCurrentPreviewDataUrl = useCallback(async () => {
+    if (!preview?.url) {
+      return ''
+    }
+    if (preview.url.startsWith('data:')) {
+      return preview.url
+    }
+    const blob = await (await fetch(preview.url)).blob()
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = () => reject(new Error('Could not read the current preview image.'))
+      reader.readAsDataURL(blob)
+    })
+  }, [preview?.url])
+
+  const handleEnhanceSourceChange = useCallback((event: ReactChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setEnhanceSourceDataUrl(reader.result)
+        setEnhanceSourceName(file.name)
+        setEnhanceMessage(`Loaded ${file.name}.`)
+      }
+    }
+    reader.readAsDataURL(file)
+  }, [])
+
+  const handleUsePreviewForEnhance = useCallback(async () => {
+    try {
+      const dataUrl = await readCurrentPreviewDataUrl()
+      if (!dataUrl) {
+        setEnhanceMessage('Generate or select an image first.')
+        return
+      }
+      setEnhanceSourceDataUrl(dataUrl)
+      setEnhanceSourceName('Current preview')
+      setEnhanceMessage('Current preview loaded for Enhance.')
+    } catch (error: unknown) {
+      setEnhanceMessage(`Could not load preview: ${formatApiError(error)}`)
+    }
+  }, [readCurrentPreviewDataUrl])
+
+  const handleRunEnhance = useCallback(async () => {
+    let source = enhanceSourceDataUrl
+    if (!source) {
+      source = await readCurrentPreviewDataUrl()
+    }
+    if (!source) {
+      setEnhanceMessage('Upload an image or use the current preview first.')
+      return
+    }
+    setEnhanceBusy(true)
+    setEnhanceMessage(enhanceMode === 'vsr' ? 'Running NVIDIA VSR image upscale...' : 'Running Enhance pipeline...')
+    try {
+      const result = enhanceMode === 'vsr'
+        ? await runVsrImage({
+            imageDataUrl: source,
+            scale: enhanceVsrScale,
+            mode: enhanceVsrMode,
+            effect: 'SuperRes',
+            strength: enhanceVsrStrength,
+          })
+        : await runEnhanceImage({
+            imageDataUrl: source,
+            restoreEnabled: enhanceMode === 'restore' || enhanceMode === 'restore-upscale',
+            restoreModel: enhanceRestoreModel,
+            restoreVisibility: enhanceRestoreVisibility,
+            codeformerWeight: enhanceCodeformerWeight,
+            upscaleEnabled: enhanceMode === 'upscale' || enhanceMode === 'restore-upscale',
+            upscaleModel: enhanceUpscaleModel,
+            upscaleScale: enhanceUpscaleScale,
+            tileSize: enhanceTileSize,
+            tileOverlap: enhanceTileOverlap,
+            restoreFirst: true,
+          })
+      const outputUrl = result.image || result.url
+      if (!outputUrl) {
+        setEnhanceMessage(result.message || 'Enhance completed without an image payload.')
+        return
+      }
+      const enhanced: RecentOutput = {
+        id: `pro-${enhanceMode}-${Date.now()}`,
+        url: outputUrl,
+        thumbnailUrl: outputUrl,
+        width: result.width || preview?.width || settings.width,
+        height: result.height || preview?.height || settings.height,
+        prompt: preview?.prompt || 'Pro image post-process',
+        negativePrompt: preview?.negativePrompt || '',
+        modelName: enhanceMode === 'vsr' ? 'NVIDIA VSR' : 'Pro Enhance',
+        mode: 'image',
+        seed: preview?.seed,
+        steps: preview?.steps,
+        cfgScale: preview?.cfgScale,
+        sampler: preview?.sampler,
+        scheduler: preview?.scheduler,
+        infotext: result.infotext || result.message,
+        createdAt: new Date().toISOString(),
+        status: 'completed',
+        path: result.outputPath,
+      }
+      setPreview(enhanced)
+      setBootstrap((current) => ({
+        ...current,
+        recentOutputs: mergeRecentOutputs([enhanced], current.recentOutputs),
+      }))
+      setEnhanceMessage(result.message || 'Enhance complete.')
+      setStatusMessage(result.message || 'Enhance complete.')
+    } catch (error: unknown) {
+      const message = `Enhance failed: ${formatApiError(error)}`
+      setEnhanceMessage(message)
+      showSupportIssue('Enhance failed', error, 'enhance', { route: '/api/pro/enhance/image' })
+    } finally {
+      setEnhanceBusy(false)
+    }
+  }, [
+    enhanceCodeformerWeight,
+    enhanceMode,
+    enhanceRestoreModel,
+    enhanceRestoreVisibility,
+    enhanceSourceDataUrl,
+    enhanceTileOverlap,
+    enhanceTileSize,
+    enhanceUpscaleModel,
+    enhanceUpscaleScale,
+    enhanceVsrMode,
+    enhanceVsrScale,
+    enhanceVsrStrength,
+    preview,
+    readCurrentPreviewDataUrl,
+    settings.height,
+    settings.width,
+    setPreview,
+  ])
+
   const handleLayoutReset = useCallback(() => {
     setLeftPanelWidth(380)
     setRightPanelWidth(320)
@@ -1242,7 +1859,47 @@ function App() {
       } as CSSProperties)
 
   return (
-    <div className="aiwf-pro-shell theme-preset-1" data-mode={activeMode}>
+    <div
+      className={`aiwf-pro-shell theme-preset-1${fileDropActive ? ' is-file-drop-active' : ''}`}
+      data-mode={activeMode}
+      onDragEnter={handleFileDragEnter}
+      onDragOver={handleFileDragOver}
+      onDragLeave={handleFileDragLeave}
+      onDrop={handleFileDrop}
+    >
+      {startupSplashVisible ? <StartupSplash ready={backendConnected} /> : null}
+      {fileDropActive ? (
+        <div className="pro-file-drop-overlay" aria-hidden="true">
+          <div>
+            <HardDrive size={28} aria-hidden="true" />
+            <strong>Drop files</strong>
+            <span>Images load into the current canvas. Videos go to Video Lab. Models go to the sorter.</span>
+          </div>
+        </div>
+      ) : null}
+      {supportIssue ? (
+        <SupportIssueDialog
+          issue={supportIssue}
+          onClose={() => setSupportIssue(null)}
+          onCopy={async () => {
+            await navigator.clipboard?.writeText(JSON.stringify(supportIssue, null, 2))
+            setStatusMessage('Error report copied.')
+          }}
+          onSubmit={() => {
+            reportProClientError({
+              kind: 'tester-report',
+              message: supportIssue.message,
+              source: supportIssue.source,
+              context: {
+                ...supportIssue.context,
+                detail: supportIssue.detail,
+                createdAt: supportIssue.createdAt,
+              },
+            })
+            setStatusMessage('Local error report saved. Send the copied report if Shawn asks for it.')
+          }}
+        />
+      ) : null}
       <aside className="pro-rail" aria-label="Primary navigation">
         <button
           type="button"
@@ -1286,6 +1943,8 @@ function App() {
               setActiveModal('segmentation')
             } else if (action === 'open-reactor') {
               setActiveModal('reactor')
+            } else if (action === 'open-enhance') {
+              setActiveModal('enhance')
             } else if (action === 'copy-last') {
               void navigator.clipboard?.writeText(settings.prompt)
               setStatusMessage('Prompt copied to clipboard.')
@@ -1327,7 +1986,34 @@ function App() {
           aria-label="AIWF Pro workspace"
           style={workspaceStyle}
         >
-          {activeRail === 'models' ? (
+          {activeRail === 'families' ? (
+            <ModelFamilyMatrixLayout {...buildLayoutProps()} />
+          ) : activeRail === 'foundry' ? (
+            <MediaFoundryImageLayout {...buildLayoutProps()} />
+          ) : activeRail === 'pipeline' ? (
+            <PipelineAtlasLayout {...buildLayoutProps()} />
+          ) : activeRail === 'projects' ? (
+            <ProjectCenterLayout {...buildLayoutProps()} />
+          ) : activeRail === 'assistant' ? (
+            <AgenticChatLayout {...buildLayoutProps()} />
+          ) : activeRail === 'audiolab' ? (
+            <AudioStudioLayout {...buildLayoutProps()} />
+          ) : activeRail === 'workflow' ? (
+            <section className="pro-workspace-surface" aria-label="Workflow">
+              <WorkspaceHeader
+                eyebrow="Workflow"
+                title="Workflow builder"
+                description="Send settings here from any generation tab, then reorder the nodes into the exact pipeline you want."
+              />
+              <div className="pro-workflow-wrap">
+                <WorkflowPanel
+                  blocks={workflowBlocks}
+                  onChange={setWorkflowBlocks}
+                  runStatus={workflowStatus}
+                />
+              </div>
+            </section>
+          ) : activeRail === 'models' ? (
             <ModelsWorkspace
               engineFilter={engineFilter}
               engines={bootstrap.engines}
@@ -1336,6 +2022,8 @@ function App() {
               selectedModelId={settings.modelId}
               onEngineFilterChange={handleEngineFilterChange}
               onModelSelect={handleModelSelect}
+              onCatalogDownload={handleCatalogDownload}
+              downloadingCatalogKey={downloadingCatalogKey}
             />
           ) : activeRail === 'data' ? (
             <>
@@ -1377,6 +2065,7 @@ function App() {
                 }}
                 onOpenData={() => handleRailSelect('data')}
                 onOpenSegmentation={() => setActiveModal('segmentation')}
+                onOpenEnhance={() => setActiveModal('enhance')}
                 onOpenReactor={() => setActiveModal('reactor')}
               />
               <ResizeHandle
@@ -1395,6 +2084,7 @@ function App() {
                 }}
                 onOpenData={() => handleRailSelect('data')}
                 onOpenSegmentation={() => setActiveModal('segmentation')}
+                onOpenEnhance={() => setActiveModal('enhance')}
                 onOpenReactor={() => setActiveModal('reactor')}
               />
               <ResizeHandle
@@ -1487,6 +2177,12 @@ function App() {
                 onSettingsChange={setSettings}
                 onSettingsStatusChange={setSettingsStatus}
                 onSaveSettings={handleSaveProSettings}
+                onModelFilesUpload={uploadModelFilesAndRefresh}
+                onModelReorganize={reorganizeModelFilesNow}
+                onUnloadModel={handleUnloadModel}
+                onRestartBackend={handleRecoverBackend}
+                onReloadFrontend={handleReloadFrontend}
+                onOpenSupportTerminal={handleOpenSupportTerminal}
                 settingsSaveStatus={settingsSaveStatus}
                 leftPanelWidth={leftPanelWidth}
                 rightPanelWidth={rightPanelWidth}
@@ -1525,9 +2221,11 @@ function App() {
                 onPreviewSelect={setPreview}
                 onGenerate={handleGenerate}
                 onStopGenerate={handleStopGenerate}
+                onSendToWorkflow={handleSendToWorkflow}
                 onToggleAdvanced={() => setShowAdvanced((value) => !value)}
                 onOpenSegmentation={() => setActiveModal('segmentation')}
                 onOpenHires={() => setActiveModal('hires')}
+                onOpenEnhance={() => setActiveModal('enhance')}
                 onOpenReactor={() => setActiveModal('reactor')}
                 onPromptAnalyze={handlePromptAnalyze}
                 bottomDockVisible={bottomDockVisible}
@@ -1555,6 +2253,7 @@ function App() {
                     height={settings.height}
                     onOpenSegmentation={() => setActiveModal('segmentation')}
                     onOpenHires={() => setActiveModal('hires')}
+                    onOpenEnhance={() => setActiveModal('enhance')}
                     onOpenReactor={() => setActiveModal('reactor')}
                     bottomDockVisible={bottomDockVisible}
                     onToggleBottomDock={() => setBottomDockVisible((value) => !value)}
@@ -1581,7 +2280,11 @@ function App() {
               />
             </>
           )}
-          <RuntimePanel runtime={runtime} selectedModelName={selectedModel?.name ?? settings.modelId} />
+          <RuntimePanel
+            runtime={runtime}
+            selectedModelName={selectedModel?.name ?? settings.modelId}
+            onUnloadModel={handleUnloadModel}
+          />
         </section>
 
       </main>
@@ -1599,17 +2302,210 @@ function App() {
               <option>Box then segment</option>
             </select>
           </label>
+          <p className="pro-field-note">
+            Quick auto-mask controls are on the Inpaint canvas. Full SAM box, point, and DINO workflows remain in Gradio Lab.
+          </p>
         </div>
       </ToolModal>
 
       <ToolModal open={activeModal === 'hires'} title="High-res fix" onClose={() => setActiveModal(null)}>
         <div className="pro-modal-form">
           <label className="pro-toggle">
-            <input type="checkbox" checked={hiresEnabled} onChange={(event) => setHiresEnabled(event.target.checked)} />
+            <input
+              type="checkbox"
+              checked={settings.enableHires}
+              onChange={(event) => setSettings((current) => ({ ...current, enableHires: event.target.checked }))}
+            />
             <span>Enable high-res pass</span>
           </label>
-          <RangeField label="Scale" min={1} max={3} step={0.05} value={hiresScale} onChange={setHiresScale} />
-          <RangeField label="Denoise" min={0} max={1} step={0.05} value={hiresDenoise} onChange={setHiresDenoise} />
+          <RangeField
+            label="Scale"
+            min={1}
+            max={4}
+            step={0.05}
+            value={settings.hiresScale}
+            onChange={(value) => setSettings((current) => ({ ...current, hiresScale: value }))}
+          />
+          <RangeField
+            label="Denoise"
+            min={0}
+            max={1}
+            step={0.05}
+            value={settings.hiresDenoise}
+            onChange={(value) => setSettings((current) => ({ ...current, hiresDenoise: value }))}
+          />
+          <label className="pro-field">
+            <FieldLabel
+              label="Second-pass steps"
+              tooltip="Use fewer high-res steps than the base pass unless the model visibly needs more detail cleanup."
+            />
+            <input
+              type="number"
+              min={0}
+              max={80}
+              value={settings.hiresSteps}
+              onChange={(event) => setSettings((current) => ({ ...current, hiresSteps: Number(event.target.value) }))}
+            />
+          </label>
+          <label className="pro-field">
+            <FieldLabel
+              label="Upscaler"
+              tooltip="Diffusers accepts common resize names such as latent, nearest, lanczos, bicubic, or a project upscaler id when supported by the route."
+            />
+            <input
+              value={settings.hiresUpscaler}
+              placeholder="latent, lanczos, bicubic, nearest"
+              onChange={(event) => setSettings((current) => ({ ...current, hiresUpscaler: event.target.value }))}
+            />
+          </label>
+        </div>
+      </ToolModal>
+
+      <ToolModal open={activeModal === 'enhance'} title="Enhance / VSR" onClose={() => setActiveModal(null)}>
+        <div className="pro-modal-form">
+          <div className="pro-enhance-source-row">
+            {enhanceSourceDataUrl ? (
+              <img className="pro-enhance-preview" src={enhanceSourceDataUrl} alt="" />
+            ) : (
+              <div className="pro-enhance-empty">No source image</div>
+            )}
+            <div className="pro-enhance-source-actions">
+              <span>{enhanceSourceName || 'Use the current canvas image or upload a source.'}</span>
+              <button type="button" className="pro-secondary-button" onClick={handleUsePreviewForEnhance} disabled={enhanceBusy || !preview?.url}>
+                Use current preview
+              </button>
+              <label className="pro-secondary-button" htmlFor="pro-enhance-source-input">
+                <FileImage size={15} aria-hidden="true" />
+                <span>Upload image</span>
+              </label>
+              <input
+                id="pro-enhance-source-input"
+                className="pro-file-input-hidden"
+                type="file"
+                accept={IMAGE_FILE_ACCEPT}
+                onChange={handleEnhanceSourceChange}
+                disabled={enhanceBusy}
+              />
+            </div>
+          </div>
+          <label className="pro-field">
+            <FieldLabel
+              label="Mode"
+              tooltip="Face restore uses GFPGAN/CodeFormer-style restorer models. Upscale uses local Enhance upscalers. VSR uses NVIDIA VideoFX when installed."
+            />
+            <select value={enhanceMode} onChange={(event) => setEnhanceMode(event.target.value as typeof enhanceMode)} disabled={enhanceBusy}>
+              <option value="restore">Face restore</option>
+              <option value="upscale">Upscale</option>
+              <option value="restore-upscale">Face restore + upscale</option>
+              <option value="vsr">NVIDIA VSR image upscale</option>
+            </select>
+          </label>
+          {enhanceMode !== 'upscale' && enhanceMode !== 'vsr' ? (
+            <>
+              <label className="pro-field">
+                <FieldLabel label="Face restorer model" />
+                <input
+                  value={enhanceRestoreModel}
+                  onChange={(event) => setEnhanceRestoreModel(event.target.value)}
+                  placeholder="gfpgan-v1.4 or codeformer"
+                  disabled={enhanceBusy}
+                />
+              </label>
+              <RangeField
+                label="Restore strength"
+                min={0}
+                max={1}
+                step={0.05}
+                value={enhanceRestoreVisibility}
+                onChange={setEnhanceRestoreVisibility}
+              />
+              <RangeField
+                label="CodeFormer weight"
+                min={0}
+                max={1}
+                step={0.05}
+                value={enhanceCodeformerWeight}
+                onChange={setEnhanceCodeformerWeight}
+              />
+            </>
+          ) : null}
+          {enhanceMode === 'upscale' || enhanceMode === 'restore-upscale' ? (
+            <>
+              <label className="pro-field">
+                <FieldLabel label="Upscaler model" />
+                <input
+                  value={enhanceUpscaleModel}
+                  onChange={(event) => setEnhanceUpscaleModel(event.target.value)}
+                  placeholder="realesrgan-x4plus"
+                  disabled={enhanceBusy}
+                />
+              </label>
+              <RangeField label="Scale" min={1} max={8} step={0.5} value={enhanceUpscaleScale} onChange={setEnhanceUpscaleScale} />
+              <div className="pro-control-grid">
+                <label className="pro-field">
+                  <FieldLabel label="Tile size" />
+                  <input
+                    type="number"
+                    min={0}
+                    max={2048}
+                    step={64}
+                    value={enhanceTileSize}
+                    onChange={(event) => setEnhanceTileSize(Number(event.target.value))}
+                    disabled={enhanceBusy}
+                  />
+                </label>
+                <label className="pro-field">
+                  <FieldLabel label="Tile overlap" />
+                  <input
+                    type="number"
+                    min={0}
+                    max={512}
+                    step={16}
+                    value={enhanceTileOverlap}
+                    onChange={(event) => setEnhanceTileOverlap(Number(event.target.value))}
+                    disabled={enhanceBusy}
+                  />
+                </label>
+              </div>
+            </>
+          ) : null}
+          {enhanceMode === 'vsr' ? (
+            <>
+              <RangeField label="VSR scale" min={1} max={4} step={0.5} value={enhanceVsrScale} onChange={setEnhanceVsrScale} />
+              <div className="pro-control-grid">
+                <label className="pro-field">
+                  <FieldLabel label="VSR mode" />
+                  <input
+                    type="number"
+                    min={0}
+                    max={19}
+                    value={enhanceVsrMode}
+                    onChange={(event) => setEnhanceVsrMode(clamp(Number(event.target.value) || 0, 0, 19))}
+                    disabled={enhanceBusy}
+                  />
+                </label>
+                <label className="pro-field">
+                  <FieldLabel label="Strength" />
+                  <input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={enhanceVsrStrength}
+                    onChange={(event) => setEnhanceVsrStrength(clamp(Number(event.target.value) || 0, 0, 1))}
+                    disabled={enhanceBusy}
+                  />
+                </label>
+              </div>
+              <p className="pro-field-note">Video VSR is also available from Video Lab after uploading a clip.</p>
+            </>
+          ) : null}
+          <div className="pro-settings-actions">
+            <button type="button" className="pro-primary-button" onClick={handleRunEnhance} disabled={enhanceBusy}>
+              {enhanceBusy ? 'Working...' : 'Run'}
+            </button>
+            <span>{enhanceMessage || 'Ready.'}</span>
+          </div>
         </div>
       </ToolModal>
 
@@ -1619,7 +2515,7 @@ function App() {
             <FieldLabel label="Source face" tooltip="Upload a clear photo of the face to transplant onto the current preview image." />
             <input
               type="file"
-              accept="image/png,image/jpeg,image/webp"
+              accept={IMAGE_FILE_ACCEPT}
               onChange={(event) => {
                 const file = event.target.files?.[0]
                 event.target.value = ''
@@ -1839,6 +2735,67 @@ function TopBar({
   )
 }
 
+function SupportIssueDialog({
+  issue,
+  onClose,
+  onCopy,
+  onSubmit,
+}: {
+  issue: SupportIssue
+  onClose: () => void
+  onCopy: () => void | Promise<void>
+  onSubmit: () => void
+}) {
+  const details = JSON.stringify({ detail: issue.detail, context: issue.context }, null, 2)
+  return (
+    <div className="pro-support-modal-backdrop" role="presentation">
+      <section className="pro-support-modal" role="dialog" aria-modal="true" aria-labelledby="support-issue-title">
+        <div className="pro-support-modal-header">
+          <div>
+            <span>Error report</span>
+            <strong id="support-issue-title">{issue.title}</strong>
+          </div>
+          <button type="button" className="pro-icon-button" aria-label="Close error report" onClick={onClose}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+        <p>{issue.message}</p>
+        <dl className="pro-support-summary">
+          <div>
+            <dt>Source</dt>
+            <dd>{issue.source}</dd>
+          </div>
+          <div>
+            <dt>Time</dt>
+            <dd>{issue.createdAt}</dd>
+          </div>
+          <div>
+            <dt>Model</dt>
+            <dd>{String(issue.context?.selectedModelName ?? issue.context?.selectedModelId ?? 'Unknown')}</dd>
+          </div>
+        </dl>
+        {issue.detail || issue.context ? (
+          <details className="pro-support-details">
+            <summary>Technical details</summary>
+            <pre>{details}</pre>
+          </details>
+        ) : null}
+        <div className="pro-settings-action-row">
+          <button type="button" className="pro-primary-button" onClick={onCopy}>
+            Copy report
+          </button>
+          <button type="button" className="pro-secondary-button" onClick={onSubmit}>
+            Save local report
+          </button>
+          <button type="button" className="pro-secondary-button" onClick={onClose}>
+            Dismiss
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function ModeTabs({
   activeMode,
   onSelect,
@@ -1891,9 +2848,11 @@ function PromptPanel({
   onPreviewSelect,
   onGenerate,
   onStopGenerate,
+  onSendToWorkflow,
   onToggleAdvanced,
   onOpenSegmentation,
   onOpenHires,
+  onOpenEnhance,
   onOpenReactor,
   onPromptAnalyze,
   bottomDockVisible,
@@ -1920,9 +2879,11 @@ function PromptPanel({
   onPreviewSelect: (value: RecentOutput) => void
   onGenerate: () => void
   onStopGenerate: () => void
+  onSendToWorkflow: (source?: string) => void
   onToggleAdvanced: () => void
   onOpenSegmentation: () => void
   onOpenHires: () => void
+  onOpenEnhance: () => void
   onOpenReactor: () => void
   onPromptAnalyze: () => void
   bottomDockVisible: boolean
@@ -2011,6 +2972,27 @@ function PromptPanel({
     reader.readAsDataURL(file)
   }
 
+  const handleControlNetImageChange = (event: ReactChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => {
+      const value = typeof reader.result === 'string' ? reader.result : ''
+      if (!value) {
+        return
+      }
+      onSettingsChange((current) => ({
+        ...current,
+        controlNetImageDataUrl: value,
+        controlNetImageName: file.name,
+      }))
+    }
+    reader.readAsDataURL(file)
+  }
+
   const handleAddModelHelperToPrompt = useCallback(() => {
     if (!modelHelper.promptText) {
       return
@@ -2084,7 +3066,7 @@ function PromptPanel({
               id="pro-video-source-input"
               className="pro-file-input-hidden"
               type="file"
-              accept="image/png,image/jpeg,image/webp"
+              accept={IMAGE_FILE_ACCEPT}
               onChange={handleVideoSourceChange}
             />
             {settings.sourceImageDataUrl ? (
@@ -2122,6 +3104,15 @@ function PromptPanel({
         >
           {isGenerating ? <X size={18} aria-hidden="true" /> : <Sparkles size={18} aria-hidden="true" />}
           <span>{isGenerating ? 'Stop' : settings.mode === 'video' ? 'Generate video' : 'Generate image'}</span>
+        </button>
+        <button
+          type="button"
+          className="pro-secondary-button pro-workflow-send-button"
+          onClick={() => onSendToWorkflow('Create panel')}
+          title="Capture the current settings as a reorderable workflow node"
+        >
+          <WorkflowIcon size={16} aria-hidden="true" />
+          <span>Send to workflow</span>
         </button>
         <button
           type="button"
@@ -2518,6 +3509,134 @@ function PromptPanel({
         />
       ) : null}
 
+      {settings.mode !== 'video' ? (
+        <section className="pro-controlnet-card" aria-label="ControlNet unit">
+          <div className="pro-controlnet-header">
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={settings.controlNetEnabled}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({ ...current, controlNetEnabled: event.target.checked }))
+                }
+              />
+              <span>ControlNet unit 1</span>
+            </label>
+            <small>Gradio Lab has the multi-unit stack.</small>
+          </div>
+          <label className="pro-field pro-compact-field">
+            <FieldLabel
+              label="ControlNet model"
+              tooltip="Use a local ControlNet model id or path that matches the selected SD/SDXL family."
+            />
+            <input
+              value={settings.controlNetModel}
+              placeholder="control_v11p_sd15_canny, diffusers folder, or local path"
+              onChange={(event) =>
+                onSettingsChange((current) => ({ ...current, controlNetModel: event.target.value }))
+              }
+            />
+          </label>
+          <label className="pro-field pro-compact-field">
+            <FieldLabel
+              label="Preprocessor"
+              tooltip="Choose none if the image is already prepared. Canny, depth, pose, line, and segmentation preprocessors run before the ControlNet pass when available."
+            />
+            <select
+              value={settings.controlNetModule}
+              onChange={(event) =>
+                onSettingsChange((current) => ({ ...current, controlNetModule: event.target.value }))
+              }
+            >
+              {CONTROLNET_MODULE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="pro-controlnet-upload-row">
+            {settings.controlNetImageDataUrl ? (
+              <img className="pro-controlnet-preview" src={settings.controlNetImageDataUrl} alt="" />
+            ) : (
+              <div className="pro-controlnet-empty">No control image</div>
+            )}
+            <div className="pro-controlnet-upload-actions">
+              <span>{settings.controlNetImageName || 'Upload an edge, pose, depth, or reference image.'}</span>
+              <label className="pro-secondary-button" htmlFor="pro-controlnet-image-input">
+                <FileImage size={15} aria-hidden="true" />
+                <span>Upload image</span>
+              </label>
+              <input
+                id="pro-controlnet-image-input"
+                className="pro-file-input-hidden"
+                type="file"
+                accept={IMAGE_FILE_ACCEPT}
+                onChange={handleControlNetImageChange}
+              />
+              {settings.controlNetImageDataUrl ? (
+                <button
+                  type="button"
+                  className="pro-secondary-button ghost"
+                  onClick={() =>
+                    onSettingsChange((current) => ({
+                      ...current,
+                      controlNetImageDataUrl: '',
+                      controlNetImageName: '',
+                    }))
+                  }
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
+          </div>
+          <RangeField
+            label="Weight"
+            tooltip="ControlNet weight decides how strongly the control image steers the generation."
+            min={0}
+            max={2}
+            step={0.05}
+            value={settings.controlNetWeight}
+            onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetWeight: value }))}
+          />
+          <div className="pro-controlnet-window">
+            <RangeField
+              label="Start"
+              min={0}
+              max={1}
+              step={0.01}
+              value={settings.controlNetGuidanceStart}
+              onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceStart: value }))}
+            />
+            <RangeField
+              label="End"
+              min={0}
+              max={1}
+              step={0.01}
+              value={settings.controlNetGuidanceEnd}
+              onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceEnd: value }))}
+            />
+          </div>
+          <label className="pro-field pro-compact-field">
+            <FieldLabel label="Processor resolution" compact />
+            <input
+              type="number"
+              min={64}
+              max={4096}
+              step={64}
+              value={settings.controlNetProcessorRes}
+              onChange={(event) =>
+                onSettingsChange((current) => ({
+                  ...current,
+                  controlNetProcessorRes: Number(event.target.value),
+                }))
+              }
+            />
+          </label>
+        </section>
+      ) : null}
+
       <div className="pro-tool-launchers">
         <button type="button" className="pro-tool-button" onClick={onOpenSegmentation}>
           <ScanSearch size={15} aria-hidden="true" />
@@ -2526,6 +3645,10 @@ function PromptPanel({
         <button type="button" className="pro-tool-button" onClick={onOpenHires}>
           <Highlighter size={15} aria-hidden="true" />
           <span>High-res fix</span>
+        </button>
+        <button type="button" className="pro-tool-button" onClick={onOpenEnhance}>
+          <Sparkles size={15} aria-hidden="true" />
+          <span>Enhance / VSR</span>
         </button>
         <button type="button" className="pro-tool-button" onClick={onOpenReactor}>
           <Wand2 size={15} aria-hidden="true" />
@@ -2782,6 +3905,8 @@ function ModelsWorkspace({
   selectedModelId,
   onEngineFilterChange,
   onModelSelect,
+  onCatalogDownload,
+  downloadingCatalogKey,
 }: {
   engineFilter: EngineId
   engines: EngineSummary[]
@@ -2790,6 +3915,8 @@ function ModelsWorkspace({
   selectedModelId: string
   onEngineFilterChange: (value: EngineId) => void
   onModelSelect: (modelId: string) => void
+  onCatalogDownload: (key: string) => void
+  downloadingCatalogKey: string
 }) {
   const visibleModels = models.filter((model) => matchesEngineFilter(model, engineFilter))
   const groupedModels = groupModelsByEngine(visibleModels, engines)
@@ -2831,6 +3958,59 @@ function ModelsWorkspace({
           <StatTile label="Route" value={`${downloadSummary.routeTotal}`} hint={downloadSummary.routeLabel} />
         </div>
         <div className="pro-download-chip-row">
+          {downloadSummary.items.map((item) => {
+            const linkLabel = item.source === 'civitai' ? 'Open CivitAI' : 'Open source'
+            const subtitle = item.installed
+              ? 'Installed'
+              : item.canDownload
+                ? `${item.category} | Direct download`
+                : item.hfUrl
+                  ? `${item.category} | ${linkLabel}`
+                  : item.category
+            if (item.canDownload && !item.installed) {
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className="pro-download-chip pro-download-chip-button"
+                  title={`${item.destination}${item.notes ? ` - ${item.notes}` : ''}`}
+                  onClick={() => onCatalogDownload(item.key)}
+                  disabled={downloadingCatalogKey === item.key}
+                >
+                  <strong>{item.title}</strong>
+                  <small>{downloadingCatalogKey === item.key ? 'Downloading...' : subtitle}</small>
+                </button>
+              )
+            }
+            return item.hfUrl ? (
+              <a
+                key={item.key}
+                className={item.installed ? 'pro-download-chip pro-download-chip-ready' : 'pro-download-chip pro-download-chip-link'}
+                href={item.hfUrl}
+                target="_blank"
+                rel="noreferrer"
+                title={`${item.destination}${item.notes ? ` - ${item.notes}` : ''}`}
+              >
+                <strong>{item.title}</strong>
+                <small>{subtitle}</small>
+              </a>
+            ) : (
+              <span
+                key={item.key}
+                className={item.installed ? 'pro-download-chip pro-download-chip-ready' : 'pro-download-chip'}
+                title={item.destination}
+              >
+                <strong>{item.title}</strong>
+                <small>{subtitle}</small>
+              </span>
+            )
+          })}
+        </div>
+        <p className="pro-download-note">
+          Downloaded-model and installable-model browsers are coming soon.
+        </p>
+        {false ? (
+        <div className="pro-download-chip-row">
           {downloadSummary.items.map((item) =>
             item.hfUrl ? (
               <a
@@ -2856,6 +4036,7 @@ function ModelsWorkspace({
             ),
           )}
         </div>
+        ) : null}
       </section>
 
       {downloadsStatus && downloadsStatus.civitaiLinks.length > 0 ? (
@@ -2870,13 +4051,14 @@ function ModelsWorkspace({
               .map((link) => (
                 <a
                   key={link.url}
-                  className="pro-download-chip pro-download-chip-link"
+                  className="pro-download-chip pro-download-chip-link pro-civitai-link"
                   href={link.url}
                   target="_blank"
                   rel="noreferrer"
                   title={link.note}
                 >
                   <strong>{link.label}</strong>
+                  <small>Open CivitAI</small>
                   <small>CivitAI ↗</small>
                 </a>
               ))}
@@ -3083,6 +4265,7 @@ function ToolsControlPanel({
   onOpenVideo,
   onOpenData,
   onOpenSegmentation,
+  onOpenEnhance,
   onOpenReactor,
 }: {
   capabilitiesStatus: ProCapabilitiesStatus | null
@@ -3091,6 +4274,7 @@ function ToolsControlPanel({
   onOpenVideo: () => void
   onOpenData: () => void
   onOpenSegmentation: () => void
+  onOpenEnhance: () => void
   onOpenReactor: () => void
 }) {
   const status = capabilitiesStatus ?? EMPTY_CAPABILITIES
@@ -3116,6 +4300,7 @@ function ToolsControlPanel({
             <button type="button" className="pro-secondary-button" onClick={onOpenVideo}>Sana Video</button>
             <button type="button" className="pro-secondary-button" onClick={onOpenData}>Data</button>
             <button type="button" className="pro-secondary-button" onClick={onOpenSegmentation}>Segment</button>
+            <button type="button" className="pro-secondary-button" onClick={onOpenEnhance}>Enhance</button>
             <button type="button" className="pro-secondary-button" onClick={onOpenReactor}>ReActor</button>
           </div>
         </InfoCard>
@@ -3133,6 +4318,75 @@ function ToolsControlPanel({
         </InfoCard>
       </div>
     </aside>
+  )
+}
+
+function ExtensionsCard() {
+  const [status, setStatus] = useState<ProExtensionsStatus | null>(null)
+  const [message, setMessage] = useState('')
+  const [busyId, setBusyId] = useState('')
+
+  const refresh = useCallback(() => {
+    fetchProExtensions()
+      .then(setStatus)
+      .catch((error: unknown) => setMessage(`Could not load extensions: ${formatApiError(error)}`))
+  }, [])
+
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+
+  const handleToggle = async (id: string, enabled: boolean) => {
+    setBusyId(id)
+    try {
+      const result = await toggleProExtension(id, enabled)
+      setMessage(result.note || 'Saved.')
+      refresh()
+    } catch (error: unknown) {
+      setMessage(`Toggle failed: ${formatApiError(error)}`)
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  return (
+    <InfoCard
+      title="Extensions"
+      subtitle="User extensions loaded from the plugins folder. Add your own by copying plugins/hello-extension — see docs/EXTENSIONS.md."
+    >
+      <div className="pro-form-stack">
+        {status && status.extensions.length === 0 ? (
+          <p className="pro-muted">
+            No extensions found. Drop a folder with a plugin.py into {status.pluginsDir || 'plugins/'} and restart.
+          </p>
+        ) : null}
+        {(status?.extensions ?? []).map((ext) => (
+          <div key={ext.id} className="pro-extension-row">
+            <div className="pro-extension-info">
+              <strong>
+                {ext.name} <small>v{ext.version}</small>
+              </strong>
+              {ext.description ? <span>{ext.description}</span> : null}
+              {ext.error ? <span className="pro-extension-error">Load error: {ext.error}</span> : null}
+              {ext.hasApi ? <small className="pro-muted">API: {ext.apiBase}</small> : null}
+            </div>
+            <button
+              type="button"
+              className="pro-secondary-button"
+              disabled={busyId === ext.id}
+              onClick={() => handleToggle(ext.id, !ext.enabled)}
+            >
+              {ext.enabled ? 'Disable' : 'Enable'}
+            </button>
+          </div>
+        ))}
+        {message ? <p className="pro-field-note">{message}</p> : null}
+        <p className="pro-field-note">
+          Extensions run as Python code inside the app — only install ones you trust. Enable/disable changes apply on
+          the next restart.
+        </p>
+      </div>
+    </InfoCard>
   )
 }
 
@@ -3275,7 +4529,7 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
             id="pro-video-lab-upload"
             className="pro-file-input-hidden"
             type="file"
-            accept="video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo"
+            accept={VIDEO_FILE_ACCEPT}
             onChange={handleUpload}
             disabled={busy}
           />
@@ -3411,6 +4665,7 @@ function ToolsWorkspace({
   onOpenVideo,
   onOpenData,
   onOpenSegmentation,
+  onOpenEnhance,
   onOpenReactor,
 }: {
   capabilitiesStatus: ProCapabilitiesStatus | null
@@ -3420,6 +4675,7 @@ function ToolsWorkspace({
   onOpenVideo: () => void
   onOpenData: () => void
   onOpenSegmentation: () => void
+  onOpenEnhance: () => void
   onOpenReactor: () => void
 }) {
   const status = capabilitiesStatus ?? EMPTY_CAPABILITIES
@@ -3450,6 +4706,7 @@ function ToolsWorkspace({
       ],
       actions: [
         { label: 'Segment', onClick: onOpenSegmentation },
+        { label: 'Enhance', onClick: onOpenEnhance },
         { label: 'ReActor', onClick: onOpenReactor },
       ],
     },
@@ -3928,6 +5185,12 @@ function SettingsWorkspace({
   onSettingsChange,
   onSettingsStatusChange,
   onSaveSettings,
+  onModelFilesUpload,
+  onModelReorganize,
+  onUnloadModel,
+  onRestartBackend,
+  onReloadFrontend,
+  onOpenSupportTerminal,
   settingsSaveStatus,
   leftPanelWidth,
   rightPanelWidth,
@@ -3943,6 +5206,12 @@ function SettingsWorkspace({
   onSettingsChange: Dispatch<SetStateAction<GenerationSettings>>
   onSettingsStatusChange: Dispatch<SetStateAction<ProSettingsStatus | null>>
   onSaveSettings: () => void
+  onModelFilesUpload: (files: File[]) => Promise<string>
+  onModelReorganize: () => Promise<string>
+  onUnloadModel: () => void
+  onRestartBackend: () => void
+  onReloadFrontend: () => void
+  onOpenSupportTerminal: () => void
   settingsSaveStatus: string
   leftPanelWidth: number
   rightPanelWidth: number
@@ -3953,6 +5222,9 @@ function SettingsWorkspace({
   const summary = summarizeRecentOutputs(recentOutputs)
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('generation')
   const [settingsQuery, setSettingsQuery] = useState('')
+  const [modelSortBusy, setModelSortBusy] = useState(false)
+  const [modelSortStatus, setModelSortStatus] = useState('')
+  const modelUploadInputRef = useRef<HTMLInputElement>(null)
   const show = useCallback(
     (section: SettingsSectionId, keywords: string) => {
       const query = settingsQuery.trim().toLowerCase()
@@ -4002,6 +5274,13 @@ function SettingsWorkspace({
     wanGroupOffloadStream: true,
     wanGroupOffloadBlocks: 4,
     ggufCudaKernels: false,
+    wanSageAttention: 'auto',
+    wanNativeDenoise: true,
+    wanManualVaeDecode: false,
+    wanVaeChunkFrames: 4,
+    wanGroupOffloadRecordStream: true,
+    wanGroupOffloadLowCpuMem: true,
+    wanResidentMinVramGb: 20,
   }
   const runtimeSettings = settingsStatus?.runtime ?? {
     port: 7860,
@@ -4019,8 +5298,10 @@ function SettingsWorkspace({
     asyncOffload: true,
     pinnedMemory: true,
     cudaMalloc: false,
+    vramProfile: 'normal',
     medvram: false,
     lowvram: false,
+    highvram: false,
     noHalf: false,
     fp8: false,
     fluxFp8: false,
@@ -4120,6 +5401,45 @@ function SettingsWorkspace({
     [onSettingsStatusChange],
   )
 
+  const updateVramProfile = useCallback(
+    (profile: string) => {
+      updateRuntimeSetting({
+        vramProfile: profile,
+        cpu: profile === 'cpu',
+        lowvram: profile === 'low',
+        medvram: profile === 'mid',
+        highvram: profile === 'high',
+      })
+    },
+    [updateRuntimeSetting],
+  )
+
+  const handleSettingsModelUpload = useCallback(
+    (event: ReactChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files ?? [])
+      event.target.value = ''
+      if (files.length === 0) {
+        return
+      }
+      setModelSortBusy(true)
+      setModelSortStatus(`Sorting ${files.length} file${files.length === 1 ? '' : 's'}...`)
+      void onModelFilesUpload(files)
+        .then(setModelSortStatus)
+        .catch((error: unknown) => setModelSortStatus(formatApiError(error)))
+        .finally(() => setModelSortBusy(false))
+    },
+    [onModelFilesUpload],
+  )
+
+  const handleSettingsModelReorganize = useCallback(() => {
+    setModelSortBusy(true)
+    setModelSortStatus('Re-reading model headers...')
+    void onModelReorganize()
+      .then(setModelSortStatus)
+      .catch((error: unknown) => setModelSortStatus(formatApiError(error)))
+      .finally(() => setModelSortBusy(false))
+  }, [onModelReorganize])
+
   const outputToggles: Array<{ key: keyof ProSettingsStatus['output']; label: string }> = [
     { key: 'embedMetadata', label: 'Embed metadata' },
     { key: 'saveSidecarTxt', label: 'Write sidecar txt' },
@@ -4140,8 +5460,6 @@ function SettingsWorkspace({
     { key: 'share', label: 'Public share link' },
     { key: 'autolaunch', label: 'Auto launch browser' },
     { key: 'blockPrivateDownloadUrls', label: 'Block private download URLs' },
-    { key: 'medvram', label: 'Med VRAM' },
-    { key: 'lowvram', label: 'Low VRAM' },
     { key: 'asyncOffload', label: 'Async offload' },
     { key: 'pinnedMemory', label: 'Pinned memory' },
     { key: 'cudaMalloc', label: 'CUDA malloc tuning' },
@@ -4149,7 +5467,6 @@ function SettingsWorkspace({
     { key: 'fp8', label: 'FP8 mode' },
     { key: 'fluxFp8', label: 'Flux FP8' },
     { key: 'directml', label: 'DirectML' },
-    { key: 'cpu', label: 'Force CPU' },
     { key: 'xformers', label: 'xFormers flag' },
     { key: 'optSdpAttention', label: 'SDP attention flag' },
     { key: 'optSplitAttention', label: 'Split attention flag' },
@@ -4198,6 +5515,27 @@ function SettingsWorkspace({
         />
       </div>
       <div className="pro-workspace-grid">
+        {show('system', 'support terminal restart backend reload frontend unload model recovery troubleshooting') && (
+        <InfoCard title="Support and recovery" subtitle="Quick actions for tester machines when something gets stuck.">
+          <div className="pro-settings-action-row">
+            <button type="button" className="pro-secondary-button" onClick={onOpenSupportTerminal}>
+              Open support terminal
+            </button>
+            <button type="button" className="pro-secondary-button" onClick={onUnloadModel}>
+              Unload model
+            </button>
+            <button type="button" className="pro-secondary-button" onClick={onRestartBackend}>
+              Restart backend
+            </button>
+            <button type="button" className="pro-secondary-button" onClick={onReloadFrontend}>
+              Reload app window
+            </button>
+          </div>
+          <p className="pro-field-note">
+            The terminal opens in this folder with the venv active. Use it for installer checks, pip fixes, and logs.
+          </p>
+        </InfoCard>
+        )}
         {show('generation', 'generation defaults model sampler scheduler steps cfg clip skip width height negative prompt save images') && (
         <InfoCard title="Generation defaults" subtitle="Saved through the Pro backend settings file.">
           <div className="pro-form-stack">
@@ -4504,6 +5842,89 @@ function SettingsWorkspace({
           </div>
         </InfoCard>
         )}
+        {show('video', 'advanced wan runtime sage attention native denoise vae decode chunk record stream resident vram low cpu memory') && (
+        <InfoCard
+          title="Advanced Wan runtime"
+          subtitle="Exact control over the Wan execution path. Defaults are the shipped behavior — change one knob at a time and compare timings."
+        >
+          <div className="pro-form-stack">
+            <label className="pro-field">
+              <FieldLabel
+                label="SageAttention"
+                tooltip="Auto uses SageAttention when the package is installed (the shipped behavior). Force warns if it is missing; Off falls back to plain torch SDPA — useful when comparing quality or debugging attention artifacts."
+              />
+              <select
+                value={videoSettings.wanSageAttention}
+                onChange={(event) => updateVideoSetting({ wanSageAttention: event.target.value })}
+                disabled={!settingsStatus}
+              >
+                <option value="auto">Auto (use when installed)</option>
+                <option value="force">Force (warn if missing)</option>
+                <option value="off">Off (plain torch SDPA)</option>
+              </select>
+            </label>
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={videoSettings.wanNativeDenoise}
+                onChange={(event) => updateVideoSetting({ wanNativeDenoise: event.target.checked })}
+                disabled={!settingsStatus}
+              />
+              <span>Native denoise loop (AIWF-owned stepping; off = diffusers pipeline as a black box)</span>
+            </label>
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={videoSettings.wanManualVaeDecode}
+                onChange={(event) => updateVideoSetting({ wanManualVaeDecode: event.target.checked })}
+                disabled={!settingsStatus}
+              />
+              <span>Manual chunked VAE decode (lower peak VRAM, slower decode)</span>
+            </label>
+            {videoSettings.wanManualVaeDecode ? (
+              <RangeField
+                label="VAE decode chunk frames"
+                min={1}
+                max={16}
+                step={1}
+                value={videoSettings.wanVaeChunkFrames}
+                onChange={(value) => updateVideoSetting({ wanVaeChunkFrames: value })}
+              />
+            ) : null}
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={videoSettings.wanGroupOffloadRecordStream}
+                onChange={(event) => updateVideoSetting({ wanGroupOffloadRecordStream: event.target.checked })}
+                disabled={!settingsStatus}
+              />
+              <span>Record CUDA streams during group offload (safer overlap; tiny overhead)</span>
+            </label>
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={videoSettings.wanGroupOffloadLowCpuMem}
+                onChange={(event) => updateVideoSetting({ wanGroupOffloadLowCpuMem: event.target.checked })}
+                disabled={!settingsStatus}
+              />
+              <span>Low CPU memory staging for offload (off = faster swaps, more system RAM)</span>
+            </label>
+            <RangeField
+              label="Resident mode minimum VRAM (GB)"
+              tooltip="Dual FP8 high/low stages only co-reside on GPUs with at least this much VRAM; below it, Resident falls back to Balanced swapping. Lower at your own risk."
+              min={8}
+              max={96}
+              step={1}
+              value={videoSettings.wanResidentMinVramGb}
+              onChange={(value) => updateVideoSetting({ wanResidentMinVramGb: value })}
+            />
+            <p className="pro-field-note">
+              Applied to the next generation — no restart needed. If a change makes things slower or unstable, set it
+              back: the defaults shown on first load are the tested configuration.
+            </p>
+          </div>
+        </InfoCard>
+        )}
         {show('video', 'wan video defaults runtime mode offload sampler flow shift high low model vae text encoder') && (
         <InfoCard title="Wan video defaults" subtitle="Restore the default Wan split, sampler, and offload choices when the video tab opens.">
           <div className="pro-form-stack">
@@ -4695,6 +6116,23 @@ function SettingsWorkspace({
                 disabled={!settingsStatus}
               />
             </label>
+            <label className="pro-field">
+              <FieldLabel
+                label="VRAM profile"
+                tooltip="Low targets 4-8 GB with sequential CPU offload; mid targets 8-16 GB with model CPU offload; high targets 16+ GB resident models. Restart AIWF for this change to take effect."
+              />
+              <select
+                value={runtimeSettings.vramProfile}
+                onChange={(event) => updateVramProfile(event.target.value)}
+                disabled={!settingsStatus}
+              >
+                {VRAM_PROFILE_OPTIONS.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="pro-settings-columns pro-settings-columns-compact">
               {runtimeToggles.map((item) => (
                 <label className="pro-toggle" key={item.key}>
@@ -4763,6 +6201,9 @@ function SettingsWorkspace({
           </div>
         </InfoCard>
         )}
+        {show('system', 'extensions plugins user addons custom api routes enable disable') && (
+        <ExtensionsCard />
+        )}
         {show('system', 'backend paths config launch profile models checkpoints outputs') && (
         <InfoCard title="Backend paths" subtitle="Real paths reported by the Pro API for tonight's QA pass.">
           <dl className="pro-runtime-list">
@@ -4772,6 +6213,42 @@ function SettingsWorkspace({
             <MetricRow label="Checkpoints" value={settingsStatus?.paths.checkpoints || 'Unavailable'} />
             <MetricRow label="Outputs" value={settingsStatus?.paths.outputs || 'Unavailable'} />
           </dl>
+        </InfoCard>
+        )}
+        {show('system', 'models upload drag drop sort reorganize reread headers gguf safetensors checkpoint inventory') && (
+        <InfoCard title="Model file sorter" subtitle="Drop or pick model files; AIWF reads headers and moves confident matches.">
+          <div className="pro-settings-action-row">
+            <button
+              type="button"
+              className="pro-secondary-button"
+              onClick={() => modelUploadInputRef.current?.click()}
+              disabled={modelSortBusy || !settingsStatus}
+            >
+              <HardDrive size={14} aria-hidden="true" />
+              Upload model files
+            </button>
+            <input
+              ref={modelUploadInputRef}
+              className="pro-file-input-hidden"
+              type="file"
+              multiple
+              accept={MODEL_FILE_ACCEPT}
+              onChange={handleSettingsModelUpload}
+            />
+            <button
+              type="button"
+              className="pro-secondary-button"
+              onClick={handleSettingsModelReorganize}
+              disabled={modelSortBusy || !settingsStatus}
+            >
+              <RefreshCcw size={14} aria-hidden="true" />
+              Reorganize models
+            </button>
+          </div>
+          <p className="pro-field-note">
+            Reorganize scans the main models directory, reads model headers, and moves confident matches without overwriting files.
+          </p>
+          {modelSortStatus ? <p className="pro-muted">{modelSortStatus}</p> : null}
         </InfoCard>
         )}
         {show('interface', 'layout memory panel width dock height advanced') && (
@@ -4847,6 +6324,7 @@ function CanvasPreview({
   height,
   onOpenSegmentation,
   onOpenHires,
+  onOpenEnhance,
   onOpenReactor,
   bottomDockVisible,
   onToggleBottomDock,
@@ -4858,6 +6336,7 @@ function CanvasPreview({
   height: number
   onOpenSegmentation: () => void
   onOpenHires: () => void
+  onOpenEnhance: () => void
   onOpenReactor: () => void
   bottomDockVisible: boolean
   onToggleBottomDock: () => void
@@ -4918,6 +6397,20 @@ function CanvasPreview({
       height: `${previewFrameSize.height}px`,
     }
   }, [aspectRatio, previewFrameSize.height, previewFrameSize.width])
+  const emptyCanvas = activeMode === 'video'
+    ? {
+        className: 'pro-empty-preview pro-stage-empty pro-stage-empty-video',
+        icon: Video,
+        title: 'Video canvas',
+        message: 'Generate text-to-video or upload a first frame in the prompt panel. Playback controls appear here.',
+      }
+    : {
+        className: 'pro-empty-preview pro-stage-empty pro-stage-empty-image',
+        icon: Image,
+        title: 'Image canvas',
+        message: 'Generate an image or select one from the output dock. Settings and history stay below the canvas.',
+      }
+  const EmptyIcon = emptyCanvas.icon
 
   return (
     <section className="pro-canvas" aria-label="Canvas and output preview">
@@ -4934,6 +6427,10 @@ function CanvasPreview({
           <button type="button" className="pro-tool-chip" onClick={onOpenHires}>
             <Highlighter size={14} aria-hidden="true" />
             <span>Hi-res</span>
+          </button>
+          <button type="button" className="pro-tool-chip" onClick={onOpenEnhance}>
+            <Sparkles size={14} aria-hidden="true" />
+            <span>Enhance</span>
           </button>
           <button type="button" className="pro-tool-chip" onClick={onOpenReactor}>
             <Wand2 size={14} aria-hidden="true" />
@@ -4960,10 +6457,10 @@ function CanvasPreview({
           ) : preview ? (
             <img src={preview.url} alt={preview.prompt} />
           ) : (
-            <div className="pro-empty-preview pro-stage-empty">
-              <Monitor size={42} aria-hidden="true" />
-              <strong>{activeMode === 'video' ? 'Video preview' : 'Image preview'}</strong>
-              <span>Ready for the next render.</span>
+            <div className={emptyCanvas.className}>
+              <EmptyIcon size={42} aria-hidden="true" />
+              <strong>{emptyCanvas.title}</strong>
+              <span>{emptyCanvas.message}</span>
             </div>
           )}
         </div>
@@ -5040,9 +6537,7 @@ function InpaintCanvas({
     if (settings.initImageDataUrl) {
       loadImage(settings.initImageDataUrl)
     }
-    // Restore any previously loaded init image when the inpaint tab mounts.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [loadImage, settings.initImageDataUrl])
 
   const handleFileChange = useCallback(
     (event: ReactChangeEvent<HTMLInputElement>) => {
@@ -5277,7 +6772,7 @@ function InpaintCanvas({
             <FileImage size={14} aria-hidden="true" />
             <span>Load image</span>
           </button>
-          <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={handleFileChange} />
+          <input ref={fileInputRef} type="file" accept={IMAGE_FILE_ACCEPT} hidden onChange={handleFileChange} />
           {preview ? (
             <button type="button" className="pro-tool-chip" onClick={usePreviewImage}>
               <Image size={14} aria-hidden="true" />
@@ -5403,10 +6898,10 @@ function InpaintCanvas({
             />
           </div>
         ) : (
-          <div className="pro-empty-preview pro-stage-empty">
+          <div className="pro-empty-preview pro-stage-empty pro-stage-empty-inpaint">
             <Brush size={42} aria-hidden="true" />
-            <strong>Inpaint canvas</strong>
-            <span>Load an image, then paint the area to regenerate. SD 1.5 and SDXL routes are shown.</span>
+            <strong>Load image to inpaint</strong>
+            <span>Use Load image or Use preview, then paint the white mask. Scroll the canvas to zoom for edge cleanup.</span>
           </div>
         )}
       </div>
@@ -5603,9 +7098,11 @@ function BottomDock({
 function RuntimePanel({
   runtime,
   selectedModelName,
+  onUnloadModel,
 }: {
   runtime: ProRuntimeStatus
   selectedModelName: string
+  onUnloadModel: () => void
 }) {
   const loadedModelName = runtime.loadedModel.loaded ? runtime.loadedModel.name : 'No model loaded'
   return (
@@ -5669,7 +7166,14 @@ function RuntimePanel({
           <MetricRow label="Text encoder" value={runtime.loadedModel.textEncoder} />
           <MetricRow label="UNet" value={runtime.loadedModel.unet} />
         </dl>
-        <button type="button" className="pro-unload-button" disabled>Unload model</button>
+        <button
+          type="button"
+          className="pro-unload-button"
+          onClick={onUnloadModel}
+          disabled={!runtime.loadedModel.loaded}
+        >
+          Unload model
+        </button>
       </div>
 
       <div className="pro-queue-row">
@@ -6424,6 +7928,58 @@ function isCreationMode(mode: ProMode): mode is CreationMode {
   return mode === 'image' || mode === 'video' || mode === 'inpaint'
 }
 
+function fileExtension(file: File): string {
+  const name = file.name || ''
+  const dot = name.lastIndexOf('.')
+  return dot >= 0 ? name.slice(dot).toLowerCase() : ''
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/') || IMAGE_FILE_EXTENSIONS.has(fileExtension(file))
+}
+
+function isVideoFile(file: File): boolean {
+  return file.type.startsWith('video/') || VIDEO_FILE_EXTENSIONS.has(fileExtension(file))
+}
+
+function isModelFile(file: File): boolean {
+  return MODEL_FILE_EXTENSIONS.has(fileExtension(file))
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}.`))
+    reader.readAsDataURL(file)
+  })
+}
+
+function imageDimensionsFromDataUrl(dataUrl: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve) => {
+    const image = new window.Image()
+    image.onload = () => resolve({ width: image.naturalWidth || 0, height: image.naturalHeight || 0 })
+    image.onerror = () => resolve({ width: 0, height: 0 })
+    image.src = dataUrl
+  })
+}
+
+function summarizeModelSort(result: ProModelSortResult): string {
+  const moved = result.counts.moved
+  const left = result.counts.left
+  const inventory = result.counts.inventoryCount
+  if (moved > 0 && left > 0) {
+    return `Moved ${moved} model file${moved === 1 ? '' : 's'}; ${left} need review. Inventory: ${inventory}.`
+  }
+  if (moved > 0) {
+    return `Moved ${moved} model file${moved === 1 ? '' : 's'}. Inventory: ${inventory}.`
+  }
+  if (left > 0) {
+    return `${left} model file${left === 1 ? '' : 's'} need review. Inventory: ${inventory}.`
+  }
+  return `Model inventory refreshed. Inventory: ${inventory}.`
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError'
 }
@@ -6501,6 +8057,7 @@ const MENU_BAR_ITEMS: Array<{
       { id: 'open-settings', label: 'Settings' },
       { id: 'open-segmentation', label: 'Segmentation' },
       { id: 'open-hires', label: 'High-res fix' },
+      { id: 'open-enhance', label: 'Enhance / VSR' },
       { id: 'open-reactor', label: 'ReActor' },
     ],
   },

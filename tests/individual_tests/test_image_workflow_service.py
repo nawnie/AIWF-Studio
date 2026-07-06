@@ -101,6 +101,9 @@ def test_segment_to_inpaint_preset_writes_receipt_manifest(tmp_path) -> None:
     assert Path(manifest["mask_path"]).is_file()
     assert request.mode == GenerationMode.INPAINT
     assert request.save_images is False
+    assert request.inpaint_only_masked is True
+    assert request.inpaint_mask_content == "original"
+    assert request.mask_blur == settings.mask_blur
     assert init_images[0].size == source.size
     assert mask_images[0].mode == "L"
     assert segment.calls

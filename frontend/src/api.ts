@@ -30,6 +30,62 @@ import type {
 type JsonRecord = Record<string, unknown>
 
 const API_BASE = (import.meta.env.VITE_AIWF_API_BASE ?? '').replace(/\/$/, '')
+const API_LATENCY_SAMPLE_LIMIT = 40
+
+export interface ProApiLatencySample {
+  path: string
+  status: number
+  clientMs: number
+  serverMs: number | null
+  createdAt: string
+}
+
+export interface ProStartupStatus {
+  status: string
+  serverReady: boolean
+  windowReady: boolean
+  startedAt: string
+  serverReadyAt: string
+  windowReadyAt: string
+  minSplashMs: number
+  readyHoldMs: number
+}
+
+const apiLatencySamples: ProApiLatencySample[] = []
+
+function recordApiLatency(sample: ProApiLatencySample): void {
+  apiLatencySamples.push(sample)
+  if (apiLatencySamples.length > API_LATENCY_SAMPLE_LIMIT) {
+    apiLatencySamples.splice(0, apiLatencySamples.length - API_LATENCY_SAMPLE_LIMIT)
+  }
+}
+
+export function getProApiLatencySamples(): ProApiLatencySample[] {
+  return apiLatencySamples.map((sample) => ({ ...sample }))
+}
+
+export interface ProModelSortAction {
+  filename: string
+  source: string
+  family: string
+  architecture: string
+  destSubdir: string
+  status: string
+  reason: string
+}
+
+export interface ProModelSortResult {
+  status: string
+  uploadedPath: string
+  uploadedBytes: number
+  actions: ProModelSortAction[]
+  counts: {
+    total: number
+    moved: number
+    left: number
+    inventoryCount: number
+  }
+}
 
 const DEFAULT_ASPECT_RATIOS: AspectRatioOption[] = [
   { id: '1:1', label: '1:1', width: 1024, height: 1024 },
@@ -110,6 +166,22 @@ const DEFAULT_SETTINGS: GenerationSettings = {
   offloadTextEncoderAfterEncode: true,
   useSageAttention: true,
   generateAudio: false,
+  wanRuntimeMode: 'fast_5b',
+  highNoiseModelId: '',
+  lowNoiseModelId: '',
+  highNoiseSteps: 20,
+  lowNoiseSteps: 1,
+  boundaryRatio: 0.875,
+  highNoiseLoraId: '',
+  highNoiseLoraScale: 1.0,
+  lowNoiseLoraId: '',
+  lowNoiseLoraScale: 1.0,
+  vaeId: '',
+  textEncoderPath: '',
+  wanOffload: 'balanced',
+  wanSigmaType: 'simple',
+  wanSampler: 'unipc',
+  wanFlowShift: 5.0,
   initImageDataUrl: '',
   maskImageDataUrl: '',
   denoisingStrength: 0.75,
@@ -123,6 +195,15 @@ const DEFAULT_SETTINGS: GenerationSettings = {
   autoMaskModel: 'sam+dino',
   autoMaskBoxThreshold: 0.3,
   autoMaskTextThreshold: 0.25,
+  controlNetEnabled: false,
+  controlNetModel: '',
+  controlNetModule: 'canny',
+  controlNetImageDataUrl: '',
+  controlNetImageName: '',
+  controlNetWeight: 1,
+  controlNetGuidanceStart: 0,
+  controlNetGuidanceEnd: 1,
+  controlNetProcessorRes: 512,
   saveImages: true,
 }
 
@@ -179,7 +260,7 @@ const FALLBACK_CAPABILITIES: ProCapabilitiesStatus = {
   gradioTabs: [
     { id: 'studio', label: 'Studio', group: 'Create', status: 'ready', count: 0, route: 'create', tab: 'Image', summary: 'Image generation and inpaint.', details: ['Existing image surface is available.'] },
     { id: 'video', label: 'Sana / Wan / LTX Video', group: 'Video', status: 'available', count: 0, route: 'create', tab: 'Video', summary: 'Video tool coverage is tracked.', details: ['React Pro can submit Sana Video.'] },
-    { id: 'enhance', label: 'Enhance', group: 'Image', status: 'available', count: 0, route: 'tools', tab: 'Enhance', summary: 'Enhance tool coverage is tracked.', details: ['React Pro shows status only.'] },
+    { id: 'enhance', label: 'Enhance', group: 'Image', status: 'available', count: 0, route: 'tools', tab: 'Enhance', summary: 'Quick restore, upscale, and VSR image tools.', details: ['Full old-photo and batch workflows remain in Gradio.'] },
     { id: 'segment', label: 'Segment', group: 'Image', status: 'available', count: 0, route: 'modal:segmentation', tab: 'Segment', summary: 'SAM tool coverage is tracked.', details: ['React Pro has a quick popup.'] },
     { id: 'reactor', label: 'ReActor', group: 'Image', status: 'available', count: 0, route: 'modal:reactor', tab: 'ReActor', summary: 'Face swap coverage is tracked.', details: ['React Pro has a quick popup.'] },
   ],
@@ -206,12 +287,24 @@ const FALLBACK_CAPABILITIES: ProCapabilitiesStatus = {
 export class ProApiError extends Error {
   readonly status: number
   readonly path: string
+  readonly detail: unknown
+  readonly clientMs?: number
+  readonly serverMs?: number | null
 
-  constructor(path: string, status: number, message: string) {
+  constructor(
+    path: string,
+    status: number,
+    message: string,
+    detail?: unknown,
+    timing?: { clientMs?: number; serverMs?: number | null },
+  ) {
     super(message)
     this.name = 'ProApiError'
     this.path = path
     this.status = status
+    this.detail = detail
+    this.clientMs = timing?.clientMs
+    this.serverMs = timing?.serverMs
   }
 }
 
@@ -300,6 +393,13 @@ export async function fetchProDownloads(signal?: AbortSignal): Promise<ProDownlo
   return normalizeDownloadsStatus(payload)
 }
 
+export async function downloadCatalogModel(key: string): Promise<ProDownloadsStatus> {
+  const payload = await requestJson(`/api/pro/downloads/catalog/${encodeURIComponent(key)}`, {
+    method: 'POST',
+  })
+  return normalizeDownloadsStatus(payload)
+}
+
 export async function fetchProLogs(signal?: AbortSignal): Promise<ProLogStatus> {
   const payload = await requestJson('/api/pro/logs', { signal })
   return normalizeLogStatus(payload)
@@ -375,6 +475,13 @@ export async function saveProSettings(
             wanGroupOffloadStream: video.wanGroupOffloadStream,
             wanGroupOffloadBlocks: video.wanGroupOffloadBlocks,
             ggufCudaKernels: video.ggufCudaKernels,
+            wanSageAttention: video.wanSageAttention,
+            wanNativeDenoise: video.wanNativeDenoise,
+            wanManualVaeDecode: video.wanManualVaeDecode,
+            wanVaeChunkFrames: video.wanVaeChunkFrames,
+            wanGroupOffloadRecordStream: video.wanGroupOffloadRecordStream,
+            wanGroupOffloadLowCpuMem: video.wanGroupOffloadLowCpuMem,
+            wanResidentMinVramGb: video.wanResidentMinVramGb,
           }
         : {},
       runtime: runtime
@@ -394,8 +501,10 @@ export async function saveProSettings(
             asyncOffload: runtime.asyncOffload,
             pinnedMemory: runtime.pinnedMemory,
             cudaMalloc: runtime.cudaMalloc,
+            vramProfile: runtime.vramProfile,
             medvram: runtime.medvram,
             lowvram: runtime.lowvram,
+            highvram: runtime.highvram,
             noHalf: runtime.noHalf,
             fp8: runtime.fp8,
             fluxFp8: runtime.fluxFp8,
@@ -521,6 +630,36 @@ function normalizeVideoLabProbe(value: unknown): VideoLabProbe {
   }
 }
 
+function normalizeModelSortAction(value: unknown): ProModelSortAction {
+  const record = asRecord(value)
+  return {
+    filename: readString(record, ['filename'], ''),
+    source: readString(record, ['source'], ''),
+    family: readString(record, ['family'], ''),
+    architecture: readString(record, ['architecture'], ''),
+    destSubdir: readString(record, ['destSubdir', 'dest_subdir'], ''),
+    status: readString(record, ['status'], ''),
+    reason: readString(record, ['reason'], ''),
+  }
+}
+
+function normalizeModelSortResult(value: unknown): ProModelSortResult {
+  const record = asRecord(value)
+  const counts = readRecord(record, ['counts'])
+  return {
+    status: readString(record, ['status'], 'completed'),
+    uploadedPath: readString(record, ['uploadedPath', 'uploaded_path'], ''),
+    uploadedBytes: readNumber(record, ['uploadedBytes', 'uploaded_bytes'], 0),
+    actions: readArray(record, ['actions']).map(normalizeModelSortAction),
+    counts: {
+      total: readNumber(counts, ['total'], 0),
+      moved: readNumber(counts, ['moved'], 0),
+      left: readNumber(counts, ['left'], 0),
+      inventoryCount: readNumber(counts, ['inventoryCount', 'inventory_count'], 0),
+    },
+  }
+}
+
 export async function uploadVideoLabFile(file: File): Promise<VideoLabProbe> {
   const body = new FormData()
   body.append('file', file)
@@ -535,6 +674,27 @@ export async function uploadVideoLabFile(file: File): Promise<VideoLabProbe> {
     throw new ProApiError('/api/pro/video-lab/upload', response.status, formatResponseError(text, response.statusText))
   }
   return normalizeVideoLabProbe(text ? JSON.parse(text) : {})
+}
+
+export async function uploadModelFile(file: File): Promise<ProModelSortResult> {
+  const body = new FormData()
+  body.append('file', file)
+  const response = await fetch(`${API_BASE}/api/pro/models/upload`, {
+    method: 'POST',
+    body,
+    cache: 'no-store',
+    headers: { Accept: 'application/json' },
+  })
+  const text = await response.text()
+  if (!response.ok) {
+    throw new ProApiError('/api/pro/models/upload', response.status, formatResponseError(text, response.statusText))
+  }
+  return normalizeModelSortResult(text ? JSON.parse(text) : {})
+}
+
+export async function reorganizeModels(): Promise<ProModelSortResult> {
+  const response = await requestJson('/api/pro/models/reorganize', { method: 'POST' })
+  return normalizeModelSortResult(response)
 }
 
 export async function runVideoLab(payload: Record<string, unknown>, signal?: AbortSignal): Promise<VideoLabResult> {
@@ -590,6 +750,123 @@ export async function runFaceSwap(
   }
 }
 
+export interface ProEnhanceImageRequest {
+  imageDataUrl: string
+  restoreEnabled: boolean
+  restoreModel: string
+  restoreVisibility: number
+  codeformerWeight: number
+  upscaleEnabled: boolean
+  upscaleModel: string
+  upscaleScale: number
+  tileSize: number
+  tileOverlap: number
+  restoreFirst: boolean
+}
+
+export interface ProImageProcessResult {
+  status: string
+  image: string
+  url: string
+  outputPath: string
+  width: number
+  height: number
+  message: string
+  infotext: string
+}
+
+function normalizeImageProcessResult(payload: unknown): ProImageProcessResult {
+  const record = asRecord(payload)
+  return {
+    status: readString(record, ['status'], 'completed'),
+    image: readString(record, ['image'], ''),
+    url: readString(record, ['url'], ''),
+    outputPath: readString(record, ['outputPath', 'output_path'], ''),
+    width: readNumber(record, ['width'], 0),
+    height: readNumber(record, ['height'], 0),
+    message: readString(record, ['message'], ''),
+    infotext: readString(record, ['infotext'], ''),
+  }
+}
+
+export async function runEnhanceImage(request: ProEnhanceImageRequest): Promise<ProImageProcessResult> {
+  const payload = await requestJson('/api/pro/enhance/image', {
+    method: 'POST',
+    body: JSON.stringify(request),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  return normalizeImageProcessResult(payload)
+}
+
+export async function runVsrImage(request: {
+  imageDataUrl: string
+  scale: number
+  mode: number
+  effect: string
+  strength: number
+}): Promise<ProImageProcessResult> {
+  const payload = await requestJson('/api/pro/vsr/image', {
+    method: 'POST',
+    body: JSON.stringify(request),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  return normalizeImageProcessResult(payload)
+}
+
+export interface ProExtensionInfo {
+  id: string
+  name: string
+  version: string
+  description: string
+  path: string
+  enabled: boolean
+  error: string | null
+  hasApi: boolean
+  apiBase: string
+}
+
+export interface ProExtensionsStatus {
+  pluginsDir: string
+  disabled: string[]
+  extensions: ProExtensionInfo[]
+}
+
+export async function fetchProExtensions(signal?: AbortSignal): Promise<ProExtensionsStatus> {
+  const payload = await requestJson('/api/pro/extensions', { signal })
+  const record = asRecord(payload)
+  return {
+    pluginsDir: readString(record, ['pluginsDir', 'plugins_dir'], ''),
+    disabled: readArray(record, ['disabled']).map((item) => `${item}`),
+    extensions: readArray(record, ['extensions']).map((item) => {
+      const ext = asRecord(item)
+      return {
+        id: readString(ext, ['id'], ''),
+        name: readString(ext, ['name'], ''),
+        version: readString(ext, ['version'], '0.0.0'),
+        description: readString(ext, ['description'], ''),
+        path: readString(ext, ['path'], ''),
+        enabled: readBoolean(ext, ['enabled'], true),
+        error: readOptionalString(ext, ['error']) ?? null,
+        hasApi: readBoolean(ext, ['hasApi', 'has_api'], false),
+        apiBase: readString(ext, ['apiBase', 'api_base'], ''),
+      }
+    }),
+  }
+}
+
+export async function toggleProExtension(id: string, enabled: boolean): Promise<{ note: string; disabled: string[] }> {
+  const payload = await requestJson('/api/pro/extensions/toggle', {
+    method: 'POST',
+    body: JSON.stringify({ id, enabled }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const record = asRecord(payload)
+  return {
+    note: readString(record, ['note'], ''),
+    disabled: readArray(record, ['disabled']).map((item) => `${item}`),
+  }
+}
+
 export async function stopProGeneration(): Promise<ProStopResult> {
   const payload = await requestJson('/api/pro/interrupt', {
     method: 'POST',
@@ -626,6 +903,32 @@ export function reportProClientError(payload: ProClientErrorPayload): void {
   })
 }
 
+function normalizeStartupStatus(value: unknown): ProStartupStatus {
+  const record = asRecord(value)
+  return {
+    status: readString(record, ['status'], 'server-ready'),
+    serverReady: readBoolean(record, ['serverReady', 'server_ready'], true),
+    windowReady: readBoolean(record, ['windowReady', 'window_ready'], false),
+    startedAt: readString(record, ['startedAt', 'started_at'], ''),
+    serverReadyAt: readString(record, ['serverReadyAt', 'server_ready_at'], ''),
+    windowReadyAt: readString(record, ['windowReadyAt', 'window_ready_at'], ''),
+    minSplashMs: readNumber(record, ['minSplashMs', 'min_splash_ms'], 1800),
+    readyHoldMs: readNumber(record, ['readyHoldMs', 'ready_hold_ms'], 1200),
+  }
+}
+
+export async function fetchProStartup(signal?: AbortSignal): Promise<ProStartupStatus> {
+  const payload = await requestJson('/api/pro/startup', { signal })
+  return normalizeStartupStatus(payload)
+}
+
+export async function notifyProWindowReady(): Promise<ProStartupStatus> {
+  const payload = await requestJson('/api/pro/startup/window-ready', {
+    method: 'POST',
+  })
+  return normalizeStartupStatus(payload)
+}
+
 export async function requestProRestart(): Promise<{ status: string }> {
   const payload = await requestJson('/api/pro/restart', {
     method: 'POST',
@@ -633,6 +936,26 @@ export async function requestProRestart(): Promise<{ status: string }> {
   const record = asRecord(payload)
   return {
     status: readString(record, ['status'], 'restart_requested'),
+  }
+}
+
+export async function unloadProModel(): Promise<ProRuntimeStatus> {
+  const payload = await requestJson('/api/pro/models/unload', {
+    method: 'POST',
+  })
+  const record = asRecord(payload)
+  return normalizeRuntime(readUnknown(record, ['runtime']))
+}
+
+export async function openSupportTerminal(): Promise<{ status: string; cwd: string; venv: string }> {
+  const payload = await requestJson('/api/pro/support/terminal', {
+    method: 'POST',
+  })
+  const record = asRecord(payload)
+  return {
+    status: readString(record, ['status'], 'opened'),
+    cwd: readString(record, ['cwd'], ''),
+    venv: readString(record, ['venv'], ''),
   }
 }
 
@@ -650,38 +973,46 @@ export function formatApiError(error: unknown): string {
 }
 
 function formatResponseError(text: string, fallback: string): string {
+  return readResponseError(text, fallback).message
+}
+
+function readResponseError(text: string, fallback: string): { message: string; detail?: unknown } {
   if (!text.trim()) {
-    return fallback
+    return { message: fallback }
   }
   try {
     const parsed = JSON.parse(text) as unknown
     const record = asRecord(parsed)
     const detail = readUnknown(record, ['detail', 'message', 'error'])
     if (typeof detail === 'string' && detail.trim()) {
-      return detail
+      return { message: detail, detail }
     }
     if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
       const detailRecord = asRecord(detail)
       const message = readString(detailRecord, ['message', 'detail', 'error'], fallback)
       const receipt = readString(detailRecord, ['receiptPath', 'receipt_path', 'failureLogPath', 'failure_log_path'], '')
-      return [message, receipt ? `Receipt: ${receipt}` : ''].filter(Boolean).join(' ')
+      return { message: [message, receipt ? `Receipt: ${receipt}` : ''].filter(Boolean).join(' '), detail }
     }
     if (Array.isArray(detail) && detail.length > 0) {
-      return detail
+      return {
+        message: detail
         .map((item) => {
           const itemRecord = asRecord(item)
           return readString(itemRecord, ['msg', 'message', 'detail'], JSON.stringify(item))
         })
         .filter(Boolean)
-        .join('; ')
+        .join('; '),
+        detail,
+      }
     }
   } catch {
     // Fall through to the raw response body.
   }
-  return text
+  return { message: text }
 }
 
 async function requestJson(path: string, init: RequestInit = {}): Promise<unknown> {
+  const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now()
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     cache: init.cache ?? 'no-store',
@@ -690,10 +1021,22 @@ async function requestJson(path: string, init: RequestInit = {}): Promise<unknow
       ...init.headers,
     },
   })
+  const clientMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt
+  const serverHeader = response.headers.get('X-AIWF-Elapsed-Ms')
+  const parsedServerMs = serverHeader === null ? NaN : Number.parseFloat(serverHeader)
+  const serverMs = Number.isFinite(parsedServerMs) ? parsedServerMs : null
+  recordApiLatency({
+    path,
+    status: response.status,
+    clientMs,
+    serverMs,
+    createdAt: new Date().toISOString(),
+  })
 
   const text = await response.text()
   if (!response.ok) {
-    throw new ProApiError(path, response.status, formatResponseError(text, response.statusText))
+    const error = readResponseError(text, response.statusText)
+    throw new ProApiError(path, response.status, error.message, error.detail, { clientMs, serverMs })
   }
   if (!text) {
     return {}
@@ -701,7 +1044,7 @@ async function requestJson(path: string, init: RequestInit = {}): Promise<unknow
   try {
     return JSON.parse(text) as unknown
   } catch {
-    throw new ProApiError(path, response.status, 'Response was not valid JSON.')
+    throw new ProApiError(path, response.status, 'Response was not valid JSON.', undefined, { clientMs, serverMs })
   }
 }
 
@@ -756,6 +1099,22 @@ function toGeneratePayload(request: ProGenerateRequest): JsonRecord {
     offload_text_encoder_after_encode: request.offloadTextEncoderAfterEncode,
     use_sage_attention: request.useSageAttention,
     generate_audio: request.generateAudio,
+    wan_runtime_mode: request.wanRuntimeMode,
+    high_noise_model_id: request.highNoiseModelId || undefined,
+    low_noise_model_id: request.lowNoiseModelId || undefined,
+    high_noise_steps: request.highNoiseSteps,
+    low_noise_steps: request.lowNoiseSteps,
+    boundary_ratio: request.boundaryRatio,
+    high_noise_lora_id: request.highNoiseLoraId || undefined,
+    high_noise_lora_scale: request.highNoiseLoraScale,
+    low_noise_lora_id: request.lowNoiseLoraId || undefined,
+    low_noise_lora_scale: request.lowNoiseLoraScale,
+    vae_id: request.vaeId || undefined,
+    text_encoder_path: request.textEncoderPath || undefined,
+    wan_offload: request.wanOffload,
+    wan_sigma_type: request.wanSigmaType,
+    wan_sampler: request.wanSampler,
+    wan_flow_shift: request.wanFlowShift,
     init_image_data_url: request.initImageDataUrl || undefined,
     mask_image_data_url: request.maskImageDataUrl || undefined,
     denoising_strength: request.denoisingStrength,
@@ -763,6 +1122,22 @@ function toGeneratePayload(request: ProGenerateRequest): JsonRecord {
     inpaint_only_masked: request.inpaintOnlyMasked,
     inpaint_masked_padding: request.inpaintMaskedPadding,
     inpaint_mask_content: request.inpaintMaskContent,
+    controlnet_units: request.controlNetEnabled
+      ? [
+          {
+            enabled: true,
+            model: request.controlNetModel,
+            module: request.controlNetModule || 'none',
+            image: request.controlNetImageDataUrl,
+            weight: request.controlNetWeight,
+            guidance_start: request.controlNetGuidanceStart,
+            guidance_end: request.controlNetGuidanceEnd,
+            processor_res: request.controlNetProcessorRes,
+            resize_mode: 'resize',
+            control_mode: 'balanced',
+          },
+        ]
+      : [],
   }
 }
 
@@ -906,6 +1281,17 @@ function normalizeSettingsStatus(value: unknown): ProSettingsStatus {
   const output = readRecord(record, ['output'])
   const video = readRecord(record, ['video'])
   const runtime = readRecord(record, ['runtime'])
+  const legacyProfile = readBoolean(runtime, ['cpu'], false)
+    ? 'cpu'
+    : readBoolean(runtime, ['lowvram'], false)
+      ? 'low'
+      : readBoolean(runtime, ['medvram'], false)
+        ? 'mid'
+        : readBoolean(runtime, ['highvram'], false)
+          ? 'high'
+          : 'normal'
+  const vramProfile = readString(runtime, ['vramProfile', 'vram_profile'], legacyProfile)
+
   return {
     paths: {
       settings: readString(paths, ['settings'], ''),
@@ -954,6 +1340,13 @@ function normalizeSettingsStatus(value: unknown): ProSettingsStatus {
       wanGroupOffloadStream: readBoolean(video, ['wanGroupOffloadStream', 'wan_group_offload_stream'], true),
       wanGroupOffloadBlocks: readNumber(video, ['wanGroupOffloadBlocks', 'wan_group_offload_blocks'], 4),
       ggufCudaKernels: readBoolean(video, ['ggufCudaKernels', 'gguf_cuda_kernels'], false),
+      wanSageAttention: readString(video, ['wanSageAttention', 'wan_sage_attention'], 'auto'),
+      wanNativeDenoise: readBoolean(video, ['wanNativeDenoise', 'wan_native_denoise'], true),
+      wanManualVaeDecode: readBoolean(video, ['wanManualVaeDecode', 'wan_manual_vae_decode'], false),
+      wanVaeChunkFrames: readNumber(video, ['wanVaeChunkFrames', 'wan_vae_chunk_frames'], 4),
+      wanGroupOffloadRecordStream: readBoolean(video, ['wanGroupOffloadRecordStream', 'wan_group_offload_record_stream'], true),
+      wanGroupOffloadLowCpuMem: readBoolean(video, ['wanGroupOffloadLowCpuMem', 'wan_group_offload_low_cpu_mem'], true),
+      wanResidentMinVramGb: readNumber(video, ['wanResidentMinVramGb', 'wan_resident_min_vram_gb'], 20),
     },
     runtime: {
       port: readNumber(runtime, ['port'], 7860),
@@ -971,8 +1364,10 @@ function normalizeSettingsStatus(value: unknown): ProSettingsStatus {
       asyncOffload: readBoolean(runtime, ['asyncOffload', 'async_offload'], true),
       pinnedMemory: readBoolean(runtime, ['pinnedMemory', 'pinned_memory'], true),
       cudaMalloc: readBoolean(runtime, ['cudaMalloc', 'cuda_malloc'], false),
+      vramProfile,
       medvram: readBoolean(runtime, ['medvram'], false),
       lowvram: readBoolean(runtime, ['lowvram'], false),
+      highvram: readBoolean(runtime, ['highvram'], false),
       noHalf: readBoolean(runtime, ['noHalf', 'no_half'], false),
       fp8: readBoolean(runtime, ['fp8'], false),
       fluxFp8: readBoolean(runtime, ['fluxFp8', 'flux_fp8', 'fluxfp8'], false),
@@ -1166,6 +1561,9 @@ function normalizeDownloadCatalogItem(value: unknown) {
     engineId: normalizeEngineId(readUnknown(record, ['engineId', 'engine_id', 'engine'])),
     engineLabel: readOptionalString(record, ['engineLabel', 'engine_label']),
     hfUrl: readOptionalString(record, ['hfUrl', 'hf_url']),
+    requiresAuth: readBoolean(record, ['requiresAuth', 'requires_auth'], false),
+    canDownload: readBoolean(record, ['canDownload', 'can_download'], false),
+    comingSoon: readBoolean(record, ['comingSoon', 'coming_soon'], false),
   }
 }
 
@@ -1362,6 +1760,22 @@ function normalizeSettings(
     ),
     useSageAttention: readBoolean(record, ['use_sage_attention', 'useSageAttention'], fallback.useSageAttention),
     generateAudio: readBoolean(record, ['generate_audio', 'generateAudio'], fallback.generateAudio),
+    wanRuntimeMode: readString(record, ['wan_runtime_mode', 'wanRuntimeMode', 'runtimeMode', 'runtime_mode'], fallback.wanRuntimeMode),
+    highNoiseModelId: readString(record, ['high_noise_model_id', 'highNoiseModelId'], fallback.highNoiseModelId),
+    lowNoiseModelId: readString(record, ['low_noise_model_id', 'lowNoiseModelId'], fallback.lowNoiseModelId),
+    highNoiseSteps: readNumber(record, ['high_noise_steps', 'highNoiseSteps'], fallback.highNoiseSteps),
+    lowNoiseSteps: readNumber(record, ['low_noise_steps', 'lowNoiseSteps'], fallback.lowNoiseSteps),
+    boundaryRatio: readNumber(record, ['boundary_ratio', 'boundaryRatio'], fallback.boundaryRatio),
+    highNoiseLoraId: readString(record, ['high_noise_lora_id', 'highNoiseLoraId'], fallback.highNoiseLoraId),
+    highNoiseLoraScale: readNumber(record, ['high_noise_lora_scale', 'highNoiseLoraScale'], fallback.highNoiseLoraScale),
+    lowNoiseLoraId: readString(record, ['low_noise_lora_id', 'lowNoiseLoraId'], fallback.lowNoiseLoraId),
+    lowNoiseLoraScale: readNumber(record, ['low_noise_lora_scale', 'lowNoiseLoraScale'], fallback.lowNoiseLoraScale),
+    vaeId: readString(record, ['vae_id', 'vaeId'], fallback.vaeId),
+    textEncoderPath: readString(record, ['text_encoder_path', 'textEncoderPath'], fallback.textEncoderPath),
+    wanOffload: readString(record, ['wan_offload', 'wanOffload', 'offload'], fallback.wanOffload),
+    wanSigmaType: readString(record, ['wan_sigma_type', 'wanSigmaType', 'sigma_type', 'sigmaType'], fallback.wanSigmaType),
+    wanSampler: readString(record, ['wan_sampler', 'wanSampler'], fallback.wanSampler),
+    wanFlowShift: readNumber(record, ['wan_flow_shift', 'wanFlowShift', 'flow_shift', 'flowShift'], fallback.wanFlowShift),
     initImageDataUrl: readString(record, ['init_image_data_url', 'initImageDataUrl'], fallback.initImageDataUrl),
     maskImageDataUrl: readString(record, ['mask_image_data_url', 'maskImageDataUrl'], fallback.maskImageDataUrl),
     denoisingStrength: readNumber(record, ['denoising_strength', 'denoisingStrength'], fallback.denoisingStrength),
@@ -1375,6 +1789,15 @@ function normalizeSettings(
     autoMaskModel: readString(record, ['auto_mask_model', 'autoMaskModel'], fallback.autoMaskModel),
     autoMaskBoxThreshold: readNumber(record, ['auto_mask_box_threshold', 'autoMaskBoxThreshold'], fallback.autoMaskBoxThreshold),
     autoMaskTextThreshold: readNumber(record, ['auto_mask_text_threshold', 'autoMaskTextThreshold'], fallback.autoMaskTextThreshold),
+    controlNetEnabled: readBoolean(record, ['controlnet_enabled', 'controlNetEnabled'], fallback.controlNetEnabled),
+    controlNetModel: readString(record, ['controlnet_model', 'controlNetModel'], fallback.controlNetModel),
+    controlNetModule: readString(record, ['controlnet_module', 'controlNetModule'], fallback.controlNetModule),
+    controlNetImageDataUrl: readString(record, ['controlnet_image_data_url', 'controlNetImageDataUrl'], fallback.controlNetImageDataUrl),
+    controlNetImageName: readString(record, ['controlnet_image_name', 'controlNetImageName'], fallback.controlNetImageName),
+    controlNetWeight: readNumber(record, ['controlnet_weight', 'controlNetWeight'], fallback.controlNetWeight),
+    controlNetGuidanceStart: readNumber(record, ['controlnet_guidance_start', 'controlNetGuidanceStart'], fallback.controlNetGuidanceStart),
+    controlNetGuidanceEnd: readNumber(record, ['controlnet_guidance_end', 'controlNetGuidanceEnd'], fallback.controlNetGuidanceEnd),
+    controlNetProcessorRes: readNumber(record, ['controlnet_processor_res', 'controlNetProcessorRes'], fallback.controlNetProcessorRes),
     saveImages: readBoolean(record, ['save_images', 'saveImages'], fallback.saveImages),
   }
 }

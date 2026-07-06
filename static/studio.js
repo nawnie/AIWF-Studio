@@ -899,7 +899,63 @@
         observer.observe(root, { subtree: true, attributes: true, attributeFilter: ["disabled", "class"] });
     }
 
+    function initStartupSplash() {
+        if (document.getElementById("aiwf-startup-splash")) {
+            return;
+        }
+        const startedAt = Date.now();
+        const splash = document.createElement("div");
+        splash.id = "aiwf-startup-splash";
+        splash.className = "aiwf-startup-splash";
+        splash.setAttribute("role", "status");
+        splash.setAttribute("aria-live", "polite");
+        splash.innerHTML = `
+            <div class="aiwf-startup-logo" aria-hidden="true">
+                <span class="aiwf-startup-logo-frame"></span>
+                <span class="aiwf-startup-logo-bolt"></span>
+                <span class="aiwf-startup-logo-core"></span>
+            </div>
+            <div class="aiwf-startup-copy">
+                <strong>Loading AIWF Studio</strong>
+                <small>Preparing local runtime</small>
+            </div>
+        `;
+        document.body.appendChild(splash);
+
+        let finishing = false;
+        const finish = () => {
+            if (finishing) {
+                return;
+            }
+            finishing = true;
+            const waitMs = Math.max(0, 3000 - (Date.now() - startedAt));
+            window.setTimeout(() => {
+                const label = splash.querySelector(".aiwf-startup-copy strong");
+                const detail = splash.querySelector(".aiwf-startup-copy small");
+                if (label) {
+                    label.textContent = "Ready";
+                }
+                if (detail) {
+                    detail.textContent = "Opening workspace";
+                }
+                window.setTimeout(() => {
+                    splash.classList.add("is-done");
+                    reportClientEvent("startup_splash_ready", "Gradio startup splash finished", studioContext());
+                    window.setTimeout(() => splash.remove(), 500);
+                }, 900);
+            }, waitMs);
+        };
+
+        if (document.readyState === "complete") {
+            requestAnimationFrame(finish);
+        } else {
+            window.addEventListener("load", finish, { once: true });
+            window.setTimeout(finish, 9000);
+        }
+    }
+
     function boot() {
+        initStartupSplash();
         markUiReady();
         initDeviceWatchers();
         initHotkeys();

@@ -1,0 +1,5 @@
+{
+  "name": "Hello Extension",
+  "version": "1.0.0",
+  "description": "Template extension: shows the API-route, Gradio-tab, and event-hook extension points. Copy this folder to start your own."
+}

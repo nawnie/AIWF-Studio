@@ -25,6 +25,8 @@ from PIL import Image
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from aiwf.core.config.launch import LaunchSettings, save_launch_settings
+from aiwf.core.config.settings import normalize_vram_profile
+from aiwf.core.domain.controlnet import ControlNetUnit
 from aiwf.core.domain.errors import GenerationCancelledError
 from aiwf.core.domain.generation import GenerationMode, GenerationRequest, JobRecord, JobState
 from aiwf.core.domain.models import SCHEDULE_TYPES, normalize_schedule_id_for_sampler
@@ -34,7 +36,9 @@ from aiwf.infrastructure.diffusers.model_blocks import (
     is_non_selectable_image_asset_path,
     known_broken_selectable_image_asset,
 )
-from aiwf.infrastructure.diffusers.model_arch import is_qwen_nunchaku_architecture, is_sd3_architecture
+from aiwf.infrastructure.diffusers.model_arch import is_sd3_architecture
+from aiwf.infrastructure.model_inventory import MODEL_EXTENSIONS, scan_and_write_model_inventory
+from aiwf.infrastructure.model_sorter import SORT_INBOX_DIRNAME, reorganize_models, sort_inbox_models
 from aiwf.services.model_download_catalog import CIVITAI_BROWSE_LINKS, QUICK_START_BUNDLES
 from aiwf.services.pipeline_readiness import (
     READINESS_STATUSES,
@@ -42,7 +46,6 @@ from aiwf.services.pipeline_readiness import (
     collect_pipeline_readiness,
     readiness_summary,
 )
-from aiwf.services.qwen_nunchaku import QwenNunchakuService
 
 _RECENT_IMAGE_LIMIT = 8
 _RECENT_SCAN_LIMIT = 400
@@ -51,13 +54,18 @@ _RECENT_MAX_BYTES = 2 * 1024 * 1024
 _RECENT_INFOTEXT_MAX_CHARS = 20_000
 _MAX_PRO_BATCH_IMAGES = 4
 _PRO_SOURCE_IMAGE_MAX_BYTES = 15 * 1024 * 1024
-_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif"}
 _LOG_FILE_LIMIT = 12
 _LOG_ROW_LIMIT = 80
 _PRO_SANA_VIDEO_BACKEND_ENABLED = 1
 _PRO_RESTART_EXIT_CODE = 75
 _CAPABILITY_CACHE_TTL_SECONDS = 30.0
 _CAPABILITY_BACKGROUND_REFRESH_SECONDS = 300.0
+_RUNTIME_RUNNING_TICK_SECONDS = 0.075
+_RUNTIME_IDLE_TICK_SECONDS = 0.25
+_RUNTIME_RESOURCE_CACHE_SECONDS = 0.35
+_STARTUP_SPLASH_MIN_MS = 1800
+_STARTUP_SPLASH_READY_HOLD_MS = 1200
 _READINESS_SNAPSHOT_FILENAMES = (
     "pipeline_readiness_current_inventory.json",
     "pipeline_readiness_with_downloads_latest.json",
@@ -68,8 +76,26 @@ _WAN_SERVICES: dict[int, Any] = {}
 _VSR_SERVICES: dict[int, Any] = {}
 _RIFE_SERVICES: dict[int, Any] = {}
 _AUDIO_SERVICES: dict[int, Any] = {}
+_RUNTIME_RESOURCE_CACHE: dict[int, tuple[float, list[dict[str, Any]]]] = {}
 _VIDEO_LAB_UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024
-_VIDEO_LAB_UPLOAD_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+_VIDEO_LAB_UPLOAD_EXTENSIONS = {
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".webm",
+    ".avi",
+    ".m4v",
+    ".wmv",
+    ".flv",
+    ".mpeg",
+    ".mpg",
+    ".ts",
+    ".mts",
+    ".m2ts",
+    ".3gp",
+    ".ogv",
+}
+_MODEL_UPLOAD_MAX_BYTES = 120 * 1024 * 1024 * 1024
 _NVIDIA_SMI_CACHE: tuple[float, tuple[float, float] | None] = (0.0, None)
 _JOB_PREVIEW_CACHE: dict[tuple[str, int, int], str] = {}
 _JOB_PREVIEW_CACHE_LOCK = threading.Lock()
@@ -83,6 +109,7 @@ _GRADIO_TOOL_TABS = [
     {"id": "studio", "label": "Studio", "group": "Create", "tab": "Image", "status": "ready", "summary": "Image, inpaint, ControlNet, LoRA, prompt tools"},
     {"id": "image_lab", "label": "Image Lab", "group": "Image", "tab": "Image Lab", "status": "ready", "summary": "XYZ plots, route maturity, batch runners"},
     {"id": "video", "label": "Wan / LTX Video", "group": "Video", "tab": "Video", "status": "ready", "summary": "Wan, LTX, post-processing chain"},
+    {"id": "sana_video", "label": "Sana Video", "group": "Video", "tab": "Sana Video", "status": "experimental", "summary": "Sana text-to-video and image-to-video"},
     {"id": "video_lab", "label": "Video Lab", "group": "Video", "tab": "Video Lab", "status": "ready", "summary": "Trim, stabilize, denoise, upscale, encode"},
     {"id": "rife", "label": "RIFE", "group": "Video", "tab": "RIFE", "status": "ready", "summary": "Frame interpolation for generated or uploaded video"},
     {"id": "audio_lab", "label": "Audio Lab", "group": "Audio", "tab": "Audio Lab", "status": "ready", "summary": "Audio cleanup, mixing, music and SFX generation"},
@@ -119,6 +146,7 @@ _READINESS_NEEDS_WORK_STATUSES = (
     "broken-runtime",
     "unsupported-no-route",
 )
+_HIDDEN_V1_MODEL_ARCHITECTURES = {"anima", "qwen_image_nunchaku"}
 
 _READINESS_SORT_ORDER = {status: index for index, status in enumerate(READINESS_STATUSES)}
 
@@ -213,6 +241,37 @@ class ProGeneratePayload(BaseModel):
         validation_alias=AliasChoices("useSageAttention", "use_sage_attention"),
     )
     generate_audio: bool = Field(default=False, validation_alias=AliasChoices("generateAudio", "generate_audio"))
+    wan_runtime_mode: str = Field(
+        default="fast_5b",
+        validation_alias=AliasChoices("wanRuntimeMode", "wan_runtime_mode", "runtimeMode", "runtime_mode"),
+    )
+    high_noise_model_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("highNoiseModelId", "high_noise_model_id"),
+    )
+    low_noise_model_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("lowNoiseModelId", "low_noise_model_id"),
+    )
+    high_noise_steps: int = Field(default=20, ge=1, le=60, validation_alias=AliasChoices("highNoiseSteps", "high_noise_steps"))
+    low_noise_steps: int = Field(default=1, ge=1, le=60, validation_alias=AliasChoices("lowNoiseSteps", "low_noise_steps"))
+    boundary_ratio: float = Field(default=0.875, ge=0.0, le=1.0, validation_alias=AliasChoices("boundaryRatio", "boundary_ratio"))
+    high_noise_lora_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("highNoiseLoraId", "high_noise_lora_id"),
+    )
+    high_noise_lora_scale: float = Field(default=1.0, ge=0.0, le=2.0, validation_alias=AliasChoices("highNoiseLoraScale", "high_noise_lora_scale"))
+    low_noise_lora_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("lowNoiseLoraId", "low_noise_lora_id"),
+    )
+    low_noise_lora_scale: float = Field(default=1.0, ge=0.0, le=2.0, validation_alias=AliasChoices("lowNoiseLoraScale", "low_noise_lora_scale"))
+    vae_id: str | None = Field(default=None, validation_alias=AliasChoices("vaeId", "vae_id"))
+    text_encoder_path: str | None = Field(default=None, validation_alias=AliasChoices("textEncoderPath", "text_encoder_path"))
+    wan_offload: str = Field(default="balanced", validation_alias=AliasChoices("wanOffload", "wan_offload", "offload"))
+    wan_sigma_type: str = Field(default="simple", validation_alias=AliasChoices("wanSigmaType", "wan_sigma_type", "sigmaType", "sigma_type"))
+    wan_sampler: str = Field(default="unipc", validation_alias=AliasChoices("wanSampler", "wan_sampler"))
+    wan_flow_shift: float = Field(default=5.0, ge=0.5, le=25.0, validation_alias=AliasChoices("wanFlowShift", "wan_flow_shift", "flowShift", "flow_shift"))
     init_image_data_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices("initImageDataUrl", "init_image_data_url", "initImage"),
@@ -247,12 +306,34 @@ class ProGeneratePayload(BaseModel):
         default="original",
         validation_alias=AliasChoices("inpaintMaskContent", "inpaint_mask_content"),
     )
+    controlnet_units: list["ProControlNetUnitPayload"] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("controlnetUnits", "controlnet_units"),
+    )
 
     @model_validator(mode="after")
     def total_batch_must_be_bounded(self):
         if self.batch_size * self.batch_count > _MAX_PRO_BATCH_IMAGES:
             raise ValueError(f"batchSize * batchCount must be <= {_MAX_PRO_BATCH_IMAGES}")
         return self
+
+
+class ProControlNetUnitPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    enabled: bool = True
+    model: str | None = None
+    module: str = "none"
+    weight: float = Field(default=1.0, ge=0.0, le=2.0)
+    image: str | None = None
+    mask: str | None = None
+    resize_mode: str = Field(default="resize", validation_alias=AliasChoices("resizeMode", "resize_mode"))
+    processor_res: int = Field(default=512, ge=64, le=4096, validation_alias=AliasChoices("processorRes", "processor_res"))
+    threshold_a: float = Field(default=64.0, validation_alias=AliasChoices("thresholdA", "threshold_a"))
+    threshold_b: float = Field(default=64.0, validation_alias=AliasChoices("thresholdB", "threshold_b"))
+    guidance_start: float = Field(default=0.0, ge=0.0, le=1.0, validation_alias=AliasChoices("guidanceStart", "guidance_start"))
+    guidance_end: float = Field(default=1.0, ge=0.0, le=1.0, validation_alias=AliasChoices("guidanceEnd", "guidance_end"))
+    control_mode: str = Field(default="balanced", validation_alias=AliasChoices("controlMode", "control_mode"))
 
 
 class ProSettingsUpdatePayload(BaseModel):
@@ -347,22 +428,12 @@ def _runtime_checkpoint_block(ctx: Any, item: Any) -> dict[str, str] | None:
     path = str(data.get("path") or data.get("filename") or "")
     if not path:
         return None
-    if is_qwen_nunchaku_architecture(architecture):
-        try:
-            status = QwenNunchakuService(getattr(ctx, "flags", None)).status(path)
-        except Exception as exc:
-            return {
-                "status": "blocked-cleanly",
-                "reason": f"Qwen Nunchaku readiness check failed: {exc}",
-                "suggestedAction": "Check the Qwen Nunchaku runtime and local base assets before generating.",
-            }
-        if not status.ready:
-            details = "; ".join(status.messages) if status.messages else "runtime or base assets are missing"
-            return {
-                "status": "blocked-cleanly",
-                "reason": f"Qwen Nunchaku is missing required files: {details}",
-                "suggestedAction": "Install the Qwen Nunchaku sidecar runtime and finish the local Qwen-Image diffusers base snapshot.",
-            }
+    if _is_hidden_v1_checkpoint_architecture(architecture):
+        return {
+            "status": "coming-soon",
+            "reason": "This model family is blocked for the v1 app until its native runtime has a passing smoke receipt.",
+            "suggestedAction": "Keep the files installed for sorting/research, but use a supported v1 image route for generation.",
+        }
     if (
         is_sd3_architecture(architecture)
         and "large" in path.lower()
@@ -374,6 +445,10 @@ def _runtime_checkpoint_block(ctx: Any, item: Any) -> dict[str, str] | None:
             "suggestedAction": "Sign in to Hugging Face with SD3.5 Large access, or provide a local diffusers pipeline folder for this model.",
         }
     return None
+
+
+def _is_hidden_v1_checkpoint_architecture(architecture: str) -> bool:
+    return (architecture or "").strip().lower() in _HIDDEN_V1_MODEL_ARCHITECTURES
 
 
 def _huggingface_token() -> str:
@@ -442,6 +517,8 @@ def _selectable_checkpoint_payloads(ctx: Any) -> tuple[list[dict[str, Any]], lis
     blocked: list[dict[str, Any]] = []
     for item in _safe_list(ctx.generation.list_checkpoints):
         payload = _checkpoint_payload(ctx, item)
+        if _is_hidden_v1_checkpoint_architecture(str(payload.get("architecture") or "")):
+            continue
         block = _blocked_checkpoint_detail(item) or _runtime_checkpoint_block(ctx, item)
         if block is None and str(payload.get("architecture") or "") == "sdxl_refiner":
             block = {
@@ -836,11 +913,74 @@ def _schedule_process_restart(delay_seconds: float = 0.25) -> None:
     def _worker() -> None:
         time.sleep(max(0.0, float(delay_seconds)))
         try:
-            subprocess.Popen(command, cwd=str(root))
+            popen_kwargs: dict[str, Any] = {"cwd": str(root)}
+            if os.name == "nt" and "--terminal" not in forwarded_args:
+                popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            subprocess.Popen(command, **popen_kwargs)
         finally:
             os._exit(_PRO_RESTART_EXIT_CODE)
 
     threading.Thread(target=_worker, name="aiwf-pro-restart", daemon=True).start()
+
+
+def _open_support_terminal(ctx: Any) -> dict[str, str]:
+    if os.name != "nt":
+        raise HTTPException(status_code=501, detail="Support terminal launch is currently available on Windows only.")
+    root = Path(__file__).resolve().parents[2]
+    flags = getattr(ctx, "flags", None)
+    venv_dir = root / "venv"
+    activate = venv_dir / "Scripts" / "Activate.ps1"
+    commands = [
+        f"Set-Location -LiteralPath {json.dumps(str(root))}",
+        "$Host.UI.RawUI.WindowTitle = 'AIWF Studio Support Terminal'",
+    ]
+    if activate.is_file():
+        commands.append(f". {json.dumps(str(activate))}")
+    commands.extend(
+        [
+            "Write-Host 'AIWF Studio support terminal'",
+            "Write-Host 'Repo:' (Get-Location)",
+            f"Write-Host 'Python:' {json.dumps(sys.executable)}",
+            "Write-Host 'Useful checks: python --version; python -m pip check; npm --prefix frontend run build'",
+        ]
+    )
+    if flags is not None:
+        commands.append(f"Write-Host 'Models:' {json.dumps(str(flags.resolved_models_dir()))}")
+        commands.append(f"Write-Host 'Outputs:' {json.dumps(str(flags.resolved_output_dir()))}")
+    command = [
+        "powershell.exe",
+        "-NoExit",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "; ".join(commands),
+    ]
+    try:
+        subprocess.Popen(command, cwd=str(root), creationflags=subprocess.CREATE_NEW_CONSOLE)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not open support terminal: {exc}") from exc
+    return {"status": "opened", "cwd": str(root), "venv": str(venv_dir)}
+
+
+def _unload_generation_model(ctx: Any) -> dict[str, Any]:
+    generation = getattr(ctx, "generation", None)
+    backend = getattr(generation, "backend", None)
+    unload = getattr(backend, "unload", None)
+    if not callable(unload):
+        raise HTTPException(status_code=501, detail="This backend does not expose a model unload action.")
+    if _image_generation_running(ctx) or _image_generation_pending(ctx) or _pro_video_job_running(ctx):
+        raise HTTPException(status_code=409, detail="A job is running. Stop it or wait before unloading models.")
+    loaded_before = _runtime_loaded_model(ctx)
+    try:
+        unload()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not unload the current model: {exc}") from exc
+    return {
+        "status": "unloaded",
+        "unloadedModel": loaded_before,
+        "runtime": _runtime_summary(ctx),
+    }
 
 
 def _image_generation_running(ctx: Any) -> bool:
@@ -1371,6 +1511,82 @@ def _pro_error_detail(message: str, **extra: Any) -> dict[str, Any]:
     return detail
 
 
+def _pro_startup_payload(ctx: Any) -> dict[str, Any]:
+    now = time.time()
+    started_at = float(getattr(ctx, "_pro_startup_started_at", 0.0) or 0.0)
+    if started_at <= 0:
+        started_at = now
+        setattr(ctx, "_pro_startup_started_at", started_at)
+    server_ready_at = float(getattr(ctx, "_pro_server_ready_at", 0.0) or 0.0)
+    if server_ready_at <= 0:
+        server_ready_at = now
+        setattr(ctx, "_pro_server_ready_at", server_ready_at)
+    window_ready_at = float(getattr(ctx, "_pro_window_ready_at", 0.0) or 0.0)
+    window_ready = window_ready_at > 0
+    return {
+        "status": "window-ready" if window_ready else "server-ready",
+        "serverReady": True,
+        "windowReady": window_ready,
+        "startedAt": datetime.fromtimestamp(started_at, timezone.utc).isoformat(),
+        "serverReadyAt": datetime.fromtimestamp(server_ready_at, timezone.utc).isoformat(),
+        "windowReadyAt": datetime.fromtimestamp(window_ready_at, timezone.utc).isoformat() if window_ready else "",
+        "minSplashMs": _STARTUP_SPLASH_MIN_MS,
+        "readyHoldMs": _STARTUP_SPLASH_READY_HOLD_MS,
+    }
+
+
+def _checkpoint_error_context(ctx: Any, checkpoint_id: str | None) -> dict[str, Any]:
+    checkpoint = _resolve_checkpoint_for_generation_guard(ctx, checkpoint_id)
+    if checkpoint is None:
+        return {"requestedId": checkpoint_id or ""}
+    data = _dump_model(checkpoint)
+    path_value = str(data.get("path") or "")
+    payload: dict[str, Any] = {
+        "id": str(data.get("id") or checkpoint_id or ""),
+        "title": str(data.get("title") or ""),
+        "filename": str(data.get("filename") or ""),
+        "path": path_value,
+        "architecture": str(data.get("architecture") or ""),
+        "kind": str(data.get("kind") or ""),
+        "sizeBytes": int(data.get("size_bytes") or data.get("sizeBytes") or 0),
+    }
+    if path_value:
+        path = Path(path_value)
+        if path.is_file() and path.suffix.lower() in {".safetensors", ".gguf"}:
+            try:
+                from aiwf.infrastructure.model_header import read_model_info
+
+                info = read_model_info(path)
+                payload["header"] = {
+                    "displayName": info.display_name,
+                    "arch": info.arch,
+                    "role": info.role,
+                    "precision": info.precision,
+                    "size": info.size_label(),
+                    "tensorCount": info.tensor_count,
+                    "metadata": {
+                        str(key): str(value)
+                        for key, value in list((info.raw_meta or {}).items())[:24]
+                        if isinstance(value, (str, int, float, bool))
+                    },
+                }
+            except Exception as exc:
+                payload["header"] = {"error": str(exc)}
+        elif path.is_dir():
+            model_index = path / "model_index.json"
+            payload["folder"] = {
+                "modelIndex": str(model_index),
+                "modelIndexExists": model_index.is_file(),
+            }
+            if model_index.is_file():
+                try:
+                    model_payload = json.loads(model_index.read_text(encoding="utf-8"))
+                    payload["folder"]["className"] = str(model_payload.get("_class_name") or "")
+                except Exception as exc:
+                    payload["folder"]["error"] = str(exc)
+    return payload
+
+
 def _log_files(ctx: Any) -> list[dict[str, Any]]:
     root = _log_root(ctx)
     candidates = []
@@ -1535,8 +1751,12 @@ def _download_payload(ctx: Any) -> dict[str, Any]:
             "counts": {"categories": 0, "catalog": 0, "installed": 0},
         }
 
+    catalog_items = list(_safe_list(service.list_catalog))
+    visible_category_keys = {str(getattr(item, "category", "") or "") for item in catalog_items}
     categories: list[dict[str, Any]] = []
     for label, key in _safe_list(service.category_choices):
+        if key not in visible_category_keys:
+            continue
         destination = ""
         try:
             destination = str(service.destination_dir(key))
@@ -1546,7 +1766,7 @@ def _download_payload(ctx: Any) -> dict[str, Any]:
 
     catalog: list[dict[str, Any]] = []
     installed_count = 0
-    for item in _safe_list(service.list_catalog):
+    for item in catalog_items:
         installed = False
         destination = ""
         try:
@@ -1560,6 +1780,8 @@ def _download_payload(ctx: Any) -> dict[str, Any]:
         if installed:
             installed_count += 1
         engine_id = _engine_id_for_catalog_entry(item)
+        requires_auth = _catalog_entry_requires_auth(item)
+        can_download = _catalog_entry_can_download(item)
         catalog.append(
             {
                 "key": item.key,
@@ -1577,6 +1799,9 @@ def _download_payload(ctx: Any) -> dict[str, Any]:
                 "engineId": engine_id,
                 "engineLabel": _ENGINE_LABELS.get(engine_id, _ENGINE_LABELS["unknown"]),
                 "hfUrl": _catalog_entry_hf_url(item),
+                "requiresAuth": requires_auth,
+                "canDownload": can_download,
+                "comingSoon": bool(getattr(item, "coming_soon", False)),
             }
         )
 
@@ -1605,6 +1830,46 @@ def _catalog_entry_hf_url(item: Any) -> str:
     if url.startswith("https://huggingface.co/"):
         return url.replace("/resolve/", "/blob/", 1)
     return url
+
+
+def _catalog_entry_requires_auth(item: Any) -> bool:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            getattr(item, "key", ""),
+            getattr(item, "title", ""),
+            getattr(item, "repo_id", ""),
+            getattr(item, "filename", ""),
+            getattr(item, "url", ""),
+            getattr(item, "notes", ""),
+        )
+    ).lower()
+    auth_tokens = (
+        "gated",
+        "token",
+        "hf_token",
+        "huggingface_token",
+        "accepted hf",
+        "accepted hugging face",
+        "accept the hugging face gate",
+        "requires accepted",
+        "needs accepted",
+        "may require accepted",
+        "requires access",
+        "needs access",
+    )
+    return any(token in text for token in auth_tokens)
+
+
+def _catalog_entry_can_download(item: Any) -> bool:
+    if bool(getattr(item, "coming_soon", False)):
+        return False
+    source = str(getattr(item, "source", "") or "").strip().lower()
+    if source not in {"huggingface", "direct"}:
+        return False
+    if _catalog_entry_requires_auth(item):
+        return False
+    return bool(str(getattr(item, "repo_id", "") or getattr(item, "url", "") or "").strip())
 
 
 def _settings_payload(ctx: Any) -> dict[str, Any]:
@@ -1660,6 +1925,13 @@ def _settings_payload(ctx: Any) -> dict[str, Any]:
             "wanGroupOffloadStream": bool(getattr(settings, "wan_group_offload_stream", True)),
             "wanGroupOffloadBlocks": int(getattr(settings, "wan_group_offload_blocks", 4)),
             "ggufCudaKernels": bool(getattr(settings, "gguf_cuda_kernels", False)),
+            "wanSageAttention": getattr(settings, "wan_sage_attention", "auto"),
+            "wanNativeDenoise": bool(getattr(settings, "wan_native_denoise", True)),
+            "wanManualVaeDecode": bool(getattr(settings, "wan_manual_vae_decode", False)),
+            "wanVaeChunkFrames": int(getattr(settings, "wan_vae_chunk_frames", 4)),
+            "wanGroupOffloadRecordStream": bool(getattr(settings, "wan_group_offload_record_stream", True)),
+            "wanGroupOffloadLowCpuMem": bool(getattr(settings, "wan_group_offload_low_cpu_mem", True)),
+            "wanResidentMinVramGb": int(getattr(settings, "wan_resident_min_vram_gb", 20)),
         },
         "runtime": {
             "port": int(getattr(flags, "port", 7860)) if flags is not None else 7860,
@@ -1677,8 +1949,10 @@ def _settings_payload(ctx: Any) -> dict[str, Any]:
             "asyncOffload": bool(getattr(flags, "async_offload", True)),
             "pinnedMemory": bool(getattr(flags, "pinned_memory", True)),
             "cudaMalloc": bool(getattr(flags, "cuda_malloc", False)),
+            "vramProfile": flags.effective_vram_profile() if flags is not None else "normal",
             "medvram": bool(getattr(flags, "medvram", False)),
             "lowvram": bool(getattr(flags, "lowvram", False)),
+            "highvram": bool(getattr(flags, "highvram", False)),
             "noHalf": bool(getattr(flags, "no_half", False)),
             "fp8": bool(getattr(flags, "fp8", False)),
             "fluxFp8": bool(getattr(flags, "fluxfp8", False)),
@@ -1736,6 +2010,18 @@ def _choice_setting(value: Any, *, allowed: set[str], default: str) -> str:
 
 def _text_setting(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _canonical_wan_runtime_mode(value: Any, *, default: str = "fast_5b") -> str:
+    normalized = str(value or default).strip().lower().replace("-", "_")
+    aliases = {
+        "high_low": "native_high_low",
+        "high_low_fp8": "native_high_low_fp8_experimental",
+        "fp8_high_low": "native_high_low_fp8_experimental",
+    }
+    normalized = aliases.get(normalized, normalized)
+    allowed = {"fast_5b", "native_high_low", "native_high_low_fp8_experimental"}
+    return normalized if normalized in allowed else default
 
 
 def _save_launch_profile(ctx: Any, launch: LaunchSettings) -> None:
@@ -1866,7 +2152,7 @@ def _apply_settings_update(ctx: Any, payload: ProSettingsUpdatePayload) -> dict[
             setattr(settings, "last_wan_flow_shift", _float_setting(wan_flow_shift, minimum=0.0, maximum=20.0))
         wan_runtime_mode = _payload_value(video, "wanRuntimeMode", "wan_runtime_mode")
         if wan_runtime_mode is not _MISSING_SETTING:
-            setattr(settings, "last_wan_runtime_mode", _choice_setting(wan_runtime_mode, allowed={"fast_5b", "high_low"}, default="fast_5b"))
+            setattr(settings, "last_wan_runtime_mode", _choice_setting(wan_runtime_mode, allowed={"fast_5b", "high_low", "native_high_low", "native_high_low_fp8_experimental"}, default="fast_5b"))
         ltx_dtype = _payload_value(video, "ltxDtype", "ltx_dtype")
         if ltx_dtype is not _MISSING_SETTING:
             setattr(settings, "ltx_dtype", _choice_setting(ltx_dtype, allowed={"bf16", "fp16"}, default="bf16"))
@@ -1882,6 +2168,24 @@ def _apply_settings_update(ctx: Any, payload: ProSettingsUpdatePayload) -> dict[
         gguf_kernels = _payload_value(video, "ggufCudaKernels", "gguf_cuda_kernels")
         if gguf_kernels is not _MISSING_SETTING:
             setattr(settings, "gguf_cuda_kernels", _bool_setting(gguf_kernels))
+        wan_sage = _payload_value(video, "wanSageAttention", "wan_sage_attention")
+        if wan_sage is not _MISSING_SETTING:
+            setattr(settings, "wan_sage_attention", _choice_setting(wan_sage, allowed={"auto", "force", "off"}, default="auto"))
+        for camel, snake, attr in (
+            ("wanNativeDenoise", "wan_native_denoise", "wan_native_denoise"),
+            ("wanManualVaeDecode", "wan_manual_vae_decode", "wan_manual_vae_decode"),
+            ("wanGroupOffloadRecordStream", "wan_group_offload_record_stream", "wan_group_offload_record_stream"),
+            ("wanGroupOffloadLowCpuMem", "wan_group_offload_low_cpu_mem", "wan_group_offload_low_cpu_mem"),
+        ):
+            value = _payload_value(video, camel, snake)
+            if value is not _MISSING_SETTING:
+                setattr(settings, attr, _bool_setting(value))
+        wan_vae_chunk = _payload_value(video, "wanVaeChunkFrames", "wan_vae_chunk_frames")
+        if wan_vae_chunk is not _MISSING_SETTING:
+            setattr(settings, "wan_vae_chunk_frames", _int_setting(wan_vae_chunk, minimum=1, maximum=16))
+        wan_resident_min = _payload_value(video, "wanResidentMinVramGb", "wan_resident_min_vram_gb")
+        if wan_resident_min is not _MISSING_SETTING:
+            setattr(settings, "wan_resident_min_vram_gb", _int_setting(wan_resident_min, minimum=8, maximum=96))
         # Apply immediately so the next pipeline load honors the new values
         # without an app restart.
         apply_video_perf_env = getattr(settings, "apply_video_perf_env", None)
@@ -1911,6 +2215,7 @@ def _apply_settings_update(ctx: Any, payload: ProSettingsUpdatePayload) -> dict[
                 ("cudaMalloc", "cuda_malloc", "cuda_malloc"),
                 ("medvram", None, "medvram"),
                 ("lowvram", None, "lowvram"),
+                ("highvram", None, "highvram"),
                 ("noHalf", "no_half", "no_half"),
                 ("fp8", None, "fp8"),
                 ("fluxFp8", "fluxfp8", "fluxfp8"),
@@ -1928,6 +2233,14 @@ def _apply_settings_update(ctx: Any, payload: ProSettingsUpdatePayload) -> dict[
                 value = _payload_value(runtime, camel, snake)
                 if value is not _MISSING_SETTING:
                     launch_data[field] = _bool_setting(value)
+            vram_profile = _payload_value(runtime, "vramProfile", "vram_profile")
+            if vram_profile is not _MISSING_SETTING:
+                normalized_profile = normalize_vram_profile(str(vram_profile))
+                launch_data["vram_profile"] = normalized_profile
+                launch_data["cpu"] = normalized_profile == "cpu"
+                launch_data["lowvram"] = normalized_profile == "low"
+                launch_data["medvram"] = normalized_profile == "mid"
+                launch_data["highvram"] = normalized_profile == "high"
             for camel, snake, field in (
                 ("backend", "inference_backend", "inference_backend"),
                 ("onnxProvider", "onnx_provider", "onnx_provider"),
@@ -2239,8 +2552,8 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "status": _capability_status(controlnet_count),
             "count": controlnet_count,
             "route": "create",
-            "summary": "Gradio has multi-unit ControlNet controls; React needs the full request schema next.",
-            "details": [f"{controlnet_count} models", f"{controlnet_modules} preprocessors"],
+            "summary": "React Pro has one ControlNet unit; Gradio remains the advanced multi-unit surface.",
+            "details": [f"{controlnet_count} models", f"{controlnet_modules} preprocessors", "One Pro unit, multi-unit in Gradio"],
         },
         {
             "id": "segment",
@@ -2249,8 +2562,8 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "status": _capability_status(sam_count),
             "count": sam_count,
             "route": "modal:segmentation",
-            "summary": "SAM masks are available in Gradio and exposed as a React tool popup.",
-            "details": [f"{sam_count} SAM models", "Box, point, and text-prompt masks in Gradio."],
+            "summary": "Pro exposes quick mask routing; Gradio remains the full SAM and DINO workspace.",
+            "details": [f"{sam_count} SAM models", "Box, point, and text-prompt masks in Gradio.", "Pro inpaint has quick auto-mask controls."],
         },
         {
             "id": "enhance",
@@ -2259,8 +2572,8 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "status": _capability_status(upscaler_count + restorer_count),
             "count": upscaler_count + restorer_count,
             "route": "tools",
-            "summary": "Upscale, restore, old-photo repair, and video frame enhancement run from Gradio.",
-            "details": [f"{upscaler_count} upscalers", f"{restorer_count} restorers"],
+            "summary": "Pro can run quick face restore, upscale, and image VSR; Gradio keeps full old-photo and batch workflows.",
+            "details": [f"{upscaler_count} upscalers", f"{restorer_count} restorers", "Video VSR is available from Pro Video Lab."],
         },
         {
             "id": "reactor",
@@ -2269,8 +2582,8 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "status": _capability_status(reactor_model_count),
             "count": reactor_model_count,
             "route": "modal:reactor",
-            "summary": "Face swap can run from Gradio and video post-processing stages.",
-            "details": [f"{reactor_model_count} swapper models", f"{reactor_face_count} saved face models"],
+            "summary": "Pro can swap onto the current preview; Gradio keeps the advanced image and video ReActor workflow.",
+            "details": [f"{reactor_model_count} swapper models", f"{reactor_face_count} saved face models", "Saved face and video-stage options stay in Gradio Lab."],
         },
         {
             "id": "video",
@@ -2279,7 +2592,7 @@ def _capability_payload(ctx: Any) -> dict[str, Any]:
             "status": "ready" if sana_ready or (wan_available and wan_count > 0) else "available",
             "count": wan_count + (1 if sana_ready else 0),
             "route": "create",
-            "summary": "Sana Video runs from React Pro; Wan, LTX, RIFE, and post stages remain visible in Gradio.",
+            "summary": "Sana, Wan, LTX, RIFE, and post stages are visible in Gradio; Pro exposes Sana/Wan generation.",
             "details": [
                 "Sana ready" if sana_ready else ("Sana backend disabled" if not sana_enabled else "Sana snapshot missing"),
                 f"{wan_count} Wan models",
@@ -2535,6 +2848,14 @@ def _nvidia_gpu_utilization() -> tuple[float, float] | None:
 
 
 def _runtime_resource_metrics(ctx: Any) -> list[dict[str, Any]]:
+    ctx_key = id(ctx)
+    now = time.monotonic()
+    cached = _RUNTIME_RESOURCE_CACHE.get(ctx_key)
+    if cached is not None:
+        cached_at, cached_metrics = cached
+        if now - cached_at < _RUNTIME_RESOURCE_CACHE_SECONDS:
+            return [dict(metric) for metric in cached_metrics]
+
     metrics: list[dict[str, Any]] = []
     try:
         torch = __import__("torch")
@@ -2594,6 +2915,7 @@ def _runtime_resource_metrics(ctx: Any) -> list[dict[str, Any]]:
     except OSError:
         metrics.append(_usage_metric("Storage", "Unavailable", 0, "neutral"))
 
+    _RUNTIME_RESOURCE_CACHE[ctx_key] = (now, [dict(metric) for metric in metrics])
     return metrics
 
 
@@ -2732,7 +3054,7 @@ def _runtime_summary(ctx: Any) -> dict[str, Any]:
 async def _runtime_sse_events(ctx: Any, request: Request):
     """Adaptive runtime stream.
 
-    - While a job runs, tick fast (0.4 s) so progress and live previews feel
+    - While a job runs, tick near the 75 ms UI budget so progress and previews feel
       immediate, but only send each preview frame ONCE per (job, step) — the
       base64 preview is by far the heaviest part of the payload.
     - While idle, tick slowly and skip emits entirely when nothing changed,
@@ -2760,7 +3082,7 @@ async def _runtime_sse_events(ctx: Any, request: Request):
         if running:
             last_idle_payload = None
             yield f"event: runtime\ndata: {json.dumps(payload, default=str)}\n\n"
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(_RUNTIME_RUNNING_TICK_SECONDS)
             continue
 
         serialized = json.dumps(payload, default=str)
@@ -2770,7 +3092,7 @@ async def _runtime_sse_events(ctx: Any, request: Request):
         else:
             # SSE comment keeps proxies/browsers from timing the stream out.
             yield ": keepalive\n\n"
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(_RUNTIME_IDLE_TICK_SECONDS)
 
 
 def _settings_defaults(ctx: Any) -> dict[str, Any]:
@@ -2795,6 +3117,22 @@ def _settings_defaults(ctx: Any) -> dict[str, Any]:
         "batchSize": 1,
         "batchCount": 1,
         "saveImages": bool(getattr(settings, "save_images", True)),
+        "wanRuntimeMode": _canonical_wan_runtime_mode(getattr(settings, "last_wan_runtime_mode", "fast_5b")),
+        "highNoiseModelId": "",
+        "lowNoiseModelId": "",
+        "highNoiseSteps": 20,
+        "lowNoiseSteps": 1,
+        "boundaryRatio": 0.875,
+        "highNoiseLoraId": "",
+        "highNoiseLoraScale": 1.0,
+        "lowNoiseLoraId": "",
+        "lowNoiseLoraScale": 1.0,
+        "vaeId": "",
+        "textEncoderPath": getattr(settings, "last_wan_text_encoder", "") or "",
+        "wanOffload": getattr(settings, "last_wan_offload", "balanced") or "balanced",
+        "wanSigmaType": getattr(settings, "last_wan_sigma_type", "simple") or "simple",
+        "wanSampler": getattr(settings, "last_wan_sampler", "unipc") or "unipc",
+        "wanFlowShift": float(getattr(settings, "last_wan_flow_shift", 5.0) or 5.0),
     }
 
 
@@ -2816,6 +3154,31 @@ def _generation_mode_from_payload(payload: ProGeneratePayload) -> GenerationMode
     if normalized == "inpaint":
         return GenerationMode.INPAINT
     raise HTTPException(status_code=422, detail="React Pro generation currently supports image/txt2img and inpaint modes.")
+
+
+def _controlnet_units_from_payload(payload: ProGeneratePayload) -> list[ControlNetUnit]:
+    units: list[ControlNetUnit] = []
+    for item in payload.controlnet_units or []:
+        if not item.enabled:
+            continue
+        units.append(
+            ControlNetUnit(
+                enabled=True,
+                model=item.model,
+                module=item.module or "none",
+                weight=item.weight,
+                image=item.image,
+                mask=item.mask,
+                resize_mode=item.resize_mode or "resize",
+                processor_res=item.processor_res,
+                threshold_a=item.threshold_a,
+                threshold_b=item.threshold_b,
+                guidance_start=item.guidance_start,
+                guidance_end=item.guidance_end,
+                control_mode=item.control_mode or "balanced",
+            )
+        )
+    return units
 
 
 def _generation_request(ctx: Any, payload: ProGeneratePayload) -> GenerationRequest:
@@ -2847,7 +3210,7 @@ def _generation_request(ctx: Any, payload: ProGeneratePayload) -> GenerationRequ
             inpaint_only_masked=payload.inpaint_only_masked,
             inpaint_masked_padding=payload.inpaint_masked_padding,
             inpaint_mask_content=payload.inpaint_mask_content,
-            controlnet_units=[],
+            controlnet_units=_controlnet_units_from_payload(payload),
             sdxl_refiner_enabled=False,
         )
     except ValidationError as exc:
@@ -3150,23 +3513,48 @@ def _generate_sana_video_response(ctx: Any, payload: ProGeneratePayload) -> dict
 
 
 def _wan_video_request_from_payload(ctx: Any, payload: ProGeneratePayload):
-    from aiwf.core.domain.wan import WAN_RUNTIME_FAST_5B, WanI2VRequest
+    from aiwf.core.domain.wan import (
+        OFFLOAD_MODES,
+        SAMPLER_TYPES,
+        SIGMA_TYPES,
+        WAN_RUNTIME_FAST_5B,
+        WAN_RUNTIME_HIGH_LOW,
+        WAN_RUNTIME_HIGH_LOW_FP8,
+        WAN_RUNTIME_MODES,
+        WanI2VRequest,
+    )
 
     service = _wan_service(ctx)
     settings = getattr(ctx, "settings", None)
-    sampler = str(getattr(settings, "last_wan_sampler", "") or "unipc").strip().lower()
-    if sampler not in {"unipc", "euler", "heun"}:
+    runtime_mode = _canonical_wan_runtime_mode(
+        payload.wan_runtime_mode or getattr(settings, "last_wan_runtime_mode", "") or WAN_RUNTIME_FAST_5B,
+        default=WAN_RUNTIME_FAST_5B,
+    )
+    if runtime_mode not in WAN_RUNTIME_MODES:
+        runtime_mode = WAN_RUNTIME_FAST_5B
+    sampler = str(payload.wan_sampler or getattr(settings, "last_wan_sampler", "") or "unipc").strip().lower()
+    if sampler not in SAMPLER_TYPES:
         sampler = "unipc"
+    sigma_type = str(payload.wan_sigma_type or getattr(settings, "last_wan_sigma_type", "") or "simple").strip().lower()
+    if sigma_type not in SIGMA_TYPES:
+        sigma_type = "simple"
     try:
-        flow_shift = float(getattr(settings, "last_wan_flow_shift", 5.0) or 5.0)
+        flow_shift = float(payload.wan_flow_shift if payload.wan_flow_shift is not None else getattr(settings, "last_wan_flow_shift", 5.0) or 5.0)
     except (TypeError, ValueError):
         flow_shift = 5.0
-    vae_id = None
-    try:
-        vae_id = service.preferred_vae(WAN_RUNTIME_FAST_5B)
-    except Exception:
-        vae_id = None
-    text_encoder = str(getattr(settings, "last_wan_text_encoder", "") or "").strip()
+    offload = str(payload.wan_offload or getattr(settings, "last_wan_offload", "balanced") or "balanced").strip().lower()
+    if offload not in OFFLOAD_MODES:
+        offload = "balanced"
+    vae_id = str(payload.vae_id or "").strip() or None
+    if not vae_id:
+        try:
+            vae_id = service.preferred_vae(runtime_mode)
+        except Exception:
+            vae_id = None
+    text_encoder = str(payload.text_encoder_path or getattr(settings, "last_wan_text_encoder", "") or "").strip()
+    model_id = str(payload.checkpoint_id or "")
+    if runtime_mode in {WAN_RUNTIME_HIGH_LOW, WAN_RUNTIME_HIGH_LOW_FP8}:
+        model_id = model_id or str(payload.high_noise_model_id or "")
     try:
         return WanI2VRequest(
             prompt=payload.prompt,
@@ -3176,15 +3564,27 @@ def _wan_video_request_from_payload(ctx: Any, payload: ProGeneratePayload):
             num_frames=min(max(int(payload.frames), 5), 257),
             fps=max(1, int(round(payload.fps))),
             steps=min(int(payload.steps), 100),
+            high_noise_steps=min(max(int(payload.high_noise_steps), 1), 60),
+            low_noise_steps=min(max(int(payload.low_noise_steps), 1), 60),
             guidance_scale=min(max(float(payload.cfg_scale), 1.0), 20.0),
             sampler=sampler,
+            sigma_type=sigma_type,
             flow_shift=flow_shift,
             seed=payload.seed,
-            runtime_mode=WAN_RUNTIME_FAST_5B,
-            model_id=str(payload.checkpoint_id or ""),
-            offload=str(getattr(settings, "last_wan_offload", "balanced") or "balanced"),
+            runtime_mode=runtime_mode,
+            model_id=model_id,
+            offload=offload,
+            boundary_ratio=payload.boundary_ratio,
+            high_noise_model_id=payload.high_noise_model_id,
+            low_noise_model_id=payload.low_noise_model_id,
+            high_noise_lora_id=payload.high_noise_lora_id,
+            high_noise_lora_scale=payload.high_noise_lora_scale,
+            low_noise_lora_id=payload.low_noise_lora_id,
+            low_noise_lora_scale=payload.low_noise_lora_scale,
             vae_id=vae_id,
             text_encoder_path=text_encoder,
+            offload_text_encoder_after_encode=payload.offload_text_encoder_after_encode,
+            use_sage_attention=payload.use_sage_attention,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
@@ -3331,6 +3731,13 @@ class ProFaceSwapPayload(BaseModel):
     )
 
 
+class ProExtensionTogglePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    extension_id: str = Field(validation_alias=AliasChoices("id", "extensionId", "extension_id"))
+    enabled: bool = True
+
+
 class ProVsrImagePayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -3341,11 +3748,94 @@ class ProVsrImagePayload(BaseModel):
     strength: float = Field(default=0.4, ge=0.0, le=1.0)
 
 
+class ProEnhanceImagePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    image_data_url: str = Field(validation_alias=AliasChoices("imageDataUrl", "image_data_url", "image"))
+    restore_enabled: bool = Field(default=True, validation_alias=AliasChoices("restoreEnabled", "restore_enabled"))
+    restore_model: str = Field(default="", validation_alias=AliasChoices("restoreModel", "restore_model"))
+    restore_visibility: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("restoreVisibility", "restore_visibility"),
+    )
+    codeformer_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("codeformerWeight", "codeformer_weight"),
+    )
+    upscale_enabled: bool = Field(default=False, validation_alias=AliasChoices("upscaleEnabled", "upscale_enabled"))
+    upscale_model: str = Field(default="", validation_alias=AliasChoices("upscaleModel", "upscale_model"))
+    upscale_scale: float = Field(default=2.0, ge=1.0, le=8.0, validation_alias=AliasChoices("upscaleScale", "upscale_scale"))
+    tile_size: int = Field(default=256, ge=0, le=2048, validation_alias=AliasChoices("tileSize", "tile_size"))
+    tile_overlap: int = Field(default=32, ge=0, le=512, validation_alias=AliasChoices("tileOverlap", "tile_overlap"))
+    restore_first: bool = Field(default=True, validation_alias=AliasChoices("restoreFirst", "restore_first"))
+
+
 def _video_lab_upload_root(ctx: Any) -> Path:
     flags = getattr(ctx, "flags", None)
     root = flags.resolved_output_dir() / "video-lab" / "uploads"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _model_upload_root(ctx: Any) -> Path:
+    flags = getattr(ctx, "flags", None)
+    if flags is None:
+        raise HTTPException(status_code=500, detail="Runtime flags are unavailable.")
+    root = flags.resolved_models_dir() / SORT_INBOX_DIRNAME
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _safe_upload_filename(filename: str | None, fallback: str) -> str:
+    raw = Path(filename or fallback).name
+    stem = Path(raw).stem
+    suffix = Path(raw).suffix.lower()
+    safe_stem = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in stem)[:120]
+    safe_stem = safe_stem.strip("._") or fallback
+    return f"{safe_stem}{suffix}"
+
+
+def _sort_action_payload(action: Any) -> dict[str, Any]:
+    return {
+        "filename": str(getattr(action, "filename", "") or ""),
+        "source": str(getattr(action, "source", "") or ""),
+        "family": str(getattr(action, "family", "") or ""),
+        "architecture": str(getattr(action, "architecture", "") or ""),
+        "destSubdir": str(getattr(action, "dest_subdir", "") or ""),
+        "status": str(getattr(action, "status", "") or ""),
+        "reason": str(getattr(action, "reason", "") or ""),
+    }
+
+
+def _refresh_model_inventory_after_sort(ctx: Any) -> dict[str, Any]:
+    flags = getattr(ctx, "flags", None)
+    if flags is None:
+        raise HTTPException(status_code=500, detail="Runtime flags are unavailable.")
+    records = scan_and_write_model_inventory(flags)
+    setattr(ctx, "_pro_capability_cache", None)
+    return {"inventoryCount": len(records)}
+
+
+def _model_sort_response(ctx: Any, actions: list[Any], *, uploaded_path: Path | None = None) -> dict[str, Any]:
+    payload_actions = [_sort_action_payload(action) for action in actions]
+    moved = sum(1 for item in payload_actions if item["status"] == "moved")
+    left = sum(1 for item in payload_actions if item["status"] in {"left", "conflict", "error"})
+    payload: dict[str, Any] = {
+        "status": "completed",
+        "uploadedPath": str(uploaded_path) if uploaded_path is not None else "",
+        "actions": payload_actions,
+        "counts": {
+            "total": len(payload_actions),
+            "moved": moved,
+            "left": left,
+        },
+    }
+    payload["counts"].update(_refresh_model_inventory_after_sort(ctx))
+    return payload
 
 
 def _video_lab_resolve_source(ctx: Any, video_path: str) -> Path:
@@ -3685,7 +4175,19 @@ def _generate_wan_video_response(ctx: Any, payload: ProGeneratePayload) -> dict[
 
 
 def build_router(ctx: Any) -> APIRouter:
+    if not getattr(ctx, "_pro_startup_started_at", None):
+        setattr(ctx, "_pro_startup_started_at", time.time())
     router = APIRouter(prefix="/api/pro")
+
+    @router.get("/startup")
+    def startup():
+        return _pro_startup_payload(ctx)
+
+    @router.post("/startup/window-ready")
+    def startup_window_ready():
+        if not getattr(ctx, "_pro_window_ready_at", None):
+            setattr(ctx, "_pro_window_ready_at", time.time())
+        return _pro_startup_payload(ctx)
 
     @router.get("/runtime")
     def runtime():
@@ -3739,6 +4241,43 @@ def build_router(ctx: Any) -> APIRouter:
     def downloads():
         return _download_payload(ctx)
 
+    @router.post("/downloads/catalog/{key}")
+    def download_catalog_model(key: str):
+        service = getattr(ctx, "model_download", None)
+        if service is None:
+            raise HTTPException(status_code=500, detail="Model download service is unavailable.")
+        entry = service.find_catalog(key)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"Catalog entry '{key}' was not found.")
+        if bool(getattr(entry, "coming_soon", False)):
+            raise HTTPException(
+                status_code=422,
+                detail="This model family is coming soon and is hidden from v1 app downloads.",
+            )
+        if not _catalog_entry_can_download(entry):
+            if _catalog_entry_requires_auth(entry):
+                detail = "This model requires upstream access or authentication. Open the source page and accept access first."
+            elif str(getattr(entry, "source", "") or "").strip().lower() == "civitai":
+                detail = "Open this CivitAI page. Direct app download is not enabled for CivitAI catalog entries."
+            else:
+                detail = "This catalog entry is link-only and cannot be downloaded directly by the app."
+            raise HTTPException(status_code=422, detail=detail)
+        try:
+            downloaded_path = service.download_catalog(key)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Catalog download failed: {exc}") from exc
+        try:
+            _refresh_model_inventory_after_sort(ctx)
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("Could not refresh model inventory after catalog download")
+        payload = _download_payload(ctx)
+        payload["downloaded"] = {"key": key, "path": str(downloaded_path)}
+        return payload
+
     @router.get("/logs")
     def logs():
         return {
@@ -3759,10 +4298,68 @@ def build_router(ctx: Any) -> APIRouter:
     def capabilities():
         return _capability_payload(ctx)
 
+    @router.post("/models/reorganize")
+    def models_reorganize():
+        flags = getattr(ctx, "flags", None)
+        if flags is None:
+            raise HTTPException(status_code=500, detail="Runtime flags are unavailable.")
+        actions = reorganize_models(flags)
+        return _model_sort_response(ctx, actions)
+
+    @router.post("/models/upload")
+    async def models_upload(file: UploadFile = File(...)):
+        suffix = Path(file.filename or "").suffix.lower()
+        if suffix not in MODEL_EXTENSIONS:
+            allowed = ", ".join(sorted(MODEL_EXTENSIONS))
+            raise HTTPException(status_code=422, detail=f"Unsupported model file type '{suffix}'. Use {allowed}.")
+        dest = _model_upload_root(ctx) / _safe_upload_filename(file.filename, "model")
+        if dest.exists():
+            raise HTTPException(status_code=409, detail=f"{SORT_INBOX_DIRNAME}/{dest.name} already exists.")
+        written = 0
+        try:
+            with dest.open("wb") as handle:
+                while True:
+                    chunk = await file.read(16 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > _MODEL_UPLOAD_MAX_BYTES:
+                        raise HTTPException(status_code=413, detail="Model upload is larger than 120 GB.")
+                    handle.write(chunk)
+        except HTTPException:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        except OSError as exc:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise HTTPException(status_code=500, detail=f"Could not store the model upload: {exc}") from exc
+        finally:
+            await file.close()
+        flags = getattr(ctx, "flags", None)
+        if flags is None:
+            raise HTTPException(status_code=500, detail="Runtime flags are unavailable.")
+        actions = sort_inbox_models(flags)
+        payload = _model_sort_response(ctx, actions, uploaded_path=dest)
+        payload["uploadedBytes"] = written
+        return payload
+
     @router.post("/restart")
     def restart():
         _schedule_process_restart()
         return {"status": "restart_requested"}
+
+    @router.post("/support/terminal")
+    def support_terminal():
+        return _open_support_terminal(ctx)
+
+    @router.post("/models/unload")
+    def models_unload():
+        return _unload_generation_model(ctx)
 
     @router.get("/outputs/{requested_path:path}")
     def output_asset(requested_path: str):
@@ -3828,7 +4425,12 @@ def build_router(ctx: Any) -> APIRouter:
             )
             raise HTTPException(
                 status_code=500,
-                detail=_pro_error_detail(str(exc), failureLogPath=failure_log_path, job=_job_status(failed_job)),
+                detail=_pro_error_detail(
+                    str(exc),
+                    failureLogPath=failure_log_path,
+                    job=_job_status(failed_job),
+                    model=_checkpoint_error_context(ctx, checkpoint_id),
+                ),
             ) from exc
         response = _generate_response(job)
         if progress:
@@ -3942,6 +4544,70 @@ def build_router(ctx: Any) -> APIRouter:
             "message": "Face swap complete.",
         }
 
+    @router.post("/enhance/image")
+    def enhance_image(payload: ProEnhanceImagePayload):
+        from aiwf.core.domain.enhance import RestoreOptions, UpscaleOptions
+
+        enhance_service = getattr(ctx, "enhance", None)
+        if enhance_service is None:
+            raise HTTPException(status_code=503, detail="Enhance service is not available in this runtime.")
+        image = _decode_pro_image_data_url(payload.image_data_url, "Source image")
+        if image is None:
+            raise HTTPException(status_code=422, detail="Provide a source image as a base64 data URL.")
+
+        restore_opts = None
+        if payload.restore_enabled:
+            restore_model = (payload.restore_model or "").strip()
+            if not restore_model:
+                raise HTTPException(status_code=422, detail="Select or enter a face restoration model.")
+            restore_opts = RestoreOptions(
+                model_id=restore_model,
+                visibility=float(payload.restore_visibility),
+                codeformer_weight=float(payload.codeformer_weight),
+            )
+
+        upscale_opts = None
+        if payload.upscale_enabled:
+            upscale_model = (payload.upscale_model or "").strip()
+            if not upscale_model:
+                raise HTTPException(status_code=422, detail="Select or enter an upscaler model.")
+            upscale_opts = UpscaleOptions(
+                model_id=upscale_model,
+                scale=float(payload.upscale_scale),
+                tile_size=int(payload.tile_size),
+                tile_overlap=int(payload.tile_overlap),
+            )
+
+        if restore_opts is None and upscale_opts is None:
+            raise HTTPException(status_code=422, detail="Enable face restore, upscale, or both.")
+
+        try:
+            result, infotext = enhance_service.run_pipeline(
+                image.convert("RGB"),
+                restore=restore_opts,
+                upscale=upscale_opts,
+                restore_first=bool(payload.restore_first),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Enhance failed: {exc}") from exc
+
+        flags = getattr(ctx, "flags", None)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        sub = getattr(getattr(ctx, "settings", None), "enhance_output_subdir", "extras-images")
+        dest = flags.resolved_output_dir() / sub / f"pro_enhance_{stamp}.png"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        result.save(dest, format="PNG")
+        return {
+            "status": "completed",
+            "outputPath": str(dest),
+            "url": _output_asset_url(ctx, dest),
+            "width": result.width,
+            "height": result.height,
+            "image": _image_to_data_url(result),
+            "infotext": infotext,
+            "message": infotext or "Enhance complete.",
+        }
+
     @router.post("/vsr/image")
     def vsr_image(payload: ProVsrImagePayload):
         from aiwf.core.domain.vsr import VsrOptions
@@ -3976,6 +4642,60 @@ def build_router(ctx: Any) -> APIRouter:
             "height": result.height,
             "image": _image_to_data_url(result),
             "message": f"Upscaled to {result.width}x{result.height} via NVIDIA VSR.",
+        }
+
+    @router.get("/extensions")
+    def extensions():
+        registry = getattr(ctx, "plugins", None)
+        plugins = registry.list_plugins() if registry is not None else []
+        api_routes = {plugin_id for plugin_id, _router in getattr(registry, "api_routers", []) or []}
+        flags = getattr(ctx, "flags", None)
+        plugins_dir = str(flags.data_dir / "plugins") if flags is not None else ""
+        disabled = list(getattr(getattr(ctx, "settings", None), "disabled_extensions", None) or [])
+        return {
+            "pluginsDir": plugins_dir,
+            "disabled": disabled,
+            "extensions": [
+                {
+                    "id": plugin.id,
+                    "name": plugin.name,
+                    "version": plugin.version,
+                    "description": plugin.description,
+                    "path": plugin.path,
+                    "enabled": plugin.enabled,
+                    "error": plugin.error,
+                    "hasApi": plugin.id in api_routes,
+                    "apiBase": f"/api/ext/{plugin.id}" if plugin.id in api_routes else "",
+                }
+                for plugin in plugins
+            ],
+        }
+
+    @router.post("/extensions/toggle")
+    def extensions_toggle(payload: ProExtensionTogglePayload):
+        settings = getattr(ctx, "settings", None)
+        if settings is None:
+            raise HTTPException(status_code=500, detail="Settings are not available in this runtime.")
+        extension_id = (payload.extension_id or "").strip()
+        if not extension_id:
+            raise HTTPException(status_code=422, detail="extension id is required")
+        disabled = [str(item) for item in (getattr(settings, "disabled_extensions", None) or [])]
+        normalized = {item.lower() for item in disabled}
+        if payload.enabled and extension_id.lower() in normalized:
+            disabled = [item for item in disabled if item.lower() != extension_id.lower()]
+        elif not payload.enabled and extension_id.lower() not in normalized:
+            disabled.append(extension_id)
+        settings.disabled_extensions = disabled
+        save_settings = getattr(ctx, "save_settings", None)
+        if callable(save_settings):
+            try:
+                save_settings()
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail=f"Could not save settings: {exc}") from exc
+        return {
+            "status": "saved",
+            "disabled": disabled,
+            "note": "Extension changes apply on the next app restart.",
         }
 
     @router.post("/interrupt")

@@ -43,6 +43,8 @@ AIWF Studio Pro.bat
 python launch_pro.py
 ```
 
+Early testers should keep [`docs/TESTER_USER_GUIDE.md`](docs/TESTER_USER_GUIDE.md) open. It covers install options, hidden terminals, support-terminal access, recovery buttons, and error reports.
+
 <p align="center">
   <img src="docs/assets/aiwf-studio-pro-sana-sprint.png" alt="AIWF Studio Pro image generation workspace" width="100%">
 </p>
@@ -53,7 +55,7 @@ python launch_pro.py
   <img src="static/icons/aiwf-studio-gradio-lab.png" alt="AIWF Studio Gradio Lab icon" width="96">
 </p>
 
-**Beta workspace.** Best for image, inpaint, ControlNet, enhance, segment, and video testing.
+**Beta workspace.** Best for image, inpaint, ControlNet, enhance, segment, Sana Video, Wan/LTX video, and post-processing tests.
 
 ```bat
 AIWF Studio Gradio Lab.bat
@@ -82,6 +84,8 @@ This pass moved `main` toward a Pro-first local install. The public branch now h
 
 - Pro UI: FastAPI plus React/Vite starts from the clean install, serves the built frontend, and answers Pro bootstrap, runtime, capabilities, settings, logs, and data API requests.
 - Pipeline routing: SDXL refiner checkpoints are kept out of the base-model picker, Flux Fill is treated as an inpaint-only route, Flux.2 Klein and Z-Image prompt-encoder handling has better VRAM checks, and Windows Z-Image GGUF is blocked with a clear reason instead of hanging.
+- Pro workflow wiring: Create now exposes one ControlNet unit for image/inpaint, high-res fix uses the real generation settings, quick Enhance/VSR can post-process the current canvas image, and quick Segment/ReActor actions are labeled as Pro quick tools while their advanced workflows stay in Gradio Lab.
+- Gradio parity: Sana Video has its own experimental tab so Pro is not the only surface that can reach that family.
 - Installer: Express install creates the Python 3.10 venv, installs CUDA PyTorch and runtime requirements, adds the default SD 1.5 fp16 model, runs `npm ci`, builds Pro, and creates Desktop shortcuts.
 - Requirements: `bitsandbytes` is now listed for the quantized transformer and text-encoder routes that need it.
 - Validation receipt: the fresh install reported `torch 2.6.0+cu124`, CUDA 12.4 available, `diffusers 0.38.0`, `transformers 4.57.6`, and `fastapi 0.139.0`.
@@ -168,8 +172,8 @@ This table is the quick truth source for model-family support on `main`.
 
 | Area | Works now | Not ready yet |
 | --- | --- | --- |
-| SD 1.5 | txt2img, img2img, inpaint, ControlNet, hires fix, clip skip, VAE choice, PNG Info, LoRA through Diffusers adapters | Full A1111 extension parity |
-| SDXL | txt2img, img2img, inpaint, ControlNet, hires/refiner path, VAE safety settings, LoRA through Diffusers adapters | Treating the SDXL refiner as a standalone base model is blocked |
+| SD 1.5 | txt2img, img2img, inpaint, ControlNet, hires fix, face restore/upscale post-process, clip skip, VAE choice, PNG Info, LoRA through Diffusers adapters | Full A1111 extension parity |
+| SDXL | txt2img, img2img, inpaint, ControlNet, hires/refiner path, VAE safety settings, face restore/upscale post-process, LoRA through Diffusers adapters | Treating the SDXL refiner as a standalone base model is blocked |
 | SD3.5 | local Diffusers-folder checkpoints and basic generation route | Broad ControlNet, LoRA, and A1111-style extension parity |
 | Flux | split local model folders from `models/flux/GGUF/` or `models/flux/UNet/`, local CLIP-L/T5/AE components, txt2img, Flux Fill as the inpaint-only route | Flux LoRA, Flux ControlNet, generic Flux img2img, and selecting Flux Fill as txt2img are blocked |
 | Flux.2 Klein | local quantized/split-model routing and prompt-encoder handling work is present | Runtime speed and memory still need more receipts across 4B and 9B assets |
@@ -179,10 +183,12 @@ This table is the quick truth source for model-family support on `main`.
 | Image quant formats | FP16/BF16 safetensors, FP8 where the family loader supports it, BNB/NF4 where a route explicitly supports it, GGUF for supported Flux/Wan-style routes | FP4/NVFP4 is not a normal runtime path on this RTX 40-series target. Treat it as storage or conversion research unless a family-specific loader says otherwise |
 | Wan video | image-to-video with 5B safetensors, 14B FP8/safetensors, and matched high/low GGUF pairs; VAE/component checks; runtime filtering; optional RIFE, ReActor, VSR, and audio post steps | Mixed 5B/14B/GGUF routes, unpaired high/low models, and unverified resident/streamed offload modes are blocked |
 | LTX video | optional isolated LTX 2.3 worker, LTX 2B Diffusers smoke path, FP8 checkpoint handling, Gemma text encoder conversion tooling | Native Gemma GGUF hidden-state backend and NVFP4 runtime execution are not ready |
-| Sana video | Pro-visible route and quantization options exist | Treat as experimental until more receipts cover model loading, memory, and output quality |
+| Sana video | Experimental Pro and Gradio routes, text-to-video, image-to-video, quantization choices, VAE tiling choice, and text-encoder offload toggle | Treat as experimental until more receipts cover model loading, memory, and output quality |
 | Audio/video-audio | Audio tab, optional MMAudio engine, generated-audio muxing after video | MMAudio checkpoints are non-commercial; broader audio workstation features are WIP |
-| LLM/chat | model inventory, dataset/config builders, Ollama client tests, and hidden/gated chat workspace scaffolding | No promoted Pro chat worker yet. llama.cpp/GGUF chat serving is a future lane, not a release feature |
+| LLM/chat | model inventory, dataset/config builders, Ollama client tests, and hidden/gated chat workspace scaffolding | No promoted Pro chat worker yet. LLM chat is intentionally outside this Pro release. llama.cpp/GGUF chat serving is a future lane |
 | Training | Kohya, ED2, and LLM training scaffolds are isolated and opt-in | Training is hidden/gated and must not be auto-started |
+
+Coming soon, hidden from the v1 app: Anima split-file generation and Qwen Image Nunchaku. Their files may still be sorted and tracked locally, but the v1 UI does not list them for download or generation until their native loaders have passing smoke receipts.
 
 ### Image Generation
 
@@ -214,7 +220,7 @@ This table is the quick truth source for model-family support on `main`.
 
 ### ControlNet
 
-- single ControlNet unit in the Image advanced panel
+- single ControlNet unit in the Pro Create panel for image and inpaint routes
 - local ControlNet model selection
 - built-in lightweight preprocessors where available
 
@@ -224,15 +230,17 @@ This table is the quick truth source for model-family support on `main`.
 - SD3.5 Diffusers-folder checkpoints are supported in `models/Stable-diffusion/`
 - Flux split-model txt2img is supported from `models/flux/GGUF/` or `models/flux/UNet/` with local CLIP-L, T5-XXL, and `ae.safetensors`
 - model aliases and trigger-word helpers
-- curated download entries for common local model folders
+- curated download entries for common local model folders, with direct buttons only for public non-auth entries
+- CivitAI browse links for model families AIWF can route; downloaded-model and installable-model browsers are coming soon
 - import helpers for model folders from another local install
 - SD/SDXL/SD3.5-style runtime LoRA loading through Diffusers adapter APIs
 - Wan stage LoRAs for supported 5B and high/low transformer routes, with runtime-aware filtering
 - Flux/new transformer-image LoRA and ONNX LoRA are intentionally blocked until their pipeline-specific appliers are implemented and tested
 
-### Enhance
+### Enhance And VSR
 
-- image upscale
+- Pro quick post-process for current preview or uploaded image: face restore, image upscale, restore plus upscale, and NVIDIA VSR image upscale
+- Gradio Lab full Enhance tab for image upscale, face restore, old-photo restore, and restore/upscale pipelines
 - GFPGAN / CodeFormer-style restoration when models are installed
 - old-photo restore pipeline
 - tiled upscale controls for local VRAM limits
@@ -246,6 +254,7 @@ This table is the quick truth source for model-family support on `main`.
 ### Video
 
 - Wan image-to-video through three explicit local routes: 5B safetensors, 14B FP8/safetensors, or matched GGUF High Noise + Low Noise transformer pairs
+- experimental Sana Video text/image-to-video tab
 - optional LTX 2.3 text/image-to-video through an isolated worker engine
 - optional RIFE post-processing to write 30 FPS or 60 FPS output after generation
 - optional ReActor post-processing from the first key frame, an uploaded image, or a saved face model
@@ -333,7 +342,7 @@ These areas exist as work-in-progress or need more hardware coverage before they
 - Wan FP8 high/low video speed path
 - Wan resident / streamed offload modes
 - training engines (Chat and Training tabs are hidden by default in Studio/Modern)
-- Ollama or llama.cpp chat workspace
+- Ollama or llama.cpp chat workspace after the Pro image/video release is stable
 - Face Swap tab
 - workflow authoring
 - model conversion and quantization tools

@@ -7,6 +7,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aiwf.core.domain.prompt_style import PromptStyle
 
+VRAM_PROFILES = {"cpu", "low", "mid", "normal", "high"}
+
+
+def normalize_vram_profile(value: str | None) -> str:
+    normalized = (value or "normal").strip().lower().replace("-", "_")
+    if normalized in {"med", "medium"}:
+        normalized = "mid"
+    if normalized in {"default", "balanced"}:
+        normalized = "normal"
+    if normalized not in VRAM_PROFILES:
+        raise ValueError("vram_profile must be cpu, low, mid, normal, or high")
+    return normalized
+
 
 class RuntimeFlags(BaseSettings):
     """Process/runtime knobs sourced from env, CLI, and saved launch profiles.
@@ -44,8 +57,10 @@ class RuntimeFlags(BaseSettings):
     # Inference backend: "diffusers" (default) or "onnx"
     inference_backend: str = "diffusers"
     onnx_provider: str = "auto"   # auto | cuda | directml | cpu
+    vram_profile: str = "normal"  # cpu | low | mid | normal | high
     medvram: bool = False
     lowvram: bool = False
+    highvram: bool = False
     attention_backend: str = "sage_sdpa"
     xformers: bool = False
     opt_sdp_attention: bool = False
@@ -83,6 +98,22 @@ class RuntimeFlags(BaseSettings):
         if normalized not in {"sage_sdpa", "sdpa", "xformers", "none"}:
             raise ValueError("attention_backend must be sage_sdpa, sdpa, xformers, or none")
         return normalized
+
+    @field_validator("vram_profile")
+    @classmethod
+    def validate_vram_profile(cls, value: str) -> str:
+        return normalize_vram_profile(value)
+
+    def effective_vram_profile(self) -> str:
+        if self.cpu:
+            return "cpu"
+        if self.lowvram:
+            return "low"
+        if self.medvram:
+            return "mid"
+        if self.highvram:
+            return "high"
+        return normalize_vram_profile(self.vram_profile)
 
     def resolved_models_dir(self) -> Path:
         return (self.models_dir or self.data_dir / "models").resolve()
@@ -284,6 +315,34 @@ class UserSettings(BaseSettings):
     # Diffusers optimized GGUF CUDA kernels (needs the `kernels` package).
     gguf_cuda_kernels: bool = False
 
+    # Advanced Wan runtime knobs. Every default mirrors the behavior the app
+    # shipped with — changing these is opt-in tuning, not a migration.
+    # SageAttention preference: auto = use when installed (default),
+    # force = require it (warn when missing), off = plain torch SDPA.
+    wan_sage_attention: str = "auto"
+    # AIWF's own denoise loop vs diffusers' pipe() as a black box.
+    wan_native_denoise: bool = True
+    # Manual chunked VAE decode trades decode speed for lower peak VRAM.
+    wan_manual_vae_decode: bool = False
+    wan_vae_chunk_frames: int = Field(default=4, ge=1, le=16)
+    # Streamed offload internals: CUDA record_stream + low CPU memory staging.
+    wan_group_offload_record_stream: bool = True
+    wan_group_offload_low_cpu_mem: bool = True
+    # Minimum total VRAM (GB) before dual FP8 stages may co-reside ("resident").
+    wan_resident_min_vram_gb: int = Field(default=20, ge=8, le=96)
+
+    # User extensions (plugins/<folder>) disabled by folder name. Disabled
+    # extensions stay listed in Settings but are never imported at boot.
+    disabled_extensions: list[str] = Field(default_factory=list)
+
+    @field_validator("wan_sage_attention")
+    @classmethod
+    def validate_wan_sage_attention(cls, value: str) -> str:
+        normalized = (value or "auto").strip().lower()
+        if normalized not in {"auto", "force", "off"}:
+            raise ValueError("wan_sage_attention must be auto, force, or off")
+        return normalized
+
     @field_validator("ltx_dtype")
     @classmethod
     def validate_ltx_dtype(cls, value: str) -> str:
@@ -320,6 +379,18 @@ class UserSettings(BaseSettings):
         # crash, so the toggle is Linux-gated regardless of the saved value.
         gguf_kernels = self.gguf_cuda_kernels and os.name != "nt"
         os.environ["DIFFUSERS_GGUF_CUDA_KERNELS"] = "1" if gguf_kernels else "0"
+        # Advanced Wan runtime. "auto" removes the env var so the runtime's
+        # own detection (use sage when installed) stays in charge.
+        if self.wan_sage_attention == "auto":
+            os.environ.pop("AIWF_WAN_SAGE_ATTENTION", None)
+        else:
+            os.environ["AIWF_WAN_SAGE_ATTENTION"] = "1" if self.wan_sage_attention == "force" else "0"
+        os.environ["AIWF_WAN_NATIVE_DENOISE"] = "1" if self.wan_native_denoise else "0"
+        os.environ["AIWF_WAN_MANUAL_VAE_DECODE"] = "1" if self.wan_manual_vae_decode else "0"
+        os.environ["AIWF_WAN_VAE_CHUNK_FRAMES"] = str(int(self.wan_vae_chunk_frames))
+        os.environ["AIWF_WAN_GROUP_OFFLOAD_RECORD_STREAM"] = "1" if self.wan_group_offload_record_stream else "0"
+        os.environ["AIWF_WAN_GROUP_OFFLOAD_LOW_CPU_MEM"] = "1" if self.wan_group_offload_low_cpu_mem else "0"
+        os.environ["AIWF_WAN_RESIDENT_MIN_VRAM_MB"] = str(int(self.wan_resident_min_vram_gb) * 1024)
 
     def apply_token_env(self) -> None:
         """Expose saved API keys to download helpers via environment variables."""

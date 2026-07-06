@@ -25,6 +25,7 @@ from aiwf.infrastructure.model_inventory import (
     MODEL_EXTENSIONS,
     ModelInventoryRecord,
     classify_model_file,
+    invalidate_model_inventory_cache,
     model_inventory_roots,
 )
 
@@ -85,6 +86,16 @@ def plan_inbox_sort(flags: RuntimeFlags) -> list[SortAction]:
 def sort_inbox_models(flags: RuntimeFlags) -> list[SortAction]:
     """Move confidently-identified inbox files into their correct folders."""
     return _run(flags, apply=True)
+
+
+def plan_model_reorganize(flags: RuntimeFlags) -> list[SortAction]:
+    """Classify files under the main models directory without moving them."""
+    return _run_all_models(flags, apply=False)
+
+
+def reorganize_models(flags: RuntimeFlags) -> list[SortAction]:
+    """Move confidently-identified files under the main models directory."""
+    return _run_all_models(flags, apply=True)
 
 
 def _run(flags: RuntimeFlags, *, apply: bool) -> list[SortAction]:
@@ -160,6 +171,95 @@ def _run(flags: RuntimeFlags, *, apply: bool) -> list[SortAction]:
             record.architecture,
         )
 
+    if apply and any(action.moved for action in actions):
+        invalidate_model_inventory_cache()
+    return actions
+
+
+def _run_all_models(flags: RuntimeFlags, *, apply: bool) -> list[SortAction]:
+    models_dir = flags.resolved_models_dir().resolve()
+    if not models_dir.is_dir():
+        return []
+
+    roots = model_inventory_roots(flags)
+    actions: list[SortAction] = []
+
+    for path in sorted(models_dir.rglob("*"), key=lambda p: str(p).lower()):
+        if not path.is_file() or path.suffix.lower() not in MODEL_EXTENSIONS:
+            continue
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(models_dir)
+        except (OSError, ValueError):
+            continue
+
+        try:
+            record = classify_model_file(resolved, roots)
+        except Exception:
+            logger.warning("model_sorter: could not classify %s - leaving in place", resolved.name, exc_info=True)
+            actions.append(SortAction(resolved.name, str(resolved), "unknown", "unknown", "", "error", "header read failed"))
+            continue
+
+        if record is None:
+            continue
+        if not record.should_move:
+            continue
+
+        confident, reason = _is_confident(record)
+        dest_subdir = record.recommended_subdir
+        if not confident:
+            actions.append(
+                SortAction(resolved.name, str(resolved), record.family, record.architecture, dest_subdir, "left", reason)
+            )
+            continue
+
+        dest_dir = models_dir / dest_subdir
+        dest = dest_dir / resolved.name
+        try:
+            if dest.resolve() == resolved:
+                continue
+        except OSError:
+            pass
+
+        if dest.exists():
+            actions.append(
+                SortAction(
+                    resolved.name,
+                    str(resolved),
+                    record.family,
+                    record.architecture,
+                    dest_subdir,
+                    "conflict",
+                    f"{dest_subdir}/{resolved.name} already exists",
+                )
+            )
+            continue
+
+        if apply:
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(resolved), str(dest))
+            except OSError:
+                logger.warning("model_sorter: failed to move %s -> %s", resolved.name, dest_subdir, exc_info=True)
+                actions.append(
+                    SortAction(
+                        resolved.name,
+                        str(resolved),
+                        record.family,
+                        record.architecture,
+                        dest_subdir,
+                        "error",
+                        "move failed",
+                    )
+                )
+                continue
+
+        actions.append(
+            SortAction(resolved.name, str(resolved), record.family, record.architecture, dest_subdir, "moved", "")
+        )
+
+    if apply and any(action.moved for action in actions):
+        invalidate_model_inventory_cache()
     return actions
 
 

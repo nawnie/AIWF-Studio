@@ -11,12 +11,15 @@ from aiwf.infrastructure.diffusers.checkpoints import diffusers_dir_has_required
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
     ARCH_FLUX2_KLEIN,
+    ARCH_ANIMA,
+    ARCH_KREA2,
     ARCH_QWEN_IMAGE,
     ARCH_QWEN_IMAGE_NUNCHAKU,
     ARCH_SANA,
     ARCH_Z_IMAGE,
 )
 from aiwf.infrastructure.diffusers.model_blocks import known_broken_selectable_image_asset
+from aiwf.services.model_family_support import detect_precision_from_name
 
 READINESS_STATUSES = (
     "working",
@@ -30,7 +33,10 @@ MODEL_FILE_SUFFIXES = {".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", 
 DOWNLOAD_KEYWORDS = (
     "flux",
     "gemma",
+    "krea",
+    "krea2",
     "ltx",
+    "anima",
     "qwen",
     "sana",
     "vae",
@@ -112,7 +118,9 @@ def _preflight_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
     from aiwf.services.pipeline_preflight import (
         PipelinePreflightResult,
         preflight_diffusers_pipeline,
+        preflight_anima_pipeline,
         preflight_image_runtime_pipelines,
+        preflight_krea2_pipeline,
         preflight_ltx_pipeline,
         preflight_onnx_pipeline,
         preflight_qwen_nunchaku_pipeline,
@@ -124,6 +132,8 @@ def _preflight_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
     preflights = [
         preflight_diffusers_pipeline(),
         preflight_image_runtime_pipelines(),
+        preflight_krea2_pipeline(flags),
+        preflight_anima_pipeline(flags),
         preflight_qwen_nunchaku_pipeline(flags),
         preflight_sana_video_pipeline(flags, settings),
         preflight_wan_pipeline(flags, settings),
@@ -646,7 +656,15 @@ def _classify_image(
         status = blocked_asset.status
         reason = blocked_asset.reason
         suggested = blocked_asset.suggested_action
-    elif path.is_dir() and _normalized_image_arch(architecture) in {ARCH_QWEN_IMAGE, ARCH_SANA}:
+    elif _normalized_image_arch(architecture) == ARCH_ANIMA:
+        status = "unsupported-no-route"
+        reason = "Anima split files are discovered, but AIWF does not yet have a native Anima loader."
+        suggested = "Keep Anima assets out of selectable generation until a split-file runtime is implemented and smoked."
+    elif _normalized_image_arch(architecture) == ARCH_KREA2 and path.suffix.lower() == ".safetensors":
+        status = "blocked-cleanly"
+        reason = "Krea 2 split transformer is discovered, but AIWF still needs a split-file Krea2 loader or a full Diffusers folder."
+        suggested = "Use this asset for catalog/preflight only until the Krea2 runtime route is added."
+    elif path.is_dir() and _normalized_image_arch(architecture) in {ARCH_QWEN_IMAGE, ARCH_SANA, ARCH_KREA2}:
         if not diffusers_dir_has_required_local_files(path):
             status = "blocked-cleanly"
             reason = "Diffusers snapshot folder is incomplete; model_index.json exists but required local shard files are missing."
@@ -702,7 +720,7 @@ def _family_arch_from_download_path(path: Path) -> tuple[str, str]:
         return "ltx", "ltx"
     if "gemma" in text:
         return ("ltx", "ltx") if "ltx" in text or path.parent.name.lower() == "downloads" else ("llm", "llm")
-    if any(token in text for token in ("flux", "qwen", "sana", "z-image", "zimage")):
+    if any(token in text for token in ("flux", "krea", "krea2", "anima", "qwen", "sana", "z-image", "zimage")):
         return "runtime_asset", _download_image_arch(path)
     return "unknown", "unknown"
 
@@ -711,6 +729,10 @@ def _download_image_arch(path: Path) -> str:
     lower = path.as_posix().lower()
     if "flux.2" in lower or "flux2" in lower:
         return "flux2-klein"
+    if "krea-2" in lower or "krea2" in lower:
+        return "krea2"
+    if "anima" in lower and "animate" not in lower:
+        return "anima"
     if "flux" in lower:
         return "flux"
     if "qwen" in lower:
@@ -730,7 +752,7 @@ def _pipeline_family(route: str) -> str:
         return "ltx"
     if "sana-video" in route:
         return "video"
-    if "qwen" in route or "sana" in route or "onnx" in route or "diffusers" in route or "image" in route:
+    if "krea" in route or "anima" in route or "qwen" in route or "sana" in route or "onnx" in route or "diffusers" in route or "image" in route:
         return "image"
     return "pipeline"
 
@@ -803,6 +825,10 @@ def _image_route_for_arch(architecture: str, path: Path) -> str:
         return "flux2-klein"
     if arch == ARCH_Z_IMAGE:
         return "z-image"
+    if arch == ARCH_KREA2:
+        return "krea2"
+    if arch == ARCH_ANIMA:
+        return "anima"
     if arch == ARCH_FLUX:
         return "flux"
     return "diffusers"
@@ -814,6 +840,8 @@ def _normalized_image_arch(architecture: str) -> str:
         return ARCH_Z_IMAGE
     if arch == "flux2klein":
         return ARCH_FLUX2_KLEIN
+    if arch in {"krea_2", "krea2"}:
+        return ARCH_KREA2
     return arch
 
 
@@ -864,30 +892,13 @@ def _ltx_request_failure_hint(path: Path) -> str:
 
 
 def _quant_from_name(filename: str) -> str:
-    lower = filename.lower()
-    for token in (
-        "q2_k",
-        "q3_k_s",
-        "q3_k_m",
-        "q4_k_s",
-        "q4_k_m",
-        "q4_0",
-        "q5_k_s",
-        "q5_k_m",
-        "q5_0",
-        "q6_k",
-        "q8_0",
-        "nf4",
-        "nvfp4",
-        "fp4",
-        "fp8",
-        "bf16",
-        "fp16",
-    ):
-        if token in lower:
-            return token.upper()
-    match = re.search(r"(?:^|[_\-.])q([2-8])(?:[_\-.]|$)", lower)
-    return f"Q{match.group(1)}" if match else ""
+    """Return a normalized precision/quant token from a model filename.
+
+    Kept as a small wrapper so legacy readiness callers now share the same
+    vocabulary as the Studio model-family matrix (INT8, NF4, FP4/NVFP4,
+    FP8/BF16/FP16, and GGUF Q/IQ variants).
+    """
+    return detect_precision_from_name(filename)
 
 
 def _size_gib(path: Path) -> float:

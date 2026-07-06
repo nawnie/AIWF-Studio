@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from aiwf.core.config.settings import RuntimeFlags
+from aiwf.core.config.settings import RuntimeFlags, normalize_vram_profile
 
 LAUNCH_FILENAME = "launch.json"
 
@@ -51,6 +51,8 @@ class LaunchSettings(BaseSettings):
     cpu: bool = False
     inference_backend: str = "diffusers"
     onnx_provider: str = "auto"
+    vram_profile: str = "normal"
+    highvram: bool = False
     cuda_graphs: bool = False
     torchao: bool = False
     fp8_quant: bool = False
@@ -119,6 +121,22 @@ class LaunchSettings(BaseSettings):
             raise ValueError("attention_backend must be sage_sdpa, sdpa, xformers, or none")
         return normalized
 
+    @field_validator("vram_profile")
+    @classmethod
+    def validate_vram_profile(cls, value: str) -> str:
+        return normalize_vram_profile(value)
+
+    def effective_vram_profile(self) -> str:
+        if self.cpu:
+            return "cpu"
+        if self.lowvram:
+            return "low"
+        if self.medvram:
+            return "mid"
+        if self.highvram:
+            return "high"
+        return normalize_vram_profile(self.vram_profile)
+
     @classmethod
     def from_runtime_flags(cls, flags: RuntimeFlags) -> LaunchSettings:
         return cls(
@@ -148,6 +166,8 @@ class LaunchSettings(BaseSettings):
             cpu=flags.cpu,
             inference_backend=flags.inference_backend,
             onnx_provider=flags.onnx_provider,
+            vram_profile=flags.effective_vram_profile(),
+            highvram=flags.highvram,
             cuda_graphs=flags.cuda_graphs,
             torchao=flags.torchao,
             fp8_quant=flags.fp8_quant,
@@ -173,6 +193,7 @@ class LaunchSettings(BaseSettings):
 
     def to_runtime_flags(self, base: RuntimeFlags) -> RuntimeFlags:
         payload = base.model_dump()
+        vram_profile = self.effective_vram_profile()
         payload.update(
             {
                 "listen": self.listen,
@@ -185,8 +206,6 @@ class LaunchSettings(BaseSettings):
                 "block_private_download_urls": self.block_private_download_urls,
                 "genlog": self.genlog,
                 "share": self.share,
-                "medvram": self.medvram,
-                "lowvram": self.lowvram,
                 "attention_backend": self.attention_backend,
                 "xformers": self.xformers,
                 "opt_sdp_attention": self.opt_sdp_attention,
@@ -198,9 +217,13 @@ class LaunchSettings(BaseSettings):
                 "fp8": self.fp8,
                 "fluxfp8": self.fluxfp8,
                 "directml": self.directml,
-                "cpu": self.cpu,
+                "cpu": vram_profile == "cpu",
                 "inference_backend": self.inference_backend,
                 "onnx_provider": self.onnx_provider,
+                "vram_profile": vram_profile,
+                "medvram": vram_profile == "mid",
+                "lowvram": vram_profile == "low",
+                "highvram": vram_profile == "high",
                 "cuda_graphs": self.cuda_graphs,
                 "torchao": self.torchao,
                 "fp8_quant": self.fp8_quant,
@@ -236,6 +259,7 @@ class LaunchSettings(BaseSettings):
 
     def argv(self) -> list[str]:
         args: list[str] = []
+        vram_profile = self.effective_vram_profile()
         if self.listen:
             args.append("--listen")
         if self.port != 7860:
@@ -256,10 +280,14 @@ class LaunchSettings(BaseSettings):
             args.append("--genlog")
         if self.share:
             args.append("--share")
-        if self.medvram:
+        if vram_profile != "normal":
+            args.extend(["--vram-profile", vram_profile])
+        if vram_profile == "mid":
             args.append("--medvram")
-        if self.lowvram:
+        if vram_profile == "low":
             args.append("--lowvram")
+        if vram_profile == "high":
+            args.append("--highvram")
         if self.attention_backend != "sage_sdpa":
             args.extend(["--attention-backend", self.attention_backend])
         if self.xformers:
@@ -282,7 +310,7 @@ class LaunchSettings(BaseSettings):
             args.append("--fluxfp8")
         if self.directml:
             args.append("--directml")
-        if self.cpu:
+        if vram_profile == "cpu":
             args.append("--cpu")
         if self.inference_backend != "diffusers":
             args.extend(["--inference-backend", self.inference_backend])
@@ -384,6 +412,7 @@ def merge_launch_settings(
     explicit = explicit or explicit_cli_flags()
     merged = saved.to_runtime_flags(cli_flags)
 
+    vram_flags = ("--vram-profile", "--cpu", "--lowvram", "--medvram", "--normalvram", "--highvram")
     field_to_flag = {
         "listen": "--listen",
         "port": "--port",
@@ -395,8 +424,10 @@ def merge_launch_settings(
         "block_private_download_urls": "--allow-private-download-urls",
         "genlog": "--genlog",
         "share": "--share",
-        "medvram": "--medvram",
-        "lowvram": "--lowvram",
+        "vram_profile": vram_flags,
+        "medvram": vram_flags,
+        "lowvram": vram_flags,
+        "highvram": vram_flags,
         "attention_backend": "--attention-backend",
         "xformers": "--xformers",
         "opt_sdp_attention": "--opt-sdp-attention",
@@ -408,7 +439,7 @@ def merge_launch_settings(
         "fp8": "--fp8",
         "fluxfp8": "--fluxfp8",
         "directml": "--directml",
-        "cpu": "--cpu",
+        "cpu": vram_flags,
         "inference_backend": "--inference-backend",
         "onnx_provider": "--onnx-provider",
         "cuda_graphs": "--cuda-graphs",

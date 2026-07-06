@@ -43,6 +43,17 @@ def test_apply_sampler_does_not_keep_beta_sigmas_when_switching_to_karras_sample
     assert getattr(pipe.scheduler.config, "use_beta_sigmas", False) is False
 
 
+def test_apply_sampler_leaves_krea2_flowmatch_scheduler_unchanged(tmp_path):
+    backend = _backend(tmp_path)
+    scheduler = object()
+    pipe = type("Krea2Pipeline", (), {"scheduler": scheduler})()
+
+    backend._apply_sampler(pipe, "dpmpp_2m", "beta")
+
+    assert pipe.scheduler is scheduler
+    assert pipe._aiwf_scheduler_signature == "dpmpp_2m|beta"
+
+
 def test_schedule_normalization_restricts_builtin_karras_sampler():
     assert allowed_schedule_ids_for_sampler("dpmpp_2m_karras") == ["automatic"]
     assert normalize_schedule_id_for_sampler("dpmpp_2m_karras", "beta") == "automatic"

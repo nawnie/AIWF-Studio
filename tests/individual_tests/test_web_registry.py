@@ -56,7 +56,7 @@ def test_default_user_settings_show_core_navigation_only():
 
     visible = [name for name, _builder, _order in registry.visible_tabs(ctx)]
 
-    assert visible == ["Image", "Image Lab", "Video", "Chat", "Video Lab", "Audio Lab", "Training", "Settings"]
+    assert visible == ["Image", "Image Lab", "Video", "Sana Video", "Chat", "Video Lab", "Audio Lab", "Training", "Settings"]
 
 
 def test_topbar_uses_provided_checkpoint_count_without_rescan():

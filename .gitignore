@@ -24,6 +24,7 @@ embeddings/
 
 # --- Python environments & caches ---
 venv/
+_pyenv*/
 .venv/
 .venv-*/
 env/
@@ -75,6 +76,7 @@ training/EveryDream2trainer/
 # and one-off handoff files all live under _local/ and never ship.
 _local/
 _trash/
+extention adapters/
 
 # --- Agent / assistant working files (dev-machine only) ---
 AGENTS.md
@@ -82,6 +84,7 @@ agents_runtime.md
 plan.md
 PROJECT_SKILLS.md
 opencode.json
+.agents/
 .hermes.md
 .hermes/
 .codex/
@@ -138,3 +141,36 @@ Thumbs.db
 .idea/
 .vscode/
 *.lnk
+
+
+# AIWF PAID Layout 2+3 v4 media center local state
+extensions/
+projects/*.aiwf/
+projects/*.aiwf.zip
+*.aiwf.zip
+.aiwf/autosave/
+.aiwf/cache/
+.aiwf/recovery/
+plugin-workspaces/
+community-plugins/
+*.plugin.local.json
+*.workflow.local.json
+*.project.local.json
+*.queue.local.json
+outputs/**/autosave*.json
+outputs/**/export-plan*.json
+
+# Local media/runtime payloads
+models/
+outputs/
+logs/
+venv/
+_pyenv*/
+node_modules/
+.env
+.env.*
+*.tmp
+*.bak
+
+# Local research output (not runtime)
+research runs/

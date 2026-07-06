@@ -37,6 +37,15 @@ def test_flux_fusion_profile_uses_four_steps():
     assert p.recommended_sampler == "euler"
 
 
+def test_flux_fill_profile_is_inpaint_not_turbo():
+    p = detect_model_profile("flux1-fill-dev.safetensors")
+    assert p.family == "flux_fill"
+    assert p.is_distilled is False
+    assert p.recommended_cfg == 3.5
+    assert p.recommended_steps == 28
+    assert p.recommended_sampler == "euler"
+
+
 def test_flux2_klein_profile_uses_model_page_defaults():
     p = detect_model_profile("fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf")
     assert p.family == "flux2_klein"
@@ -53,6 +62,29 @@ def test_z_image_profile_wins_over_flux2_name_prefix():
     assert p.cfg_max == 1.5
     assert p.recommended_steps == 8
     assert p.recommended_sampler == "euler"
+
+
+def test_krea2_turbo_profile_wins_over_generic_turbo():
+    p = detect_model_profile("krea2_turbo_fp8_scaled.safetensors")
+    assert p.family == "krea2_turbo"
+    assert p.is_distilled
+    assert p.recommended_cfg == 0.0
+    assert p.recommended_steps == 8
+    assert p.recommended_sampler == "euler"
+
+
+def test_krea2_raw_and_anima_are_not_distilled_profiles():
+    raw = detect_model_profile("Krea-2-Raw")
+    assert raw.family == "krea2_raw"
+    assert raw.is_distilled is False
+    assert raw.recommended_cfg == 3.5
+    assert raw.recommended_steps == 52
+
+    anima = detect_model_profile("anima-base-v1.0.safetensors")
+    assert anima.family == "anima"
+    assert anima.is_distilled is False
+    assert anima.recommended_cfg == 4.5
+    assert anima.recommended_steps == 36
 
 
 def test_qwen_nunchaku_profile_wins_over_generic_lightning():
@@ -78,6 +110,15 @@ def test_sana_video_profile_uses_video_defaults():
     assert p.recommended_cfg == 6.0
     assert p.recommended_steps == 50
     assert p.recommended_sampler == "euler"
+
+
+def test_sdxl_refiner_profile_is_second_pass():
+    p = detect_model_profile("sd_xl_refiner_1.0.safetensors")
+    assert p.family == "sdxl_refiner"
+    assert p.is_distilled is False
+    assert p.recommended_cfg == 6.0
+    assert p.recommended_steps == 10
+    assert p.recommended_sampler == "dpmpp_2m"
 
 
 def test_standard_model():

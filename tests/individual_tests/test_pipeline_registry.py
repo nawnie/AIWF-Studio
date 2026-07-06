@@ -16,12 +16,14 @@ def test_pipeline_registry_lists_image_launch_choices(tmp_path: Path):
     assert ("ONNX Runtime pipeline", "onnx") in choices
 
 
-def test_pipeline_registry_lists_qwen_nunchaku_image_pipeline(tmp_path: Path):
+def test_pipeline_registry_lists_v1_image_pipelines(tmp_path: Path):
     registry = PipelineRegistry(RuntimeFlags(data_dir=tmp_path), UserSettings())
 
     ids = {pipeline.id for pipeline in registry.image_pipelines()}
 
-    assert {"diffusers", "qwen-image", "qwen-nunchaku", "sana", "onnx"}.issubset(ids)
+    assert {"diffusers", "krea2", "qwen-image", "sana", "onnx"}.issubset(ids)
+    assert "anima" not in ids
+    assert "qwen-nunchaku" not in ids
 
 
 def test_pipeline_registry_marks_qwen_and_sana_missing_until_snapshots_exist(tmp_path: Path):
@@ -34,6 +36,8 @@ def test_pipeline_registry_marks_qwen_and_sana_missing_until_snapshots_exist(tmp
     assert "complete Qwen Image Diffusers snapshot" in by_id["qwen-image"].message
     assert not by_id["sana"].ready
     assert "complete Sana Diffusers snapshot" in by_id["sana"].message
+    assert not by_id["krea2"].ready
+    assert "complete Krea 2 Diffusers snapshot" in by_id["krea2"].message
 
 
 def test_pipeline_registry_marks_incomplete_qwen_snapshot_not_ready(tmp_path: Path):
@@ -182,10 +186,9 @@ def test_pipeline_registry_marks_sana_video_waiting_for_snapshot(tmp_path: Path)
     assert "SANA-Video snapshot" in sana_video.message
 
 
-def test_pipeline_registry_marks_qwen_nunchaku_missing_until_runtime_ready(tmp_path: Path):
+def test_pipeline_registry_hides_qwen_nunchaku_until_v1_ready(tmp_path: Path):
     registry = PipelineRegistry(RuntimeFlags(data_dir=tmp_path), UserSettings())
 
-    qwen = [pipeline for pipeline in registry.image_pipelines() if pipeline.id == "qwen-nunchaku"][0]
+    ids = {pipeline.id for pipeline in registry.image_pipelines()}
 
-    assert not qwen.ready
-    assert "missing" in qwen.message
+    assert "qwen-nunchaku" not in ids

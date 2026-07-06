@@ -31,6 +31,20 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _sage_preference() -> str:
+    """User preference for SageAttention: auto (default), force, or off.
+
+    Settings write AIWF_WAN_SAGE_ATTENTION as "auto"/"1"/"0"; the legacy
+    AIWF_USE_SAGE_ATTENTION truthy flag still means force.
+    """
+    raw = os.environ.get("AIWF_WAN_SAGE_ATTENTION", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return "off"
+    if raw in {"1", "true", "yes", "on", "force"} or _env_flag("AIWF_USE_SAGE_ATTENTION"):
+        return "force"
+    return "auto"
+
+
 def _module_importable(name: str) -> bool:
     if find_spec(name) is None:
         return False
@@ -68,7 +82,10 @@ def bootstrap_wan_cuda_settings() -> list[str]:
 def _try_sage_attention() -> str | None:
     """ComfyUI parity: --use-sage-attention patches SDPA with sageattention when installed."""
     global _ORIGINAL_SDPA, _SAGE_SDPA_INSTALLED
-    if not _env_flag("AIWF_WAN_SAGE_ATTENTION") and not _env_flag("AIWF_USE_SAGE_ATTENTION"):
+    preference = _sage_preference()
+    if preference == "off":
+        return None
+    if preference == "auto":
         # Auto-enable when the package is present (user already installed it for Comfy).
         try:
             import sageattention  # noqa: F401
@@ -449,7 +466,8 @@ def apply_wan_transformer_optimizations(transformer, *, name: str = "transformer
     # backends are preferred because they handle the Wan layout natively and do not
     # patch global SDPA (which would also affect SD image generation). All are gated
     # on the backend actually being callable, so none can raise 'NoneType' is not callable.
-    backend = _set_wan_sage_backend(transformer) or _set_wan_flash_backend(transformer)
+    sage_allowed = _sage_preference() != "off"
+    backend = (_set_wan_sage_backend(transformer) if sage_allowed else None) or _set_wan_flash_backend(transformer)
     backend_label = "torch_sdpa"
     if backend:
         active.append(backend)
