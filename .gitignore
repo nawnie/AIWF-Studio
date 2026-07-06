@@ -24,6 +24,7 @@ embeddings/
 
 # --- Python environments & caches ---
 venv/
+_pyenv*/
 .venv/
 .venv-*/
 env/
@@ -164,6 +165,7 @@ models/
 outputs/
 logs/
 venv/
+_pyenv*/
 node_modules/
 .env
 .env.*

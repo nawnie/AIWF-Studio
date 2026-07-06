@@ -101,6 +101,70 @@ function Get-VenvPythonMinor {
     }
 }
 
+function Move-StaleVenv {
+    param([string]$Reason)
+    if (-not (Test-Path -LiteralPath $VenvDir)) { return }
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $trash = Join-Path $Root "_trash\installer-venv-$stamp"
+    New-Item -ItemType Directory -Path (Split-Path $trash -Parent) -Force | Out-Null
+    Write-Host "$Reason Moving the existing venv to $trash"
+    Move-Item -LiteralPath $VenvDir -Destination $trash
+}
+
+function Get-CondaCommand {
+    $cmd = Get-Command conda -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($p in @(
+        (Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"),
+        (Join-Path $env:USERPROFILE "Miniconda3\Scripts\conda.exe"),
+        (Join-Path $env:USERPROFILE "anaconda3\Scripts\conda.exe"),
+        (Join-Path $env:LOCALAPPDATA "miniconda3\Scripts\conda.exe"),
+        (Join-Path $env:ProgramData "miniconda3\Scripts\conda.exe")
+    )) { if (Test-Path -LiteralPath $p) { return $p } }
+    return $null
+}
+
+function Install-Miniconda {
+    $target = Join-Path $env:USERPROFILE "miniconda3"
+    $installer = Join-Path $env:TEMP "Miniconda3-latest-Windows-x86_64.exe"
+    if ($DryRun) {
+        Write-Host "[dry-run] Would download + silently install Miniconda to $target"
+        return (Join-Path $target "Scripts\conda.exe")
+    }
+    Write-Host "Downloading Miniconda (Python $PythonVersion provider)..."
+    Invoke-WebRequest -Uri "https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe" -OutFile $installer -UseBasicParsing
+    Write-Host "Installing Miniconda silently to $target ..."
+    Start-Process -FilePath $installer -ArgumentList "/InstallationType=JustMe","/RegisterPython=0","/AddToPath=0","/S","/D=$target" -Wait
+    Update-ProcessPath
+    return (Join-Path $target "Scripts\conda.exe")
+}
+
+# Fallback provisioner: use conda to get a real Python 3.10, then build a
+# STANDARD venv from it so the app still finds venv\Scripts\python.exe.
+function Ensure-PythonVenv-Conda {
+    Write-Host "uv could not provide Python $PythonVersion. Trying conda."
+    $conda = Get-CondaCommand
+    if (-not $conda) {
+        $answer = Read-Host "Python $PythonVersion is required and was not available. Install Miniconda now to create it automatically? [Y/n]"
+        if ($answer -and $answer.Trim().ToLowerInvariant().StartsWith("n")) {
+            throw "Python $PythonVersion is required. Install Python $PythonVersion (or conda) and re-run the installer."
+        }
+        $conda = Install-Miniconda
+    }
+    if (-not $conda -or -not (Test-Path -LiteralPath $conda)) {
+        throw "conda was not available after the install attempt; cannot provision Python $PythonVersion."
+    }
+    $pyenv = Join-Path $Root "_pyenv$($PythonVersion.Replace('.',''))"
+    if (Test-Path -LiteralPath $pyenv) { Remove-Item -Recurse -Force -LiteralPath $pyenv }
+    Invoke-External "Create conda Python $PythonVersion" $conda @("create", "-y", "-p", $pyenv, "python=$PythonVersion")
+    $condaPython = Join-Path $pyenv "python.exe"
+    if (-not (Test-Path -LiteralPath $condaPython)) {
+        throw "conda did not produce a Python at $condaPython"
+    }
+    Move-StaleVenv -Reason "Rebuilding the venv with the conda-provided Python $PythonVersion."
+    Invoke-External "Create AIWF venv from conda Python" $condaPython @("-m", "venv", $VenvDir)
+}
+
 function Ensure-PythonVenv {
     Write-Section "Python environment"
     if ($DryRun) {
@@ -110,28 +174,48 @@ function Ensure-PythonVenv {
         return
     }
 
-    Invoke-External "Install Python $PythonVersion with uv" "uv" @("python", "install", $PythonVersion)
-
-    $minor = Get-VenvPythonMinor
-    if ($minor -and $minor -ne $PythonVersion) {
-        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-        $trash = Join-Path $Root "_trash\installer-venv-$stamp"
-        New-Item -ItemType Directory -Path (Split-Path $trash -Parent) -Force | Out-Null
-        Write-Host "Existing venv uses Python $minor. Moving it to $trash"
-        Move-Item -LiteralPath $VenvDir -Destination $trash
-        $minor = ""
+    # Preferred path: uv provides a standalone Python 3.10 with no system dependency.
+    $uvOk = $false
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
+        try {
+            Invoke-External "Install Python $PythonVersion with uv" "uv" @("python", "install", $PythonVersion)
+            $minor = Get-VenvPythonMinor
+            if ($minor -and $minor -ne $PythonVersion) {
+                Move-StaleVenv -Reason "Existing venv uses Python $minor (need $PythonVersion)."
+                $minor = ""
+            }
+            if (-not $minor) {
+                Invoke-External "Create AIWF venv" "uv" @("venv", "--python", $PythonVersion, $VenvDir)
+            } else {
+                Write-Host "AIWF venv already uses Python $minor."
+            }
+            if ((Get-VenvPythonMinor) -eq $PythonVersion) { $uvOk = $true }
+        } catch {
+            Write-Host "uv Python provisioning failed: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Host "uv is not available; will use the conda fallback for Python $PythonVersion."
     }
 
-    if (-not $minor) {
-        Invoke-External "Create AIWF venv" "uv" @("venv", "--python", $PythonVersion, $VenvDir)
-    } else {
-        Write-Host "AIWF venv already uses Python $minor."
+    # Fallback: conda (offered to the user if not already installed).
+    if (-not $uvOk) {
+        Ensure-PythonVenv-Conda
     }
 
     if (-not (Test-Path -LiteralPath $VenvPython)) {
         throw "Expected venv Python was not created: $VenvPython"
     }
-    Invoke-External "Seed pip" "uv" @("pip", "install", "--python", $VenvPython, "pip", "setuptools", "wheel")
+    $finalMinor = Get-VenvPythonMinor
+    if ($finalMinor -ne $PythonVersion) {
+        throw "venv Python is $finalMinor but $PythonVersion is required. Install Python $PythonVersion or conda and re-run."
+    }
+
+    # Seed pip via uv when present, otherwise the venv's own pip (conda path).
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
+        Invoke-External "Seed pip" "uv" @("pip", "install", "--python", $VenvPython, "pip", "setuptools", "wheel")
+    } else {
+        Invoke-External "Seed pip" $VenvPython @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
+    }
 }
 
 function Prepare-AiwfRuntime {
