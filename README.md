@@ -1,18 +1,30 @@
-# AIWF Studio
+<h1 align="center">AIWF Studio</h1>
 
-[![Windows](https://img.shields.io/badge/Windows-local--first-0078D4?logo=windows11&logoColor=white)](#quick-start)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![React](https://img.shields.io/badge/React-Pro%20UI-61DAFB?logo=react&logoColor=black)](frontend/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-Pro%20frontend-3178C6?logo=typescript&logoColor=white)](frontend/)
-[![Vite](https://img.shields.io/badge/Vite-build-646CFF?logo=vite&logoColor=white)](frontend/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-Pro%20API-009688?logo=fastapi&logoColor=white)](#what-works-on-main)
-[![Gradio](https://img.shields.io/badge/Gradio-Lab%20UI-F97316?logo=gradio&logoColor=white)](#aiwf-studio-gradio-lab)
-[![Diffusers](https://img.shields.io/badge/Diffusers-local%20pipelines-FFD21E?logo=huggingface&logoColor=black)](#image-generation)
-[![NVIDIA RTX / VFX SDK](https://img.shields.io/badge/NVIDIA%20RTX-VFX%20SDK-76B900?logo=nvidia&logoColor=white)](https://docs.nvidia.com/maxine/vfx/index.html)
+<p align="center">
+  <strong>Local-first creative AI workspace for Windows and NVIDIA GPUs.</strong>
+</p>
 
-Local-first creative AI workspace for Windows and NVIDIA GPUs, focused on image generation, inpainting, video generation, and video-audio post-processing.
+<p align="center">
+  <a href="https://www.aiembeddedsystems.com">AI Embedded Systems</a> |
+  <a href="#quick-start">Quick Start</a> |
+  <a href="#what-works-on-main">What Works</a> |
+  <a href="docs/FEATURES.md">Feature Inventory</a>
+</p>
 
-Engineered by [AI Embedded Systems](https://www.ai-embedded-systems.com).
+<p align="center">
+  <a href="#quick-start"><img src="https://img.shields.io/badge/Windows-local--first-0078D4?logo=windows11&logoColor=white" alt="Windows local-first"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+"></a>
+  <a href="frontend/"><img src="https://img.shields.io/badge/React-Pro%20UI-61DAFB?logo=react&logoColor=black" alt="React Pro UI"></a>
+  <a href="frontend/"><img src="https://img.shields.io/badge/TypeScript-Pro%20frontend-3178C6?logo=typescript&logoColor=white" alt="TypeScript Pro frontend"></a>
+  <a href="frontend/"><img src="https://img.shields.io/badge/Vite-build-646CFF?logo=vite&logoColor=white" alt="Vite build"></a>
+  <a href="#what-works-on-main"><img src="https://img.shields.io/badge/FastAPI-Pro%20API-009688?logo=fastapi&logoColor=white" alt="FastAPI Pro API"></a>
+  <a href="#aiwf-studio-gradio-lab"><img src="https://img.shields.io/badge/Gradio-Lab%20UI-F97316?logo=gradio&logoColor=white" alt="Gradio Lab UI"></a>
+  <a href="#image-generation"><img src="https://img.shields.io/badge/Diffusers-local%20pipelines-FFD21E?logo=huggingface&logoColor=black" alt="Diffusers local pipelines"></a>
+  <a href="https://docs.nvidia.com/maxine/vfx/index.html"><img src="https://img.shields.io/badge/NVIDIA%20RTX-VFX%20SDK-76B900?logo=nvidia&logoColor=white" alt="NVIDIA RTX / VFX SDK"></a>
+  <a href="https://www.aiembeddedsystems.com"><img src="https://img.shields.io/badge/Website-aiembeddedsystems.com-111111?logo=googlechrome&logoColor=white" alt="AI Embedded Systems website"></a>
+</p>
+
+AIWF Studio is focused on image generation, inpainting, video generation, and video-audio post-processing on local Windows/NVIDIA hardware. It is engineered by [AI Embedded Systems](https://www.aiembeddedsystems.com).
 
 AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. The goal is a local creative workstation with explicit wiring, typed requests, predictable model folders, and no legacy global `shared` state.
 
@@ -33,7 +45,7 @@ Both app tracks read and write the same model folders, output history, and setti
   <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="96">
 </p>
 
-**Stable UI track.** Best for Create, Models, Data, Monitor, Logs, and Settings.
+**Stable UI track.** Create and generate, Workflow builder, Model Families, Models, Data, Monitor, Logs, and Settings, plus additional workspace screens in active integration.
 
 ```bat
 AIWF Studio Pro.bat
@@ -78,18 +90,21 @@ Current focus: image generation, inpainting, video generation, and video-audio p
 - Benchmark claims need timing receipts from this repo, not upstream marketing numbers.
 - Optional engines, model weights, SDKs, and generated outputs stay local and are not committed.
 
-## 2026-07-03 Release State
+## Release State
 
-This pass moved `main` toward a Pro-first local install. The public branch now has a cleaned root layout, a current support matrix, and an installer path that was tested from a fresh GitHub clone on `C:\AIWF_Studio_install_test`.
+`main` is a Pro-first local install: FastAPI + React/Vite starts from a clean install, serves the built frontend, and drives image/video generation plus the Pro bootstrap, runtime, capabilities, settings, logs, and data APIs.
 
-- Pro UI: FastAPI plus React/Vite starts from the clean install, serves the built frontend, and answers Pro bootstrap, runtime, capabilities, settings, logs, and data API requests.
-- Pipeline routing: SDXL refiner checkpoints are kept out of the base-model picker, Flux Fill is treated as an inpaint-only route, Flux.2 Klein and Z-Image prompt-encoder handling has better VRAM checks, and Windows Z-Image GGUF is blocked with a clear reason instead of hanging.
-- Pro workflow wiring: Create now exposes one ControlNet unit for image/inpaint, high-res fix uses the real generation settings, quick Enhance/VSR can post-process the current canvas image, and quick Segment/ReActor actions are labeled as Pro quick tools while their advanced workflows stay in Gradio Lab.
-- Gradio parity: Sana Video has its own experimental tab so Pro is not the only surface that can reach that family.
-- Installer: Express install creates the Python 3.10 venv, installs CUDA PyTorch and runtime requirements, adds the default SD 1.5 fp16 model, runs `npm ci`, builds Pro, and creates Desktop shortcuts.
-- Requirements: `bitsandbytes` is now listed for the quantized transformer and text-encoder routes that need it.
-- Validation receipt: the fresh install reported `torch 2.6.0+cu124`, CUDA 12.4 available, `diffusers 0.38.0`, `transformers 4.57.6`, and `fastapi 0.139.0`.
-- Known gap: NVIDIA VideoFX SDK is optional and was not installed on the validation machine, so VSR remains disabled until the user installs the SDK.
+Recent additions on `main`:
+
+- **Workflow builder (Pro):** a **Send to workflow** button on the generation panel captures the current settings as a node; nodes are **manually reorderable by drag or up/down arrows**, with duplicate/remove/clear and local persistence. Uses a shared Pro/Gradio workflow-node serialization contract.
+- **Additional Pro workspace screens:** Workflow, Model Families (live support matrix), Foundry (image surface), Pipeline (workflow blocks), Projects, Assistant, and Audio are wired alongside the stable Create flow. These screens are additive; the core Create -> generate path is unchanged. Maturity varies by screen.
+- **User extensions:** drop a folder with a `plugin.py` into `plugins/` to add REST routes (`/api/ext/<id>/`), Gradio tabs, or event hooks. Managed in Settings; see [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) and the `plugins/hello-extension/` template.
+- **Video Lab (Pro):** upload a video, then NVIDIA VSR upscale, RIFE interpolation, extend it via Wan image-to-video, or add audio. NVIDIA VSR is also wired for single images.
+- **Pipeline routing fixes:** SDXL refiner is kept out of the base-model picker, Flux Fill is inpaint-only, unsupported files (e.g. Hunyuan) are excluded from the pickers instead of misclassified, and Windows Z-Image GGUF is blocked with a clear reason instead of hanging.
+- **Adjustable runtime:** advanced Wan/LTX precision, offload, and SageAttention behavior are user-settable in Settings, with the shipped defaults as the tested baseline.
+- **Installer:** Express install provisions Python 3.10 through uv, or a **conda fallback** if uv is unavailable; it offers to install Miniconda and builds the 3.10 venv automatically. It then installs CUDA PyTorch and requirements, adds the default SD 1.5 fp16 model, builds the Pro frontend, and creates Desktop shortcuts.
+- **Validated env:** `torch 2.6.0+cu124`, CUDA 12.4, `diffusers 0.38.0`, `transformers 4.57.6`, `fastapi 0.139.0`.
+- **Known gap:** the NVIDIA VideoFX SDK is optional and user-installed; VSR stays disabled until the SDK is present.
 
 ## Quick Start
 
@@ -203,11 +218,13 @@ Coming soon, hidden from the v1 app: Anima split-file generation and Qwen Image 
 ### UI And Monitoring
 
 - FastAPI + React/TypeScript/Vite Pro app with left-rail navigation
-- Create, Models, Data, Monitor, Logs, and Settings workspaces
+- Create, Workflow, Model Families, Models, Data, Monitor, Logs, and Settings workspaces, plus additional integrated screens (Foundry, Pipeline, Projects, Assistant, Audio)
+- Workflow builder: **Send to workflow** from the generation panel, then manually reorder nodes by drag or up/down arrows (persists locally)
+- User extensions loaded from `plugins/` with REST/tab/event hooks, managed in Settings
 - scroll-safe panels, popup tool windows, and resizable workspace columns
 - runtime monitor for backend state, queue health, logs, resources, and recent receipts
 - browser-side Transformers.js prompt helper loaded only when **Analyze prompt** is clicked
-- Pro API endpoints for runtime, bootstrap, generation, data, logs, and settings
+- Pro API endpoints for runtime, bootstrap, generation, data, logs, settings, workflows, and extensions
 
 ### Inpaint, Masking, And Segment
 
@@ -261,6 +278,7 @@ Coming soon, hidden from the v1 app: Anima split-file generation and Qwen Image 
 - optional NVIDIA RTX VSR / Video Effects SDK upscale post-processing when the SDK is installed
 - optional generated audio muxing after video when a supported local audio backend is installed
 - optional video-conditioned audio post-processing through MMAudio, installed in an isolated engine venv
+- Pro Video Lab: upload an existing video, then VSR upscale, RIFE interpolation, extend it via Wan image-to-video (continues from the last frame), or add audio
 - standalone RIFE frame interpolation tab for existing videos
 - standalone Audio tab for generating music or sound effects after a video
 - local Wan component folder support for tokenizer, text encoder, scheduler, and VAE
@@ -338,18 +356,15 @@ Current rule for `main`: keep SageAttention optional and benchmark-gated. Wan mu
 
 These areas exist as work-in-progress or need more hardware coverage before they should be treated as stable:
 
-- Pro UI (React/Vite frontend) feature parity with Studio
+- deeper integration of the newer Pro workspace screens (Foundry, Pipeline, Projects, Assistant, Audio), wired and rendering, still maturing
 - Wan FP8 high/low video speed path
 - Wan resident / streamed offload modes
 - training engines (Chat and Training tabs are hidden by default in Studio/Modern)
 - Ollama or llama.cpp chat workspace after the Pro image/video release is stable
-- Face Swap tab
-- workflow authoring
 - model conversion and quantization tools
-- plugin system
 - richer generated-audio controls and model installers
 - AMD, Intel, Linux, and lower-VRAM validation
-- installer polish and first-run onboarding
+- installer first-run onboarding polish
 
 ## Credits
 
