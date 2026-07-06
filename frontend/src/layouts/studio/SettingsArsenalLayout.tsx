@@ -50,7 +50,7 @@ export function SettingsArsenalLayout({
   }
 
   return (
-    <div className="studio-settings studio-full-surface" aria-label="Advanced paid settings layout">
+    <div className="studio-settings studio-full-surface" aria-label="Advanced settings layout">
       <aside className="studio-settings-nav">
         <div className="studio-product-lockup compact">
           <span className="studio-logo-orb"><Settings2 size={20} /></span>

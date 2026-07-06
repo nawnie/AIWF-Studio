@@ -46,6 +46,8 @@ import {
   saveWorkflowBlocksToStorage,
 } from './workflow/workflowBlocks'
 import type { WorkflowCodeBlock } from './types'
+import { ModelFamilyMatrixLayout } from './layouts/studio/ModelFamilyMatrixLayout'
+import type { LayoutProps } from './layouts/studio/LayoutTypes'
 import {
   fetchProData,
   fetchProBootstrap,
@@ -196,6 +198,7 @@ const RAIL_ITEMS: IconItem<string>[] = [
   { id: 'create', label: 'Create', icon: Sparkles },
   { id: 'workflow', label: 'Workflow', icon: WorkflowIcon },
   { id: 'models', label: 'Models', icon: Boxes },
+  { id: 'families', label: 'Families', icon: Database },
   { id: 'tools', label: 'Tools', icon: Wand2 },
   { id: 'data', label: 'Data', icon: Database },
   { id: 'monitor', label: 'Monitor', icon: Monitor },
@@ -1089,6 +1092,32 @@ function App() {
     return source.slice(0, 8)
   }, [bootstrap.recentOutputs, dataStatus])
 
+  // Shared props bundle fed to every migrated studio layout screen. Keeps the
+  // ex-paid layouts as pure presentation over my real state + handlers.
+  const buildLayoutProps = useCallback(
+    (): LayoutProps => ({
+      settings,
+      bootstrap,
+      runtime,
+      recentOutputs,
+      preview,
+      selectedModel,
+      selectedModelName: selectedModel?.name ?? settings.modelId,
+      statusMessage,
+      isGenerating,
+      onSettingsChange: setSettings,
+      onGenerate: handleGenerate,
+      onSendToWorkflow: handleSendToWorkflow,
+      workflowBlocks,
+      onWorkflowBlocksChange: setWorkflowBlocks,
+      onPreviewSelect: setPreview,
+      onOpenModels: () => handleRailSelect('models'),
+      onOpenSettings: () => handleRailSelect('settings'),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bootstrap, isGenerating, preview, recentOutputs, runtime, selectedModel, settings, statusMessage, workflowBlocks],
+  )
+
   const activeRatio = useMemo(
     () =>
       bootstrap.aspectRatios.find((ratio) => ratio.id === settings.aspectRatioId) ??
@@ -1947,7 +1976,9 @@ function App() {
           aria-label="AIWF Pro workspace"
           style={workspaceStyle}
         >
-          {activeRail === 'workflow' ? (
+          {activeRail === 'families' ? (
+            <ModelFamilyMatrixLayout {...buildLayoutProps()} />
+          ) : activeRail === 'workflow' ? (
             <section className="pro-workspace-surface" aria-label="Workflow">
               <WorkspaceHeader
                 eyebrow="Workflow"
