@@ -7,44 +7,46 @@ param(
     [switch]$StreamLayers,
     [switch]$NoDiffusionFlashAttention,
     [switch]$VaeTiling,
-    [switch]$SkipInstall
+    [switch]$SetDefault,
+    [switch]$SkipInstall,
+    [switch]$Terminal
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
-$env:AIWF_INFERENCE_BACKEND = "sdcpp"
-$env:AIWF_SDCPP_BACKEND = $Backend
-$env:AIWF_SDCPP_MAX_VRAM = $MaxVram
-$env:AIWF_SDCPP_MMAP = "1"
-
+$Args = @(
+    "-Profile", "sdcpp",
+    "-SdcppBackend", $Backend,
+    "-MaxVram", $MaxVram
+)
 if ($SdCli) {
-    $env:AIWF_SDCPP_BINARY = (Resolve-Path $SdCli).Path
+    $Args += @("-SdCli", $SdCli)
 }
 if ($ParamsBackend) {
-    $env:AIWF_SDCPP_PARAMS_BACKEND = $ParamsBackend
+    $Args += @("-ParamsBackend", $ParamsBackend)
 }
 if ($OffloadToCpu) {
-    $env:AIWF_SDCPP_OFFLOAD_TO_CPU = "1"
+    $Args += "-OffloadToCpu"
 }
 if ($StreamLayers) {
-    $env:AIWF_SDCPP_STREAM_LAYERS = "1"
+    $Args += "-StreamLayers"
 }
 if ($NoDiffusionFlashAttention) {
-    $env:AIWF_SDCPP_DIFFUSION_FA = "0"
-} else {
-    $env:AIWF_SDCPP_DIFFUSION_FA = "1"
+    $Args += "-NoDiffusionFlashAttention"
 }
 if ($VaeTiling) {
-    $env:AIWF_SDCPP_VAE_TILING = "1"
+    $Args += "-VaeTiling"
 }
-
-$LaunchArgs = @()
+if ($SetDefault) {
+    $Args += "-SetDefault"
+}
 if ($SkipInstall) {
-    $LaunchArgs += "--skip-install"
+    $Args += "-SkipInstall"
+}
+if ($Terminal) {
+    $Args += "-Terminal"
 }
 
-Write-Host "[AIWF] Launching production UI with stable-diffusion.cpp backend" -ForegroundColor Cyan
-Write-Host "[AIWF] Backend: $Backend | Max VRAM: $MaxVram | sd-cli: $($env:AIWF_SDCPP_BINARY)"
-python launch.py @LaunchArgs
+& (Join-Path $PSScriptRoot "launch_backend_profile.ps1") @Args
