@@ -137,9 +137,19 @@ def _create_onnx_backend(flags: RuntimeFlags, settings: UserSettings):
     return backend
 
 
+def _create_sdcpp_backend(flags: RuntimeFlags):
+    from aiwf.infrastructure.sdcpp.backend import StableDiffusionCppBackend
+
+    backend = StableDiffusionCppBackend(flags)
+    logger.info("Inference backend: stable-diffusion.cpp (binary=%s)", backend.executable)
+    return backend
+
+
 def _create_inference_backend(flags: RuntimeFlags, settings: UserSettings, devices):
     if flags.inference_backend == "onnx":
         return _create_onnx_backend(flags, settings)
+    if flags.inference_backend in {"sdcpp", "stable-diffusion.cpp", "stable_diffusion_cpp"}:
+        return _create_sdcpp_backend(flags)
     backend = _create_diffusers_backend(flags, devices)
     logger.info("Inference backend: Diffusers")
     return backend
