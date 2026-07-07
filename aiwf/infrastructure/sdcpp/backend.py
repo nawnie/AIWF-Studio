@@ -207,6 +207,12 @@ class StableDiffusionCppBackend:
                 )
                 if any(str(field).lower() == lowered for field in fields):
                     return item
+        # An explicitly requested model that doesn't exist must fail loudly —
+        # silently generating with checkpoints[0] runs the wrong model.
+        if checkpoint_id:
+            raise ModelNotFoundError(
+                f"Checkpoint not found for stable-diffusion.cpp: {checkpoint_id}"
+            )
         return checkpoints[0]
 
     def load_checkpoint(self, checkpoint_id: str | None = None) -> Checkpoint:
@@ -220,14 +226,38 @@ class StableDiffusionCppBackend:
     def unload(self) -> None:
         self._loaded_checkpoint_id = None
 
-    def _resolve_vae_path(self, request: GenerationRequest) -> str | None:
-        if not request.vae_id:
-            return _path_text(self.flags.vae_path) or None
-        lowered = request.vae_id.lower()
+    def _resolve_vae_path(self, request: GenerationRequest, checkpoint: Checkpoint | None = None) -> str | None:
+        if request.vae_id:
+            lowered = request.vae_id.lower()
+            for vae in self.list_vaes():
+                if lowered in {vae.id.lower(), vae.title.lower(), vae.filename.lower(), vae.path.lower()}:
+                    return vae.path
+        explicit = _path_text(self.flags.vae_path) or None
+        if explicit:
+            return explicit
+        if checkpoint is not None:
+            return self._auto_vae_for_architecture(checkpoint.architecture)
+        return None
+
+    def _auto_vae_for_architecture(self, architecture: str) -> str | None:
+        """SDXL single-file checkpoints ship fp16 VAEs that NaN out in sd.cpp and
+        produce blank images. When the user has an SDXL VAE (fp16-fix) installed,
+        pass it automatically instead of relying on the baked-in one."""
+        if (architecture or "").lower() != "sdxl":
+            return None
+        best: str | None = None
         for vae in self.list_vaes():
-            if lowered in {vae.id.lower(), vae.title.lower(), vae.filename.lower(), vae.path.lower()}:
+            name = vae.filename.lower()
+            if "sdxl" not in name:
+                continue
+            if name == "sdxl_vae.safetensors" or "fp16" in name:
+                logger.info("sd.cpp: auto-selected SDXL VAE %s for SDXL checkpoint", vae.filename)
                 return vae.path
-        return _path_text(self.flags.vae_path) or None
+            if best is None:
+                best = vae.path
+        if best:
+            logger.info("sd.cpp: auto-selected SDXL VAE %s for SDXL checkpoint", Path(best).name)
+        return best
 
     def _save_input_image(self, image: Image.Image, directory: Path, name: str) -> str:
         path = directory / name
@@ -286,10 +316,15 @@ class StableDiffusionCppBackend:
             cmd.extend(["-b", str(image_total)])
         if scheduler:
             cmd.extend(["--scheduler", scheduler])
-        if request.clip_skip > 0:
+        # sd.cpp clip-skip semantics differ from A1111: -1/unset auto-picks the
+        # architecture default (1 for SD1.x, 2 for SDXL). Forcing the A1111
+        # default of 1 onto SDXL breaks conditioning and renders pure white
+        # (verified locally with cyberrealisticPony_v125). Only forward an
+        # explicit user choice of 2+, and let sd.cpp auto-select otherwise.
+        if request.clip_skip >= 2:
             cmd.extend(["--clip-skip", str(int(request.clip_skip))])
 
-        vae_path = self._resolve_vae_path(request)
+        vae_path = self._resolve_vae_path(request, checkpoint)
         if vae_path:
             cmd.extend(["--vae", vae_path])
 
@@ -338,6 +373,10 @@ class StableDiffusionCppBackend:
             cmd.extend(["--params-backend", params_backend])
         if max_vram:
             cmd.extend(["--max-vram", max_vram])
+        # Opt-in escape hatch for models whose text encoders NaN in fp16 on GPU.
+        if _env_value("AIWF_SDCPP_CLIP_ON_CPU") in {"1", "true", "yes", "on"}:
+            cmd.append("--clip-on-cpu")
+
         if _env_value("AIWF_SDCPP_OFFLOAD_TO_CPU") in {"1", "true", "yes", "on"}:
             cmd.append("--offload-to-cpu")
         if _env_value("AIWF_SDCPP_STREAM_LAYERS") in {"1", "true", "yes", "on"}:
@@ -523,9 +562,16 @@ class StableDiffusionCppBackend:
                 )
             if flat_outputs:
                 flat_list = "\n".join(flat_outputs)
+                hint = ""
+                if (checkpoint.architecture or "").lower() == "sdxl":
+                    hint = (
+                        " If a Clip skip value of 2+ is set, try leaving it at default. Otherwise "
+                        "install sdxl_vae.safetensors (fp16-fix) into models/VAE, set "
+                        "AIWF_SDCPP_CLIP_ON_CPU=1, or switch this model to the Diffusers backend."
+                    )
                 raise RuntimeError(
                     "stable-diffusion.cpp produced blank/flat output image(s). "
-                    f"The checkpoint may be incompatible with this C++ backend: {checkpoint.title}\n{flat_list}"
+                    f"The checkpoint may be incompatible with this C++ backend: {checkpoint.title}.{hint}\n{flat_list}"
                 )
 
             if on_progress is not None:
