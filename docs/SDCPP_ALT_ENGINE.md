@@ -19,7 +19,9 @@ Implemented:
 - preview polling through `sd-cli --preview`
 - cancellation by terminating the `sd-cli` subprocess
 - output import back into AIWF's normal save/metadata flow
-- Windows PowerShell launch helper at `scripts/launch_sdcpp.ps1`
+- shared-venv Pro profile launcher via `launch_backend_profile.py`
+- Windows PowerShell launch helpers in `scripts/`
+- optional backend-switch helper page at `/api/ext/backend-switch/ui`
 
 Not done yet:
 
@@ -28,9 +30,44 @@ Not done yet:
 - advanced LoRA argument translation
 - full Flux/Qwen/Wan split-asset path mapping
 - deep sampler parity matrix
-- Pro UI settings surface for every `AIWF_SDCPP_*` option
+- main React settings dropdown source edit for `sdcpp` in `App.tsx`
 
-## How to launch
+## Backend profiles
+
+The profile launcher keeps one AIWF venv and chooses the backend at Pro boot time:
+
+```text
+AIWF Pro UI -> Pro API -> GenerationService -> selected backend
+                                     |-> Diffusers
+                                     |-> stable-diffusion.cpp sd-cli
+                                     |-> ONNX
+```
+
+Use this when you want a fallback lane without maintaining separate Python environments.
+
+```powershell
+# Launch with the saved profile default.
+.\scripts\launch_backend_profile.ps1
+
+# Force Diffusers for this launch.
+.\scripts\launch_backend_profile.ps1 -Profile diffusers
+
+# Force stable-diffusion.cpp for this launch.
+.\scripts\launch_backend_profile.ps1 -Profile sdcpp -SdCli "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe" -SdcppBackend cuda0 -MaxVram 14
+
+# Save stable-diffusion.cpp as the profile launcher default.
+.\scripts\launch_backend_profile.ps1 -Profile sdcpp -SetDefault -SdCli "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe" -SdcppBackend cuda0 -MaxVram 14
+```
+
+The helper page is available after Pro starts:
+
+```text
+http://127.0.0.1:7860/api/ext/backend-switch/ui
+```
+
+That page saves the backend profile default for `scripts/launch_backend_profile.ps1`. A restart is still required because the backend object is built at app boot.
+
+## How to launch stable-diffusion.cpp directly
 
 Install or build `stable-diffusion.cpp` separately, then point AIWF at `sd-cli.exe`.
 
@@ -54,19 +91,19 @@ Useful low-VRAM lane:
 Manual environment version:
 
 ```powershell
-$env:AIWF_INFERENCE_BACKEND = "sdcpp"
+$env:AIWF_PROFILE_BACKEND = "sdcpp"
 $env:AIWF_SDCPP_BINARY = "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe"
 $env:AIWF_SDCPP_BACKEND = "cuda0"
 $env:AIWF_SDCPP_MAX_VRAM = "14"
 $env:AIWF_SDCPP_DIFFUSION_FA = "1"
-python launch.py --skip-install
+python launch_backend_profile.py --backend sdcpp --skip-install
 ```
 
 ## Environment knobs
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `AIWF_INFERENCE_BACKEND` | `diffusers` | Set to `sdcpp` to activate this backend. |
+| `AIWF_PROFILE_BACKEND` | `diffusers` | Profile backend used by `webui_backend_profile.py`. |
 | `AIWF_SDCPP_BINARY` | auto-detect | Full path to `sd-cli.exe` or `sd-cli`. |
 | `AIWF_SDCPP_BACKEND` | `cuda0` | Passed to `sd-cli --backend`. Use `cpu`, `cuda0`, `vulkan0`, etc. |
 | `AIWF_SDCPP_PARAMS_BACKEND` | blank | Passed to `sd-cli --params-backend`. |
