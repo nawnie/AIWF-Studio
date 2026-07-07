@@ -30,9 +30,8 @@ module import paths that run during UI startup.
 
 ## License Posture
 
-For AIWF / local AI repos, default to a free non-commercial attribution license:
-people can play, study, modify, and share with credit, while commercial use
-requires contacting the project owner. Keep third-party model and SDK licenses
+For AIWF / local AI repos, default to MIT unless a repo has a documented reason
+to use another OSI-approved license. Keep third-party model and SDK licenses
 separate and explicit.
 
 Use `engines/<name>/` for local engine ownership:

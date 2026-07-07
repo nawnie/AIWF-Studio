@@ -20,6 +20,7 @@
   <a href="#what-works-on-main"><img src="https://img.shields.io/badge/FastAPI-Pro%20API-009688?logo=fastapi&logoColor=white" alt="FastAPI Pro API"></a>
   <a href="#aiwf-studio-gradio-lab"><img src="https://img.shields.io/badge/Gradio-Lab%20UI-F97316?logo=gradio&logoColor=white" alt="Gradio Lab UI"></a>
   <a href="#image-generation"><img src="https://img.shields.io/badge/Diffusers-local%20pipelines-FFD21E?logo=huggingface&logoColor=black" alt="Diffusers local pipelines"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22C55E" alt="MIT license"></a>
   <a href="https://docs.nvidia.com/maxine/vfx/index.html"><img src="https://img.shields.io/badge/NVIDIA%20RTX-VFX%20SDK-76B900?logo=nvidia&logoColor=white" alt="NVIDIA RTX / VFX SDK"></a>
   <a href="https://www.aiembeddedsystems.com"><img src="https://img.shields.io/badge/Website-aiembeddedsystems.com-111111?logo=googlechrome&logoColor=white" alt="AI Embedded Systems website"></a>
 </p>
@@ -333,9 +334,8 @@ Useful project docs:
 
 This is a practical release checklist, not legal advice.
 
-- AIWF Studio's own code is licensed under the **AIWF Non-Commercial Attribution License v1.0** in `LICENSE`.
-- Non-commercial use, study, modification, and sharing are allowed with attribution.
-- Commercial use requires separate written permission from the project owner. Contact: https://github.com/nawnie
+- AIWF Studio's own code is licensed under the **MIT License** in `LICENSE`.
+- The MIT license allows use, copying, modification, distribution, sublicensing, and sale of the software, as long as the copyright and license notice stay with the code.
 - Model weights, generated outputs, NVIDIA SDK binaries, MMAudio checkout files, and large engine repos are local-only and ignored by git.
 - Users are responsible for the licenses of checkpoints, LoRAs, VAEs, ControlNet models, SAM weights, Wan files, and audio models they install.
 - Stable Diffusion 3.5 model weights are released under Stability AI's Community License and may require Hugging Face gate acceptance before download.

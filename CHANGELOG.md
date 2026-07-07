@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-06
+
+### Licensing
+
+- Changed the AIWF Studio source license from the AIWF Non-Commercial Attribution License to MIT.
+- Updated README license wording and package metadata so the repo presents as open source.
+- Kept third-party model, SDK, and checkpoint license warnings separate from the source-code license.
+
 ## 2026-07-03
 
 ### Pro Release State
