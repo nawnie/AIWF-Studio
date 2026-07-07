@@ -5051,22 +5051,39 @@ class DiffusersBackend:
             if parsed.loras and not _supports_runtime_lora_adapters(checkpoint.architecture):
                 raise ValueError(f"{family_label} LoRA application is not wired yet. Remove LoRAs for this pass.")
 
+        masked_crop_img2img = (
+            request.mode == GenerationMode.INPAINT
+            and bool(getattr(request, "inpaint_only_masked", False))
+            and not is_inpaint_architecture(checkpoint.architecture)
+            and not is_sd3_architecture(checkpoint.architecture)
+            and not is_flux_architecture(checkpoint.architecture)
+        )
         if request.mode == GenerationMode.INPAINT:
             if not init_images:
                 raise ValueError("inpaint requires init_images")
             if not mask_images:
                 raise ValueError("inpaint requires mask_images")
-            if (
-                not is_inpaint_architecture(checkpoint.architecture)
-                and not is_sd3_architecture(checkpoint.architecture)
-                and not is_flux_architecture(checkpoint.architecture)
-            ):
-                logger.warning(
-                    "Checkpoint %s is not an inpaint model (%s); results may be poor or fail.",
+            if masked_crop_img2img:
+                logger.info(
+                    "Loading img2img pipeline for masked-crop inpaint on %s (%s)",
                     checkpoint.title,
                     checkpoint.architecture,
                 )
-            pipe = self._load_inpaint_checkpoint(checkpoint)
+                self.load_checkpoint(request.checkpoint_id)
+                pipe = self._img2img
+                assert pipe is not None
+            else:
+                if (
+                    not is_inpaint_architecture(checkpoint.architecture)
+                    and not is_sd3_architecture(checkpoint.architecture)
+                    and not is_flux_architecture(checkpoint.architecture)
+                ):
+                    logger.warning(
+                        "Checkpoint %s is not an inpaint model (%s); results may be poor or fail.",
+                        checkpoint.title,
+                        checkpoint.architecture,
+                    )
+                pipe = self._load_inpaint_checkpoint(checkpoint)
         elif request.mode == GenerationMode.IMG2IMG:
             if not init_images:
                 raise ValueError("img2img requires init_images")
@@ -5501,27 +5518,39 @@ class DiffusersBackend:
                             total_steps=request.steps,
                             preview_every_n_steps=preview_every_n_steps,
                         )
-                        prompt_kwargs = build_prompt_kwargs(
-                            pipe,
-                            parsed.prompt,
-                            request.negative_prompt,
-                            request.clip_skip,
-                        )
-                        output = self._call_pipe(
-                            pipe,
-                            **prompt_kwargs,
-                            num_inference_steps=request.steps,
-                            guidance_scale=request.cfg_scale,
-                            num_images_per_prompt=request.batch_size,
-                            generator=generator,
-                            callback_on_step_end=callback,
-                            callback_on_step_end_tensor_inputs=["latents"],
-                            image=pipeline_src,
-                            mask_image=pipeline_msk,
-                            strength=request.denoising_strength,
-                            width=pipe_w,
-                            height=pipe_h,
-                        )
+                        if masked_crop_img2img:
+                            output = self._run_img2img_pass(
+                                pipe,
+                                request,
+                                parsed.prompt,
+                                generator,
+                                callback,
+                                pipeline_src,
+                                steps=request.steps,
+                                strength=request.denoising_strength,
+                            )
+                        else:
+                            prompt_kwargs = build_prompt_kwargs(
+                                pipe,
+                                parsed.prompt,
+                                request.negative_prompt,
+                                request.clip_skip,
+                            )
+                            output = self._call_pipe(
+                                pipe,
+                                **prompt_kwargs,
+                                num_inference_steps=request.steps,
+                                guidance_scale=request.cfg_scale,
+                                num_images_per_prompt=request.batch_size,
+                                generator=generator,
+                                callback_on_step_end=callback,
+                                callback_on_step_end_tensor_inputs=["latents"],
+                                image=pipeline_src,
+                                mask_image=pipeline_msk,
+                                strength=request.denoising_strength,
+                                width=pipe_w,
+                                height=pipe_h,
+                            )
                         # Paste generated crop back, then composite with seam control.
                         full_mask = prepare_inpaint_mask(raw_mask, size=orig.size)
                         pw = crop_box[2] - crop_box[0]

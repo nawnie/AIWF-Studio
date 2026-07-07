@@ -3,7 +3,9 @@ import type {
   CreationMode,
   EngineSummary,
   GenerationSettings,
+  ImportedGenerationMetadata,
   LoadedModelInfo,
+  PipelineBackend,
   ProBootstrap,
   ProCapabilitiesStatus,
   ProCapabilityItem,
@@ -141,6 +143,7 @@ const DEFAULT_SETTINGS: GenerationSettings = {
     'A futuristic overgrown city in the rain, neon lights reflecting on wet streets, cinematic, ultra detailed, moody lighting, photorealistic',
   negativePrompt: 'blurry, low quality, distorted, text, watermark, signature',
   modelId: DEFAULT_MODELS[0].id,
+  pipelineBackend: 'aiwf',
   aspectRatioId: '3:2',
   width: 1536,
   height: 1024,
@@ -553,6 +556,20 @@ export async function generateProOutput(
   return normalizeGenerateResult(payload, request)
 }
 
+export async function importGenerationMetadataFromImage(
+  imageDataUrl: string,
+  filename: string,
+  signal?: AbortSignal,
+): Promise<ImportedGenerationMetadata> {
+  const payload = await requestJson('/api/pro/metadata/import', {
+    body: JSON.stringify({ imageDataUrl, filename }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+    signal,
+  })
+  return normalizeImportedGenerationMetadata(payload)
+}
+
 export interface VideoLabProbe {
   path: string
   url?: string
@@ -947,18 +964,6 @@ export async function unloadProModel(): Promise<ProRuntimeStatus> {
   return normalizeRuntime(readUnknown(record, ['runtime']))
 }
 
-export async function openSupportTerminal(): Promise<{ status: string; cwd: string; venv: string }> {
-  const payload = await requestJson('/api/pro/support/terminal', {
-    method: 'POST',
-  })
-  const record = asRecord(payload)
-  return {
-    status: readString(record, ['status'], 'opened'),
-    cwd: readString(record, ['cwd'], ''),
-    venv: readString(record, ['venv'], ''),
-  }
-}
-
 export function formatApiError(error: unknown): string {
   if (error instanceof DOMException && error.name === 'AbortError') {
     return 'Request was cancelled.'
@@ -1075,6 +1080,7 @@ function toGeneratePayload(request: ProGenerateRequest): JsonRecord {
     prompt: request.prompt,
     negative_prompt: request.negativePrompt,
     checkpoint_id: request.modelId,
+    pipeline_backend: request.pipelineBackend,
     width: request.width,
     height: request.height,
     steps: request.steps,
@@ -1678,6 +1684,22 @@ function normalizeGenerateResult(
   }
 }
 
+function normalizeImportedGenerationMetadata(value: unknown): ImportedGenerationMetadata {
+  const record = asRecord(value)
+  const settings = readRecord(record, ['settings']) as Partial<GenerationSettings>
+  return {
+    status: readString(record, ['status'], 'empty'),
+    filename: readString(record, ['filename'], ''),
+    width: readNumber(record, ['width'], 0),
+    height: readNumber(record, ['height'], 0),
+    infotext: readString(record, ['infotext'], ''),
+    settings,
+    metadata: readRecord(record, ['metadata']),
+    receipt: readRecord(record, ['receipt']),
+    message: readString(record, ['message'], 'No generation metadata was found in this image.'),
+  }
+}
+
 function normalizeProgressEvent(value: unknown) {
   const record = asRecord(value)
   return {
@@ -1727,6 +1749,7 @@ function normalizeSettings(
       ['model_id', 'modelId', 'checkpoint_id', 'checkpointId'],
       models[0]?.id ?? fallback.modelId,
     ),
+    pipelineBackend: normalizePipelineBackend(readUnknown(record, ['pipeline_backend', 'pipelineBackend']), fallback.pipelineBackend),
     aspectRatioId: matchedRatio?.id ?? fallback.aspectRatioId,
     width,
     height,
@@ -1932,6 +1955,9 @@ function normalizeRecentOutput(
   const thumbnailUrl = normalizeAssetUrl(
     readString(record, ['thumbnail_url', 'thumbnailUrl', 'thumbnail'], rawUrl),
   )
+  const generationSettings = readRecord(record, ['generationSettings', 'generation_settings']) as Partial<GenerationSettings>
+  const generationReceipt = readRecord(record, ['generationReceipt', 'generation_receipt'])
+  const metadata = readRecord(record, ['metadata'])
 
   return {
     id: readString(record, ['id', 'job_id', 'jobId'], `output-${index}-${url}`),
@@ -1951,6 +1977,13 @@ function normalizeRecentOutput(
     clipSkip: readOptionalNumber(record, ['clipSkip', 'clip_skip']),
     sampler: readOptionalString(record, ['sampler', 'samplerName', 'sampler_name']),
     scheduler: readOptionalString(record, ['scheduler', 'schedule']),
+    durationSeconds: readOptionalNumber(record, ['durationSeconds', 'duration_seconds', 'elapsedSeconds', 'elapsed_seconds']),
+    speed: readOptionalString(record, ['speed', 'throughput', 'stepsPerSecond', 'steps_per_second']),
+    receiptPath: readOptionalString(record, ['receiptPath', 'receipt_path']),
+    generationSettings: Object.keys(generationSettings).length > 0 ? generationSettings : undefined,
+    generationReceipt: Object.keys(generationReceipt).length > 0 ? generationReceipt : undefined,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+    metadataSchema: readOptionalString(record, ['metadataSchema', 'metadata_schema']),
     modelName: readOptionalString(record, ['model_name', 'modelName', 'model']),
     status: readOptionalString(record, ['status', 'state']),
     source: readOptionalString(record, ['source']),
@@ -2110,6 +2143,16 @@ function normalizeCreationMode(value: unknown, fallback: CreationMode): Creation
   }
   if (value === 'img2img') {
     return 'image'
+  }
+  return fallback
+}
+
+function normalizePipelineBackend(value: unknown, fallback: PipelineBackend): PipelineBackend {
+  if (value === 'sdcpp' || value === 'stable-diffusion.cpp' || value === 'stable_diffusion_cpp') {
+    return 'sdcpp'
+  }
+  if (value === 'aiwf' || value === 'diffusers' || value === 'pipeline') {
+    return 'aiwf'
   }
   return fallback
 }

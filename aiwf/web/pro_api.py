@@ -169,6 +169,10 @@ class ProGeneratePayload(BaseModel):
         default=None,
         validation_alias=AliasChoices("checkpointTitle", "checkpoint_title", "title"),
     )
+    pipeline_backend: str = Field(
+        default="aiwf",
+        validation_alias=AliasChoices("pipelineBackend", "pipeline_backend", "backend"),
+    )
     sampler: str = "euler_a"
     scheduler: str = "automatic"
     steps: int = Field(default=20, ge=1, le=150)
@@ -334,6 +338,15 @@ class ProControlNetUnitPayload(BaseModel):
     guidance_start: float = Field(default=0.0, ge=0.0, le=1.0, validation_alias=AliasChoices("guidanceStart", "guidance_start"))
     guidance_end: float = Field(default=1.0, ge=0.0, le=1.0, validation_alias=AliasChoices("guidanceEnd", "guidance_end"))
     control_mode: str = Field(default="balanced", validation_alias=AliasChoices("controlMode", "control_mode"))
+
+
+class ProMetadataImportPayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    image_data_url: str = Field(
+        validation_alias=AliasChoices("imageDataUrl", "image_data_url", "dataUrl", "data_url"),
+    )
+    filename: str = ""
 
 
 class ProSettingsUpdatePayload(BaseModel):
@@ -623,14 +636,23 @@ def _engine_id_for_catalog_entry(item: Any) -> str:
     return "unknown"
 
 
-def _artifact_payload(item: Any) -> dict[str, str]:
+def _artifact_payload(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         path = item.get("path", "")
         infotext = item.get("infotext", "")
+        receipt_path = item.get("receipt_path") or item.get("receiptPath")
+        metadata = item.get("metadata")
     else:
         path = getattr(item, "path", "")
         infotext = getattr(item, "infotext", "")
-    return {"path": str(path), "infotext": str(infotext or "")}
+        receipt_path = getattr(item, "receipt_path", None)
+        metadata = getattr(item, "metadata", None)
+    payload: dict[str, Any] = {"path": str(path), "infotext": str(infotext or "")}
+    if receipt_path:
+        payload["receiptPath"] = str(receipt_path)
+    if isinstance(metadata, dict) and metadata:
+        payload["metadata"] = metadata
+    return payload
 
 
 def _clean_optional_text(value: Any) -> str:
@@ -695,6 +717,122 @@ def _settings_from_infotext(infotext: str) -> dict[str, Any]:
     if height is not None:
         settings["height"] = height
     return settings
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _settings_from_generation_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    pro_settings = metadata.get("pro_settings")
+    if isinstance(pro_settings, dict):
+        return dict(pro_settings)
+    settings = metadata.get("settings")
+    if not isinstance(settings, dict):
+        return {}
+    mapped: dict[str, Any] = {}
+    key_map = {
+        "prompt": "prompt",
+        "negative_prompt": "negativePrompt",
+        "checkpoint_id": "modelId",
+        "width": "width",
+        "height": "height",
+        "steps": "steps",
+        "cfg_scale": "cfgScale",
+        "sampler": "sampler",
+        "scheduler": "scheduler",
+        "seed": "seed",
+        "clip_skip": "clipSkip",
+        "batch_size": "batchSize",
+        "batch_count": "batchCount",
+        "enable_hr": "enableHires",
+        "hr_scale": "hiresScale",
+        "hr_steps": "hiresSteps",
+        "hr_denoising_strength": "hiresDenoise",
+        "hr_upscaler": "hiresUpscaler",
+        "vae_id": "vaeId",
+        "denoising_strength": "denoisingStrength",
+        "mask_blur": "maskBlur",
+        "inpaint_only_masked": "inpaintOnlyMasked",
+        "inpaint_masked_padding": "inpaintMaskedPadding",
+        "inpaint_mask_content": "inpaintMaskContent",
+        "save_images": "saveImages",
+    }
+    for source, target in key_map.items():
+        if source in settings and settings[source] is not None:
+            mapped[target] = settings[source]
+    mode = str(settings.get("mode") or "").lower()
+    if mode in {"inpaint", "img2img"}:
+        mapped["mode"] = "inpaint" if mode == "inpaint" else "image"
+    elif mode:
+        mapped["mode"] = "image"
+    return mapped
+
+
+def _image_text_metadata_fields(image_text: dict[str, Any]) -> dict[str, Any]:
+    aiwf_payload = _json_object(image_text.get("aiwf"))
+    generation = _json_object(image_text.get("aiwf_generation"))
+    if not generation and isinstance(aiwf_payload.get("generation"), dict):
+        generation = dict(aiwf_payload["generation"])
+    settings = _json_object(image_text.get("aiwf_generation_settings")) or _settings_from_generation_metadata(generation)
+    receipt = _json_object(image_text.get("aiwf_generation_receipt"))
+    if not receipt and isinstance(generation.get("receipt"), dict):
+        receipt = dict(generation["receipt"])
+    infotext = _clean_optional_text(image_text.get("parameters"))
+    if not settings:
+        settings = _settings_from_infotext(infotext)
+    fields: dict[str, Any] = {}
+    if generation:
+        fields["metadata"] = generation
+        fields["metadataSchema"] = str(generation.get("metadata_schema") or "aiwf.generation.v1")
+        model = generation.get("model")
+        if isinstance(model, dict):
+            fields["modelName"] = str(model.get("title") or model.get("id") or model.get("filename") or "")
+    if settings:
+        fields["generationSettings"] = settings
+        fields.update({key: value for key, value in settings.items() if key in {
+            "prompt",
+            "negativePrompt",
+            "width",
+            "height",
+            "steps",
+            "cfgScale",
+            "sampler",
+            "scheduler",
+            "seed",
+            "clipSkip",
+            "modelName",
+        }})
+    if receipt:
+        fields["generationReceipt"] = receipt
+        elapsed = _optional_float(receipt.get("elapsed_seconds"))
+        if elapsed is not None:
+            fields["durationSeconds"] = round(elapsed, 2)
+        steps_per_second = _optional_float(receipt.get("steps_per_second"))
+        if steps_per_second is not None:
+            fields["speed"] = f"{steps_per_second:.2f} steps/s"
+    return fields
+
+
+def _read_output_generation_metadata(path: Path) -> dict[str, Any]:
+    try:
+        with Image.open(path) as image:
+            text = dict(getattr(image, "text", None) or {})
+            info = getattr(image, "info", None) or {}
+            for key in ("parameters", "aiwf", "aiwf_generation", "aiwf_generation_settings", "aiwf_generation_receipt"):
+                if key not in text and key in info:
+                    text[key] = info[key]
+    except Exception:
+        return {}
+    return _image_text_metadata_fields(text)
 
 
 def _read_output_infotext(path: Path, fallback: Any = "") -> str:
@@ -924,43 +1062,10 @@ def _schedule_process_restart(delay_seconds: float = 0.25) -> None:
 
 
 def _open_support_terminal(ctx: Any) -> dict[str, str]:
-    if os.name != "nt":
-        raise HTTPException(status_code=501, detail="Support terminal launch is currently available on Windows only.")
-    root = Path(__file__).resolve().parents[2]
-    flags = getattr(ctx, "flags", None)
-    venv_dir = root / "venv"
-    activate = venv_dir / "Scripts" / "Activate.ps1"
-    commands = [
-        f"Set-Location -LiteralPath {json.dumps(str(root))}",
-        "$Host.UI.RawUI.WindowTitle = 'AIWF Studio Support Terminal'",
-    ]
-    if activate.is_file():
-        commands.append(f". {json.dumps(str(activate))}")
-    commands.extend(
-        [
-            "Write-Host 'AIWF Studio support terminal'",
-            "Write-Host 'Repo:' (Get-Location)",
-            f"Write-Host 'Python:' {json.dumps(sys.executable)}",
-            "Write-Host 'Useful checks: python --version; python -m pip check; npm --prefix frontend run build'",
-        ]
+    raise HTTPException(
+        status_code=410,
+        detail="Visible support terminals are disabled. Use the in-app Monitor and Logs views instead.",
     )
-    if flags is not None:
-        commands.append(f"Write-Host 'Models:' {json.dumps(str(flags.resolved_models_dir()))}")
-        commands.append(f"Write-Host 'Outputs:' {json.dumps(str(flags.resolved_output_dir()))}")
-    command = [
-        "powershell.exe",
-        "-NoExit",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        "; ".join(commands),
-    ]
-    try:
-        subprocess.Popen(command, cwd=str(root), creationflags=subprocess.CREATE_NEW_CONSOLE)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not open support terminal: {exc}") from exc
-    return {"status": "opened", "cwd": str(root), "venv": str(venv_dir)}
 
 
 def _unload_generation_model(ctx: Any) -> dict[str, Any]:
@@ -1306,6 +1411,7 @@ def _recent_output_images_uncached(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT
                     if index < len(getattr(result, "infotexts", []) or [])
                     else artifact.get("infotext", "")
                 )
+                elapsed_seconds = _generation_elapsed_seconds(result)
                 add_image(
                     {
                         "source": "memory",
@@ -1321,11 +1427,22 @@ def _recent_output_images_uncached(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT
                         ),
                         "sampler": str(getattr(request, "sampler", "") or ""),
                         "scheduler": str(getattr(request, "scheduler", "") or ""),
+                        "durationSeconds": round(elapsed_seconds, 2) if elapsed_seconds > 0 else None,
+                        "speed": _generation_speed_label(request, result),
                         "seed": (getattr(result, "seeds", []) or [None])[index]
                         if index < len(getattr(result, "seeds", []) or [])
                         else None,
                         "modelName": str(getattr(request, "checkpoint_id", "") or ""),
                         "infotext": infotext,
+                        "receiptPath": artifact.get("receiptPath", ""),
+                        **_image_text_metadata_fields(
+                            {
+                                "parameters": infotext,
+                                "aiwf_generation": json.dumps(artifact.get("metadata", {}), sort_keys=True)
+                                if isinstance(artifact.get("metadata"), dict)
+                                else "",
+                            }
+                        ),
                     }
                 )
             if len(images) >= limit:
@@ -1350,6 +1467,8 @@ def _recent_output_images_uncached(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT
                         "dataUrl": data_url,
                         "path": str(path),
                         "infotext": infotext,
+                        "receiptPath": artifact_data.get("receiptPath", ""),
+                        **_read_output_generation_metadata(path),
                         **_settings_from_infotext(infotext),
                     }
                 )
@@ -1375,6 +1494,7 @@ def _recent_output_images_uncached(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT
                 "dataUrl": data_url,
                 "path": str(path),
                 "infotext": infotext,
+                **_read_output_generation_metadata(path),
                 **_settings_from_infotext(infotext),
             }
         )
@@ -3217,6 +3337,51 @@ def _generation_request(ctx: Any, payload: ProGeneratePayload) -> GenerationRequ
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
 
+def _normal_pipeline_backend(value: str | None) -> str:
+    normalized = str(value or "aiwf").strip().lower().replace("-", "_")
+    if normalized in {"sdcpp", "stable_diffusion.cpp", "stable_diffusion_cpp"}:
+        return "sdcpp"
+    return "aiwf"
+
+
+def _assert_requested_pipeline_backend(ctx: Any, payload: ProGeneratePayload) -> None:
+    requested = _normal_pipeline_backend(payload.pipeline_backend)
+    if requested != "sdcpp":
+        return
+    active_backend = str(getattr(getattr(ctx, "flags", None), "inference_backend", "") or "").strip().lower()
+    backend_class = getattr(getattr(getattr(ctx, "generation", None), "backend", None), "__class__", type("", (), {})).__name__.lower()
+    if active_backend in {"sdcpp", "stable-diffusion.cpp", "stable_diffusion_cpp"} or "sdcpp" in backend_class:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail="stable-diffusion.cpp is selected, but the running Pro backend is not the C++ backend. Restart Pro with the C++ backend before generating from this toggle.",
+    )
+
+
+def _generation_elapsed_seconds(result: Any) -> float:
+    try:
+        return max(0.0, float(getattr(result, "elapsed_seconds", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _generation_speed_label(request: Any, result: Any) -> str:
+    elapsed = _generation_elapsed_seconds(result)
+    if elapsed <= 0:
+        return ""
+    try:
+        steps = max(0, int(getattr(request, "steps", 0) or 0))
+    except (TypeError, ValueError):
+        steps = 0
+    parts: list[str] = []
+    if steps > 0:
+        parts.append(f"{steps / elapsed:.2f} steps/s")
+    images = len(getattr(result, "images", []) or [])
+    if images > 1:
+        parts.append(f"{images / elapsed:.2f} img/s")
+    return " | ".join(parts)
+
+
 def _job_recent_output_payloads(job: Any) -> list[dict[str, Any]]:
     request = getattr(job, "request", None)
     result = getattr(job, "result", None)
@@ -3230,6 +3395,8 @@ def _job_recent_output_payloads(job: Any) -> list[dict[str, Any]]:
     prompt = str(getattr(request, "prompt", "") or "")
     negative_prompt = str(getattr(request, "negative_prompt", "") or "")
     model_name = str(getattr(request, "checkpoint_id", "") or "")
+    elapsed_seconds = _generation_elapsed_seconds(result)
+    speed = _generation_speed_label(request, result)
     outputs: list[dict[str, Any]] = []
     for index, image in enumerate(images):
         data_url = _image_to_data_url(image)
@@ -3237,6 +3404,14 @@ def _job_recent_output_payloads(job: Any) -> list[dict[str, Any]]:
             continue
         artifact = artifacts[index] if index < len(artifacts) else {}
         path = str(artifact.get("path") or "")
+        metadata_fields = _image_text_metadata_fields(
+            {
+                "parameters": infotexts[index] if index < len(infotexts) and infotexts[index] else "",
+                "aiwf_generation": json.dumps(artifact.get("metadata", {}), sort_keys=True)
+                if isinstance(artifact.get("metadata"), dict)
+                else "",
+            }
+        )
         created_at = datetime.now(timezone.utc).isoformat()
         if path:
             try:
@@ -3268,7 +3443,11 @@ def _job_recent_output_payloads(job: Any) -> list[dict[str, Any]]:
                 "clipSkip": int(getattr(request, "clip_skip", 1) or 1),
                 "sampler": str(getattr(request, "sampler", "") or ""),
                 "scheduler": str(getattr(request, "scheduler", "") or ""),
+                "durationSeconds": round(elapsed_seconds, 2) if elapsed_seconds > 0 else None,
+                "speed": speed,
                 "modelName": model_name,
+                "receiptPath": artifact.get("receiptPath", ""),
+                **metadata_fields,
                 "status": "completed",
                 "source": "generation",
             }
@@ -3282,6 +3461,12 @@ def _generate_response(job: Any) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=getattr(job, "error", None) or "Generation failed")
     recent_outputs = _job_recent_output_payloads(job)
     encoded_images = [item["url"] for item in recent_outputs]
+    request = getattr(job, "request", None)
+    elapsed_seconds = _generation_elapsed_seconds(result)
+    try:
+        steps = max(0, int(getattr(request, "steps", 0) or 0))
+    except (TypeError, ValueError):
+        steps = 0
     return {
         "jobId": str(getattr(job, "id", getattr(result, "job_id", ""))),
         "status": "completed",
@@ -3293,6 +3478,10 @@ def _generate_response(job: Any) -> dict[str, Any]:
         "seeds": list(getattr(result, "seeds", []) or []),
         "infotexts": list(getattr(result, "infotexts", []) or []),
         "artifacts": [_artifact_payload(item) for item in (getattr(result, "artifacts", []) or [])],
+        "timings": {
+            "elapsedSeconds": round(elapsed_seconds, 3),
+            "stepsPerSecond": round(steps / elapsed_seconds, 3) if elapsed_seconds > 0 and steps > 0 else 0,
+        },
         "message": f"Generated {len(recent_outputs)} image(s).",
     }
 
@@ -3318,6 +3507,58 @@ def _decode_pro_image_data_url(data_url: str | None, label: str) -> Image.Image 
     except OSError as exc:
         raise HTTPException(status_code=422, detail=f"{label} could not be opened.") from exc
     return image
+
+
+def _decode_data_url_bytes(data_url: str | None, label: str) -> bytes:
+    value = (data_url or "").strip()
+    if not value:
+        raise HTTPException(status_code=422, detail=f"{label} is empty.")
+    if "," not in value or ";base64" not in value.partition(",")[0].lower():
+        raise HTTPException(status_code=422, detail=f"{label} must be a base64 data URL.")
+    header, encoded = value.split(",", 1)
+    if not header.lower().startswith("data:image/"):
+        raise HTTPException(status_code=422, detail=f"{label} must be an image.")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{label} data is not valid base64.") from exc
+    if len(raw) > _PRO_SOURCE_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"{label} is too large.")
+    return raw
+
+
+def _import_generation_metadata_from_image(payload: ProMetadataImportPayload) -> dict[str, Any]:
+    raw = _decode_data_url_bytes(payload.image_data_url, "Image metadata import")
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            text = dict(getattr(image, "text", None) or {})
+            info = getattr(image, "info", None) or {}
+            for key in ("parameters", "aiwf", "aiwf_generation", "aiwf_generation_settings", "aiwf_generation_receipt"):
+                if key not in text and key in info:
+                    text[key] = info[key]
+            width, height = image.size
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail="Image metadata import could not be opened.") from exc
+
+    infotext = _clean_optional_text(text.get("parameters"))
+    fields = _image_text_metadata_fields(text)
+    settings = fields.get("generationSettings")
+    if not isinstance(settings, dict):
+        settings = _settings_from_infotext(infotext)
+    metadata = fields.get("metadata") if isinstance(fields.get("metadata"), dict) else {}
+    receipt = fields.get("generationReceipt") if isinstance(fields.get("generationReceipt"), dict) else {}
+    return {
+        "status": "ok" if settings else "empty",
+        "filename": payload.filename,
+        "width": width,
+        "height": height,
+        "infotext": infotext,
+        "settings": settings or {},
+        "metadata": metadata,
+        "receipt": receipt,
+        "message": "Generation settings found." if settings else "No generation metadata was found in this image.",
+    }
 
 
 def _assert_inpaint_checkpoint_supported(ctx: Any, payload: ProGeneratePayload) -> None:
@@ -4365,8 +4606,13 @@ def build_router(ctx: Any) -> APIRouter:
     def output_asset(requested_path: str):
         return FileResponse(_output_asset_path(ctx, requested_path))
 
+    @router.post("/metadata/import")
+    def metadata_import(payload: ProMetadataImportPayload):
+        return _import_generation_metadata_from_image(payload)
+
     @router.post("/generate")
     def generate(payload: ProGeneratePayload):
+        _assert_requested_pipeline_backend(ctx, payload)
         if (payload.mode or "").strip().lower() in {"video", "sana", "sana_video", "wan"}:
             if _pro_video_job_running(ctx) or _image_generation_running(ctx) or _image_generation_pending(ctx):
                 raise HTTPException(status_code=409, detail="A generation job is already running. Stop it or wait for it to finish.")

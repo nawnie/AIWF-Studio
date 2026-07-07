@@ -54,6 +54,20 @@ Rules:
   the generic launch installer because their Python/CUDA/torch stack differs
   from the core Studio runtime.
 
+## Installer Weight
+
+The installer should not make optional media stacks look mandatory.
+
+- Plain Express installs the current shared app runtime, builds Pro, and creates
+  shortcuts. It should not download model weights or probe optional vendor SDKs.
+- Model downloads require an explicit switch such as `-WithDefaultModel`.
+- NVIDIA VideoFX linking requires an explicit switch such as `-WithNvidiaVideoFx`
+  after the user has installed the SDK locally.
+- The current shared runtime still includes CUDA PyTorch and Diffusers because
+  the default image backend is in-process. The cleanup target is to split the
+  Pro shell from image runtime setup so the UI can boot before any local image
+  backend is installed.
+
 ## ED2 Fork
 
 ED2 is the full fine-tune engine. Install Shawn's fork by setting:

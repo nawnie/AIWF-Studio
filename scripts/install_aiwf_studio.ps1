@@ -1,11 +1,15 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("prompt", "express", "custom", "quit")]
+    [ValidateSet("prompt", "express", "full", "custom", "quit")]
     [string]$Mode = "prompt",
     [switch]$DryRun,
     [switch]$ShortcutsOnly,
     [switch]$SkipPrerequisites,
-    [switch]$SkipFrontendBuild
+    [switch]$SkipFrontendBuild,
+    [switch]$SkipRuntimeSetup,
+    [switch]$WithDefaultModel,
+    [switch]$WithNvidiaVideoFx,
+    [switch]$FullImageStack
 )
 
 $ErrorActionPreference = "Stop"
@@ -219,6 +223,11 @@ function Ensure-PythonVenv {
 }
 
 function Prepare-AiwfRuntime {
+    if ($SkipRuntimeSetup) {
+        Write-Host "Skipping Python runtime setup. Launching generation later may install runtime packages."
+        return
+    }
+
     Write-Section "AIWF Python dependencies"
     Invoke-External "Prepare AIWF runtime" $VenvPython @(
         "-c",
@@ -249,6 +258,11 @@ function Build-ProFrontend {
 }
 
 function Install-DefaultBaseModel {
+    if (-not ($WithDefaultModel -or $FullImageStack)) {
+        Write-Host "Skipping default SD 1.5 model download. Use -WithDefaultModel or -FullImageStack to install it."
+        return
+    }
+
     Write-Section "Default image model"
     if ($DryRun) {
         Write-Host "[dry-run] Would install Stable Diffusion 1.5 fp16 pruned base model if missing."
@@ -264,6 +278,7 @@ function New-DesktopShortcut {
     param(
         [string]$Name,
         [string]$TargetPath,
+        [string]$Arguments = "",
         [string]$IconPath,
         [string]$Description
     )
@@ -273,6 +288,9 @@ function New-DesktopShortcut {
     if ($DryRun) {
         Write-Host "[dry-run] Shortcut: $shortcutPath"
         Write-Host "          Target: $TargetPath"
+        if ($Arguments) {
+            Write-Host "          Args:   $Arguments"
+        }
         Write-Host "          Icon:   $IconPath"
         return
     }
@@ -280,29 +298,39 @@ function New-DesktopShortcut {
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = $TargetPath
+    $shortcut.Arguments = $Arguments
     $shortcut.WorkingDirectory = $Root
     $shortcut.IconLocation = "$IconPath,0"
     $shortcut.Description = $Description
+    $shortcut.WindowStyle = 7
     $shortcut.Save()
     Write-Host "Created Desktop shortcut: $shortcutPath"
 }
 
 function Install-DesktopShortcuts {
     Write-Section "Desktop shortcuts"
+    $wscript = Join-Path $env:WINDIR "System32\wscript.exe"
     New-DesktopShortcut `
         -Name "AIWF Studio Pro" `
-        -TargetPath (Join-Path $Root "AIWF Studio Pro.bat") `
+        -TargetPath $wscript `
+        -Arguments ('"{0}"' -f (Join-Path $Root "AIWF Studio Pro.vbs")) `
         -IconPath (Join-Path $Root "static\icons\aiwf-studio-pro.ico") `
         -Description "AIWF Studio Pro production React app"
 
     New-DesktopShortcut `
         -Name "AIWF Studio Gradio Lab" `
-        -TargetPath (Join-Path $Root "AIWF Studio Gradio Lab.bat") `
+        -TargetPath $wscript `
+        -Arguments ('"{0}"' -f (Join-Path $Root "AIWF Studio Gradio Lab.vbs")) `
         -IconPath (Join-Path $Root "static\icons\aiwf-studio-gradio-lab.ico") `
         -Description "AIWF Studio Gradio Lab for WIP features"
 }
 
 function Install-NvidiaVideoFx {
+    if (-not ($WithNvidiaVideoFx -or $FullImageStack)) {
+        Write-Host "Skipping NVIDIA VideoFX SDK linking. Use -WithNvidiaVideoFx or -FullImageStack after installing the SDK locally."
+        return
+    }
+
     Write-Section "NVIDIA VideoFX (VSR) SDK"
     $enginesDir = Join-Path $Root "engines"
     $sdkLink = Join-Path $enginesDir "nvidia-vfx-sdk"
@@ -365,15 +393,17 @@ function Install-NvidiaVideoFx {
 function Read-InstallerMode {
     Write-Host "AIWF Studio installer"
     Write-Host ""
-    Write-Host "Express installs or checks Git, uv, Python $PythonVersion, Node.js LTS, app dependencies, the Pro frontend, and Desktop shortcuts."
+    Write-Host "Express installs or checks Git, uv, Python $PythonVersion, Node.js LTS, the app runtime, the Pro frontend, and Desktop shortcuts."
+    Write-Host "Full does Express plus the default SD 1.5 model and optional NVIDIA VideoFX SDK link checks."
     Write-Host "Custom is the existing manual path: use the .bat files or Python launch commands yourself."
     Write-Host ""
-    $choice = Read-Host "Choose [E]xpress, [C]ustom, or [Q]uit"
+    $choice = Read-Host "Choose [E]xpress, [F]ull image stack, [C]ustom, or [Q]uit"
     if ([string]::IsNullOrWhiteSpace($choice)) {
         return "express"
     }
     switch ($choice.Trim().Substring(0, 1).ToLowerInvariant()) {
         "e" { return "express" }
+        "f" { return "full" }
         "c" { return "custom" }
         "q" { return "quit" }
         default { return "express" }
@@ -398,6 +428,10 @@ if ($Mode -eq "custom") {
     Write-Host "  python launch_pro.py"
     Write-Host "  python launch_gradio.py"
     exit 0
+}
+
+if ($Mode -eq "full") {
+    $FullImageStack = $true
 }
 
 if ($ShortcutsOnly) {

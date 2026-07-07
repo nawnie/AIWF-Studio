@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 from uuid import uuid4
 
-from PIL import Image
+from PIL import Image, ImageStat
 
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.errors import GenerationCancelledError, ModelNotFoundError
@@ -71,6 +71,7 @@ _STEP_PATTERNS = (
     re.compile(r"(?:step|sampling)\D+(\d+)\D+(\d+)", re.IGNORECASE),
     re.compile(r"\b(\d+)\s*/\s*(\d+)\b"),
 )
+_SEED_PATTERN = re.compile(r"generating image:\s*\d+/\d+\s*-\s*seed\s+(-?\d+)", re.IGNORECASE)
 
 
 def _env_value(name: str, default: str = "") -> str:
@@ -368,6 +369,11 @@ class StableDiffusionCppBackend:
                 return step, total
         return None
 
+    @staticmethod
+    def _is_flat_output(image: Image.Image) -> bool:
+        stat = ImageStat.Stat(image)
+        return max(stat.stddev or [0.0]) < 0.5
+
     def _collect_outputs(self, output_path: Path) -> list[Path]:
         if "%" in output_path.name:
             pattern = re.sub(r"%0?\d*d", "*", output_path.name)
@@ -429,6 +435,7 @@ class StableDiffusionCppBackend:
             )
 
             lines: list[str] = []
+            generated_seeds: list[int] = []
             last_step = 0
             last_preview_mtime = 0.0
             reader_done = threading.Event()
@@ -443,6 +450,12 @@ class StableDiffusionCppBackend:
                     lines.append(line)
                     del lines[:-80]
                     logger.info("stable-diffusion.cpp: %s", line)
+                    seed_match = _SEED_PATTERN.search(line)
+                    if seed_match is not None:
+                        try:
+                            generated_seeds.append(int(seed_match.group(1)))
+                        except ValueError:
+                            pass
                     parsed = self._parse_step(line)
                     if parsed is None:
                         continue
@@ -489,12 +502,15 @@ class StableDiffusionCppBackend:
             images: list[Image.Image] = []
             seeds: list[int] = []
             infotexts: list[str] = []
+            flat_outputs: list[str] = []
             base_seed = int(request.seed if request.seed >= 0 else 0)
             for index, path in enumerate(output_files):
                 with Image.open(path) as image:
                     img = image.convert("RGB").copy()
+                if self._is_flat_output(img):
+                    flat_outputs.append(str(path))
                 images.append(img)
-                seed = base_seed + index if base_seed >= 0 else base_seed
+                seed = generated_seeds[index] if index < len(generated_seeds) else base_seed + index
                 seeds.append(seed)
                 infotexts.append(
                     format_infotext(
@@ -504,6 +520,12 @@ class StableDiffusionCppBackend:
                         output_width=img.width,
                         output_height=img.height,
                     )
+                )
+            if flat_outputs:
+                flat_list = "\n".join(flat_outputs)
+                raise RuntimeError(
+                    "stable-diffusion.cpp produced blank/flat output image(s). "
+                    f"The checkpoint may be incompatible with this C++ backend: {checkpoint.title}\n{flat_list}"
                 )
 
             if on_progress is not None:

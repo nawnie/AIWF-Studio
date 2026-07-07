@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -359,7 +360,7 @@ class GenerationService:
             elapsed = float(result.elapsed_seconds or 0.0)
             controlnet_units = [
                 {
-                    "model_id": unit.model_id,
+                    "model_id": unit.model,
                     "module": unit.module,
                     "weight": unit.weight,
                     "guidance_start": unit.guidance_start,
@@ -680,6 +681,163 @@ class GenerationService:
             "metadata_schema": "aiwf.training.v1",
         }
 
+    def _runtime_flags_payload(self) -> dict[str, Any]:
+        flags = getattr(self.backend, "flags", None)
+        if flags is None:
+            return {}
+        def flag_text(name: str) -> str:
+            value = getattr(flags, name, "")
+            return value if isinstance(value, str) else ""
+
+        def flag_bool(name: str) -> bool:
+            value = getattr(flags, name, False)
+            return value if isinstance(value, bool) else False
+
+        vram_profile = flags.effective_vram_profile() if hasattr(flags, "effective_vram_profile") else ""
+        if not isinstance(vram_profile, str):
+            vram_profile = ""
+        return {
+            "inference_backend": flag_text("inference_backend"),
+            "attention_backend": flag_text("attention_backend"),
+            "vram_profile": vram_profile,
+            "fp8": flag_bool("fp8"),
+            "medvram": flag_bool("medvram"),
+            "lowvram": flag_bool("lowvram"),
+            "highvram": flag_bool("highvram"),
+            "no_half": flag_bool("no_half"),
+            "torch_compile": flag_bool("torch_compile"),
+            "channels_last": flag_bool("channels_last"),
+        }
+
+    def _pro_settings_payload(
+        self,
+        request: GenerationRequest,
+        *,
+        seed: int | None,
+        image: Image.Image,
+    ) -> dict[str, Any]:
+        mode = "inpaint" if request.mode == GenerationMode.INPAINT else "image"
+        active_control_unit = next((unit for unit in request.controlnet_units if getattr(unit, "enabled", False)), None)
+        payload: dict[str, Any] = {
+            "mode": mode,
+            "prompt": request.prompt,
+            "negativePrompt": request.negative_prompt,
+            "modelId": request.checkpoint_id or "",
+            "width": int(getattr(image, "width", request.width)),
+            "height": int(getattr(image, "height", request.height)),
+            "steps": int(request.steps),
+            "cfgScale": float(request.cfg_scale),
+            "sampler": request.sampler,
+            "scheduler": request.scheduler,
+            "seed": seed if seed is not None else request.seed,
+            "clipSkip": int(request.clip_skip),
+            "batchSize": int(request.batch_size),
+            "batchCount": int(request.batch_count),
+            "enableHires": bool(request.enable_hr),
+            "hiresScale": float(request.hr_scale),
+            "hiresSteps": int(request.hr_steps),
+            "hiresDenoise": float(request.hr_denoising_strength),
+            "hiresUpscaler": request.hr_upscaler,
+            "denoisingStrength": float(request.denoising_strength),
+            "maskBlur": int(request.mask_blur),
+            "inpaintOnlyMasked": bool(request.inpaint_only_masked),
+            "inpaintMaskedPadding": int(request.inpaint_masked_padding),
+            "inpaintMaskContent": request.inpaint_mask_content,
+            "controlNetEnabled": bool(active_control_unit),
+            "controlNetModel": getattr(active_control_unit, "model", "") if active_control_unit else "",
+            "controlNetModule": getattr(active_control_unit, "module", "none") if active_control_unit else "none",
+            "controlNetWeight": float(getattr(active_control_unit, "weight", 1.0)) if active_control_unit else 1.0,
+            "controlNetGuidanceStart": (
+                float(getattr(active_control_unit, "guidance_start", 0.0)) if active_control_unit else 0.0
+            ),
+            "controlNetGuidanceEnd": (
+                float(getattr(active_control_unit, "guidance_end", 1.0)) if active_control_unit else 1.0
+            ),
+            "controlNetProcessorRes": (
+                int(getattr(active_control_unit, "processor_res", 512)) if active_control_unit else 512
+            ),
+            "saveImages": bool(request.save_images),
+        }
+        if request.vae_id:
+            payload["vaeId"] = request.vae_id
+        return payload
+
+    def _generation_metadata_payload(
+        self,
+        result: GenerationResult,
+        request: GenerationRequest,
+        checkpoint,
+        *,
+        seed: int | None,
+        index: int,
+        image: Image.Image,
+        optimization_plan: OptimizationPlan | None,
+    ) -> dict[str, Any]:
+        elapsed = float(result.elapsed_seconds or 0.0)
+        step_count = self._genlog_step_count(request)
+        parsed = parse_extra_networks(request.prompt)
+        return {
+            "metadata_schema": "aiwf.generation.v1",
+            "generator": "aiwf-studio",
+            "app_version": __version__,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "kind": "image",
+            "image_index": index,
+            "seed": seed if seed is not None else request.seed,
+            "output": {
+                "width": int(getattr(image, "width", request.width)),
+                "height": int(getattr(image, "height", request.height)),
+            },
+            "model": {
+                "id": getattr(checkpoint, "id", None),
+                "title": getattr(checkpoint, "title", None),
+                "filename": getattr(checkpoint, "filename", None),
+                "architecture": getattr(checkpoint, "architecture", None),
+                "hash": getattr(checkpoint, "hash", None),
+                "kind": getattr(checkpoint, "kind", None),
+                "asset_summary": getattr(checkpoint, "asset_summary", None),
+            },
+            "loras": [{"name": ref.name, "weight": ref.weight} for ref in parsed.loras],
+            "settings": request.model_dump(mode="json"),
+            "pro_settings": self._pro_settings_payload(request, seed=seed, image=image),
+            "optimization": {
+                "profile_id": optimization_plan.profile_id if optimization_plan is not None else None,
+                "pipeline_kind": self._pipeline_kind_for_request(request).value,
+                "model_family": self._model_family_for_checkpoint(checkpoint).value,
+            },
+            "runtime": self._runtime_flags_payload(),
+            "receipt": {
+                "job_id": str(result.job_id),
+                "elapsed_seconds": round(elapsed, 6),
+                "step_count": step_count,
+                "steps_per_second": round(step_count / elapsed, 6) if elapsed > 0 else None,
+                "image_count": len(result.images),
+                "images_per_second": round(len(result.images) / elapsed, 6) if elapsed > 0 else None,
+                "batch_size": int(request.batch_size),
+                "batch_count": int(request.batch_count),
+            },
+        }
+
+    def _write_generation_receipt(
+        self,
+        image_path: Path,
+        *,
+        metadata_payload: dict[str, Any],
+        infotext: str,
+    ) -> str | None:
+        receipt = {
+            "schema": "aiwf.generation-receipt.v1",
+            "image_path": str(image_path),
+            "infotext": infotext,
+            **metadata_payload,
+        }
+        receipt_path = image_path.with_suffix(f"{image_path.suffix}.receipt.json")
+        try:
+            receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
+            return str(receipt_path)
+        except OSError:
+            return None
+
     def _save_generation_result(
         self,
         result: GenerationResult,
@@ -718,6 +876,24 @@ class GenerationService:
             extra_payload = None
             filename_stem = None
             format_override = None
+            generation_payload = self._generation_metadata_payload(
+                result,
+                request,
+                checkpoint,
+                seed=seed,
+                index=index,
+                image=image,
+                optimization_plan=optimization_plan,
+            )
+            extra_text = {
+                "aiwf_generation": json.dumps(generation_payload, sort_keys=True),
+                "aiwf_generation_settings": json.dumps(generation_payload["pro_settings"], sort_keys=True),
+                "aiwf_generation_receipt": json.dumps(generation_payload["receipt"], sort_keys=True),
+            }
+            extra_payload = {
+                "generation_metadata_schema": "aiwf.generation.v1",
+                "generation": generation_payload,
+            }
             if training_enabled:
                 caption = self._training_caption(
                     request,
@@ -735,16 +911,16 @@ class GenerationService:
                     image=image,
                     optimization_plan=optimization_plan,
                 )
-                extra_text = {
+                extra_text.update({
                     "full_prompt": request.prompt,
                     "negative_prompt": request.negative_prompt,
                     "aiwf_training": json.dumps(training_payload, sort_keys=True),
-                }
-                extra_payload = {
+                })
+                extra_payload.update({
                     "for_ai_training": True,
                     "training_metadata_schema": "aiwf.training.v1",
                     "training": training_payload,
-                }
+                })
                 filename_stem = self._training_filename_stem(request, checkpoint, index + 1)
                 format_override = "png"
             if self.settings.embed_metadata or request.tags or training_enabled:
@@ -766,6 +942,18 @@ class GenerationService:
                 filename_stem=filename_stem,
                 format_override=format_override,
             )
+            if self.settings.embed_metadata or training_enabled:
+                receipt_path = self._write_generation_receipt(
+                    Path(artifact.path),
+                    metadata_payload=generation_payload,
+                    infotext=infotext,
+                )
+                artifact = artifact.model_copy(
+                    update={
+                        "receipt_path": receipt_path,
+                        "metadata": generation_payload,
+                    }
+                )
             artifacts.append(artifact)
             saved_images.append(image)
         if request.save_before_hires and result.before_hires_images:

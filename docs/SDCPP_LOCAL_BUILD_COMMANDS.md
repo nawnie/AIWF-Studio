@@ -17,8 +17,8 @@ cmake -S $ToolRoot -B (Join-Path $ToolRoot "build") -DSD_CUDA=ON -DCMAKE_BUILD_T
 # Build sd-cli.
 cmake --build (Join-Path $ToolRoot "build") --config Release --parallel
 
-# Launch AIWF Pro through the sd.cpp profile.
-.\scripts\launch_sdcpp.ps1 -SdCli "$ToolRoot\build\bin\Release\sd-cli.exe" -Backend cuda0 -MaxVram 14 -SetDefault -Terminal
+# Save the sd.cpp profile, then start Pro from the Desktop shortcut.
+.\scripts\launch_sdcpp.ps1 -SdCli "$ToolRoot\build\bin\Release\sd-cli.exe" -Backend cuda0 -MaxVram 14 -SetDefault
 ```
 
 If the built binary lands in a different folder, point `-SdCli` at that path.

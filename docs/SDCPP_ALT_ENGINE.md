@@ -15,12 +15,12 @@ AIWF Pro UI -> Pro API -> GenerationService -> selected backend
 
 ```powershell
 # Launch with saved profile default.
-.\AIWF Studio Pro.bat --terminal
+# Use the AIWF Studio Pro Desktop shortcut.
 
-# Launch a specific profile.
-.\scripts\launch_backend_profile.ps1 -Profile diffusers -Terminal
-.\scripts\launch_backend_profile.ps1 -Profile sdcpp -SdCli "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe" -SdcppBackend cuda0 -MaxVram 14 -Terminal
-.\scripts\launch_backend_profile.ps1 -Profile onnx -Terminal
+# Save a specific profile for the next hidden Pro launch.
+.\scripts\launch_backend_profile.ps1 -Profile diffusers -SetDefault
+.\scripts\launch_backend_profile.ps1 -Profile sdcpp -SdCli "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe" -SdcppBackend cuda0 -MaxVram 14 -SetDefault
+.\scripts\launch_backend_profile.ps1 -Profile onnx -SetDefault
 ```
 
 The launcher runs `scripts/ensure_pro_frontend.py` before Pro starts. If `frontend/src/App.tsx` does not expose `stable-diffusion.cpp` in the Settings backend dropdown, the patch is applied and the Pro frontend rebuilds.

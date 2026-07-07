@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator
@@ -106,6 +106,8 @@ class SavedArtifact(BaseModel):
 
     path: str
     infotext: str
+    receipt_path: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class GenerationResult(BaseModel):

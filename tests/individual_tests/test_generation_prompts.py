@@ -156,6 +156,76 @@ def test_ai_training_metadata_mode_writes_caption_payload_and_filename(tmp_path:
         assert training["model"]["title"] == "Tiny/Model:XL"
 
 
+def test_generation_save_writes_aiwf_generation_metadata_and_receipt(tmp_path: Path):
+    backend = MagicMock()
+    backend.list_vaes.return_value = []
+    backend.list_loras.return_value = []
+    backend.flags = MagicMock(
+        inference_backend="diffusers",
+        attention_backend="sdpa",
+        fp8=False,
+        medvram=False,
+        lowvram=False,
+        highvram=False,
+        no_half=False,
+        torch_compile=False,
+        channels_last=False,
+    )
+    backend.flags.effective_vram_profile.return_value = "mid"
+    settings = UserSettings(embed_metadata=True)
+    service = GenerationService(
+        backend=backend,
+        store=FilesystemImageStore(tmp_path, settings=settings),
+        metadata=MetadataService(),
+        queue=MagicMock(),
+        events=MagicMock(),
+        settings=settings,
+    )
+    request = GenerationRequest(
+        prompt="cinematic city street",
+        negative_prompt="blur",
+        steps=8,
+        cfg_scale=4.5,
+        width=512,
+        height=512,
+        seed=44,
+        checkpoint_id="city-xl",
+    )
+    checkpoint = Checkpoint(
+        id="city-xl",
+        title="City XL",
+        filename="city-xl.safetensors",
+        path="/models/city-xl.safetensors",
+        hash="abc123",
+        architecture="sdxl",
+    )
+    result = GenerationResult(
+        job_id=uuid4(),
+        images=[Image.new("RGB", (8, 8), "purple")],
+        seeds=[44],
+        infotexts=["cinematic city street\nSteps: 8, CFG scale: 4.5, Seed: 44, Size: 512x512, Model: City XL"],
+        mode=GenerationMode.TXT2IMG,
+        elapsed_seconds=2.0,
+    )
+
+    service._save_generation_result(result, request, checkpoint, None)
+
+    artifact = result.artifacts[0]
+    assert artifact.receipt_path
+    with Image.open(artifact.path) as saved:
+        assert "aiwf_generation" in saved.text
+        assert "aiwf_generation_settings" in saved.text
+        payload = json.loads(saved.text["aiwf_generation"])
+        assert payload["metadata_schema"] == "aiwf.generation.v1"
+        assert payload["pro_settings"]["prompt"] == request.prompt
+        assert payload["pro_settings"]["modelId"] == "city-xl"
+        assert payload["receipt"]["elapsed_seconds"] == 2.0
+    receipt = json.loads(Path(artifact.receipt_path).read_text(encoding="utf-8"))
+    assert receipt["schema"] == "aiwf.generation-receipt.v1"
+    assert receipt["model"]["title"] == "City XL"
+    assert receipt["receipt"]["steps_per_second"] == 4.0
+
+
 def test_streaming_generation_reports_model_loading_before_backend_steps():
     checkpoint = Checkpoint(
         id="tiny",

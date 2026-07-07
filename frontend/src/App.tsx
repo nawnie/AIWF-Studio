@@ -26,6 +26,7 @@ import {
   Maximize2,
   Monitor,
   PanelLeft,
+  PanelRight,
   Rows3,
   ScanSearch,
   RefreshCcw,
@@ -69,8 +70,8 @@ import {
   formatApiError,
   generateAutoMask,
   generateProOutput,
+  importGenerationMetadataFromImage,
   getProApiLatencySamples,
-  openSupportTerminal,
   runFaceSwap,
   runVideoLab,
   reorganizeModels,
@@ -98,6 +99,7 @@ import type {
   EngineSummary,
   GenerationSettings,
   GenerationProgressEvent,
+  ImportedGenerationMetadata,
   ProCapabilitiesStatus,
   ProDataStatus,
   ProDownloadsStatus,
@@ -109,6 +111,7 @@ import type {
   ProReadinessStatus,
   PromptInsight,
   ProRuntimeStatus,
+  ProGenerateResult,
   ProSettingsStatus,
   ResourceMetric,
   RecentOutput,
@@ -121,9 +124,17 @@ interface IconItem<T extends string> {
   icon: LucideIcon
 }
 
-type ToolModalId = 'segmentation' | 'hires' | 'enhance' | 'reactor' | 'about' | null
+type ToolModalId = 'segmentation' | 'hires' | 'enhance' | 'reactor' | 'xyPlot' | 'about' | null
 type MenuBarId = 'file' | 'edit' | 'view' | 'options' | 'help' | null
 type DragTarget = 'left' | 'right' | 'bottom'
+
+interface XyPlotCell {
+  id: string
+  modelId: string
+  steps: number
+}
+
+type GenerationSettingsPatch = Partial<GenerationSettings> & { modelName?: string }
 
 interface SupportIssue {
   title: string
@@ -140,6 +151,8 @@ const MODEL_FILE_ACCEPT = '.safetensors,.ckpt,.pt,.pth,.bin,.gguf,.onnx'
 const IMAGE_FILE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff', '.avif'])
 const VIDEO_FILE_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v', '.wmv', '.flv', '.mpeg', '.mpg', '.ts', '.mts', '.m2ts', '.3gp', '.ogv'])
 const MODEL_FILE_EXTENSIONS = new Set(['.safetensors', '.ckpt', '.pt', '.pth', '.bin', '.gguf', '.onnx'])
+const XY_PLOT_DEFAULT_CELLS = 4
+const XY_PLOT_MAX_CELLS = 12
 
 interface DragState {
   target: DragTarget
@@ -451,12 +464,15 @@ function App() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [statusMessage, setStatusMessage] = useState('Ready.')
   const [isGenerating, setIsGenerating] = useState(false)
+  const [continuousGenerating, setContinuousGenerating] = useState(false)
   const [backendConnected, setBackendConnected] = useState(false)
   const [backendRecovering, setBackendRecovering] = useState(false)
   const [engineFilter, setEngineFilter] = useState<EngineId>('all')
   const [downloadingCatalogKey, setDownloadingCatalogKey] = useState('')
   const [leftPanelWidth, setLeftPanelWidth] = useState(initialLayout.leftPanelWidth)
   const [rightPanelWidth, setRightPanelWidth] = useState(initialLayout.rightPanelWidth)
+  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
   const [bottomDockVisible, setBottomDockVisible] = useState(initialLayout.bottomDockVisible)
   const [bottomDockHeight, setBottomDockHeight] = useState(initialLayout.bottomDockHeight)
   const [activeModal, setActiveModal] = useState<ToolModalId>(null)
@@ -481,6 +497,8 @@ function App() {
   const [reactorSourceDataUrl, setReactorSourceDataUrl] = useState('')
   const [reactorBusy, setReactorBusy] = useState(false)
   const [reactorMessage, setReactorMessage] = useState('')
+  const [xyPlotCells, setXyPlotCells] = useState<XyPlotCell[]>([])
+  const [xyPlotStatus, setXyPlotStatus] = useState('')
   const generationAbortRef = useRef<AbortController | null>(null)
   const startupSplashStartedAtRef = useRef(Date.now())
   const startupWindowReadyReportedRef = useRef(false)
@@ -490,8 +508,21 @@ function App() {
   const auxiliaryFetchInFlightRef = useRef<Record<string, boolean>>({})
   const fileDropDepthRef = useRef(0)
   const [fileDropActive, setFileDropActive] = useState(false)
+  const continuousGenerateRef = useRef(false)
   const runtimeJobActive = isRuntimeJobActive(runtime.job)
   const generationActive = isGenerating || runtime.state.toLowerCase() === 'running' || runtimeJobActive
+  const sdcppRuntimeAvailable = isSdcppRuntime(runtime)
+
+  useEffect(() => {
+    if (settings.pipelineBackend !== 'sdcpp' || sdcppRuntimeAvailable) {
+      return
+    }
+    setSettings((current) => (
+      current.pipelineBackend === 'sdcpp'
+        ? { ...current, pipelineBackend: 'aiwf' }
+        : current
+    ))
+  }, [sdcppRuntimeAvailable, settings.pipelineBackend])
 
   const setDisconnectedRuntime = useCallback((message: string) => {
     setRuntime({
@@ -1041,6 +1072,11 @@ function App() {
     [creationModels, engineFilter],
   )
 
+  const xyPlotModels = useMemo(
+    () => modelsForCreationMode(bootstrap.models, 'image').filter((model) => !isModelBlocked(model)),
+    [bootstrap.models],
+  )
+
   const selectedModel = useMemo(() => {
     return (
       filteredModels.find((model) => model.id === settings.modelId) ??
@@ -1048,6 +1084,22 @@ function App() {
       creationModels[0]
     )
   }, [creationModels, filteredModels, settings.modelId])
+
+  const selectedModelWarning = useMemo(() => {
+    const requestedModel = bootstrap.models.find((model) => model.id === settings.modelId)
+    if (requestedModel && !modelFitsCreationMode(requestedModel, settings.mode)) {
+      return settings.mode === 'video'
+        ? 'Pick a Wan or Sana Video model before generating video.'
+        : 'Video models are only available from the Video tab.'
+    }
+    if (isModelBlocked(selectedModel)) {
+      return modelBlockedMessage(selectedModel)
+    }
+    if (!bootstrap.models.some((model) => model.id === settings.modelId)) {
+      return 'Selected model is not available in the current Pro model list.'
+    }
+    return ''
+  }, [bootstrap.models, selectedModel, settings.mode, settings.modelId])
 
   useEffect(() => {
     saveWorkflowBlocksToStorage(workflowBlocks)
@@ -1102,6 +1154,31 @@ function App() {
     const source = dataStatus?.recentOutputs.length ? dataStatus.recentOutputs : bootstrap.recentOutputs
     return source.slice(0, 8)
   }, [bootstrap.recentOutputs, dataStatus])
+
+  const commitRecentOutputs = useCallback((outputs: RecentOutput[]) => {
+    if (outputs.length === 0) {
+      return
+    }
+    setBootstrap((current) => ({
+      ...current,
+      recentOutputs: mergeRecentOutputs(outputs, current.recentOutputs),
+    }))
+    setDataStatus((current) =>
+      current
+        ? {
+            ...current,
+            counts: {
+              ...current.counts,
+              recentOutputs: Math.max(
+                current.counts.recentOutputs,
+                mergeRecentOutputs(outputs, current.recentOutputs).length,
+              ),
+            },
+            recentOutputs: mergeRecentOutputs(outputs, current.recentOutputs),
+          }
+        : current,
+    )
+  }, [])
 
   // Shared props bundle fed to every migrated studio layout screen. Keeps the
   // ex-paid layouts as pure presentation over my real state + handlers.
@@ -1328,18 +1405,6 @@ function App() {
     }
   }, [showSupportIssue])
 
-  const handleOpenSupportTerminal = useCallback(async () => {
-    setStatusMessage('Opening support terminal...')
-    try {
-      const result = await openSupportTerminal()
-      setStatusMessage(result.cwd ? `Support terminal opened in ${result.cwd}.` : 'Support terminal opened.')
-    } catch (error: unknown) {
-      const message = formatApiError(error)
-      setStatusMessage(message)
-      showSupportIssue('Support terminal failed', error, 'support-terminal', { route: '/api/pro/support/terminal' })
-    }
-  }, [showSupportIssue])
-
   const handleReloadFrontend = useCallback(() => {
     window.location.reload()
   }, [])
@@ -1357,7 +1422,49 @@ function App() {
       }
       if (firstImage) {
         const dataUrl = await readFileAsDataUrl(firstImage)
-        if (activeMode === 'video') {
+        const metadataImport = await importGenerationMetadataFromImage(dataUrl, firstImage.name).catch((error: unknown) => {
+          reportProClientError({
+            kind: 'api',
+            message: formatApiError(error),
+            source: 'metadata-import',
+            context: { filename: firstImage.name },
+          })
+          return null
+        })
+        const importedSettings = metadataImport?.settings ?? {}
+        if (metadataImport && Object.keys(importedSettings).length > 0) {
+          const dimensions = await imageDimensionsFromDataUrl(dataUrl)
+          setSettings((current) => applyGenerationSettingsPatch(current, importedSettings, bootstrap.models, bootstrap.aspectRatios))
+          setActiveMode(importedSettings.mode === 'inpaint' ? 'inpaint' : 'image')
+          setActiveRail('create')
+          setPreview({
+            id: `metadata-${Date.now()}`,
+            url: dataUrl,
+            thumbnailUrl: dataUrl,
+            prompt: importedSettings.prompt || firstImage.name,
+            negativePrompt: importedSettings.negativePrompt,
+            infotext: metadataImport.infotext,
+            width: dimensions.width || importedSettings.width || settings.width,
+            height: dimensions.height || importedSettings.height || settings.height,
+            createdAt: new Date().toISOString(),
+            mode: importedSettings.mode === 'inpaint' ? 'inpaint' : 'image',
+            seed: importedSettings.seed,
+            steps: importedSettings.steps,
+            cfgScale: importedSettings.cfgScale,
+            clipSkip: importedSettings.clipSkip,
+            sampler: importedSettings.sampler,
+            scheduler: importedSettings.scheduler,
+            durationSeconds: readReceiptNumber(metadataImport.receipt, 'elapsed_seconds'),
+            speed: readReceiptSpeed(metadataImport.receipt),
+            generationSettings: importedSettings,
+            generationReceipt: metadataImport.receipt,
+            metadata: metadataImport.metadata,
+            metadataSchema: typeof metadataImport.metadata.metadata_schema === 'string' ? metadataImport.metadata.metadata_schema : undefined,
+            modelName: readImportedModelName(metadataImport, importedSettings),
+            source: 'metadata-import',
+          })
+          setStatusMessage(`Applied generation settings from ${firstImage.name}.`)
+        } else if (activeMode === 'video') {
           setSettings((current) => ({
             ...current,
             mode: 'video',
@@ -1401,7 +1508,7 @@ function App() {
         )
       }
     },
-    [activeMode, setPreview, settings.height, settings.width, uploadModelFilesAndRefresh],
+    [activeMode, bootstrap.aspectRatios, bootstrap.models, setPreview, settings.height, settings.width, uploadModelFilesAndRefresh],
   )
 
   const handleFileDragEnter = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
@@ -1459,17 +1566,17 @@ function App() {
     if (generationAbortRef.current) {
       if (generationActive) {
         setStatusMessage('Generation is already running.')
-        return
+        return false
       }
       generationAbortRef.current = null
     }
     if (generationActive) {
       setStatusMessage('Generation is already running in the backend.')
-      return
+      return false
     }
     if (!settings.prompt.trim()) {
       setStatusMessage('Enter a prompt before generating.')
-      return
+      return false
     }
     const requestedModel = bootstrap.models.find((model) => model.id === settings.modelId)
     if (requestedModel && !modelFitsCreationMode(requestedModel, settings.mode)) {
@@ -1479,35 +1586,35 @@ function App() {
           : 'Video models are only available from the Video tab.'
       setGenerationError(message)
       setStatusMessage(message)
-      return
+      return false
     }
     if (settings.mode === 'inpaint') {
       if (!settings.initImageDataUrl) {
         setStatusMessage('Load an image into the inpaint canvas first.')
-        return
+        return false
       }
       if (!settings.maskImageDataUrl) {
         setStatusMessage('Paint a mask over the area you want to regenerate.')
-        return
+        return false
       }
       if (selectedModel && !['sd15', 'sdxl', 'flux_fill'].includes(selectedModel.engineId ?? 'unknown')) {
         const message = 'Inpainting supports SD 1.5, SDXL, and Flux Fill checkpoints. Pick one of those models.'
         setGenerationError(message)
         setStatusMessage(message)
-        return
+        return false
       }
     }
     if (isModelBlocked(selectedModel)) {
       const message = modelBlockedMessage(selectedModel)
       setGenerationError(message)
       setStatusMessage(message)
-      return
+      return false
     }
     if (!bootstrap.models.some((model) => model.id === settings.modelId)) {
       const message = 'Selected model is not available in the current Pro model list.'
       setGenerationError(message)
       setStatusMessage(message)
-      return
+      return false
     }
 
     const controller = new AbortController()
@@ -1544,32 +1651,16 @@ function App() {
       }))
       if (stampedOutputs.length > 0) {
         setPreview(stampedOutputs[stampedOutputs.length - 1])
-        setBootstrap((current) => ({
-          ...current,
-          recentOutputs: mergeRecentOutputs(stampedOutputs, current.recentOutputs),
-        }))
-        setDataStatus((current) =>
-          current
-            ? {
-                ...current,
-                counts: {
-                  ...current.counts,
-                  recentOutputs: Math.max(
-                    current.counts.recentOutputs,
-                    mergeRecentOutputs(stampedOutputs, current.recentOutputs).length,
-                  ),
-                },
-                recentOutputs: mergeRecentOutputs(stampedOutputs, current.recentOutputs),
-              }
-            : current,
-        )
+        commitRecentOutputs(stampedOutputs)
       }
       setStatusMessage(result.message || `Generation ${result.status}.`)
       setGenerationError('')
+      return true
     } catch (error: unknown) {
       if (isGenerationCancelResult(error)) {
         setGenerationError('')
         setStatusMessage('Generation stop requested.')
+        return false
       } else {
         const nextMessage = `Generation failed: ${formatApiError(error)}`
         setGenerationError(nextMessage)
@@ -1593,6 +1684,7 @@ function App() {
             route: '/api/pro/generate',
           },
         })
+        return false
       }
     } finally {
       if (generationAbortRef.current === controller) {
@@ -1602,9 +1694,180 @@ function App() {
       void fetchProRuntime().then(setRuntime).catch(() => undefined)
       void fetchProLogs().then(setLogStatus).catch(() => undefined)
     }
-  }, [bootstrap.models, generationActive, selectedModel, settings])
+  }, [bootstrap.models, commitRecentOutputs, generationActive, selectedModel, settings])
+
+  const handleOpenXyPlot = useCallback(() => {
+    setXyPlotCells((current) => {
+      if (current.length > 0) {
+        return normalizeXyPlotCells(current, xyPlotModels, settings)
+      }
+      return buildDefaultXyPlotCells(settings, xyPlotModels)
+    })
+    setXyPlotStatus(xyPlotModels.length > 0 ? 'Ready.' : 'No image models are ready for X/Y testing.')
+    setActiveModal('xyPlot')
+  }, [settings, xyPlotModels])
+
+  const handleResetXyPlot = useCallback(() => {
+    setXyPlotCells(buildDefaultXyPlotCells(settings, xyPlotModels))
+    setXyPlotStatus('Reset to the current image settings.')
+  }, [settings, xyPlotModels])
+
+  const handleXyPlotCellChange = useCallback((id: string, patch: Partial<XyPlotCell>) => {
+    setXyPlotCells((current) =>
+      current.map((cell) =>
+        cell.id === id
+          ? {
+              ...cell,
+              ...patch,
+              steps: patch.steps !== undefined ? clamp(Math.round(patch.steps), 1, 150) : cell.steps,
+            }
+          : cell,
+      ),
+    )
+  }, [])
+
+  const handleAddXyPlotCell = useCallback(() => {
+    setXyPlotCells((current) => {
+      if (current.length >= XY_PLOT_MAX_CELLS) {
+        return current
+      }
+      const model = xyPlotModels[current.length % Math.max(1, xyPlotModels.length)]
+      const previous = current[current.length - 1]
+      const nextSteps = clamp((previous?.steps ?? settings.steps) + 5, 1, 150)
+      return [
+        ...current,
+        {
+          id: `xy-${Date.now()}-${current.length}`,
+          modelId: model?.id ?? settings.modelId,
+          steps: nextSteps,
+        },
+      ]
+    })
+  }, [settings.modelId, settings.steps, xyPlotModels])
+
+  const handleRemoveXyPlotCell = useCallback((id: string) => {
+    setXyPlotCells((current) => (current.length <= 1 ? current : current.filter((cell) => cell.id !== id)))
+  }, [])
+
+  const handleRunXyPlot = useCallback(async () => {
+    if (generationAbortRef.current) {
+      if (generationActive) {
+        setXyPlotStatus('Generation is already running.')
+        setStatusMessage('Generation is already running.')
+        return
+      }
+      generationAbortRef.current = null
+    }
+    if (generationActive) {
+      setXyPlotStatus('Generation is already running in the backend.')
+      setStatusMessage('Generation is already running in the backend.')
+      return
+    }
+    if (!settings.prompt.trim()) {
+      setXyPlotStatus('Enter a prompt before running the X/Y plot.')
+      setStatusMessage('Enter a prompt before generating.')
+      return
+    }
+
+    const normalizedCells = normalizeXyPlotCells(xyPlotCells, xyPlotModels, settings)
+    const runnableCells = normalizedCells.filter((cell) => xyPlotModels.some((model) => model.id === cell.modelId))
+    setXyPlotCells(normalizedCells)
+    if (runnableCells.length === 0) {
+      setXyPlotStatus('No ready image model is selected.')
+      return
+    }
+
+    const controller = new AbortController()
+    generationAbortRef.current = controller
+    setIsGenerating(true)
+    setGenerationProgress([])
+    setGenerationTimings({})
+    setGenerationReceiptPath('')
+    setGenerationError('')
+    setXyPlotStatus(`Running 1 of ${runnableCells.length}.`)
+    setStatusMessage(`Running X/Y plot 1/${runnableCells.length}...`)
+    reportProClientEvent({
+      action: 'pro-xy-plot-submit',
+      detail: `${runnableCells.length} image tests`,
+      context: {
+        cells: runnableCells.map((cell) => ({ modelId: cell.modelId, steps: cell.steps })),
+      },
+    })
+
+    const allOutputs: RecentOutput[] = []
+    try {
+      for (let index = 0; index < runnableCells.length; index += 1) {
+        const cell = runnableCells[index]
+        const model = xyPlotModels.find((item) => item.id === cell.modelId)
+        if (!model) {
+          throw new Error(`X/Y cell ${index + 1} has no ready image model selected.`)
+        }
+        const requestSettings: GenerationSettings = {
+          ...settings,
+          mode: 'image',
+          modelId: model.id,
+          steps: clamp(Math.round(cell.steps), 1, 150),
+          batchSize: 1,
+          batchCount: 1,
+          initImageDataUrl: '',
+          maskImageDataUrl: '',
+        }
+        setXyPlotStatus(`Running ${index + 1} of ${runnableCells.length}: ${model.name}, ${requestSettings.steps} steps.`)
+        setStatusMessage(`Running X/Y plot ${index + 1}/${runnableCells.length}: ${model.name}.`)
+        const result = await generateProOutput(requestSettings, controller.signal)
+        setGenerationProgress(result.progress)
+        setGenerationTimings(result.timings)
+        setGenerationReceiptPath(result.receiptPath ?? '')
+        const stampedOutputs = collectGenerateOutputs(result, model.name)
+        if (stampedOutputs.length > 0) {
+          allOutputs.push(...stampedOutputs)
+          setPreview(stampedOutputs[stampedOutputs.length - 1])
+          commitRecentOutputs(stampedOutputs)
+        }
+      }
+      setStatusMessage(`X/Y plot complete: ${allOutputs.length} image${allOutputs.length === 1 ? '' : 's'}.`)
+      setXyPlotStatus(`Complete: ${allOutputs.length} image${allOutputs.length === 1 ? '' : 's'} generated.`)
+      setGenerationError('')
+      setActiveModal(null)
+    } catch (error: unknown) {
+      if (isGenerationCancelResult(error)) {
+        setGenerationError('')
+        setXyPlotStatus('X/Y plot stopped.')
+        setStatusMessage('Generation stop requested.')
+      } else {
+        const nextMessage = `X/Y plot failed: ${formatApiError(error)}`
+        setGenerationError(nextMessage)
+        setXyPlotStatus(nextMessage)
+        setStatusMessage(nextMessage)
+        showSupportIssue('X/Y plot failed', error, 'xy-plot', {
+          route: '/api/pro/generate',
+          cellCount: runnableCells.length,
+          cells: runnableCells.map((cell) => ({ modelId: cell.modelId, steps: cell.steps })),
+        })
+        reportProClientError({
+          kind: 'generation',
+          message: nextMessage,
+          stack: error instanceof Error ? error.stack : undefined,
+          source: 'handleRunXyPlot',
+          context: {
+            route: '/api/pro/generate',
+            cellCount: runnableCells.length,
+          },
+        })
+      }
+    } finally {
+      if (generationAbortRef.current === controller) {
+        generationAbortRef.current = null
+      }
+      setIsGenerating(false)
+      void fetchProRuntime().then(setRuntime).catch(() => undefined)
+      void fetchProLogs().then(setLogStatus).catch(() => undefined)
+    }
+  }, [commitRecentOutputs, generationActive, settings, showSupportIssue, xyPlotCells, xyPlotModels])
 
   const handleStopGenerate = useCallback(() => {
+    continuousGenerateRef.current = false
+    setContinuousGenerating(false)
     const controller = generationAbortRef.current
     if (!controller && !generationActive) {
       setStatusMessage('No active generation to stop.')
@@ -1634,6 +1897,43 @@ function App() {
       })
     controller?.abort()
   }, [generationActive, runtime.job.id, runtime.state])
+
+  const handleToggleContinuousGenerate = useCallback(() => {
+    if (continuousGenerateRef.current) {
+      continuousGenerateRef.current = false
+      setContinuousGenerating(false)
+      handleStopGenerate()
+      return
+    }
+    if (generationActive) {
+      setStatusMessage('Wait for the current generation to finish before starting continuous mode.')
+      return
+    }
+    continuousGenerateRef.current = true
+    setContinuousGenerating(true)
+    setStatusMessage('Continuous generation started.')
+    reportProClientEvent({
+      action: 'pro-generate-continuous-start',
+      detail: `${settings.mode} ${settings.width}x${settings.height}`,
+      context: {
+        mode: settings.mode,
+        modelId: settings.modelId,
+        steps: settings.steps,
+      },
+    })
+    void (async () => {
+      while (continuousGenerateRef.current) {
+        const completed = await handleGenerate()
+        if (!completed || !continuousGenerateRef.current) {
+          break
+        }
+      }
+      if (continuousGenerateRef.current) {
+        continuousGenerateRef.current = false
+      }
+      setContinuousGenerating(false)
+    })()
+  }, [generationActive, handleGenerate, handleStopGenerate, settings.height, settings.mode, settings.modelId, settings.steps, settings.width])
 
   const handlePromptAnalyze = useCallback(async () => {
     setPromptInsightBusy(true)
@@ -1665,22 +1965,29 @@ function App() {
   }, [settings.negativePrompt, settings.prompt])
 
   const handleApplyOutputSettings = useCallback((output: RecentOutput) => {
-    setSettings((current) => ({
-      ...current,
-      mode: output.mode === 'video' ? current.mode : output.mode,
-      prompt: output.prompt || current.prompt,
-      negativePrompt: output.negativePrompt ?? current.negativePrompt,
-      width: output.width || current.width,
-      height: output.height || current.height,
-      steps: typeof output.steps === 'number' ? output.steps : current.steps,
-      cfgScale: typeof output.cfgScale === 'number' ? output.cfgScale : current.cfgScale,
-      clipSkip: typeof output.clipSkip === 'number' ? output.clipSkip : current.clipSkip,
-      sampler: output.sampler || current.sampler,
-      scheduler: output.scheduler || current.scheduler,
-      seed: typeof output.seed === 'number' ? output.seed : current.seed,
-    }))
+    const patch: GenerationSettingsPatch = output.generationSettings ?? {
+      mode: output.mode === 'video' ? undefined : output.mode,
+      prompt: output.prompt,
+      negativePrompt: output.negativePrompt,
+      width: output.width,
+      height: output.height,
+      steps: output.steps,
+      cfgScale: output.cfgScale,
+      clipSkip: output.clipSkip,
+      sampler: output.sampler,
+      scheduler: output.scheduler,
+      seed: output.seed,
+      modelName: output.modelName,
+    }
+    setSettings((current) => applyGenerationSettingsPatch(current, patch, bootstrap.models, bootstrap.aspectRatios))
+    if (patch.mode === 'image' || patch.mode === 'inpaint') {
+      setActiveMode(patch.mode)
+    } else {
+      setActiveMode('image')
+    }
+    setActiveRail('create')
     setStatusMessage('Output settings applied to the current generation controls.')
-  }, [])
+  }, [bootstrap.aspectRatios, bootstrap.models])
 
   const readCurrentPreviewDataUrl = useCallback(async () => {
     if (!preview?.url) {
@@ -1825,6 +2132,8 @@ function App() {
   const handleLayoutReset = useCallback(() => {
     setLeftPanelWidth(380)
     setRightPanelWidth(320)
+    setLeftPanelCollapsed(false)
+    setRightPanelCollapsed(false)
     setBottomDockHeight(196)
     setBottomDockVisible(true)
   }, [])
@@ -1858,6 +2167,11 @@ function App() {
         '--left-panel-width': `${leftPanelWidth}px`,
         '--right-panel-width': `${rightPanelWidth}px`,
       } as CSSProperties)
+  const workspaceClassName = [
+    'pro-workspace',
+    activeRail === 'create' && leftPanelCollapsed ? 'pro-workspace-left-collapsed' : '',
+    activeRail === 'create' && rightPanelCollapsed ? 'pro-workspace-right-collapsed' : '',
+  ].filter(Boolean).join(' ')
 
   return (
     <div
@@ -1983,7 +2297,7 @@ function App() {
         <ModeTabs activeMode={activeMode} onSelect={handleModeSelect} />
 
         <section
-          className="pro-workspace"
+          className={workspaceClassName}
           aria-label="AIWF Pro workspace"
           style={workspaceStyle}
         >
@@ -2183,7 +2497,6 @@ function App() {
                 onUnloadModel={handleUnloadModel}
                 onRestartBackend={handleRecoverBackend}
                 onReloadFrontend={handleReloadFrontend}
-                onOpenSupportTerminal={handleOpenSupportTerminal}
                 settingsSaveStatus={settingsSaveStatus}
                 leftPanelWidth={leftPanelWidth}
                 rightPanelWidth={rightPanelWidth}
@@ -2199,43 +2512,60 @@ function App() {
             </>
           ) : (
             <>
-              <PromptPanel
-                settings={settings}
-                bootstrap={bootstrap}
-                filteredModels={filteredModels}
-                engineFilter={engineFilter}
-                engines={creationEngines}
-                selectedModelName={selectedModel?.name ?? settings.modelId}
-                activeRatio={activeRatio}
-                showAdvanced={showAdvanced}
-                isGenerating={generationActive}
-                recentOutputs={recentOutputs}
-                promptInsight={promptInsight}
-                promptInsightBusy={promptInsightBusy}
-                generationProgress={generationProgress}
-                generationTimings={generationTimings}
-                generationReceiptPath={generationReceiptPath}
-                onSettingsChange={setSettings}
-                onEngineFilterChange={handleEngineFilterChange}
-                onModelSelect={handleModelSelect}
-                onRatioSelect={handleRatioSelect}
-                onPreviewSelect={setPreview}
-                onGenerate={handleGenerate}
-                onStopGenerate={handleStopGenerate}
-                onSendToWorkflow={handleSendToWorkflow}
-                onToggleAdvanced={() => setShowAdvanced((value) => !value)}
-                onOpenSegmentation={() => setActiveModal('segmentation')}
-                onOpenHires={() => setActiveModal('hires')}
-                onOpenEnhance={() => setActiveModal('enhance')}
-                onOpenReactor={() => setActiveModal('reactor')}
-                onPromptAnalyze={handlePromptAnalyze}
-                bottomDockVisible={bottomDockVisible}
-              />
-              <ResizeHandle
-                axis="vertical"
-                label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
-              />
+              {leftPanelCollapsed ? (
+                <CollapsedPanelButton side="left" label="Show prompt column" icon={PanelLeft} onClick={() => setLeftPanelCollapsed(false)} />
+              ) : (
+                <PromptPanel
+                  settings={settings}
+                  bootstrap={bootstrap}
+                  filteredModels={filteredModels}
+                  engineFilter={engineFilter}
+                  engines={creationEngines}
+                  selectedModelName={selectedModel?.name ?? settings.modelId}
+                  activeRatio={activeRatio}
+                  showAdvanced={showAdvanced}
+                  isGenerating={generationActive}
+                  isContinuousGenerating={continuousGenerating}
+                  recentOutputs={recentOutputs}
+                  promptInsight={promptInsight}
+                  promptInsightBusy={promptInsightBusy}
+                  generationProgress={generationProgress}
+                  generationTimings={generationTimings}
+                  generationReceiptPath={generationReceiptPath}
+                  onSettingsChange={setSettings}
+                  onEngineFilterChange={handleEngineFilterChange}
+                  onModelSelect={handleModelSelect}
+                  onRatioSelect={handleRatioSelect}
+                  onPreviewSelect={setPreview}
+                  onGenerate={handleGenerate}
+                  onStopGenerate={handleStopGenerate}
+                  onToggleContinuousGenerate={handleToggleContinuousGenerate}
+                  onSendToWorkflow={handleSendToWorkflow}
+                  onToggleAdvanced={() => setShowAdvanced((value) => !value)}
+                  onToggleLeftPanel={() => setLeftPanelCollapsed(true)}
+                  onToggleRightPanel={() => setRightPanelCollapsed((value) => !value)}
+                  onToggleBottomDock={() => setBottomDockVisible((value) => !value)}
+                  onOpenSegmentation={() => setActiveModal('segmentation')}
+                  onOpenHires={() => setActiveModal('hires')}
+                  onOpenEnhance={() => setActiveModal('enhance')}
+                  onOpenReactor={() => setActiveModal('reactor')}
+                  onOpenXyPlot={handleOpenXyPlot}
+                  onPromptAnalyze={handlePromptAnalyze}
+                  selectedModelWarning={selectedModelWarning}
+                  bottomDockVisible={bottomDockVisible}
+                  rightPanelCollapsed={rightPanelCollapsed}
+                  sdcppRuntimeAvailable={sdcppRuntimeAvailable}
+                />
+              )}
+              {leftPanelCollapsed ? (
+                <div className="pro-panel-gap" aria-hidden="true" />
+              ) : (
+                <ResizeHandle
+                  axis="vertical"
+                  label="Resize left panel"
+                  onMouseDown={() => startHorizontalDrag('left')}
+                />
+              )}
               <div className="pro-center-column">
                 {activeMode === 'inpaint' ? (
                   <InpaintCanvas
@@ -2244,6 +2574,13 @@ function App() {
                     statusMessage={statusMessage}
                     preview={preview}
                     onOpenSegmentation={() => setActiveModal('segmentation')}
+                    leftPanelCollapsed={leftPanelCollapsed}
+                    isGenerating={generationActive}
+                    isContinuousGenerating={continuousGenerating}
+                    selectedModelWarning={selectedModelWarning}
+                    onGenerate={handleGenerate}
+                    onStopGenerate={handleStopGenerate}
+                    onToggleContinuousGenerate={handleToggleContinuousGenerate}
                   />
                 ) : (
                   <CanvasPreview
@@ -2258,6 +2595,13 @@ function App() {
                     onOpenReactor={() => setActiveModal('reactor')}
                     bottomDockVisible={bottomDockVisible}
                     onToggleBottomDock={() => setBottomDockVisible((value) => !value)}
+                    leftPanelCollapsed={leftPanelCollapsed}
+                    isGenerating={generationActive}
+                    isContinuousGenerating={continuousGenerating}
+                    selectedModelWarning={selectedModelWarning}
+                    onGenerate={handleGenerate}
+                    onStopGenerate={handleStopGenerate}
+                    onToggleContinuousGenerate={handleToggleContinuousGenerate}
                   />
                 )}
                 <BottomDock
@@ -2274,21 +2618,44 @@ function App() {
                   onToggleVisible={() => setBottomDockVisible((value) => !value)}
                 />
               </div>
-              <ResizeHandle
-                axis="vertical"
-                label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
-              />
+              {rightPanelCollapsed ? (
+                <div className="pro-panel-gap" aria-hidden="true" />
+              ) : (
+                <ResizeHandle
+                  axis="vertical"
+                  label="Resize right panel"
+                  onMouseDown={() => startHorizontalDrag('right')}
+                />
+              )}
             </>
           )}
-          <RuntimePanel
-            runtime={runtime}
-            selectedModelName={selectedModel?.name ?? settings.modelId}
-            onUnloadModel={handleUnloadModel}
-          />
+          {activeRail === 'create' && rightPanelCollapsed ? (
+            <CollapsedPanelButton side="right" label="Show system column" icon={PanelRight} onClick={() => setRightPanelCollapsed(false)} />
+          ) : (
+            <RuntimePanel
+              runtime={runtime}
+              selectedModelName={selectedModel?.name ?? settings.modelId}
+              onUnloadModel={handleUnloadModel}
+              onToggleRightPanel={() => setRightPanelCollapsed(true)}
+            />
+          )}
         </section>
 
       </main>
+
+      <ToolModal open={activeModal === 'xyPlot'} title="X/Y plot" onClose={() => setActiveModal(null)}>
+        <XyPlotSetupModal
+          cells={xyPlotCells}
+          models={xyPlotModels}
+          running={generationActive}
+          status={xyPlotStatus}
+          onCellChange={handleXyPlotCellChange}
+          onAddCell={handleAddXyPlotCell}
+          onRemoveCell={handleRemoveXyPlotCell}
+          onReset={handleResetXyPlot}
+          onRun={handleRunXyPlot}
+        />
+      </ToolModal>
 
       <ToolModal open={activeModal === 'segmentation'} title="Segmentation" onClose={() => setActiveModal(null)}>
         <div className="pro-modal-form">
@@ -2600,6 +2967,94 @@ function App() {
   )
 }
 
+function XyPlotSetupModal({
+  cells,
+  models,
+  running,
+  status,
+  onCellChange,
+  onAddCell,
+  onRemoveCell,
+  onReset,
+  onRun,
+}: {
+  cells: XyPlotCell[]
+  models: ProModelOption[]
+  running: boolean
+  status: string
+  onCellChange: (id: string, patch: Partial<XyPlotCell>) => void
+  onAddCell: () => void
+  onRemoveCell: (id: string) => void
+  onReset: () => void
+  onRun: () => void
+}) {
+  const canRun = !running && cells.length > 0 && models.length > 0
+  return (
+    <div className="pro-modal-form pro-xy-plot-panel">
+      <p className="pro-field-note">
+        Run one image per row using the current prompt, resolution, seed, backend, and sampler. Change model and steps for each test.
+      </p>
+      <div className="pro-xy-plot-grid">
+        {cells.map((cell, index) => (
+          <section className="pro-xy-plot-cell" key={cell.id}>
+            <div className="pro-xy-plot-cell-header">
+              <strong>Test {index + 1}</strong>
+              <button
+                type="button"
+                className="pro-secondary-button ghost"
+                onClick={() => onRemoveCell(cell.id)}
+                disabled={running || cells.length <= 1}
+              >
+                Remove
+              </button>
+            </div>
+            <label className="pro-field">
+              <FieldLabel label="Model" />
+              <select
+                value={cell.modelId}
+                onChange={(event) => onCellChange(cell.id, { modelId: event.target.value })}
+                disabled={running || models.length === 0}
+              >
+                {models.length === 0 ? <option value="">No ready image models</option> : null}
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {formatModelOptionLabel(model)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="pro-field">
+              <FieldLabel label="Steps" />
+              <input
+                type="number"
+                min={1}
+                max={150}
+                value={cell.steps}
+                onChange={(event) => onCellChange(cell.id, { steps: Number(event.target.value) })}
+                disabled={running}
+              />
+            </label>
+          </section>
+        ))}
+      </div>
+      <div className="pro-xy-plot-actions">
+        <button type="button" className="pro-secondary-button" onClick={onAddCell} disabled={running || cells.length >= XY_PLOT_MAX_CELLS || models.length === 0}>
+          Add test
+        </button>
+        <button type="button" className="pro-secondary-button" onClick={onReset} disabled={running}>
+          Reset
+        </button>
+        <button type="button" className="pro-primary-button" onClick={onRun} disabled={!canRun}>
+          {running ? 'Running...' : 'Run X/Y plot'}
+        </button>
+      </div>
+      <p className="pro-xy-plot-status" role="status">
+        {status || 'Ready.'}
+      </p>
+    </div>
+  )
+}
+
 function MenuBar({
   openMenu,
   onMenuChange,
@@ -2836,6 +3291,7 @@ function PromptPanel({
   activeRatio,
   showAdvanced,
   isGenerating,
+  isContinuousGenerating,
   recentOutputs,
   promptInsight,
   promptInsightBusy,
@@ -2849,14 +3305,22 @@ function PromptPanel({
   onPreviewSelect,
   onGenerate,
   onStopGenerate,
+  onToggleContinuousGenerate,
   onSendToWorkflow,
   onToggleAdvanced,
+  onToggleLeftPanel,
+  onToggleRightPanel,
+  onToggleBottomDock,
   onOpenSegmentation,
   onOpenHires,
   onOpenEnhance,
   onOpenReactor,
+  onOpenXyPlot,
   onPromptAnalyze,
+  selectedModelWarning,
   bottomDockVisible,
+  rightPanelCollapsed,
+  sdcppRuntimeAvailable,
 }: {
   settings: GenerationSettings
   bootstrap: ProBootstrap
@@ -2867,6 +3331,7 @@ function PromptPanel({
   activeRatio: AspectRatioOption | undefined
   showAdvanced: boolean
   isGenerating: boolean
+  isContinuousGenerating: boolean
   recentOutputs: RecentOutput[]
   promptInsight: PromptInsight
   promptInsightBusy: boolean
@@ -2880,14 +3345,22 @@ function PromptPanel({
   onPreviewSelect: (value: RecentOutput) => void
   onGenerate: () => void
   onStopGenerate: () => void
+  onToggleContinuousGenerate: () => void
   onSendToWorkflow: (source?: string) => void
   onToggleAdvanced: () => void
+  onToggleLeftPanel: () => void
+  onToggleRightPanel: () => void
+  onToggleBottomDock: () => void
   onOpenSegmentation: () => void
   onOpenHires: () => void
   onOpenEnhance: () => void
   onOpenReactor: () => void
+  onOpenXyPlot: () => void
   onPromptAnalyze: () => void
+  selectedModelWarning: string
   bottomDockVisible: boolean
+  rightPanelCollapsed: boolean
+  sdcppRuntimeAvailable: boolean
 }) {
   const handlePromptKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== 'Enter' || !event.shiftKey || event.nativeEvent.isComposing) {
@@ -2899,13 +3372,6 @@ function PromptPanel({
   const selectedModel =
     filteredModels.find((model) => model.id === settings.modelId) ?? filteredModels[0]
   const selectedEngine = selectedModel?.engineId ?? 'unknown'
-  const selectedModelBlocked = isModelBlocked(selectedModel)
-  const selectedModelUnavailable = !selectedModel
-  const selectedModelWarning = selectedModelBlocked
-    ? modelBlockedMessage(selectedModel)
-    : selectedModelUnavailable
-      ? 'Selected model is not available in the current Pro model list.'
-      : ''
   // Flow-match DiT families run their own scheduler; the sampler picker has no effect.
   const samplerIgnored = ['flux', 'flux2', 'zimage', 'sd35', 'qwen', 'sana'].includes(selectedEngine)
   // Flux.2 Klein is step-distilled; classifier-free guidance is ignored by the pipeline.
@@ -3006,7 +3472,7 @@ function PromptPanel({
 
   return (
     <aside className="pro-prompt-panel" aria-label="Prompt and generation settings">
-      <PanelHeader title="Prompt" actionLabel="Prompt tools" icon={PanelLeft} />
+      <PanelHeader title="Prompt" actionLabel="Hide prompt column" icon={PanelLeft} onAction={onToggleLeftPanel} />
       <label className="pro-field pro-prompt-field">
         <FieldLabel
           label="Prompt"
@@ -3108,12 +3574,32 @@ function PromptPanel({
         </button>
         <button
           type="button"
+          className={isContinuousGenerating ? 'pro-secondary-button pro-continuous-generate-button is-active' : 'pro-secondary-button pro-continuous-generate-button'}
+          disabled={!isContinuousGenerating && (isGenerating || Boolean(selectedModelWarning))}
+          onClick={onToggleContinuousGenerate}
+          title={!isContinuousGenerating && selectedModelWarning ? selectedModelWarning : 'Keep generating until stopped.'}
+        >
+          {isContinuousGenerating ? <X size={16} aria-hidden="true" /> : <RefreshCcw size={16} aria-hidden="true" />}
+          <span>{isContinuousGenerating ? 'Stop continuous' : 'Generate continuously'}</span>
+        </button>
+        <button
+          type="button"
           className="pro-secondary-button pro-workflow-send-button"
           onClick={() => onSendToWorkflow('Create panel')}
           title="Capture the current settings as a reorderable workflow node"
         >
           <WorkflowIcon size={16} aria-hidden="true" />
           <span>Send to workflow</span>
+        </button>
+        <button
+          type="button"
+          className="pro-secondary-button pro-xy-plot-button"
+          disabled={settings.mode !== 'image'}
+          onClick={onOpenXyPlot}
+          title={settings.mode !== 'image' ? 'X/Y plot is image-only in Pro right now.' : 'Set up a multi-image model and steps test.'}
+        >
+          <ArrowLeftRight size={16} aria-hidden="true" />
+          <span>X/Y plot</span>
         </button>
         <button
           type="button"
@@ -3124,12 +3610,203 @@ function PromptPanel({
           {promptInsightBusy ? 'Analyzing...' : 'Analyze prompt'}
         </button>
       </div>
+      <div className="pro-run-options" aria-label="Run options">
+        <div className="pro-pipeline-toggle" role="group" aria-label="Generation backend">
+          <button
+            type="button"
+            className={settings.pipelineBackend === 'aiwf' ? 'active' : ''}
+            aria-pressed={settings.pipelineBackend === 'aiwf'}
+            onClick={() => onSettingsChange((current) => ({ ...current, pipelineBackend: 'aiwf' }))}
+          >
+            AIWF pipelines
+          </button>
+          <button
+            type="button"
+            className={settings.pipelineBackend === 'sdcpp' ? 'active' : ''}
+            aria-pressed={settings.pipelineBackend === 'sdcpp'}
+            disabled={settings.mode === 'video' || !sdcppRuntimeAvailable}
+            title={
+              settings.mode === 'video'
+                ? 'C++ backend is image-only in Pro right now.'
+                : sdcppRuntimeAvailable
+                  ? 'Use stable-diffusion.cpp for this image run.'
+                  : 'Restart Pro with the C++ backend before using this option.'
+            }
+            onClick={() => onSettingsChange((current) => ({ ...current, pipelineBackend: 'sdcpp' }))}
+          >
+            C++ backend
+          </button>
+        </div>
+        <div className="pro-visibility-actions">
+          <button type="button" className="pro-secondary-button" onClick={onToggleBottomDock}>
+            {bottomDockVisible ? <Rows3 size={14} aria-hidden="true" /> : <Layers2 size={14} aria-hidden="true" />}
+            <span>{bottomDockVisible ? 'Hide output' : 'Show output'}</span>
+          </button>
+          <button type="button" className="pro-secondary-button" onClick={onToggleLeftPanel}>
+            <PanelLeft size={14} aria-hidden="true" />
+            <span>Hide left</span>
+          </button>
+          <button type="button" className="pro-secondary-button" onClick={onToggleRightPanel}>
+            <PanelRight size={14} aria-hidden="true" />
+            <span>{rightPanelCollapsed ? 'Show right' : 'Hide right'}</span>
+          </button>
+        </div>
+      </div>
       {selectedModelWarning ? (
         <div className="pro-model-readiness-note" role="alert">
-          <strong>{selectedModelBlocked ? 'Model not ready' : 'Model unavailable'}</strong>
+          <strong>{isModelBlocked(selectedModel) ? 'Model not ready' : 'Model unavailable'}</strong>
           <span>{selectedModelWarning}</span>
           {selectedModel?.suggestedAction ? <small>{selectedModel.suggestedAction}</small> : null}
         </div>
+      ) : null}
+
+      {settings.mode !== 'video' ? (
+        <section className="pro-image-tool-stack" aria-label="Image tools">
+          <div className="pro-section-label">Image tools</div>
+          <div className="pro-tool-launchers">
+            <button type="button" className="pro-tool-button" onClick={onOpenSegmentation}>
+              <ScanSearch size={15} aria-hidden="true" />
+              <span>Segment</span>
+            </button>
+            <button type="button" className="pro-tool-button" onClick={onOpenHires}>
+              <Highlighter size={15} aria-hidden="true" />
+              <span>High-res</span>
+            </button>
+            <button type="button" className="pro-tool-button" onClick={onOpenEnhance}>
+              <Sparkles size={15} aria-hidden="true" />
+              <span>Enhance / VSR</span>
+            </button>
+            <button type="button" className="pro-tool-button" onClick={onOpenReactor}>
+              <Wand2 size={15} aria-hidden="true" />
+              <span>ReActor</span>
+            </button>
+          </div>
+          <section className="pro-controlnet-card" aria-label="ControlNet unit">
+            <div className="pro-controlnet-header">
+              <label className="pro-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings.controlNetEnabled}
+                  onChange={(event) =>
+                    onSettingsChange((current) => ({ ...current, controlNetEnabled: event.target.checked }))
+                  }
+                />
+                <span>ControlNet unit 1</span>
+              </label>
+              <small>Gradio Lab has the multi-unit stack.</small>
+            </div>
+            <label className="pro-field pro-compact-field">
+              <FieldLabel
+                label="ControlNet model"
+                tooltip="Use a local ControlNet model id or path that matches the selected SD/SDXL family."
+              />
+              <input
+                value={settings.controlNetModel}
+                placeholder="control_v11p_sd15_canny, diffusers folder, or local path"
+                onChange={(event) =>
+                  onSettingsChange((current) => ({ ...current, controlNetModel: event.target.value }))
+                }
+              />
+            </label>
+            <label className="pro-field pro-compact-field">
+              <FieldLabel
+                label="Preprocessor"
+                tooltip="Choose none if the image is already prepared. Canny, depth, pose, line, and segmentation preprocessors run before the ControlNet pass when available."
+              />
+              <select
+                value={settings.controlNetModule}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({ ...current, controlNetModule: event.target.value }))
+                }
+              >
+                {CONTROLNET_MODULE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="pro-controlnet-upload-row">
+              {settings.controlNetImageDataUrl ? (
+                <img className="pro-controlnet-preview" src={settings.controlNetImageDataUrl} alt="" />
+              ) : (
+                <div className="pro-controlnet-empty">No control image</div>
+              )}
+              <div className="pro-controlnet-upload-actions">
+                <span>{settings.controlNetImageName || 'Upload an edge, pose, depth, or reference image.'}</span>
+                <label className="pro-secondary-button" htmlFor="pro-controlnet-image-input">
+                  <FileImage size={15} aria-hidden="true" />
+                  <span>Upload image</span>
+                </label>
+                <input
+                  id="pro-controlnet-image-input"
+                  className="pro-file-input-hidden"
+                  type="file"
+                  accept={IMAGE_FILE_ACCEPT}
+                  onChange={handleControlNetImageChange}
+                />
+                {settings.controlNetImageDataUrl ? (
+                  <button
+                    type="button"
+                    className="pro-secondary-button ghost"
+                    onClick={() =>
+                      onSettingsChange((current) => ({
+                        ...current,
+                        controlNetImageDataUrl: '',
+                        controlNetImageName: '',
+                      }))
+                    }
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            <RangeField
+              label="Weight"
+              tooltip="ControlNet weight decides how strongly the control image steers the generation."
+              min={0}
+              max={2}
+              step={0.05}
+              value={settings.controlNetWeight}
+              onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetWeight: value }))}
+            />
+            <div className="pro-controlnet-window">
+              <RangeField
+                label="Start"
+                min={0}
+                max={1}
+                step={0.01}
+                value={settings.controlNetGuidanceStart}
+                onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceStart: value }))}
+              />
+              <RangeField
+                label="End"
+                min={0}
+                max={1}
+                step={0.01}
+                value={settings.controlNetGuidanceEnd}
+                onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceEnd: value }))}
+              />
+            </div>
+            <label className="pro-field pro-compact-field">
+              <FieldLabel label="Processor resolution" compact />
+              <input
+                type="number"
+                min={64}
+                max={4096}
+                step={64}
+                value={settings.controlNetProcessorRes}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({
+                    ...current,
+                    controlNetProcessorRes: Number(event.target.value),
+                  }))
+                }
+              />
+            </label>
+          </section>
+        </section>
       ) : null}
 
       <section className="pro-prompt-insight-card" aria-label="Prompt helper">
@@ -3510,153 +4187,6 @@ function PromptPanel({
         />
       ) : null}
 
-      {settings.mode !== 'video' ? (
-        <section className="pro-controlnet-card" aria-label="ControlNet unit">
-          <div className="pro-controlnet-header">
-            <label className="pro-toggle">
-              <input
-                type="checkbox"
-                checked={settings.controlNetEnabled}
-                onChange={(event) =>
-                  onSettingsChange((current) => ({ ...current, controlNetEnabled: event.target.checked }))
-                }
-              />
-              <span>ControlNet unit 1</span>
-            </label>
-            <small>Gradio Lab has the multi-unit stack.</small>
-          </div>
-          <label className="pro-field pro-compact-field">
-            <FieldLabel
-              label="ControlNet model"
-              tooltip="Use a local ControlNet model id or path that matches the selected SD/SDXL family."
-            />
-            <input
-              value={settings.controlNetModel}
-              placeholder="control_v11p_sd15_canny, diffusers folder, or local path"
-              onChange={(event) =>
-                onSettingsChange((current) => ({ ...current, controlNetModel: event.target.value }))
-              }
-            />
-          </label>
-          <label className="pro-field pro-compact-field">
-            <FieldLabel
-              label="Preprocessor"
-              tooltip="Choose none if the image is already prepared. Canny, depth, pose, line, and segmentation preprocessors run before the ControlNet pass when available."
-            />
-            <select
-              value={settings.controlNetModule}
-              onChange={(event) =>
-                onSettingsChange((current) => ({ ...current, controlNetModule: event.target.value }))
-              }
-            >
-              {CONTROLNET_MODULE_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="pro-controlnet-upload-row">
-            {settings.controlNetImageDataUrl ? (
-              <img className="pro-controlnet-preview" src={settings.controlNetImageDataUrl} alt="" />
-            ) : (
-              <div className="pro-controlnet-empty">No control image</div>
-            )}
-            <div className="pro-controlnet-upload-actions">
-              <span>{settings.controlNetImageName || 'Upload an edge, pose, depth, or reference image.'}</span>
-              <label className="pro-secondary-button" htmlFor="pro-controlnet-image-input">
-                <FileImage size={15} aria-hidden="true" />
-                <span>Upload image</span>
-              </label>
-              <input
-                id="pro-controlnet-image-input"
-                className="pro-file-input-hidden"
-                type="file"
-                accept={IMAGE_FILE_ACCEPT}
-                onChange={handleControlNetImageChange}
-              />
-              {settings.controlNetImageDataUrl ? (
-                <button
-                  type="button"
-                  className="pro-secondary-button ghost"
-                  onClick={() =>
-                    onSettingsChange((current) => ({
-                      ...current,
-                      controlNetImageDataUrl: '',
-                      controlNetImageName: '',
-                    }))
-                  }
-                >
-                  Clear
-                </button>
-              ) : null}
-            </div>
-          </div>
-          <RangeField
-            label="Weight"
-            tooltip="ControlNet weight decides how strongly the control image steers the generation."
-            min={0}
-            max={2}
-            step={0.05}
-            value={settings.controlNetWeight}
-            onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetWeight: value }))}
-          />
-          <div className="pro-controlnet-window">
-            <RangeField
-              label="Start"
-              min={0}
-              max={1}
-              step={0.01}
-              value={settings.controlNetGuidanceStart}
-              onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceStart: value }))}
-            />
-            <RangeField
-              label="End"
-              min={0}
-              max={1}
-              step={0.01}
-              value={settings.controlNetGuidanceEnd}
-              onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceEnd: value }))}
-            />
-          </div>
-          <label className="pro-field pro-compact-field">
-            <FieldLabel label="Processor resolution" compact />
-            <input
-              type="number"
-              min={64}
-              max={4096}
-              step={64}
-              value={settings.controlNetProcessorRes}
-              onChange={(event) =>
-                onSettingsChange((current) => ({
-                  ...current,
-                  controlNetProcessorRes: Number(event.target.value),
-                }))
-              }
-            />
-          </label>
-        </section>
-      ) : null}
-
-      <div className="pro-tool-launchers">
-        <button type="button" className="pro-tool-button" onClick={onOpenSegmentation}>
-          <ScanSearch size={15} aria-hidden="true" />
-          <span>Segmentation</span>
-        </button>
-        <button type="button" className="pro-tool-button" onClick={onOpenHires}>
-          <Highlighter size={15} aria-hidden="true" />
-          <span>High-res fix</span>
-        </button>
-        <button type="button" className="pro-tool-button" onClick={onOpenEnhance}>
-          <Sparkles size={15} aria-hidden="true" />
-          <span>Enhance / VSR</span>
-        </button>
-        <button type="button" className="pro-tool-button" onClick={onOpenReactor}>
-          <Wand2 size={15} aria-hidden="true" />
-          <span>ReActor</span>
-        </button>
-      </div>
-
       <div className="pro-panel-actions">
         <button
           type="button"
@@ -3743,6 +4273,8 @@ function buildOutputDetailRows(item: RecentOutput): Array<{ label: string; value
     { label: 'Model', value: item.modelName || 'Not stored' },
     { label: 'Size', value: item.width && item.height ? `${item.width}x${item.height}` : 'Not stored' },
     { label: 'Steps', value: formatOutputSettingValue(item.steps) },
+    { label: 'Time', value: formatDurationSeconds(item.durationSeconds) },
+    { label: 'Speed', value: item.speed || 'Not stored' },
     { label: 'CFG', value: formatOutputSettingValue(item.cfgScale) },
     { label: 'Clip skip', value: formatOutputSettingValue(item.clipSkip) },
     { label: 'Sampler', value: item.sampler || 'Not stored' },
@@ -3759,6 +4291,15 @@ function buildOutputStatusText(item: RecentOutput): string {
     typeof item.seed === 'number' ? `seed ${item.seed}` : '',
   ].filter((value) => value.length > 0)
   return details.length > 0 ? `${prompt} | ${details.join(' | ')}` : prompt
+}
+
+function formatOutputReceiptText(item: RecentOutput): string {
+  const duration = formatDurationSeconds(item.durationSeconds)
+  const parts = [
+    duration !== 'Not stored' ? duration : '',
+    item.speed || '',
+  ].filter((value) => value.length > 0)
+  return parts.join(' | ')
 }
 
 function buildOutputButtonLabel(item: RecentOutput): string {
@@ -3847,6 +4388,21 @@ function appendPromptText(prompt: string, addition: string): string {
 
 function formatOutputSettingValue(value: number | undefined): string {
   return typeof value === 'number' && Number.isFinite(value) ? String(value) : 'Not stored'
+}
+
+function formatDurationSeconds(value: number | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return 'Not stored'
+  }
+  if (value < 10) {
+    return `${value.toFixed(2)}s`
+  }
+  if (value < 60) {
+    return `${value.toFixed(1)}s`
+  }
+  const minutes = Math.floor(value / 60)
+  const seconds = Math.round(value % 60).toString().padStart(2, '0')
+  return `${minutes}:${seconds}`
 }
 
 function SanaStageReceipt({
@@ -4484,7 +5040,7 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
       enabled: Boolean(labStatus?.vsr.available),
       hint: labStatus?.vsr.available
         ? `NVIDIA VideoFX ready (${labStatus.vsr.modelCount} model packs)`
-        : 'NVIDIA VideoFX SDK not detected — run the installer.',
+        : 'NVIDIA VideoFX SDK not detected. Install it locally, then run the installer with -WithNvidiaVideoFx.',
     },
     {
       id: 'rife',
@@ -5191,7 +5747,6 @@ function SettingsWorkspace({
   onUnloadModel,
   onRestartBackend,
   onReloadFrontend,
-  onOpenSupportTerminal,
   settingsSaveStatus,
   leftPanelWidth,
   rightPanelWidth,
@@ -5212,7 +5767,6 @@ function SettingsWorkspace({
   onUnloadModel: () => void
   onRestartBackend: () => void
   onReloadFrontend: () => void
-  onOpenSupportTerminal: () => void
   settingsSaveStatus: string
   leftPanelWidth: number
   rightPanelWidth: number
@@ -5516,12 +6070,9 @@ function SettingsWorkspace({
         />
       </div>
       <div className="pro-workspace-grid">
-        {show('system', 'support terminal restart backend reload frontend unload model recovery troubleshooting') && (
+        {show('system', 'support restart backend reload frontend unload model recovery troubleshooting logs') && (
         <InfoCard title="Support and recovery" subtitle="Quick actions for tester machines when something gets stuck.">
           <div className="pro-settings-action-row">
-            <button type="button" className="pro-secondary-button" onClick={onOpenSupportTerminal}>
-              Open support terminal
-            </button>
             <button type="button" className="pro-secondary-button" onClick={onUnloadModel}>
               Unload model
             </button>
@@ -5533,7 +6084,7 @@ function SettingsWorkspace({
             </button>
           </div>
           <p className="pro-field-note">
-            The terminal opens in this folder with the venv active. Use it for installer checks, pip fixes, and logs.
+            Recovery stays inside the app. Use Monitor and Logs for diagnostics.
           </p>
         </InfoCard>
         )}
@@ -6329,6 +6880,13 @@ function CanvasPreview({
   onOpenReactor,
   bottomDockVisible,
   onToggleBottomDock,
+  leftPanelCollapsed,
+  isGenerating,
+  isContinuousGenerating,
+  selectedModelWarning,
+  onGenerate,
+  onStopGenerate,
+  onToggleContinuousGenerate,
 }: {
   activeMode: ProMode
   preview: RecentOutput | null
@@ -6341,6 +6899,13 @@ function CanvasPreview({
   onOpenReactor: () => void
   bottomDockVisible: boolean
   onToggleBottomDock: () => void
+  leftPanelCollapsed: boolean
+  isGenerating: boolean
+  isContinuousGenerating: boolean
+  selectedModelWarning: string
+  onGenerate: () => void
+  onStopGenerate: () => void
+  onToggleContinuousGenerate: () => void
 }) {
   const frameWidth = Math.max(1, preview?.width ?? width)
   const frameHeight = Math.max(1, preview?.height ?? height)
@@ -6398,6 +6963,7 @@ function CanvasPreview({
       height: `${previewFrameSize.height}px`,
     }
   }, [aspectRatio, previewFrameSize.height, previewFrameSize.width])
+  const outputReceiptText = preview ? formatOutputReceiptText(preview) : ''
   const emptyCanvas = activeMode === 'video'
     ? {
         className: 'pro-empty-preview pro-stage-empty pro-stage-empty-video',
@@ -6421,6 +6987,30 @@ function CanvasPreview({
           <small>{frameWidth}x{frameHeight}</small>
         </div>
         <div className="pro-canvas-tools" aria-label="Canvas tools">
+          {leftPanelCollapsed ? (
+            <>
+              <button
+                type="button"
+                className={isGenerating ? 'pro-generate-button pro-canvas-generate-button pro-generate-button-stop' : 'pro-generate-button pro-canvas-generate-button'}
+                disabled={!isGenerating && Boolean(selectedModelWarning)}
+                onClick={isGenerating ? onStopGenerate : onGenerate}
+                title={!isGenerating && selectedModelWarning ? selectedModelWarning : undefined}
+              >
+                {isGenerating ? <X size={16} aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}
+                <span>{isGenerating ? 'Stop' : activeMode === 'video' ? 'Generate video' : 'Generate image'}</span>
+              </button>
+              <button
+                type="button"
+                className={isContinuousGenerating ? 'pro-tool-chip pro-continuous-generate-button is-active' : 'pro-tool-chip pro-continuous-generate-button'}
+                disabled={!isContinuousGenerating && (isGenerating || Boolean(selectedModelWarning))}
+                onClick={onToggleContinuousGenerate}
+                title={!isContinuousGenerating && selectedModelWarning ? selectedModelWarning : 'Keep generating until stopped.'}
+              >
+                {isContinuousGenerating ? <X size={14} aria-hidden="true" /> : <RefreshCcw size={14} aria-hidden="true" />}
+                <span>{isContinuousGenerating ? 'Stop loop' : 'Continuous'}</span>
+              </button>
+            </>
+          ) : null}
           <button type="button" className="pro-tool-chip" onClick={onOpenSegmentation}>
             <ScanSearch size={14} aria-hidden="true" />
             <span>Segment</span>
@@ -6470,7 +7060,7 @@ function CanvasPreview({
       <div className="pro-canvas-footer">
         <span>{frameWidth}x{frameHeight}</span>
         <span>{preview?.modelName ?? 'Local model'}</span>
-        <span>{statusMessage}</span>
+        <span>{outputReceiptText || statusMessage}</span>
       </div>
     </section>
   )
@@ -6482,12 +7072,26 @@ function InpaintCanvas({
   statusMessage,
   preview,
   onOpenSegmentation,
+  leftPanelCollapsed,
+  isGenerating,
+  isContinuousGenerating,
+  selectedModelWarning,
+  onGenerate,
+  onStopGenerate,
+  onToggleContinuousGenerate,
 }: {
   settings: GenerationSettings
   onSettingsChange: Dispatch<SetStateAction<GenerationSettings>>
   statusMessage: string
   preview: RecentOutput | null
   onOpenSegmentation: () => void
+  leftPanelCollapsed: boolean
+  isGenerating: boolean
+  isContinuousGenerating: boolean
+  selectedModelWarning: string
+  onGenerate: () => void
+  onStopGenerate: () => void
+  onToggleContinuousGenerate: () => void
 }) {
   const imageCanvasRef = useRef<HTMLCanvasElement>(null)
   const maskCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -6769,6 +7373,30 @@ function InpaintCanvas({
           <small>{imageSize.width > 0 ? `${imageSize.width}x${imageSize.height}` : 'load an image'}</small>
         </div>
         <div className="pro-canvas-tools" aria-label="Inpaint tools">
+          {leftPanelCollapsed ? (
+            <>
+              <button
+                type="button"
+                className={isGenerating ? 'pro-generate-button pro-canvas-generate-button pro-generate-button-stop' : 'pro-generate-button pro-canvas-generate-button'}
+                disabled={!isGenerating && Boolean(selectedModelWarning)}
+                onClick={isGenerating ? onStopGenerate : onGenerate}
+                title={!isGenerating && selectedModelWarning ? selectedModelWarning : undefined}
+              >
+                {isGenerating ? <X size={16} aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}
+                <span>{isGenerating ? 'Stop' : 'Generate image'}</span>
+              </button>
+              <button
+                type="button"
+                className={isContinuousGenerating ? 'pro-tool-chip pro-continuous-generate-button is-active' : 'pro-tool-chip pro-continuous-generate-button'}
+                disabled={!isContinuousGenerating && (isGenerating || Boolean(selectedModelWarning))}
+                onClick={onToggleContinuousGenerate}
+                title={!isContinuousGenerating && selectedModelWarning ? selectedModelWarning : 'Keep generating until stopped.'}
+              >
+                {isContinuousGenerating ? <X size={14} aria-hidden="true" /> : <RefreshCcw size={14} aria-hidden="true" />}
+                <span>{isContinuousGenerating ? 'Stop loop' : 'Continuous'}</span>
+              </button>
+            </>
+          ) : null}
           <button type="button" className="pro-tool-chip" onClick={() => fileInputRef.current?.click()}>
             <FileImage size={14} aria-hidden="true" />
             <span>Load image</span>
@@ -7096,24 +7724,52 @@ function BottomDock({
   )
 }
 
+function CollapsedPanelButton({
+  side,
+  label,
+  icon: Icon,
+  onClick,
+}: {
+  side: 'left' | 'right'
+  label: string
+  icon: LucideIcon
+  onClick: () => void
+}) {
+  return (
+    <aside className={`pro-collapsed-panel pro-collapsed-panel-${side}`} aria-label={label}>
+      <button type="button" className="pro-collapsed-panel-button" onClick={onClick}>
+        <Icon size={17} aria-hidden="true" />
+        <span>{label}</span>
+      </button>
+    </aside>
+  )
+}
+
 function RuntimePanel({
   runtime,
   selectedModelName,
   onUnloadModel,
+  onToggleRightPanel,
 }: {
   runtime: ProRuntimeStatus
   selectedModelName: string
   onUnloadModel: () => void
+  onToggleRightPanel: () => void
 }) {
   const loadedModelName = runtime.loadedModel.loaded ? runtime.loadedModel.name : 'No model loaded'
   return (
     <aside className="pro-status-panel" aria-label="Runtime status">
       <div className="pro-status-heading">
         <span>System</span>
-        <strong>
-          <span className="pro-status-dot" aria-hidden="true" />
-          {runtime.state}
-        </strong>
+        <div className="pro-status-heading-actions">
+          <strong>
+            <span className="pro-status-dot" aria-hidden="true" />
+            {runtime.state}
+          </strong>
+          <button type="button" className="pro-icon-button" aria-label="Hide system column" onClick={onToggleRightPanel}>
+            <PanelRight size={15} aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <div className="pro-signal-grid">
@@ -7380,15 +8036,17 @@ function PanelHeader({
   title,
   actionLabel,
   icon: Icon,
+  onAction,
 }: {
   title: string
   actionLabel: string
   icon: LucideIcon
+  onAction?: () => void
 }) {
   return (
     <div className="pro-panel-header">
       <span>{title}</span>
-      <button type="button" className="pro-icon-button" aria-label={actionLabel}>
+      <button type="button" className="pro-icon-button" aria-label={actionLabel} onClick={onAction}>
         <Icon size={15} aria-hidden="true" />
       </button>
     </div>
@@ -7518,7 +8176,7 @@ function ToolModal({
   }
   return (
     <div className="pro-modal-backdrop" onClick={onClose}>
-      <div className="pro-modal" onClick={(event) => event.stopPropagation()}>
+      <div className="pro-modal" role="dialog" aria-modal="true" aria-label={title} onClick={(event) => event.stopPropagation()}>
         <div className="pro-modal-header">
           <h2 className="pro-modal-title">{title}</h2>
           <button type="button" className="pro-icon-button" onClick={onClose} aria-label={`Close ${title}`}>
@@ -7671,6 +8329,137 @@ function mergeRecentOutputs(nextOutputs: RecentOutput[], currentOutputs: RecentO
   return merged
 }
 
+function collectGenerateOutputs(result: ProGenerateResult, modelName: string): RecentOutput[] {
+  const sessionOutputs =
+    result.recentOutputs.length > 0
+      ? result.recentOutputs
+      : result.output
+        ? [result.output]
+        : []
+  return sessionOutputs.map((item) => ({
+    ...item,
+    modelName: item.modelName || modelName,
+  }))
+}
+
+function applyGenerationSettingsPatch(
+  current: GenerationSettings,
+  patch: GenerationSettingsPatch,
+  models: ProModelOption[],
+  aspectRatios: AspectRatioOption[],
+): GenerationSettings {
+  const model = findImportedModel(models, patch)
+  let next: GenerationSettings = model
+    ? applyModelPresetSettings({ ...current, modelId: model.id }, model, aspectRatios)
+    : { ...current }
+  const mode = patch.mode === 'inpaint' ? 'inpaint' : patch.mode === 'image' ? 'image' : undefined
+  const width = finiteNumber(patch.width)
+  const height = finiteNumber(patch.height)
+  next = {
+    ...next,
+    mode: mode ?? next.mode,
+    prompt: typeof patch.prompt === 'string' && patch.prompt.length > 0 ? patch.prompt : next.prompt,
+    negativePrompt: typeof patch.negativePrompt === 'string' ? patch.negativePrompt : next.negativePrompt,
+    width: width ? clamp(Math.round(width), 64, 2048) : next.width,
+    height: height ? clamp(Math.round(height), 64, 2048) : next.height,
+    steps: patch.steps !== undefined ? clamp(Math.round(finiteNumber(patch.steps) ?? next.steps), 1, 150) : next.steps,
+    cfgScale: patch.cfgScale !== undefined ? clamp(finiteNumber(patch.cfgScale) ?? next.cfgScale, 0, 30) : next.cfgScale,
+    clipSkip: patch.clipSkip !== undefined ? clamp(Math.round(finiteNumber(patch.clipSkip) ?? next.clipSkip), 1, 12) : next.clipSkip,
+    sampler: typeof patch.sampler === 'string' && patch.sampler.length > 0 ? patch.sampler : next.sampler,
+    scheduler: typeof patch.scheduler === 'string' && patch.scheduler.length > 0 ? patch.scheduler : next.scheduler,
+    seed: patch.seed !== undefined ? Math.round(finiteNumber(patch.seed) ?? next.seed) : next.seed,
+    batchSize: patch.batchSize !== undefined ? clamp(Math.round(finiteNumber(patch.batchSize) ?? next.batchSize), 1, 4) : next.batchSize,
+    batchCount: patch.batchCount !== undefined ? clamp(Math.round(finiteNumber(patch.batchCount) ?? next.batchCount), 1, 4) : next.batchCount,
+    enableHires: typeof patch.enableHires === 'boolean' ? patch.enableHires : next.enableHires,
+    hiresScale: patch.hiresScale !== undefined ? clamp(finiteNumber(patch.hiresScale) ?? next.hiresScale, 1, 4) : next.hiresScale,
+    hiresSteps: patch.hiresSteps !== undefined ? clamp(Math.round(finiteNumber(patch.hiresSteps) ?? next.hiresSteps), 1, 150) : next.hiresSteps,
+    hiresDenoise: patch.hiresDenoise !== undefined ? clamp(finiteNumber(patch.hiresDenoise) ?? next.hiresDenoise, 0, 1) : next.hiresDenoise,
+    hiresUpscaler: typeof patch.hiresUpscaler === 'string' && patch.hiresUpscaler.length > 0 ? patch.hiresUpscaler : next.hiresUpscaler,
+    vaeId: typeof patch.vaeId === 'string' ? patch.vaeId : next.vaeId,
+    denoisingStrength: patch.denoisingStrength !== undefined ? clamp(finiteNumber(patch.denoisingStrength) ?? next.denoisingStrength, 0, 1) : next.denoisingStrength,
+    maskBlur: patch.maskBlur !== undefined ? clamp(Math.round(finiteNumber(patch.maskBlur) ?? next.maskBlur), 0, 64) : next.maskBlur,
+    inpaintOnlyMasked: typeof patch.inpaintOnlyMasked === 'boolean' ? patch.inpaintOnlyMasked : next.inpaintOnlyMasked,
+    inpaintMaskedPadding: patch.inpaintMaskedPadding !== undefined ? clamp(Math.round(finiteNumber(patch.inpaintMaskedPadding) ?? next.inpaintMaskedPadding), 0, 256) : next.inpaintMaskedPadding,
+    inpaintMaskContent: typeof patch.inpaintMaskContent === 'string' && patch.inpaintMaskContent.length > 0 ? patch.inpaintMaskContent : next.inpaintMaskContent,
+    controlNetEnabled: typeof patch.controlNetEnabled === 'boolean' ? patch.controlNetEnabled : next.controlNetEnabled,
+    controlNetModel: typeof patch.controlNetModel === 'string' ? patch.controlNetModel : next.controlNetModel,
+    controlNetModule: typeof patch.controlNetModule === 'string' && patch.controlNetModule.length > 0 ? patch.controlNetModule : next.controlNetModule,
+    controlNetWeight: patch.controlNetWeight !== undefined ? clamp(finiteNumber(patch.controlNetWeight) ?? next.controlNetWeight, 0, 2) : next.controlNetWeight,
+    controlNetGuidanceStart: patch.controlNetGuidanceStart !== undefined ? clamp(finiteNumber(patch.controlNetGuidanceStart) ?? next.controlNetGuidanceStart, 0, 1) : next.controlNetGuidanceStart,
+    controlNetGuidanceEnd: patch.controlNetGuidanceEnd !== undefined ? clamp(finiteNumber(patch.controlNetGuidanceEnd) ?? next.controlNetGuidanceEnd, 0, 1) : next.controlNetGuidanceEnd,
+    controlNetProcessorRes: patch.controlNetProcessorRes !== undefined ? clamp(Math.round(finiteNumber(patch.controlNetProcessorRes) ?? next.controlNetProcessorRes), 64, 4096) : next.controlNetProcessorRes,
+    saveImages: typeof patch.saveImages === 'boolean' ? patch.saveImages : next.saveImages,
+  }
+  const matchingRatio = findMatchingAspectRatio(aspectRatios, next.width, next.height)
+  return matchingRatio ? { ...next, aspectRatioId: matchingRatio.id } : next
+}
+
+function findImportedModel(models: ProModelOption[], patch: GenerationSettingsPatch): ProModelOption | undefined {
+  const modelId = typeof patch.modelId === 'string' ? patch.modelId.trim().toLowerCase() : ''
+  const modelName = typeof patch.modelName === 'string' ? patch.modelName.trim().toLowerCase() : ''
+  if (!modelId && !modelName) {
+    return undefined
+  }
+  return models.find((model) => {
+    const labels = [model.id, model.name, model.assetSummary].map((value) => `${value ?? ''}`.trim().toLowerCase())
+    return labels.some((label) => {
+      if (!label) {
+        return false
+      }
+      return (modelId && label === modelId) || (modelName && (label === modelName || label.includes(modelName)))
+    })
+  })
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  const numberValue = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(numberValue) ? numberValue : undefined
+}
+
+function readReceiptNumber(receipt: Record<string, unknown>, key: string): number | undefined {
+  return finiteNumber(receipt[key])
+}
+
+function readReceiptSpeed(receipt: Record<string, unknown>): string | undefined {
+  const stepsPerSecond = finiteNumber(receipt.steps_per_second)
+  return stepsPerSecond !== undefined ? `${stepsPerSecond.toFixed(2)} steps/s` : undefined
+}
+
+function readImportedModelName(imported: ImportedGenerationMetadata, settings: GenerationSettingsPatch): string | undefined {
+  const model = imported.metadata.model
+  if (model && typeof model === 'object' && !Array.isArray(model)) {
+    const record = model as Record<string, unknown>
+    const label = record.title ?? record.id ?? record.filename
+    return typeof label === 'string' && label.length > 0 ? label : undefined
+  }
+  return settings.modelId || settings.modelName
+}
+
+function buildDefaultXyPlotCells(settings: GenerationSettings, models: ProModelOption[]): XyPlotCell[] {
+  const fallbackModelId = models.find((model) => model.id === settings.modelId)?.id ?? models[0]?.id ?? settings.modelId
+  const baseSteps = clamp(Math.round(settings.steps || 20), 1, 150)
+  return Array.from({ length: XY_PLOT_DEFAULT_CELLS }, (_, index) => {
+    const model = models[index % Math.max(1, models.length)]
+    const stepsOffset = Math.floor(index / Math.max(1, models.length)) * 5
+    return {
+      id: `xy-${index}`,
+      modelId: model?.id ?? fallbackModelId,
+      steps: clamp(baseSteps + stepsOffset, 1, 150),
+    }
+  })
+}
+
+function normalizeXyPlotCells(cells: XyPlotCell[], models: ProModelOption[], settings: GenerationSettings): XyPlotCell[] {
+  const modelIds = new Set(models.map((model) => model.id))
+  const fallbackModelId = models.find((model) => model.id === settings.modelId)?.id ?? models[0]?.id ?? settings.modelId
+  const normalized = cells.slice(0, XY_PLOT_MAX_CELLS).map((cell, index) => ({
+    id: cell.id || `xy-${index}`,
+    modelId: modelIds.has(cell.modelId) ? cell.modelId : fallbackModelId,
+    steps: clamp(Math.round(Number.isFinite(cell.steps) ? cell.steps : settings.steps), 1, 150),
+  }))
+  return normalized.length > 0 ? normalized : buildDefaultXyPlotCells(settings, models)
+}
+
 function buildOutputModelBuckets(recentOutputs: RecentOutput[], fallbackModelName: string) {
   const counts = new Map<string, number>()
   for (const item of recentOutputs) {
@@ -7801,6 +8590,11 @@ function clampPercent(value: number): number {
 function isRuntimeJobActive(job: ProRuntimeStatus['job']): boolean {
   const state = job.state.toLowerCase()
   return state !== 'idle' && state !== 'completed' && state !== 'failed' && state !== 'cancelled' && state !== 'canceled'
+}
+
+function isSdcppRuntime(runtime: ProRuntimeStatus): boolean {
+  const backend = `${runtime.backend} ${runtime.loadedModel.type}`.toLowerCase()
+  return backend.includes('sdcpp') || backend.includes('stable-diffusion.cpp') || backend.includes('stable diffusion.cpp')
 }
 
 function mergeBootstrapDefaults(

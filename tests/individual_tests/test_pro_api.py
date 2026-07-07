@@ -435,10 +435,9 @@ def test_model_unload_endpoint_calls_backend_unload(tmp_path):
     assert calls == ["unload"]
 
 
-def test_support_terminal_endpoint_opens_windows_terminal(tmp_path, monkeypatch):
+def test_support_terminal_endpoint_is_disabled(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     launched = []
-    monkeypatch.setattr(pro_api.os, "name", "nt")
     monkeypatch.setattr(
         pro_api.subprocess,
         "Popen",
@@ -448,12 +447,9 @@ def test_support_terminal_endpoint_opens_windows_terminal(tmp_path, monkeypatch)
 
     response = client.post("/api/pro/support/terminal")
 
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "opened"
-    assert launched
-    assert launched[0][0][0] == "powershell.exe"
-    assert launched[0][1]["creationflags"] == subprocess.CREATE_NEW_CONSOLE
+    assert response.status_code == 410
+    assert "Visible support terminals are disabled" in response.json()["detail"]
+    assert launched == []
 
 
 def test_bootstrap_allows_sd35_large_when_hf_auth_is_available(tmp_path, monkeypatch):
@@ -1206,6 +1202,53 @@ def test_data_endpoint_reads_png_settings_for_output_dock(tmp_path):
     assert output["modelName"] == "test-model"
     assert output["width"] == 512
     assert output["height"] == 768
+
+
+def test_metadata_import_reads_aiwf_generation_settings(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+    generation_payload = {
+        "metadata_schema": "aiwf.generation.v1",
+        "pro_settings": {
+            "mode": "image",
+            "prompt": "neon city",
+            "negativePrompt": "blur",
+            "modelId": "model-a",
+            "width": 768,
+            "height": 512,
+            "steps": 12,
+            "cfgScale": 4.25,
+            "sampler": "euler_a",
+            "scheduler": "automatic",
+            "seed": 123,
+        },
+        "model": {"id": "model-a", "title": "Model A", "filename": "model-a.safetensors"},
+        "receipt": {"elapsed_seconds": 3.5, "steps_per_second": 3.428571},
+    }
+    pnginfo = PngImagePlugin.PngInfo()
+    pnginfo.add_text("parameters", "neon city\nSteps: 12, CFG scale: 4.25, Seed: 123")
+    pnginfo.add_text("aiwf_generation", json.dumps(generation_payload))
+    pnginfo.add_text("aiwf_generation_settings", json.dumps(generation_payload["pro_settings"]))
+    pnginfo.add_text("aiwf_generation_receipt", json.dumps(generation_payload["receipt"]))
+    buffer = io.BytesIO()
+    Image.new("RGB", (768, 512), "purple").save(buffer, format="PNG", pnginfo=pnginfo)
+
+    response = client.post(
+        "/api/pro/metadata/import",
+        json={
+            "filename": "import.png",
+            "imageDataUrl": f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["settings"]["prompt"] == "neon city"
+    assert data["settings"]["modelId"] == "model-a"
+    assert data["settings"]["seed"] == 123
+    assert data["receipt"]["elapsed_seconds"] == 3.5
+    assert data["metadata"]["model"]["title"] == "Model A"
 
 
 def test_data_endpoint_reads_sidecar_settings_for_output_dock(tmp_path):

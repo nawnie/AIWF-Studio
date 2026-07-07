@@ -1,7 +1,7 @@
 <h1 align="center">AIWF Studio</h1>
 
 <p align="center">
-  <strong>Local-first creative AI workspace for Windows and NVIDIA GPUs.</strong>
+  <strong>Local-first creative AI workspace with a modular frontend and optional local backends.</strong>
 </p>
 
 <p align="center">
@@ -19,15 +19,14 @@
   <a href="frontend/"><img src="https://img.shields.io/badge/Vite-build-646CFF?logo=vite&logoColor=white" alt="Vite build"></a>
   <a href="#what-works-on-main"><img src="https://img.shields.io/badge/FastAPI-Pro%20API-009688?logo=fastapi&logoColor=white" alt="FastAPI Pro API"></a>
   <a href="#aiwf-studio-gradio-lab"><img src="https://img.shields.io/badge/Gradio-Lab%20UI-F97316?logo=gradio&logoColor=white" alt="Gradio Lab UI"></a>
-  <a href="#image-generation"><img src="https://img.shields.io/badge/Diffusers-local%20pipelines-FFD21E?logo=huggingface&logoColor=black" alt="Diffusers local pipelines"></a>
+  <a href="#what-works-on-main"><img src="https://img.shields.io/badge/Backends-optional%20lanes-0F766E" alt="Optional backend lanes"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-22C55E" alt="MIT license"></a>
-  <a href="https://docs.nvidia.com/maxine/vfx/index.html"><img src="https://img.shields.io/badge/NVIDIA%20RTX-VFX%20SDK-76B900?logo=nvidia&logoColor=white" alt="NVIDIA RTX / VFX SDK"></a>
   <a href="https://www.aiembeddedsystems.com"><img src="https://img.shields.io/badge/Website-aiembeddedsystems.com-111111?logo=googlechrome&logoColor=white" alt="AI Embedded Systems website"></a>
 </p>
 
-AIWF Studio is focused on image generation, inpainting, video generation, and video-audio post-processing on local Windows/NVIDIA hardware. It is engineered by [AI Embedded Systems](https://www.aiembeddedsystems.com).
+AIWF Studio is focused on a usable local creative workspace first: model folders, prompt and workflow state, logs, receipts, typed API calls, and a React UI that can route to more than one backend. It is engineered by [AI Embedded Systems](https://www.aiembeddedsystems.com).
 
-AIWF Studio is a clean-room rebuild of the AUTOMATIC1111-style Stable Diffusion web UI. The goal is a local creative workstation with explicit wiring, typed requests, predictable model folders, and no legacy global `shared` state.
+Diffusers is the current reference image backend because it gives the project a working local path today. It is not meant to be the whole product. The project direction is a stable frontend plus optional backend lanes such as stable-diffusion.cpp, ONNX, isolated video workers, and external local services.
 
 This `main` branch is the stable sharing branch. It only advertises features intended for normal local use. Experimental work lives on `dev`.
 
@@ -56,7 +55,7 @@ AIWF Studio Pro.bat
 python launch_pro.py
 ```
 
-Early testers should keep [`docs/TESTER_USER_GUIDE.md`](docs/TESTER_USER_GUIDE.md) open. It covers install options, hidden terminals, support-terminal access, recovery buttons, and error reports.
+Early testers should keep [`docs/TESTER_USER_GUIDE.md`](docs/TESTER_USER_GUIDE.md) open. It covers install options, hidden terminals, recovery buttons, and error reports.
 
 <p align="center">
   <img src="docs/assets/aiwf-studio-pro-sana-sprint.png" alt="AIWF Studio Pro image generation workspace" width="100%">
@@ -90,6 +89,25 @@ Current focus: image generation, inpainting, video generation, and video-audio p
 - Optimization work is allowed when it improves an existing path and has a fallback.
 - Benchmark claims need timing receipts from this repo, not upstream marketing numbers.
 - Optional engines, model weights, SDKs, and generated outputs stay local and are not committed.
+- The default public install should stay as lean as the current architecture allows. Heavy model downloads and optional SDK link checks are opt-in.
+
+## Backend Scope
+
+AIWF should be a frontend and workflow shell that can use local backends, not a repo that vendors every model stack into one mandatory install.
+
+Current state:
+
+- The Pro app and API are the stable user surface.
+- Diffusers is still the default in-process image backend and the current runtime setup installs CUDA PyTorch plus the shared image requirements.
+- stable-diffusion.cpp and ONNX are backend lanes, but they are not full replacements for every image/video route yet.
+- LTX, training, audio, and other incompatible stacks should stay isolated or disabled by default.
+- Model weights, generated media, NVIDIA SDK binaries, and cloned engine repos are local-only and ignored by git.
+
+Near-term cleanup target:
+
+- Split the shared image runtime out of the Pro shell so the UI can start without installing Diffusers or CUDA Torch.
+- Keep each backend behind a readiness check, a launch profile, and a plain error when the selected backend cannot serve the requested route.
+- Treat vendor SDKs as user-installed integrations, not installer obligations.
 
 ## Release State
 
@@ -103,7 +121,7 @@ Recent additions on `main`:
 - **Video Lab (Pro):** upload a video, then NVIDIA VSR upscale, RIFE interpolation, extend it via Wan image-to-video, or add audio. NVIDIA VSR is also wired for single images.
 - **Pipeline routing fixes:** SDXL refiner is kept out of the base-model picker, Flux Fill is inpaint-only, unsupported files (e.g. Hunyuan) are excluded from the pickers instead of misclassified, and Windows Z-Image GGUF is blocked with a clear reason instead of hanging.
 - **Adjustable runtime:** advanced Wan/LTX precision, offload, and SageAttention behavior are user-settable in Settings, with the shipped defaults as the tested baseline.
-- **Installer:** Express install provisions Python 3.10 through uv, or a **conda fallback** if uv is unavailable; it offers to install Miniconda and builds the 3.10 venv automatically. It then installs CUDA PyTorch and requirements, adds the default SD 1.5 fp16 model, builds the Pro frontend, and creates Desktop shortcuts.
+- **Installer:** Express install provisions Python 3.10 through uv, or a **conda fallback** if uv is unavailable; it offers to install Miniconda and builds the 3.10 venv automatically. It prepares the current shared app runtime, builds the Pro frontend, and creates Desktop shortcuts. Default model download and NVIDIA VideoFX SDK link checks are opt-in.
 - **Validated env:** `torch 2.6.0+cu124`, CUDA 12.4, `diffusers 0.38.0`, `transformers 4.57.6`, `fastapi 0.139.0`.
 - **Known gap:** the NVIDIA VideoFX SDK is optional and user-installed; VSR stays disabled until the SDK is present.
 
@@ -116,6 +134,21 @@ Install AIWF Studio.bat
 ```
 
 Choose **Express**. It checks or installs Git, uv, Python 3.10, and Node.js LTS; prepares the AIWF runtime; builds the Pro frontend; and creates Desktop shortcuts for Pro and Gradio Lab.
+
+The current runtime setup still installs CUDA PyTorch and the shared image requirements because Diffusers is the default in-process image backend. To skip model downloads and SDK probing, use plain Express. To install the old all-in-one image stack, use:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_aiwf_studio.ps1 -Mode full
+```
+
+Useful switches:
+
+```powershell
+-WithDefaultModel     # download the default SD 1.5 fp16 model
+-WithNvidiaVideoFx    # link a locally installed NVIDIA VideoFX SDK
+-FullImageStack       # both of the above
+-SkipRuntimeSetup     # create the venv, but skip app runtime package setup until launch
+```
 
 Manual launchers:
 

@@ -150,6 +150,7 @@ a:hover {
 .aiwf-pro-shell {
   position: relative;
   width: 100%;
+  max-width: 100vw;
   height: 100svh;
   min-height: 0;
   overflow: hidden;
@@ -640,7 +641,7 @@ a:hover {
   min-height: 0;
   min-width: 0;
   display: grid;
-  grid-template-rows: 32px 48px 42px minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   overflow: hidden;
   background: var(--background);
 }
@@ -650,13 +651,25 @@ a:hover {
   min-width: 0;
   display: grid;
   grid-template-columns:
-    minmax(300px, var(--left-panel-width, 380px))
+    minmax(clamp(260px, 25vw, 300px), min(var(--left-panel-width, 380px), 34vw))
     10px
     minmax(0, 1fr)
     10px
-    minmax(280px, var(--right-panel-width, 320px));
+    minmax(clamp(240px, 22vw, 280px), min(var(--right-panel-width, 320px), 30vw));
   overflow: hidden;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.pro-workspace-left-collapsed {
+  grid-template-columns: 54px 10px minmax(0, 1fr) 10px minmax(clamp(240px, 22vw, 280px), min(var(--right-panel-width, 320px), 30vw));
+}
+
+.pro-workspace-right-collapsed {
+  grid-template-columns: minmax(clamp(260px, 25vw, 300px), min(var(--left-panel-width, 380px), 34vw)) 10px minmax(0, 1fr) 10px 54px;
+}
+
+.pro-workspace-left-collapsed.pro-workspace-right-collapsed {
+  grid-template-columns: 54px 10px minmax(0, 1fr) 10px 54px;
 }
 
 .pro-logo-button {
@@ -692,7 +705,7 @@ a:hover {
   min-height: 0;
   display: grid;
   gap: 6px;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .pro-rail-button {
@@ -754,7 +767,7 @@ a:hover {
 }
 
 .pro-titlebar {
-  min-width: 156px;
+  min-width: min(156px, 100%);
   display: grid;
   gap: 1px;
 }
@@ -769,6 +782,9 @@ a:hover {
 }
 
 .pro-titlebar span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--muted);
   font-size: 11px;
 }
@@ -776,11 +792,11 @@ a:hover {
 .pro-generation-strip {
   --generation-strip-text: #ffffff;
   --generation-strip-muted: rgba(255, 255, 255, 0.92);
-  min-width: min(620px, 54vw);
+  min-width: min(460px, 46vw);
   max-width: none;
-  flex: 1 1 auto;
+  flex: 1 1 420px;
   display: grid;
-  grid-template-columns: minmax(160px, 0.75fr) minmax(260px, 1.4fr) minmax(100px, 0.45fr);
+  grid-template-columns: minmax(130px, 0.8fr) minmax(180px, 1.4fr) minmax(82px, 0.5fr);
   align-items: center;
   gap: 10px;
   padding: 7px 10px;
@@ -900,7 +916,10 @@ a:hover {
 }
 
 .pro-topbar-status {
+  min-width: 0;
   margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .pro-engine-status {
@@ -1163,7 +1182,6 @@ a:hover {
 .pro-controlnet-card {
   display: grid;
   gap: 10px;
-  margin-top: 12px;
   padding: 12px;
   border: 1px solid rgba(47, 133, 128, 0.34);
   border-radius: var(--radius-md);
@@ -1288,12 +1306,17 @@ a:hover {
 }
 
 .pro-file-input-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 1px !important;
+  max-width: 1px;
+  height: 1px !important;
   overflow: hidden;
   clip: rect(0 0 0 0);
   clip-path: inset(50%);
+  opacity: 0;
+  pointer-events: none;
   white-space: nowrap;
 }
 
@@ -1487,6 +1510,23 @@ a:hover {
   flex: 1 1 auto;
 }
 
+.pro-canvas-generate-button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 12px;
+  box-shadow: 0 8px 18px rgba(239, 104, 70, 0.16);
+}
+
+.pro-continuous-generate-button {
+  white-space: nowrap;
+}
+
+.pro-continuous-generate-button.is-active {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .pro-generate-button-stop {
   border-color: var(--danger);
   background: var(--danger);
@@ -1508,11 +1548,21 @@ a:hover {
   box-shadow: none;
 }
 
+.pro-image-tool-stack {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid rgba(47, 133, 128, 0.28);
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(180deg, rgba(47, 133, 128, 0.055), rgba(239, 104, 70, 0.035)),
+    rgba(255, 246, 230, 0.34);
+}
+
 .pro-tool-launchers {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  margin-top: 12px;
 }
 
 .pro-tool-button,
@@ -1520,6 +1570,7 @@ a:hover {
   min-height: 32px;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 7px;
   padding: 0 10px;
   border: 1px solid var(--border);
@@ -1665,6 +1716,14 @@ a:hover {
   font-family: var(--font-mono);
   font-size: 10px;
   line-height: 1;
+}
+
+.pro-status-heading-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .pro-canvas-tools {
@@ -1982,9 +2041,10 @@ a:hover {
   grid-area: auto;
   min-height: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
-  padding: 0 14px;
+  padding: 7px 14px;
   background: rgba(13, 45, 61, 0.96);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
@@ -2017,7 +2077,9 @@ a:hover {
 
 .pro-topbar .topbar-actions,
 .pro-topbar .pro-actions {
+  min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-left: auto;
@@ -2052,6 +2114,7 @@ a:hover {
   position: relative;
   z-index: 25;
   display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
   gap: 2px;
   padding: 0 10px;
@@ -2194,6 +2257,8 @@ a:hover {
 .pro-status-panel {
   height: 100%;
   min-height: 0;
+  min-width: 0;
+  max-width: 100%;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -2206,6 +2271,58 @@ a:hover {
 .pro-prompt-panel {
   padding: 14px;
   border-right: 1px solid var(--border);
+}
+
+.pro-panel-gap {
+  min-width: 0;
+  min-height: 0;
+}
+
+.pro-collapsed-panel {
+  min-width: 0;
+  height: 100%;
+  display: grid;
+  place-items: stretch;
+  padding: 8px;
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+.pro-collapsed-panel-left {
+  border-right: 1px solid var(--border);
+}
+
+.pro-collapsed-panel-right {
+  border-left: 1px solid var(--border);
+}
+
+.pro-collapsed-panel-button {
+  width: 100%;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.pro-collapsed-panel-button span {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.pro-collapsed-panel-button:hover {
+  border-color: var(--accent);
+  color: var(--text-strong);
 }
 
 .pro-status-panel {
@@ -2248,6 +2365,8 @@ a:hover {
 .pro-card,
 .pro-section,
 .pro-modal .modal-panel {
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-raised);
@@ -2452,6 +2571,59 @@ a:hover {
   white-space: nowrap;
 }
 
+.pro-xy-plot-button {
+  justify-content: center;
+}
+
+.pro-run-options {
+  display: grid;
+  gap: 8px;
+}
+
+.pro-pipeline-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(13, 27, 33, 0.05);
+}
+
+.pro-pipeline-toggle button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.pro-pipeline-toggle button.active {
+  background: linear-gradient(135deg, rgba(239, 104, 70, 0.92), rgba(47, 133, 128, 0.88));
+  color: white;
+  box-shadow: 0 8px 18px rgba(17, 24, 39, 0.14);
+}
+
+.pro-pipeline-toggle button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.pro-visibility-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pro-visibility-actions .pro-secondary-button {
+  min-height: 32px;
+  justify-content: center;
+  padding-inline: 8px;
+}
+
 .pro-model-readiness-note {
   display: grid;
   gap: 4px;
@@ -2480,6 +2652,7 @@ a:hover {
 .pro-topbar button:not(.pro-icon-button),
 .prompt-actions button,
 .pro-modal button {
+  max-width: 100%;
   min-height: 32px;
   display: inline-flex;
   align-items: center;
@@ -4398,6 +4571,59 @@ a:hover {
   gap: 12px;
 }
 
+.pro-xy-plot-panel {
+  min-width: min(560px, calc(100vw - 48px));
+}
+
+.pro-xy-plot-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pro-xy-plot-cell {
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.pro-xy-plot-cell-header,
+.pro-xy-plot-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pro-xy-plot-cell-header {
+  justify-content: space-between;
+}
+
+.pro-xy-plot-cell-header strong {
+  color: var(--text-strong);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.pro-xy-plot-cell-header .pro-secondary-button {
+  min-height: 28px;
+  padding-inline: 8px;
+}
+
+.pro-xy-plot-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.pro-xy-plot-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .pro-about-panel {
   display: grid;
   gap: 8px;
@@ -4489,11 +4715,32 @@ kbd {
 
 @media (max-width: 1200px) {
   .pro-workspace {
-    grid-template-columns: minmax(270px, 340px) 10px minmax(0, 1fr) 10px minmax(250px, 300px);
+    grid-template-columns: minmax(250px, min(32vw, 320px)) 8px minmax(0, 1fr) 8px minmax(220px, min(28vw, 280px));
+  }
+
+  .pro-workspace-left-collapsed {
+    grid-template-columns: 54px 8px minmax(0, 1fr) 8px minmax(220px, min(28vw, 280px));
+  }
+
+  .pro-workspace-right-collapsed {
+    grid-template-columns: minmax(250px, min(32vw, 320px)) 8px minmax(0, 1fr) 8px 54px;
+  }
+
+  .pro-workspace-left-collapsed.pro-workspace-right-collapsed {
+    grid-template-columns: 54px 8px minmax(0, 1fr) 8px 54px;
+  }
+
+  .pro-generation-strip {
+    min-width: min(360px, 42vw);
+    grid-template-columns: minmax(0, 1fr) minmax(120px, 1.2fr) auto;
+  }
+
+  .pro-menu-button {
+    min-width: 0;
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1024px) {
   html,
   body,
   #root {
@@ -4536,11 +4783,11 @@ kbd {
     z-index: 30;
     width: 100%;
     min-height: 58px;
+    flex-wrap: wrap;
     flex-direction: row;
     align-items: center;
     gap: 8px;
-    overflow-x: auto;
-    overflow-y: hidden;
+    overflow: hidden;
     padding: 8px 10px;
     border-right: 0;
     border-bottom: 1px solid var(--border);
@@ -4550,8 +4797,10 @@ kbd {
   .pro-rail .rail-nav,
   .pro-rail .rail-section {
     width: auto;
+    max-width: 100%;
     display: flex;
-    flex: 0 0 auto;
+    flex-wrap: wrap;
+    flex: 1 1 auto;
   }
 
   .pro-rail-footer {
@@ -4608,7 +4857,8 @@ kbd {
 
   .pro-tabs {
     max-width: 100%;
-    overflow-x: auto;
+    flex-wrap: wrap;
+    overflow-x: hidden;
   }
 
   .pro-prompt-panel,
@@ -4686,7 +4936,6 @@ kbd {
   }
 
   .pro-menu-bar {
-    overflow-x: auto;
     padding-right: 14px;
   }
 
@@ -4734,6 +4983,23 @@ kbd {
 
   .pro-topbar-status {
     gap: 6px;
+  }
+
+  .pro-rail {
+    gap: 5px;
+    padding: 6px 8px;
+  }
+
+  .pro-rail-button,
+  .pro-logo-button {
+    width: 36px;
+    min-width: 0;
+    flex: 0 0 36px;
+    height: 36px;
+  }
+
+  .pro-rail-footer {
+    display: none;
   }
 
   .pro-engine-status span:not(.pro-status-dot) {
@@ -4817,12 +5083,43 @@ kbd {
     grid-template-columns: 1fr;
   }
 
+  .pro-controlnet-upload-row,
+  .pro-enhance-source-row,
+  .pro-video-source-row {
+    grid-template-columns: 1fr;
+  }
+
+  .pro-controlnet-preview,
+  .pro-controlnet-empty,
+  .pro-enhance-preview,
+  .pro-enhance-empty {
+    width: min(100%, 150px);
+  }
+
+  .pro-tool-launchers {
+    grid-template-columns: 1fr;
+  }
+
+  .pro-visibility-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .pro-xy-plot-panel {
+    min-width: 0;
+  }
+
+  .pro-xy-plot-grid {
+    grid-template-columns: 1fr;
+  }
+
   .pro-button,
   .pro-primary-button,
   .pro-secondary-button,
   .pro-danger-button,
   .prompt-actions button {
     flex: 1 1 auto;
+    white-space: normal;
+    line-height: 1.15;
   }
 
 }

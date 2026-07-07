@@ -25,6 +25,9 @@ def _bgr_to_pil(image: np.ndarray) -> Image.Image:
 
 
 def _bgr_to_tensor(image: np.ndarray) -> torch.Tensor:
+    if image.dtype in (np.float32, np.float64):
+        rgb = image[:, :, ::-1].astype(np.float32, copy=False)
+        return torch.from_numpy(rgb.transpose(2, 0, 1)).float()
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     return torch.from_numpy(rgb.transpose(2, 0, 1)).float()
 

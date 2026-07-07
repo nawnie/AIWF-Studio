@@ -1,4 +1,5 @@
 export type CreationMode = 'image' | 'video' | 'inpaint'
+export type PipelineBackend = 'aiwf' | 'sdcpp'
 
 export type ProMode = CreationMode | 'models' | 'data'
 
@@ -62,6 +63,7 @@ export interface GenerationSettings {
   prompt: string
   negativePrompt: string
   modelId: string
+  pipelineBackend: PipelineBackend
   aspectRatioId: string
   width: number
   height: number
@@ -146,6 +148,13 @@ export interface RecentOutput {
   clipSkip?: number
   sampler?: string
   scheduler?: string
+  durationSeconds?: number
+  speed?: string
+  receiptPath?: string
+  generationSettings?: Partial<GenerationSettings>
+  generationReceipt?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+  metadataSchema?: string
   modelName?: string
   status?: string
   source?: string
@@ -228,6 +237,18 @@ export interface ProGenerateResult {
   attentionBackend?: string
   quantization?: string
   vaeTiling?: string
+}
+
+export interface ImportedGenerationMetadata {
+  status: string
+  filename: string
+  width: number
+  height: number
+  infotext: string
+  settings: Partial<GenerationSettings>
+  metadata: Record<string, unknown>
+  receipt: Record<string, unknown>
+  message: string
 }
 
 export interface ProStopResult {

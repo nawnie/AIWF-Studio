@@ -65,12 +65,15 @@ if ($CleanBuild -and (Test-Path -LiteralPath $BuildDir)) {
 }
 
 $flags = @()
+$flags += "-DSD_SERVER_BUILD_FRONTEND=OFF"
+$flags += "-DCMAKE_CXX_FLAGS=/bigobj"
 if ($Backend -eq "cuda") {
     $flags += "-DSD_CUDA=ON"
 }
 $flags += $CMakeOption
 
-Run "cmake" @("-S", $ToolRoot, "-B", $BuildDir, "-DCMAKE_BUILD_TYPE=Release") + $flags
+$configureArgs = @("-S", $ToolRoot, "-B", $BuildDir, "-DCMAKE_BUILD_TYPE=Release") + $flags
+Run "cmake" $configureArgs
 Run "cmake" @("--build", $BuildDir, "--config", "Release", "--parallel")
 
 $candidates = @(

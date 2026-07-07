@@ -33,6 +33,18 @@ from aiwf.web.ext_api import build_extension_router
 logger = logging.getLogger("aiwf")
 
 
+def _generation_backend_device_label(ctx: AppContext) -> str:
+    backend = getattr(getattr(ctx, "generation", None), "backend", None)
+    devices = getattr(backend, "devices", None)
+    if devices is not None and callable(getattr(devices, "describe", None)):
+        try:
+            return _friendly_device_name(devices.describe())
+        except Exception:
+            logger.debug("Could not describe generation backend device.", exc_info=True)
+    backend_name = backend.__class__.__name__ if backend is not None else "generation backend"
+    return backend_name.replace("StableDiffusionCppBackend", "stable-diffusion.cpp backend")
+
+
 def _pro_icon_path(name: str) -> Path:
     return Path(__file__).resolve().parent.parent / "static" / "icons" / name
 
@@ -282,7 +294,7 @@ def run() -> None:
         ) from exc
     ctx.runtime_port = port
 
-    _startup_message(f"Using {_friendly_device_name(ctx.generation.backend.devices.describe())}.")
+    _startup_message(f"Using {_generation_backend_device_label(ctx)}.")
     checkpoint_count = len(ctx.generation.list_checkpoints())
     lora_count = len(ctx.generation.list_loras())
     _startup_message(_friendly_library_message(checkpoint_count, lora_count))

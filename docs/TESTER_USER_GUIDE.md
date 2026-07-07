@@ -4,17 +4,7 @@ This guide is for early Windows testers running AIWF Studio Pro.
 
 ## Start Pro
 
-Use the Desktop shortcut or run:
-
-```powershell
-AIWF Studio Pro.bat
-```
-
-Pro starts without terminal windows by default. To debug startup in a visible terminal:
-
-```powershell
-AIWF Studio Pro.bat --terminal
-```
+Use the **AIWF Studio Pro** Desktop shortcut. It opens the loading screen first, then switches into the Pro workspace when the local backend is ready. Terminal windows stay hidden during normal startup.
 
 ## Install
 
@@ -24,7 +14,22 @@ Recommended:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_aiwf_studio.ps1 -Mode express
 ```
 
-Express install creates the venv, installs runtime packages, builds the Pro frontend, downloads the default SD 1.5 fp16 model, and creates shortcuts.
+Express install creates the venv, installs the current shared runtime packages, builds the Pro frontend, and creates shortcuts. It does not download the default SD 1.5 model or probe NVIDIA VideoFX by default.
+
+Use the full image stack only when you want the bundled Diffusers path plus the default model and local SDK link checks:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_aiwf_studio.ps1 -Mode full
+```
+
+Useful switches:
+
+```powershell
+-WithDefaultModel
+-WithNvidiaVideoFx
+-FullImageStack
+-SkipRuntimeSetup  # create the venv, but skip app runtime package setup until launch
+```
 
 If your system Python is the wrong version, install Python 3.10 or 3.11 with `pyenv-win`, then run:
 
@@ -51,7 +56,6 @@ If you use Conda, launch from that activated environment or point `PYTHON` at th
 
 Open **Settings -> System & Launch**.
 
-- **Open support terminal** opens PowerShell in the repo with the venv activated.
 - **Unload model** frees the current image model from memory.
 - **Restart backend** restarts the FastAPI backend and reconnects the Pro window.
 - **Reload app window** refreshes the React frontend.
