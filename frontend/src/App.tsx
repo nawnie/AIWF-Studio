@@ -341,6 +341,7 @@ const WAN_RUNTIME_MODE_OPTIONS = [
 
 const RUNTIME_BACKEND_OPTIONS = [
   { id: 'diffusers', label: 'Diffusers' },
+  { id: 'sdcpp', label: 'stable-diffusion.cpp' }, // AIWF-SDCPP-BACKEND-OPTION
   { id: 'onnx', label: 'ONNX' },
 ]
 

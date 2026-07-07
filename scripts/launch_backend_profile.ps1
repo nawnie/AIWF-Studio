@@ -11,6 +11,7 @@ param(
     [switch]$VaeTiling,
     [switch]$SetDefault,
     [switch]$SkipInstall,
+    [switch]$SkipFrontendBuild,
     [switch]$Terminal
 )
 
@@ -51,11 +52,14 @@ if ($SetDefault) {
 if ($SkipInstall) {
     $LaunchArgs += "--skip-install"
 }
+if ($SkipFrontendBuild) {
+    $LaunchArgs += "--skip-frontend-build"
+}
 if ($Terminal) {
     $LaunchArgs += "--terminal"
 }
 
-Write-Host "[AIWF] Launching Pro with backend profile: $Profile" -ForegroundColor Cyan
+Write-Host "[AIWF] Launching Pro with backend profile: $Profile" -ForegroundColor Yellow
 if ($Profile -eq "sdcpp") {
     Write-Host "[AIWF] sd.cpp backend: $SdcppBackend | Max VRAM: $MaxVram | sd-cli: $($env:AIWF_SDCPP_BINARY)"
 }

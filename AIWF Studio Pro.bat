@@ -3,6 +3,7 @@ setlocal EnableExtensions
 
 rem AIWF Studio Pro - production-oriented React/FastAPI app.
 rem Uses the saved backend profile by default: diffusers, sdcpp, or onnx.
+rem The profile launcher also checks whether the Pro frontend needs a patch/build before launch.
 set "AIWF_ROOT=%~dp0"
 cd /d "%AIWF_ROOT%"
 

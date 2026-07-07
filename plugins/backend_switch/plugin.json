@@ -1,5 +1,5 @@
 {
   "name": "Backend Switch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Runtime helper for launching AIWF Studio Pro with Diffusers, ONNX, or stable-diffusion.cpp profiles."
 }

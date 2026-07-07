@@ -9,6 +9,7 @@ param(
     [switch]$VaeTiling,
     [switch]$SetDefault,
     [switch]$SkipInstall,
+    [switch]$SkipFrontendBuild,
     [switch]$Terminal
 )
 
@@ -44,6 +45,9 @@ if ($SetDefault) {
 }
 if ($SkipInstall) {
     $Args += "-SkipInstall"
+}
+if ($SkipFrontendBuild) {
+    $Args += "-SkipFrontendBuild"
 }
 if ($Terminal) {
     $Args += "-Terminal"

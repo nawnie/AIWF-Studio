@@ -68,14 +68,14 @@ def _html(current: str, saved: str) -> str:
   <meta charset='utf-8'>
   <title>AIWF Backend Switch</title>
   <style>
-    body {{ margin: 0; background: #111816; color: #f3ead8; font: 15px system-ui, sans-serif; }}
-    main {{ max-width: 760px; margin: 48px auto; padding: 24px; background: #17211f; border: 1px solid #31443f; border-radius: 18px; }}
-    h1 {{ margin-top: 0; color: #63d6bd; }}
+    body {{ margin: 0; background: #161310; color: #f4ead6; font: 15px system-ui, sans-serif; }}
+    main {{ max-width: 760px; margin: 48px auto; padding: 24px; background: #211b16; border: 1px solid #57432f; border-radius: 18px; }}
+    h1 {{ margin-top: 0; color: #d99a32; }}
     .row {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 18px 0; }}
-    button {{ border: 1px solid #4a6b64; border-radius: 12px; background: #22312e; color: #f3ead8; padding: 12px 16px; cursor: pointer; }}
-    button.active {{ background: #2f8b79; color: #06110f; font-weight: 700; }}
-    .status {{ padding: 12px; border-radius: 12px; background: #0f1614; border: 1px solid #31443f; }}
-    code {{ color: #63d6bd; }}
+    button {{ border: 1px solid #72583b; border-radius: 12px; background: #2b241d; color: #f4ead6; padding: 12px 16px; cursor: pointer; }}
+    button.active {{ background: #d99a32; color: #161310; font-weight: 700; }}
+    .status {{ padding: 12px; border-radius: 12px; background: #120f0d; border: 1px solid #57432f; }}
+    code {{ color: #f0b04f; }}
   </style>
 </head>
 <body>

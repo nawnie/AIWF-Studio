@@ -1,5 +1,5 @@
 {
-  "name": "SDCPP Pipeline QA",
+  "name": "stable-diffusion.cpp Pipeline QA",
   "version": "0.1.0",
-  "description": "Profile UI for the alternate backend lane."
+  "description": "Profile, argument, smoke-test, and fallback wiring for AIWF stable-diffusion.cpp backend QA."
 }

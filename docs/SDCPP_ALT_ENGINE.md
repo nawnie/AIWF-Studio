@@ -2,37 +2,7 @@
 
 This branch keeps the AIWF Studio production UI and swaps the image-generation backend to a `stable-diffusion.cpp` CLI bridge.
 
-The first pass is intentionally boring in the good way: UI, queue, settings, model scan, output saving, history, and logs stay in AIWF. The actual inference call is delegated to `sd-cli` from `stable-diffusion.cpp`.
-
-Tiny robot note: this is not the final C++ engine marriage ceremony. It is the first clean wire through the wall.
-
-## Current scope
-
-Implemented:
-
-- `AIWF_INFERENCE_BACKEND=sdcpp` route in `aiwf/bootstrap.py`
-- `aiwf.infrastructure.sdcpp.StableDiffusionCppBackend`
-- production UI compatibility through the existing `InferenceBackend` protocol
-- model scanning through the existing AIWF model inventory
-- txt2img command generation
-- basic img2img and inpaint input handoff
-- preview polling through `sd-cli --preview`
-- cancellation by terminating the `sd-cli` subprocess
-- output import back into AIWF's normal save/metadata flow
-- shared-venv Pro profile launcher via `launch_backend_profile.py`
-- Windows PowerShell launch helpers in `scripts/`
-- optional backend-switch helper page at `/api/ext/backend-switch/ui`
-
-Not done yet:
-
-- embedded C API binding
-- stable-diffusion.cpp install/download automation
-- advanced LoRA argument translation
-- full Flux/Qwen/Wan split-asset path mapping
-- deep sampler parity matrix
-- main React settings dropdown source edit for `sdcpp` in `App.tsx`
-
-## Backend profiles
+## Launch profiles
 
 The profile launcher keeps one AIWF venv and chooses the backend at Pro boot time:
 
@@ -43,108 +13,57 @@ AIWF Pro UI -> Pro API -> GenerationService -> selected backend
                                      |-> ONNX
 ```
 
-Use this when you want a fallback lane without maintaining separate Python environments.
-
 ```powershell
-# Launch with the saved profile default.
-.\scripts\launch_backend_profile.ps1
+# Launch with saved profile default.
+.\AIWF Studio Pro.bat --terminal
 
-# Force Diffusers for this launch.
-.\scripts\launch_backend_profile.ps1 -Profile diffusers
-
-# Force stable-diffusion.cpp for this launch.
-.\scripts\launch_backend_profile.ps1 -Profile sdcpp -SdCli "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe" -SdcppBackend cuda0 -MaxVram 14
-
-# Save stable-diffusion.cpp as the profile launcher default.
-.\scripts\launch_backend_profile.ps1 -Profile sdcpp -SetDefault -SdCli "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe" -SdcppBackend cuda0 -MaxVram 14
+# Launch a specific profile.
+.\scripts\launch_backend_profile.ps1 -Profile diffusers -Terminal
+.\scripts\launch_backend_profile.ps1 -Profile sdcpp -SdCli "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe" -SdcppBackend cuda0 -MaxVram 14 -Terminal
+.\scripts\launch_backend_profile.ps1 -Profile onnx -Terminal
 ```
 
-The helper page is available after Pro starts:
+The launcher runs `scripts/ensure_pro_frontend.py` before Pro starts. If `frontend/src/App.tsx` does not expose `stable-diffusion.cpp` in the Settings backend dropdown, the patch is applied and the Pro frontend rebuilds.
+
+## Build/install sd-cli
+
+```powershell
+.\scripts\install_sdcpp.ps1 -Mode build -Backend cuda -SetProfile
+```
+
+That clones `stable-diffusion.cpp` into `tools/stable-diffusion.cpp`, builds `sd-cli`, and saves the `sdcpp` backend profile.
+
+## QA UI
+
+After Pro starts:
 
 ```text
-http://127.0.0.1:7860/api/ext/backend-switch/ui
+http://127.0.0.1:7860/api/ext/sdcpp-pipeline/ui
 ```
 
-That page saves the backend profile default for `scripts/launch_backend_profile.ps1`. A restart is still required because the backend object is built at app boot.
+Use it to set sd.cpp component paths, LoRA directory, ControlNet path, max VRAM, offload mode, and smoke tests.
 
-## How to launch stable-diffusion.cpp directly
-
-Install or build `stable-diffusion.cpp` separately, then point AIWF at `sd-cli.exe`.
-
-```powershell
-# From the AIWF-Studio repo root
-.\scripts\launch_sdcpp.ps1 -SdCli "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe" -Backend cuda0 -MaxVram 14
-```
-
-Useful low-VRAM lane:
-
-```powershell
-.\scripts\launch_sdcpp.ps1 `
-  -SdCli "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe" `
-  -Backend cuda0 `
-  -MaxVram 14 `
-  -OffloadToCpu `
-  -StreamLayers `
-  -VaeTiling
-```
-
-Manual environment version:
-
-```powershell
-$env:AIWF_PROFILE_BACKEND = "sdcpp"
-$env:AIWF_SDCPP_BINARY = "F:\tools\stable-diffusion.cpp\bin\sd-cli.exe"
-$env:AIWF_SDCPP_BACKEND = "cuda0"
-$env:AIWF_SDCPP_MAX_VRAM = "14"
-$env:AIWF_SDCPP_DIFFUSION_FA = "1"
-python launch_backend_profile.py --backend sdcpp --skip-install
-```
-
-## Environment knobs
-
-| Variable | Default | Purpose |
-|---|---:|---|
-| `AIWF_PROFILE_BACKEND` | `diffusers` | Profile backend used by `webui_backend_profile.py`. |
-| `AIWF_SDCPP_BINARY` | auto-detect | Full path to `sd-cli.exe` or `sd-cli`. |
-| `AIWF_SDCPP_BACKEND` | `cuda0` | Passed to `sd-cli --backend`. Use `cpu`, `cuda0`, `vulkan0`, etc. |
-| `AIWF_SDCPP_PARAMS_BACKEND` | blank | Passed to `sd-cli --params-backend`. |
-| `AIWF_SDCPP_MAX_VRAM` | `0` | Passed to `sd-cli --max-vram`. Use a GiB value like `14`. |
-| `AIWF_SDCPP_OFFLOAD_TO_CPU` | `0` | Adds `--offload-to-cpu`. |
-| `AIWF_SDCPP_STREAM_LAYERS` | `0` | Adds `--stream-layers`. Useful with max VRAM. |
-| `AIWF_SDCPP_DIFFUSION_FA` | `1` | Adds `--diffusion-fa` unless set to `0`. |
-| `AIWF_SDCPP_VAE_TILING` | `0` | Adds `--vae-tiling`. |
-| `AIWF_SDCPP_MMAP` | `1` | Adds `--mmap` unless set to `0`. |
-| `AIWF_SDCPP_PREVIEW` | `vae` | Preview decoder mode sent to `--preview`. |
-| `AIWF_SDCPP_EXTRA_ARGS` | blank | Extra raw arguments appended to `sd-cli`. |
-
-## Architecture
-
-AIWF already has a backend boundary:
+## Helper endpoints
 
 ```text
-Production UI -> Pro API -> GenerationService -> InferenceBackend
+GET  /api/ext/sdcpp-pipeline/status
+GET  /api/ext/sdcpp-pipeline/profile
+POST /api/ext/sdcpp-pipeline/profile
+GET  /api/ext/sdcpp-pipeline/requirements
+POST /api/ext/sdcpp-pipeline/smoke/image
+POST /api/ext/sdcpp-pipeline/smoke/video
 ```
 
-This branch adds:
+## CLI smoke tests
 
-```text
-InferenceBackend -> StableDiffusionCppBackend -> sd-cli subprocess
+```powershell
+python .\scripts\sdcpp_smoke_test.py --model "F:\models\sd15.safetensors" --name sd15-512
+
+python .\scripts\sdcpp_smoke_test.py --model "F:\models\sdxl.safetensors" --name sdxl-1024 --width 1024 --height 1024 --steps 6
+
+python .\scripts\sdcpp_video_smoke_test.py --model "F:\models\video-model.safetensors" --frames 25 --fps 16
 ```
 
-That gives us a safe test lane before deeper C++ integration. If it works well, the second pass can replace the subprocess bridge with a Python binding or direct C API bridge.
+## Current limitation
 
-## Test checklist
-
-Start with boring SD1.5 or SDXL single-file models first.
-
-1. Launch with `scripts/launch_sdcpp.ps1`.
-2. Confirm the model dropdown still scans existing model folders.
-3. Generate 512x512 SD1.5 txt2img.
-4. Generate 1024x1024 SDXL txt2img.
-5. Test cancel mid-run.
-6. Test preview updates.
-7. Test img2img handoff.
-8. Test inpaint handoff.
-9. Compare output save/history metadata against Diffusers backend.
-10. Only then move to Flux/Qwen/Z-Image split-asset routes.
-
-Logs first. The gremlins can have snacks later.
+The sd.cpp route is a QA-ready CLI bridge. The main AIWF pipelines remain the fallback when a model family, split-asset graph, or video route needs features that the sd.cpp CLI bridge has not proven yet.
