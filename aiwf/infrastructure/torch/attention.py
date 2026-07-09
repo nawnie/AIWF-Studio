@@ -25,11 +25,11 @@ def _attention_backend(flags) -> str:
     elif _flag(flags, "opt_sdp_attention") or _flag(flags, "opt_split_attention"):
         normalized = "sdpa"
     else:
-        normalized = "sage_sdpa"
+        normalized = "sdpa"
     if normalized in {"sage", "sageattention"}:
         normalized = "sage_sdpa"
     if normalized not in {"sage_sdpa", "sdpa", "xformers", "none"}:
-        return "sage_sdpa"
+        return "sdpa"
     return normalized
 
 
@@ -213,7 +213,7 @@ def resolve_best_diffusers_attention_backend(flags) -> str:
     if _flashattention_usable_in_diffusers():
         return "flash"
 
-    if _sageattention_usable_in_diffusers() and preference in {"sage_sdpa", "sdpa"}:
+    if _sageattention_usable_in_diffusers() and preference == "sage_sdpa":
         return "sage"
 
     # Ada 4070 Ti path: PyTorch flash SDPA via Diffusers native dispatch.

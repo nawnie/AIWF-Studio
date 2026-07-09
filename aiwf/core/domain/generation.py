@@ -80,6 +80,10 @@ class GenerationRequest(BaseModel):
     # Multiple units are preserved here; each backend decides how to fan them
     # out or reject unsupported combinations.
     controlnet_units: list[ControlNetUnit] = Field(default_factory=list)
+    # Per-request engine selection. None/"aiwf" -> primary (Diffusers),
+    # "sdcpp" -> stable-diffusion.cpp. Only honored when the dual backend
+    # is active; single-backend deployments ignore it.
+    pipeline_backend: str | None = None
 
     @field_validator("width", "height")
     @classmethod

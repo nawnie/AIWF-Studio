@@ -1,7 +1,7 @@
 export type CreationMode = 'image' | 'video' | 'inpaint'
-export type PipelineBackend = 'aiwf' | 'sdcpp'
+export type PipelineBackend = 'aiwf' | 'dual' | 'sdcpp'
 
-export type ProMode = CreationMode | 'models' | 'data'
+export type ProMode = CreationMode | 'audio' | 'settings' | 'models' | 'data'
 
 export type EngineId = 'all' | 'flux' | 'flux_fill' | 'flux2' | 'sana_video' | 'wan' | 'sd15' | 'sdxl' | 'sd35' | 'zimage' | 'qwen' | 'sana' | 'unknown'
 
@@ -202,6 +202,7 @@ export interface ProRuntimeStatus {
   queueCount: number
   resources: ResourceMetric[]
   loadedModel: LoadedModelInfo
+  gerror: boolean
 }
 
 export interface ProBootstrap {
@@ -360,6 +361,7 @@ export interface ProSettingsStatus {
     livePreview: boolean
     showProgressEveryNSteps: number
     livePreviewDecoder: string
+    livePreviewTitleProgress: boolean
     hiddenTabs: string[]
   }
   output: {
@@ -406,6 +408,7 @@ export interface ProSettingsStatus {
     share: boolean
     autolaunch: boolean
     api: boolean
+    gerror: boolean
     genlog: boolean
     backend: string
     onnxProvider: string

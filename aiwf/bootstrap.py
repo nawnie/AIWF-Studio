@@ -137,19 +137,31 @@ def _create_onnx_backend(flags: RuntimeFlags, settings: UserSettings):
     return backend
 
 
-def _create_sdcpp_backend(flags: RuntimeFlags):
+def _create_sdcpp_backend(flags: RuntimeFlags, devices=None):
     from aiwf.infrastructure.sdcpp.backend import StableDiffusionCppBackend
 
-    backend = StableDiffusionCppBackend(flags)
+    backend = StableDiffusionCppBackend(flags, devices)
     logger.info("Inference backend: stable-diffusion.cpp (binary=%s)", backend.executable)
+    return backend
+
+
+def _create_dual_backend(flags: RuntimeFlags, devices):
+    from aiwf.infrastructure.dual.backend import DualInferenceBackend
+
+    primary = _create_diffusers_backend(flags, devices)
+    sdcpp = _create_sdcpp_backend(flags, devices)
+    backend = DualInferenceBackend(primary, sdcpp)
+    logger.info("Inference backend: dual (Diffusers + stable-diffusion.cpp, routed per request)")
     return backend
 
 
 def _create_inference_backend(flags: RuntimeFlags, settings: UserSettings, devices):
     if flags.inference_backend == "onnx":
         return _create_onnx_backend(flags, settings)
+    if flags.inference_backend in {"dual", "both"}:
+        return _create_dual_backend(flags, devices)
     if flags.inference_backend in {"sdcpp", "stable-diffusion.cpp", "stable_diffusion_cpp"}:
-        return _create_sdcpp_backend(flags)
+        return _create_sdcpp_backend(flags, devices)
     backend = _create_diffusers_backend(flags, devices)
     logger.info("Inference backend: Diffusers")
     return backend

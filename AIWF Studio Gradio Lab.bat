@@ -11,9 +11,11 @@ if exist "%VENV_DIR%\Scripts\python.exe" set "PYTHON=%VENV_DIR%\Scripts\python.e
 if not defined COMMANDLINE_ARGS set "COMMANDLINE_ARGS=--autolaunch"
 if /I "%~1"=="--terminal" goto visible_terminal
 
-set "PYTHONW=%PYTHON%"
-if exist "%VENV_DIR%\Scripts\pythonw.exe" set "PYTHONW=%VENV_DIR%\Scripts\pythonw.exe"
-start "AIWF Studio Gradio Lab" "%PYTHONW%" "%AIWF_ROOT%launch_gradio.py" %COMMANDLINE_ARGS% %*
+if exist "%AIWF_ROOT%AIWF Studio Gradio Lab.vbs" (
+  start "" /B wscript.exe //nologo "%AIWF_ROOT%AIWF Studio Gradio Lab.vbs" %COMMANDLINE_ARGS% %*
+  endlocal & exit /b 0
+)
+wscript.exe //nologo "%AIWF_ROOT%AIWF Studio Gradio Lab.vbs" %COMMANDLINE_ARGS% %*
 endlocal & exit /b 0
 
 :visible_terminal

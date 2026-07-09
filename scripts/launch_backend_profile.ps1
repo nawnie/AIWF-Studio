@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("diffusers", "sdcpp", "onnx")]
+    [ValidateSet("diffusers", "dual", "sdcpp", "onnx")]
     [string]$Profile = "diffusers",
     [string]$SdCli = "",
     [string]$SdcppBackend = "cuda0",
@@ -19,7 +19,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
-if ($Profile -eq "sdcpp") {
+if ($Profile -in @("dual", "sdcpp")) {
     $env:AIWF_SDCPP_BACKEND = $SdcppBackend
     $env:AIWF_SDCPP_MAX_VRAM = $MaxVram
     $env:AIWF_SDCPP_MMAP = "1"
@@ -60,7 +60,7 @@ if ($Terminal) {
 }
 
 Write-Host "[AIWF] Launching Pro with backend profile: $Profile" -ForegroundColor Yellow
-if ($Profile -eq "sdcpp") {
+if ($Profile -in @("dual", "sdcpp")) {
     Write-Host "[AIWF] sd.cpp backend: $SdcppBackend | Max VRAM: $MaxVram | sd-cli: $($env:AIWF_SDCPP_BINARY)"
 }
 python launch_backend_profile.py @LaunchArgs

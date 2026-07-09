@@ -55,7 +55,7 @@ def _flags(**kwargs):
         "xformers": False,
         "opt_sdp_attention": False,
         "opt_split_attention": False,
-        "attention_backend": "sage_sdpa",
+        "attention_backend": "sdpa",
     }
     values.update(kwargs)
     return SimpleNamespace(**values)
@@ -134,6 +134,15 @@ def test_attention_backend_sage_uses_sdpa_processor():
     result = apply_attention_optimizations(pipe, _flags(attention_backend="sage_sdpa"))
 
     assert result == "sage_sdpa"
+    assert pipe.unet.processor is not None
+
+
+def test_attention_backend_default_is_sdpa():
+    pipe = _AttentionPipe()
+
+    result = apply_attention_optimizations(pipe, _flags(attention_backend=None))
+
+    assert result == "sdp"
     assert pipe.unet.processor is not None
 
 

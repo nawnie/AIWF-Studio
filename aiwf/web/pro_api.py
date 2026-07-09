@@ -20,7 +20,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from PIL import Image
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -1412,8 +1412,22 @@ def _recent_output_images_uncached(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT
                     else artifact.get("infotext", "")
                 )
                 elapsed_seconds = _generation_elapsed_seconds(result)
+                metadata_fields = _image_text_metadata_fields(
+                    {
+                        "parameters": infotext,
+                        "aiwf_generation": json.dumps(artifact.get("metadata", {}), sort_keys=True)
+                        if isinstance(artifact.get("metadata"), dict)
+                        else "",
+                    }
+                )
+                seed = (getattr(result, "seeds", []) or [None])[index] if index < len(getattr(result, "seeds", []) or []) else None
+                request_settings = _recent_generation_settings_payload(request, image, seed, str(getattr(getattr(result, "mode", None), "value", getattr(result, "mode", "txt2img"))))
+                metadata_settings = metadata_fields.get("generationSettings")
+                if isinstance(metadata_settings, dict):
+                    request_settings = {**metadata_settings, **request_settings}
                 add_image(
                     {
+                        **metadata_fields,
                         "source": "memory",
                         "dataUrl": data_url,
                         "path": artifact_path,
@@ -1429,20 +1443,11 @@ def _recent_output_images_uncached(ctx: Any, *, limit: int = _RECENT_IMAGE_LIMIT
                         "scheduler": str(getattr(request, "scheduler", "") or ""),
                         "durationSeconds": round(elapsed_seconds, 2) if elapsed_seconds > 0 else None,
                         "speed": _generation_speed_label(request, result),
-                        "seed": (getattr(result, "seeds", []) or [None])[index]
-                        if index < len(getattr(result, "seeds", []) or [])
-                        else None,
+                        "seed": seed,
                         "modelName": str(getattr(request, "checkpoint_id", "") or ""),
                         "infotext": infotext,
                         "receiptPath": artifact.get("receiptPath", ""),
-                        **_image_text_metadata_fields(
-                            {
-                                "parameters": infotext,
-                                "aiwf_generation": json.dumps(artifact.get("metadata", {}), sort_keys=True)
-                                if isinstance(artifact.get("metadata"), dict)
-                                else "",
-                            }
-                        ),
+                        "generationSettings": request_settings,
                     }
                 )
             if len(images) >= limit:
@@ -2013,6 +2018,7 @@ def _settings_payload(ctx: Any) -> dict[str, Any]:
             "livePreview": getattr(settings, "enable_live_preview", True),
             "showProgressEveryNSteps": int(getattr(settings, "show_progress_every_n_steps", 5)),
             "livePreviewDecoder": getattr(settings, "live_preview_decoder", "vae"),
+            "livePreviewTitleProgress": bool(getattr(settings, "live_preview_title_progress", True)),
             "hiddenTabs": list(getattr(settings, "hidden_tabs", []) or []),
         },
         "output": {
@@ -2059,6 +2065,7 @@ def _settings_payload(ctx: Any) -> dict[str, Any]:
             "share": bool(getattr(flags, "share", False)),
             "autolaunch": bool(getattr(flags, "autolaunch", False)),
             "api": bool(getattr(flags, "api", False)),
+            "gerror": bool(getattr(flags, "gerror", False)),
             "genlog": bool(getattr(flags, "genlog", False)),
             "backend": getattr(flags, "inference_backend", "unknown") if flags is not None else "unknown",
             "onnxProvider": getattr(flags, "onnx_provider", "auto") if flags is not None else "auto",
@@ -2205,6 +2212,8 @@ def _apply_settings_update(ctx: Any, payload: ProSettingsUpdatePayload) -> dict[
         if "livePreviewDecoder" in ui or "live_preview_decoder" in ui:
             decoder = str(ui.get("livePreviewDecoder", ui.get("live_preview_decoder")) or "vae")
             setattr(settings, "live_preview_decoder", decoder if decoder == "vae" else "vae")
+        if "livePreviewTitleProgress" in ui or "live_preview_title_progress" in ui:
+            setattr(settings, "live_preview_title_progress", _bool_setting(ui.get("livePreviewTitleProgress", ui.get("live_preview_title_progress"))))
         if "accentPreset" in ui or "accent_preset" in ui:
             setattr(settings, "accent_preset", str(ui.get("accentPreset", ui.get("accent_preset")) or "mint"))
         if "hiddenTabs" in ui or "hidden_tabs" in ui:
@@ -2326,6 +2335,7 @@ def _apply_settings_update(ctx: Any, payload: ProSettingsUpdatePayload) -> dict[
                 ("share", None, "share"),
                 ("autolaunch", None, "autolaunch"),
                 ("api", None, "api"),
+                ("gerror", None, "gerror"),
                 ("genlog", None, "genlog"),
                 ("xformers", None, "xformers"),
                 ("optSdpAttention", "opt_sdp_attention", "opt_sdp_attention"),
@@ -3167,6 +3177,7 @@ def _runtime_summary(ctx: Any) -> dict[str, Any]:
         "port": getattr(ctx, "runtime_port", None),
         "listen": bool(getattr(flags, "listen", False)),
         "api": True,
+        "gerror": bool(getattr(flags, "gerror", False)),
         "localOnly": not bool(getattr(flags, "listen", False)),
     }
 
@@ -3332,6 +3343,7 @@ def _generation_request(ctx: Any, payload: ProGeneratePayload) -> GenerationRequ
             inpaint_mask_content=payload.inpaint_mask_content,
             controlnet_units=_controlnet_units_from_payload(payload),
             sdxl_refiner_enabled=False,
+            pipeline_backend=_normal_pipeline_backend(payload.pipeline_backend),
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
@@ -3339,7 +3351,7 @@ def _generation_request(ctx: Any, payload: ProGeneratePayload) -> GenerationRequ
 
 def _normal_pipeline_backend(value: str | None) -> str:
     normalized = str(value or "aiwf").strip().lower().replace("-", "_")
-    if normalized in {"sdcpp", "stable_diffusion.cpp", "stable_diffusion_cpp"}:
+    if normalized in {"dual", "both", "sdcpp", "stable_diffusion.cpp", "stable_diffusion_cpp"}:
         return "sdcpp"
     return "aiwf"
 
@@ -3350,11 +3362,18 @@ def _assert_requested_pipeline_backend(ctx: Any, payload: ProGeneratePayload) ->
         return
     active_backend = str(getattr(getattr(ctx, "flags", None), "inference_backend", "") or "").strip().lower()
     backend_class = getattr(getattr(getattr(ctx, "generation", None), "backend", None), "__class__", type("", (), {})).__name__.lower()
-    if active_backend in {"sdcpp", "stable-diffusion.cpp", "stable_diffusion_cpp"} or "sdcpp" in backend_class:
+    if (
+        active_backend in {"sdcpp", "stable-diffusion.cpp", "stable_diffusion_cpp", "dual", "both"}
+        or "sdcpp" in backend_class
+        or "dual" in backend_class
+    ):
         return
     raise HTTPException(
         status_code=409,
-        detail="stable-diffusion.cpp is selected, but the running Pro backend is not the C++ backend. Restart Pro with the C++ backend before generating from this toggle.",
+        detail=(
+            "stable-diffusion.cpp is selected, but the running Pro backend is not the C++ backend. "
+            "Restart Pro with --inference-backend dual (or sdcpp) to use this toggle."
+        ),
     )
 
 
@@ -3380,6 +3399,37 @@ def _generation_speed_label(request: Any, result: Any) -> str:
     if images > 1:
         parts.append(f"{images / elapsed:.2f} img/s")
     return " | ".join(parts)
+
+
+def _recent_generation_settings_payload(request: Any, image: Any, seed: Any, mode: str) -> dict[str, Any]:
+    width, height = getattr(image, "size", (0, 0))
+    return {
+        "mode": "inpaint" if mode == "inpaint" else "image",
+        "prompt": str(getattr(request, "prompt", "") or ""),
+        "negativePrompt": str(getattr(request, "negative_prompt", "") or ""),
+        "modelId": str(getattr(request, "checkpoint_id", "") or ""),
+        "width": int(getattr(request, "width", 0) or width or 0),
+        "height": int(getattr(request, "height", 0) or height or 0),
+        "steps": int(getattr(request, "steps", 0) or 0),
+        "cfgScale": float(getattr(request, "cfg_scale", 0.0) or 0.0),
+        "sampler": str(getattr(request, "sampler", "") or ""),
+        "scheduler": str(getattr(request, "scheduler", "") or ""),
+        "seed": seed if seed is not None else getattr(request, "seed", -1),
+        "clipSkip": int(getattr(request, "clip_skip", 1) or 1),
+        "batchSize": int(getattr(request, "batch_size", 1) or 1),
+        "batchCount": int(getattr(request, "batch_count", 1) or 1),
+        "enableHires": bool(getattr(request, "enable_hr", False)),
+        "hiresScale": float(getattr(request, "hr_scale", 1.0) or 1.0),
+        "hiresSteps": int(getattr(request, "hr_steps", 1) or 1),
+        "hiresDenoise": float(getattr(request, "hr_denoising_strength", 0.0) or 0.0),
+        "hiresUpscaler": str(getattr(request, "hr_upscaler", "") or ""),
+        "denoisingStrength": float(getattr(request, "denoising_strength", 0.75) or 0.75),
+        "maskBlur": int(getattr(request, "mask_blur", 4) or 4),
+        "inpaintOnlyMasked": bool(getattr(request, "inpaint_only_masked", False)),
+        "inpaintMaskedPadding": int(getattr(request, "inpaint_masked_padding", 32) or 32),
+        "inpaintMaskContent": str(getattr(request, "inpaint_mask_content", "original") or "original"),
+        "saveImages": bool(getattr(request, "save_images", True)),
+    }
 
 
 def _job_recent_output_payloads(job: Any) -> list[dict[str, Any]]:
@@ -3420,8 +3470,14 @@ def _job_recent_output_payloads(job: Any) -> list[dict[str, Any]]:
             except OSError:
                 pass
         width, height = getattr(image, "size", (0, 0))
+        seed = seeds[index] if index < len(seeds) else None
+        request_settings = _recent_generation_settings_payload(request, image, seed, mode)
+        metadata_settings = metadata_fields.get("generationSettings")
+        if isinstance(metadata_settings, dict):
+            request_settings = {**metadata_settings, **request_settings}
         outputs.append(
             {
+                **metadata_fields,
                 "id": f"{getattr(job, 'id', 'job')}-{index}",
                 "url": data_url,
                 "thumbnailUrl": data_url,
@@ -3433,7 +3489,7 @@ def _job_recent_output_payloads(job: Any) -> list[dict[str, Any]]:
                 "height": height,
                 "createdAt": created_at,
                 "mode": mode,
-                "seed": seeds[index] if index < len(seeds) else None,
+                "seed": seed,
                 "steps": int(getattr(request, "steps", 0) or 0) or None,
                 "cfgScale": (
                     float(getattr(request, "cfg_scale"))
@@ -3447,7 +3503,7 @@ def _job_recent_output_payloads(job: Any) -> list[dict[str, Any]]:
                 "speed": speed,
                 "modelName": model_name,
                 "receiptPath": artifact.get("receiptPath", ""),
-                **metadata_fields,
+                "generationSettings": request_settings,
                 "status": "completed",
                 "source": "generation",
             }
@@ -4422,7 +4478,13 @@ def build_router(ctx: Any) -> APIRouter:
 
     @router.get("/startup")
     def startup():
-        return _pro_startup_payload(ctx)
+        # CORS-open on purpose: the launcher's loading window is a file://
+        # page that must read this payload to know the real backend is up.
+        # Boot status carries nothing sensitive.
+        return JSONResponse(
+            _pro_startup_payload(ctx),
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"},
+        )
 
     @router.post("/startup/window-ready")
     def startup_window_ready():

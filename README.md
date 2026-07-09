@@ -45,7 +45,7 @@ Both app tracks read and write the same model folders, output history, and setti
   <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="96">
 </p>
 
-**Stable UI track.** Create and generate, Workflow builder, Model Families, Models, Data, Monitor, Logs, and Settings, plus additional workspace screens in active integration.
+**Stable UI track.** Create and generate, Workflow builder, Model Families, Models, Data, Monitor, Logs, Settings, Video, Audio, Pipeline, and Project workspaces. The Create flow is the main release path; the larger workspace screens are being folded in without changing the core local generation route.
 
 ```bat
 AIWF Studio Pro.bat
@@ -58,7 +58,16 @@ python launch_pro.py
 Early testers should keep [`docs/TESTER_USER_GUIDE.md`](docs/TESTER_USER_GUIDE.md) open. It covers install options, hidden terminals, recovery buttons, and error reports.
 
 <p align="center">
-  <img src="docs/assets/aiwf-studio-pro-sana-sprint.png" alt="AIWF Studio Pro image generation workspace" width="100%">
+  <img src="docs/assets/aiwf-pro-video-workspace.png" alt="AIWF Studio Pro video workspace" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/aiwf-pro-audio-studio.png" alt="AIWF Studio Pro audio workspace" width="49%">
+  <img src="docs/assets/aiwf-pro-pipeline-blocks.png" alt="AIWF Studio Pro pipeline blocks workspace" width="49%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/aiwf-pro-startup-checks.png" alt="AIWF Studio Pro startup checks" width="75%">
 </p>
 
 ### AIWF Studio Gradio Lab
@@ -115,8 +124,11 @@ Near-term cleanup target:
 
 Recent additions on `main`:
 
+- **Pro navigation pass:** top tabs now switch the main creation modes and major workspaces; the left rail is for the workspace family. The canvas header has separate image and dock visibility controls, and the lower output dock can apply a selected result back into prompt and generation settings.
+- **Dual image runtime lane:** Pro can save and launch a dual Diffusers plus stable-diffusion.cpp runtime profile. The per-run backend selector is visible in Create for image routes, while unsupported route/model combinations are blocked instead of being sent to the wrong backend.
+- **Live preview controls:** Settings has a dedicated Live preview card with enable/disable, preview interval, decoder, and window-title progress controls.
 - **Workflow builder (Pro):** a **Send to workflow** button on the generation panel captures the current settings as a node; nodes are **manually reorderable by drag or up/down arrows**, with duplicate/remove/clear and local persistence. Uses a shared Pro/Gradio workflow-node serialization contract.
-- **Additional Pro workspace screens:** Workflow, Model Families (live support matrix), Foundry (image surface), Pipeline (workflow blocks), Projects, Assistant, and Audio are wired alongside the stable Create flow. These screens are additive; the core Create -> generate path is unchanged. Maturity varies by screen.
+- **Additional Pro workspace screens:** Workflow, Model Families (live support matrix), Foundry (image surface), Pipeline (workflow blocks), Projects, Assistant, Audio, and Video are wired alongside the stable Create flow. These screens are additive; the core Create -> generate path is unchanged. Maturity varies by screen.
 - **User extensions:** drop a folder with a `plugin.py` into `plugins/` to add REST routes (`/api/ext/<id>/`), Gradio tabs, or event hooks. Managed in Settings; see [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) and the `plugins/hello-extension/` template.
 - **Video Lab (Pro):** upload a video, then NVIDIA VSR upscale, RIFE interpolation, extend it via Wan image-to-video, or add audio. NVIDIA VSR is also wired for single images.
 - **Pipeline routing fixes:** SDXL refiner is kept out of the base-model picker, Flux Fill is inpaint-only, unsupported files (e.g. Hunyuan) are excluded from the pickers instead of misclassified, and Windows Z-Image GGUF is blocked with a clear reason instead of hanging.
@@ -179,6 +191,14 @@ python launch.py --genlog
 ```
 
 `--genlog` writes JSONL entries to `outputs/genlog/generation-log.jsonl` for SD, SDXL, and Wan runs. It records timings, runtime route/pipeline, settings, models, and LoRAs, but not prompt text. The flag is off by default.
+
+Optional funny user-facing errors:
+
+```powershell
+python launch_pro.py --gerror
+```
+
+`--gerror` keeps the real error text in logs and support reports, but shows a short joke in the Pro UI. It covers cancel, timeout, network, validation, conflict, missing file or model, auth, upload, JSON parse, generation/runtime, and server-side errors. Anything outside those buckets falls back to `Something broke, probably on purpose.` You can also turn it on from **Settings -> Runtime -> Funny errors**.
 
 ## Runtime Folders
 
@@ -245,6 +265,7 @@ Coming soon, hidden from the v1 app: Anima split-file generation and Qwen Image 
 - Stable Diffusion 1.5, SDXL, SD3.5, and Flux txt2img checkpoint loading through Diffusers
 - sampler, scheduler, steps, CFG, seed, size, VAE, clip skip, and hires fix controls
 - live preview, interrupt, continuous generation, and job history
+- selectable AIWF, dual, and C++ backend lanes for supported image routes
 - prompt styles, wildcards, prompt files, dynamic prompt syntax, and Compel support
 - LoRA selection, keyword expansion, saved aliases/strengths, and runtime adapter loading for supported Diffusers image families
 - PNG metadata and PNG Info import back into the Image tab
@@ -252,8 +273,10 @@ Coming soon, hidden from the v1 app: Anima split-file generation and Qwen Image 
 ### UI And Monitoring
 
 - FastAPI + React/TypeScript/Vite Pro app with left-rail navigation
-- Create, Workflow, Model Families, Models, Data, Monitor, Logs, and Settings workspaces, plus additional integrated screens (Foundry, Pipeline, Projects, Assistant, Audio)
-- Workflow builder: **Send to workflow** from the generation panel, then manually reorder nodes by drag or up/down arrows (persists locally)
+- top navigation for Image, Inpaint, Video, Audio, Models, Data, and Settings
+- left rail workspace switching for Create, Workflow, Model Families, Foundry, Pipeline, Projects, Monitor, and Logs
+- Workflow builder: **Send to workflow** from the generation panel, then manually reorder nodes by drag or up/down arrows. It persists locally.
+- lower output dock can apply a selected output back into the prompt and generation settings
 - User extensions loaded from `plugins/` with REST/tab/event hooks, managed in Settings
 - scroll-safe panels, popup tool windows, and resizable workspace columns
 - runtime monitor for backend state, queue health, logs, resources, and recent receipts

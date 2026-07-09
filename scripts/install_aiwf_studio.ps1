@@ -17,7 +17,7 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $VenvDir = Join-Path $Root "venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-$PythonVersion = "3.10"
+$PythonVersion = "3.12"
 
 function Write-Section {
     param([string]$Message)
@@ -143,7 +143,7 @@ function Install-Miniconda {
     return (Join-Path $target "Scripts\conda.exe")
 }
 
-# Fallback provisioner: use conda to get a real Python 3.10, then build a
+# Fallback provisioner: use conda to get the target Python, then build a
 # STANDARD venv from it so the app still finds venv\Scripts\python.exe.
 function Ensure-PythonVenv-Conda {
     Write-Host "uv could not provide Python $PythonVersion. Trying conda."
@@ -178,7 +178,7 @@ function Ensure-PythonVenv {
         return
     }
 
-    # Preferred path: uv provides a standalone Python 3.10 with no system dependency.
+    # Preferred path: uv provides a standalone Python with no system dependency.
     $uvOk = $false
     if (Get-Command uv -ErrorAction SilentlyContinue) {
         try {
@@ -280,11 +280,25 @@ function New-DesktopShortcut {
         [string]$TargetPath,
         [string]$Arguments = "",
         [string]$IconPath,
-        [string]$Description
+        [string]$Description,
+        [string]$Directory = ""
     )
 
-    $desktop = [Environment]::GetFolderPath("Desktop")
-    $shortcutPath = Join-Path $desktop "$Name.lnk"
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
+        $Directory = [Environment]::GetFolderPath("DesktopDirectory")
+        if ([string]::IsNullOrWhiteSpace($Directory)) {
+            $shell = New-Object -ComObject WScript.Shell
+            $Directory = $shell.SpecialFolders("Desktop")
+        }
+    }
+    if (-not (Test-Path $Directory)) {
+        if ($DryRun) {
+            Write-Host "[dry-run] Would create shortcut folder: $Directory"
+        } else {
+            New-Item -ItemType Directory -Force -Path $Directory | Out-Null
+        }
+    }
+    $shortcutPath = Join-Path $Directory "$Name.lnk"
     if ($DryRun) {
         Write-Host "[dry-run] Shortcut: $shortcutPath"
         Write-Host "          Target: $TargetPath"
@@ -304,25 +318,62 @@ function New-DesktopShortcut {
     $shortcut.Description = $Description
     $shortcut.WindowStyle = 7
     $shortcut.Save()
-    Write-Host "Created Desktop shortcut: $shortcutPath"
+    try {
+        $shortcut.Refresh()
+    } catch {
+    }
+    Write-Host "Created shortcut: $shortcutPath"
+}
+
+function Refresh-DesktopShell {
+    param([string]$Path)
+
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class AiwfShellNotify {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern void SHChangeNotify(uint wEventId, uint uFlags, string dwItem1, IntPtr dwItem2);
+}
+"@ -ErrorAction SilentlyContinue | Out-Null
+        [AiwfShellNotify]::SHChangeNotify(0x02000000, 0x0005, $Path, [IntPtr]::Zero)
+        [AiwfShellNotify]::SHChangeNotify(0x08000000, 0x0000, $null, [IntPtr]::Zero)
+    } catch {
+    }
 }
 
 function Install-DesktopShortcuts {
     Write-Section "Desktop shortcuts"
-    $wscript = Join-Path $env:WINDIR "System32\wscript.exe"
     New-DesktopShortcut `
         -Name "AIWF Studio Pro" `
-        -TargetPath $wscript `
-        -Arguments ('"{0}"' -f (Join-Path $Root "AIWF Studio Pro.vbs")) `
+        -TargetPath (Join-Path $Root "AIWF Studio Pro.vbs") `
         -IconPath (Join-Path $Root "static\icons\aiwf-studio-pro.ico") `
         -Description "AIWF Studio Pro production React app"
+    Refresh-DesktopShell -Path (Join-Path ([Environment]::GetFolderPath("DesktopDirectory")) "AIWF Studio Pro.lnk")
 
     New-DesktopShortcut `
         -Name "AIWF Studio Gradio Lab" `
-        -TargetPath $wscript `
-        -Arguments ('"{0}"' -f (Join-Path $Root "AIWF Studio Gradio Lab.vbs")) `
+        -TargetPath (Join-Path $Root "AIWF Studio Gradio Lab.vbs") `
         -IconPath (Join-Path $Root "static\icons\aiwf-studio-gradio-lab.ico") `
         -Description "AIWF Studio Gradio Lab for WIP features"
+    Refresh-DesktopShell -Path (Join-Path ([Environment]::GetFolderPath("DesktopDirectory")) "AIWF Studio Gradio Lab.lnk")
+
+    Write-Section "Start Menu shortcuts"
+    $startMenuDir = Join-Path ([Environment]::GetFolderPath("Programs")) "AIWF Studio"
+    New-DesktopShortcut `
+        -Name "AIWF Studio Pro" `
+        -TargetPath (Join-Path $Root "AIWF Studio Pro.vbs") `
+        -IconPath (Join-Path $Root "static\icons\aiwf-studio-pro.ico") `
+        -Description "AIWF Studio Pro production React app" `
+        -Directory $startMenuDir
+
+    New-DesktopShortcut `
+        -Name "AIWF Studio Gradio Lab" `
+        -TargetPath (Join-Path $Root "AIWF Studio Gradio Lab.vbs") `
+        -IconPath (Join-Path $Root "static\icons\aiwf-studio-gradio-lab.ico") `
+        -Description "AIWF Studio Gradio Lab for WIP features" `
+        -Directory $startMenuDir
 }
 
 function Install-NvidiaVideoFx {
@@ -390,6 +441,99 @@ function Install-NvidiaVideoFx {
     }
 }
 
+function Show-InstallerFailureDialog {
+    param(
+        [string]$Title,
+        [string]$Summary,
+        [string]$Details
+    )
+
+    try {
+        Add-Type -AssemblyName System.Drawing, System.Windows.Forms
+        [System.Windows.Forms.Application]::EnableVisualStyles()
+
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = $Title
+        $form.StartPosition = "CenterScreen"
+        $form.Size = New-Object System.Drawing.Size(920, 680)
+        $form.MinimumSize = New-Object System.Drawing.Size(760, 520)
+        $form.TopMost = $true
+        $form.FormBorderStyle = "SizableToolWindow"
+        $form.MaximizeBox = $false
+        $form.MinimizeBox = $false
+
+        $layout = New-Object System.Windows.Forms.TableLayoutPanel
+        $layout.Dock = "Fill"
+        $layout.ColumnCount = 1
+        $layout.RowCount = 4
+        $layout.Padding = New-Object System.Windows.Forms.Padding(18)
+        $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+        $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+        $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+        $layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+        $form.Controls.Add($layout)
+
+        $titleLabel = New-Object System.Windows.Forms.Label
+        $titleLabel.AutoSize = $true
+        $titleLabel.MaximumSize = New-Object System.Drawing.Size(860, 0)
+        $titleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+        $titleLabel.Text = $Summary
+        $layout.Controls.Add($titleLabel, 0, 0)
+
+        $hintLabel = New-Object System.Windows.Forms.Label
+        $hintLabel.AutoSize = $true
+        $hintLabel.Margin = New-Object System.Windows.Forms.Padding(0, 8, 0, 8)
+        $hintLabel.MaximumSize = New-Object System.Drawing.Size(860, 0)
+        $hintLabel.Text = "Copy the details below before closing this window."
+        $layout.Controls.Add($hintLabel, 0, 1)
+
+        $detailsBox = New-Object System.Windows.Forms.TextBox
+        $detailsBox.Dock = "Fill"
+        $detailsBox.Multiline = $true
+        $detailsBox.ReadOnly = $true
+        $detailsBox.ScrollBars = "Vertical"
+        $detailsBox.WordWrap = $false
+        $detailsBox.Font = New-Object System.Drawing.Font("Consolas", 9)
+        $detailsBox.Text = $Details
+        $layout.Controls.Add($detailsBox, 0, 2)
+
+        $buttonRow = New-Object System.Windows.Forms.FlowLayoutPanel
+        $buttonRow.Dock = "Fill"
+        $buttonRow.AutoSize = $true
+        $buttonRow.FlowDirection = "RightToLeft"
+        $buttonRow.WrapContents = $false
+        $buttonRow.Margin = New-Object System.Windows.Forms.Padding(0, 12, 0, 0)
+
+        $closeButton = New-Object System.Windows.Forms.Button
+        $closeButton.Text = "Close"
+        $closeButton.AutoSize = $true
+        $closeButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $buttonRow.Controls.Add($closeButton)
+
+        $copyButton = New-Object System.Windows.Forms.Button
+        $copyButton.Text = "Copy details"
+        $copyButton.AutoSize = $true
+        $copyButton.Add_Click({
+            try {
+                [System.Windows.Forms.Clipboard]::SetText($detailsBox.Text)
+                $copyButton.Text = "Copied"
+            } catch {
+                $copyButton.Text = "Copy failed"
+            }
+        })
+        $buttonRow.Controls.Add($copyButton)
+
+        $layout.Controls.Add($buttonRow, 0, 3)
+        $form.AcceptButton = $copyButton
+        $form.CancelButton = $closeButton
+        [void]$form.ShowDialog()
+    } catch {
+        Write-Host $Title
+        Write-Host $Summary
+        Write-Host $Details
+    }
+}
+
 function Read-InstallerMode {
     Write-Host "AIWF Studio installer"
     Write-Host ""
@@ -410,52 +554,73 @@ function Read-InstallerMode {
     }
 }
 
-Update-ProcessPath
+try {
+    Update-ProcessPath
 
-if ($Mode -eq "prompt" -and -not $ShortcutsOnly) {
-    $Mode = Read-InstallerMode
-}
+    if ($Mode -eq "prompt" -and -not $ShortcutsOnly) {
+        $Mode = Read-InstallerMode
+    }
 
-if ($Mode -eq "quit") {
-    Write-Host "Install cancelled."
-    exit 0
-}
+    if ($Mode -eq "quit") {
+        Write-Host "Install cancelled."
+        exit 0
+    }
 
-if ($Mode -eq "custom") {
-    Write-Host "Custom install is the existing manual path:"
-    Write-Host "  AIWF Studio Pro.bat"
-    Write-Host "  AIWF Studio Gradio Lab.bat"
-    Write-Host "  python launch_pro.py"
-    Write-Host "  python launch_gradio.py"
-    exit 0
-}
+    if ($Mode -eq "custom") {
+        Write-Host "Custom install is the existing manual path:"
+        Write-Host "  AIWF Studio Pro.bat"
+        Write-Host "  AIWF Studio Gradio Lab.bat"
+        Write-Host "  python launch_pro.py"
+        Write-Host "  python launch_gradio.py"
+        exit 0
+    }
 
-if ($Mode -eq "full") {
-    $FullImageStack = $true
-}
+    if ($Mode -eq "full") {
+        $FullImageStack = $true
+    }
 
-if ($ShortcutsOnly) {
+    if ($ShortcutsOnly) {
+        Install-DesktopShortcuts
+        exit 0
+    }
+
+    Write-Section "Prerequisites"
+    if (-not $SkipPrerequisites) {
+        Ensure-WingetPackage -Label "Git" -Id "Git.Git" -Commands @("git")
+        Ensure-WingetPackage -Label "uv Python manager" -Id "astral-sh.uv" -Commands @("uv")
+        Ensure-WingetPackage -Label "Node.js LTS" -Id "OpenJS.NodeJS.LTS" -Commands @("node", "npm")
+    } else {
+        Write-Host "Skipping prerequisite installation."
+    }
+
+    Ensure-PythonVenv
+    Prepare-AiwfRuntime
+    Install-DefaultBaseModel
+    Install-NvidiaVideoFx
+    Build-ProFrontend
     Install-DesktopShortcuts
-    exit 0
+
+    Write-Section "Done"
+    Write-Host "Use the Desktop shortcuts:"
+    Write-Host "  AIWF Studio Pro"
+    Write-Host "  AIWF Studio Gradio Lab"
+} catch {
+    $errorRecord = $_
+    $summary = if ($errorRecord.Exception -and $errorRecord.Exception.Message) {
+        $errorRecord.Exception.Message
+    } else {
+        "The installer failed."
+    }
+    $details = @(
+        "AIWF Studio installer failed."
+        ""
+        "Summary:"
+        $summary
+        ""
+        "Details:"
+        ($errorRecord | Out-String).TrimEnd()
+    ) -join [Environment]::NewLine
+
+    Show-InstallerFailureDialog -Title "AIWF Studio installer failed" -Summary $summary -Details $details
+    exit 1
 }
-
-Write-Section "Prerequisites"
-if (-not $SkipPrerequisites) {
-    Ensure-WingetPackage -Label "Git" -Id "Git.Git" -Commands @("git")
-    Ensure-WingetPackage -Label "uv Python manager" -Id "astral-sh.uv" -Commands @("uv")
-    Ensure-WingetPackage -Label "Node.js LTS" -Id "OpenJS.NodeJS.LTS" -Commands @("node", "npm")
-} else {
-    Write-Host "Skipping prerequisite installation."
-}
-
-Ensure-PythonVenv
-Prepare-AiwfRuntime
-Install-DefaultBaseModel
-Install-NvidiaVideoFx
-Build-ProFrontend
-Install-DesktopShortcuts
-
-Write-Section "Done"
-Write-Host "Use the Desktop shortcuts:"
-Write-Host "  AIWF Studio Pro"
-Write-Host "  AIWF Studio Gradio Lab"

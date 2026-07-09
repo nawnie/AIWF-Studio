@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 
 VALID_BACKENDS = {
     "diffusers": "Diffusers",
+    "dual": "Dual: Diffusers + stable-diffusion.cpp",
     "sdcpp": "stable-diffusion.cpp",
     "onnx": "ONNX",
 }
@@ -22,6 +23,8 @@ def _normalize_backend(value: str | None) -> str:
     normalized = (value or "").strip().lower().replace("_", "-")
     aliases = {
         "diffusers": "diffusers",
+        "dual": "dual",
+        "both": "dual",
         "onnx": "onnx",
         "sdcpp": "sdcpp",
         "sd-cpp": "sdcpp",
@@ -126,7 +129,7 @@ def setup(ctx: Any) -> None:
     def save_profile(backend: str) -> dict[str, Any]:
         normalized = _normalize_backend(backend)
         if normalized not in VALID_BACKENDS:
-            raise HTTPException(status_code=422, detail="Backend must be diffusers, sdcpp, or onnx.")
+            raise HTTPException(status_code=422, detail="Backend must be diffusers, dual, sdcpp, or onnx.")
         _write_profile(normalized)
         return {
             "status": "saved",

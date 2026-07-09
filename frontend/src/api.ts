@@ -33,6 +33,89 @@ type JsonRecord = Record<string, unknown>
 
 const API_BASE = (import.meta.env.VITE_AIWF_API_BASE ?? '').replace(/\/$/, '')
 const API_LATENCY_SAMPLE_LIMIT = 40
+type GerrorCategory =
+  | 'auth'
+  | 'cancel'
+  | 'conflict'
+  | 'default'
+  | 'generation'
+  | 'missing'
+  | 'model'
+  | 'network'
+  | 'parse'
+  | 'server'
+  | 'timeout'
+  | 'upload'
+  | 'validation'
+
+const GERROR_MESSAGES: Record<GerrorCategory, readonly string[]> = {
+  auth: [
+    'The tiny bouncer rejected that pass. The real access note is in the logs.',
+    'A locked door made dramatic eye contact. Check the report for the real reason.',
+  ],
+  cancel: [
+    'Operation bonked politely and stopped.',
+    'The chaos crew heard "stop" and actually listened.',
+  ],
+  conflict: [
+    'Two buttons tried to drive at once. The logs know who grabbed the wheel.',
+    'A job is already chewing on something. Let it finish or stop it first.',
+  ],
+  default: [
+    'Something broke, probably on purpose.',
+    'Something made a weird noise. The technical details stayed intact.',
+  ],
+  generation: [
+    'The image machine coughed up sparks. The real failure is in the report.',
+    'Generation fell into the parts bin. Logs kept the useful bits.',
+  ],
+  missing: [
+    'A required thing wandered off. The logs name the missing piece.',
+    'The shelf was empty where AIWF expected a part.',
+  ],
+  model: [
+    'The model cave said no. The report has the actual model complaint.',
+    'A checkpoint refused to wear the correct hat. Logs kept the real mismatch.',
+  ],
+  network: [
+    'The local wire got yanked by invisible hands. Waiting for the backend.',
+    'The backend stopped answering the door. Technical details are in the logs.',
+  ],
+  parse: [
+    'The API handed back soup instead of JSON. The raw response is in the report.',
+    'A response arrived wearing the wrong syntax hat.',
+  ],
+  server: [
+    'The backend tripped over a toolbox. The stack trace stayed in the logs.',
+    'A server-side lever snapped. The useful details were saved.',
+  ],
+  timeout: [
+    'The backend took a snack break for too long.',
+    'The request waited, sighed, and gave up. Logs kept the timing.',
+  ],
+  upload: [
+    'The file chute jammed. The report says which file complained.',
+    'That upload got stuck in the tiny loading dock.',
+  ],
+  validation: [
+    'AIWF rejected the offering. The report says which field was cursed.',
+    'One setting looked suspicious. Logs kept the exact complaint.',
+  ],
+}
+
+let gerrorEnabled = false
+const gerrorDisplayToRaw = new Map<string, string>()
+
+export function setGerrorEnabled(enabled: boolean): void {
+  gerrorEnabled = enabled
+  if (!enabled) {
+    gerrorDisplayToRaw.clear()
+  }
+}
+
+export function isGerrorEnabled(): boolean {
+  return gerrorEnabled
+}
 
 export interface ProApiLatencySample {
   path: string
@@ -229,6 +312,7 @@ const FALLBACK_RUNTIME: ProRuntimeStatus = {
   attention: 'Unknown',
   maxResolution: 'Unknown',
   queueCount: 0,
+  gerror: false,
   resources: [
     { label: 'VRAM', value: 'Unavailable', percent: 0, tone: 'neutral' },
     { label: 'GPU utilization', value: 'Unavailable', percent: 0, tone: 'neutral' },
@@ -362,26 +446,69 @@ export function streamProRuntime(
 
   const source = new EventSource(`${API_BASE}/api/pro/runtime/stream`)
   let lastEventData = ''
-  source.addEventListener('runtime', (event) => {
+  // The backend ticks every 75 ms while a job runs and each setRuntime
+  // re-renders the whole shell, so React falls behind the stream. Coalesce:
+  // keep only the LATEST payload and apply it at most once per animation
+  // frame with a minimum spacing, trailing-edge included so the final
+  // state always lands.
+  const MIN_APPLY_INTERVAL_MS = 150
+  let pendingData: string | null = null
+  let rafHandle: number | null = null
+  let timerHandle: number | null = null
+  let lastAppliedAt = 0
+  let closed = false
+
+  const applyPending = () => {
+    rafHandle = null
+    timerHandle = null
+    if (closed || pendingData === null) {
+      return
+    }
+    const data = pendingData
+    pendingData = null
+    lastAppliedAt = performance.now()
     try {
-      // Identical payloads (idle ticks) must not trigger a state update —
-      // every setRuntime re-renders the whole shell.
-      if (event.data === lastEventData) {
-        onConnectionChange?.(true)
-        return
-      }
-      lastEventData = event.data
-      onRuntime(normalizeRuntime(JSON.parse(event.data) as unknown))
+      onRuntime(normalizeRuntime(JSON.parse(data) as unknown))
       onConnectionChange?.(true)
     } catch {
       onConnectionChange?.(false)
     }
+  }
+
+  const scheduleFlush = () => {
+    if (rafHandle !== null || timerHandle !== null) {
+      return
+    }
+    const elapsed = performance.now() - lastAppliedAt
+    if (elapsed >= MIN_APPLY_INTERVAL_MS) {
+      rafHandle = window.requestAnimationFrame(applyPending)
+    } else {
+      timerHandle = window.setTimeout(applyPending, MIN_APPLY_INTERVAL_MS - elapsed)
+    }
+  }
+
+  source.addEventListener('runtime', (event) => {
+    // Identical payloads (idle ticks) must not trigger a state update.
+    if (event.data === lastEventData) {
+      onConnectionChange?.(true)
+      return
+    }
+    lastEventData = event.data
+    pendingData = event.data
+    scheduleFlush()
   })
   source.addEventListener('error', () => {
     onConnectionChange?.(false)
   })
 
   return () => {
+    closed = true
+    if (rafHandle !== null) {
+      window.cancelAnimationFrame(rafHandle)
+    }
+    if (timerHandle !== null) {
+      window.clearTimeout(timerHandle)
+    }
     source.close()
   }
 }
@@ -441,6 +568,7 @@ export async function saveProSettings(
             livePreview: ui.livePreview,
             showProgressEveryNSteps: ui.showProgressEveryNSteps,
             livePreviewDecoder: ui.livePreviewDecoder,
+            livePreviewTitleProgress: ui.livePreviewTitleProgress,
             accentPreset: ui.accentPreset,
             hiddenTabs: ui.hiddenTabs,
           }
@@ -494,6 +622,7 @@ export async function saveProSettings(
             share: runtime.share,
             autolaunch: runtime.autolaunch,
             api: runtime.api,
+            gerror: runtime.gerror,
             genlog: runtime.genlog,
             backend: runtime.backend,
             onnxProvider: runtime.onnxProvider,
@@ -903,6 +1032,7 @@ export interface ProClientEventPayload {
 
 export interface ProClientErrorPayload {
   message: string
+  displayMessage?: string
   stack?: string
   source?: string
   kind?: string
@@ -914,8 +1044,11 @@ export function reportProClientEvent(payload: ProClientEventPayload): void {
 }
 
 export function reportProClientError(payload: ProClientErrorPayload): void {
+  const resolved = resolveGerrorLogMessage(payload.message)
   void postClientLog('/api/v1/client-errors', {
     ...payload,
+    message: resolved.raw,
+    ...(payload.displayMessage || resolved.display ? { displayMessage: payload.displayMessage ?? resolved.display } : {}),
     kind: payload.kind ?? 'error',
   })
 }
@@ -965,16 +1098,127 @@ export async function unloadProModel(): Promise<ProRuntimeStatus> {
 }
 
 export function formatApiError(error: unknown): string {
+  let raw = ''
+  let category: GerrorCategory = 'default'
   if (error instanceof DOMException && error.name === 'AbortError') {
-    return 'Request was cancelled.'
+    raw = 'Request was cancelled.'
+    category = 'cancel'
+  } else if (error instanceof ProApiError) {
+    raw = `${error.path} returned ${error.status}: ${error.message}`
+    category = classifyGerror(raw, error.status, error.path)
+  } else if (error instanceof Error) {
+    raw = error.message
+    category = classifyGerror(raw)
+  } else {
+    raw = 'Unknown API error.'
   }
-  if (error instanceof ProApiError) {
-    return `${error.path} returned ${error.status}: ${error.message}`
+  return gerrorDisplay(raw, category)
+}
+
+function gerrorDisplay(raw: string, category: GerrorCategory = 'default'): string {
+  if (!gerrorEnabled) {
+    return raw
   }
-  if (error instanceof Error) {
-    return error.message
+  const normalized = raw.trim() || 'Unknown API error.'
+  const messages = GERROR_MESSAGES[category] ?? GERROR_MESSAGES.default
+  const index = Math.abs(hashString(normalized)) % messages.length
+  const display = messages[index] ?? GERROR_MESSAGES.default[0]
+  gerrorDisplayToRaw.set(display, normalized)
+  return display
+}
+
+function classifyGerror(raw: string, status = 0, path = ''): GerrorCategory {
+  const text = `${path} ${raw}`.toLowerCase()
+  if (text.includes('abort') || text.includes('cancel')) {
+    return 'cancel'
   }
-  return 'Unknown API error.'
+  if (text.includes('timeout') || text.includes('timed out')) {
+    return 'timeout'
+  }
+  if (
+    text.includes('failed to fetch') ||
+    text.includes('network') ||
+    text.includes('connection') ||
+    text.includes('disconnected') ||
+    text.includes('unreachable')
+  ) {
+    return 'network'
+  }
+  if (status === 401 || status === 403 || text.includes('unauthorized') || text.includes('forbidden') || text.includes('auth')) {
+    return 'auth'
+  }
+  if (status === 404 || text.includes('not found') || text.includes('missing') || text.includes('not available')) {
+    return 'missing'
+  }
+  if (status === 409 || text.includes('already running') || text.includes('conflict') || text.includes('stop it or wait')) {
+    return 'conflict'
+  }
+  if (status === 413 || text.includes('upload') || text.includes('too large') || text.includes('could not store')) {
+    return 'upload'
+  }
+  if (
+    text.includes('model') ||
+    text.includes('checkpoint') ||
+    text.includes('lora') ||
+    text.includes('vae') ||
+    text.includes('text encoder') ||
+    text.includes('catalog')
+  ) {
+    return 'model'
+  }
+  if (
+    text.includes('generation') ||
+    text.includes('generate') ||
+    text.includes('decode') ||
+    text.includes('runtime') ||
+    text.includes('pipeline') ||
+    text.includes('out of memory')
+  ) {
+    return 'generation'
+  }
+  if (text.includes('json') || text.includes('parse') || text.includes('syntax')) {
+    return 'parse'
+  }
+  if (
+    status === 400 ||
+    status === 422 ||
+    text.includes('invalid') ||
+    text.includes('unsupported') ||
+    text.includes('requires') ||
+    text.includes('provide') ||
+    text.includes('select') ||
+    text.includes('choose') ||
+    text.includes('must be')
+  ) {
+    return 'validation'
+  }
+  if (status >= 500) {
+    return 'server'
+  }
+  return 'default'
+}
+
+function resolveGerrorLogMessage(message: string): { raw: string; display?: string } {
+  if (!gerrorEnabled || gerrorDisplayToRaw.size === 0) {
+    return { raw: message }
+  }
+  for (const [display, raw] of gerrorDisplayToRaw) {
+    if (message === display) {
+      return { raw, display }
+    }
+    if (message.includes(display)) {
+      return { raw: message.replace(display, raw), display: message }
+    }
+  }
+  return { raw: message }
+}
+
+function hashString(value: string): number {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0
+  }
+  return hash
 }
 
 function formatResponseError(text: string, fallback: string): string {
@@ -1314,6 +1558,7 @@ function normalizeSettingsStatus(value: unknown): ProSettingsStatus {
       livePreview: readBoolean(ui, ['livePreview', 'live_preview'], true),
       showProgressEveryNSteps: readNumber(ui, ['showProgressEveryNSteps', 'show_progress_every_n_steps'], 5),
       livePreviewDecoder: readString(ui, ['livePreviewDecoder', 'live_preview_decoder'], 'vae'),
+      livePreviewTitleProgress: readBoolean(ui, ['livePreviewTitleProgress', 'live_preview_title_progress'], true),
       hiddenTabs: readArray(ui, ['hiddenTabs', 'hidden_tabs']).map((item) => readLooseString(item, '')).filter(Boolean),
     },
     output: {
@@ -1360,6 +1605,7 @@ function normalizeSettingsStatus(value: unknown): ProSettingsStatus {
       share: readBoolean(runtime, ['share'], false),
       autolaunch: readBoolean(runtime, ['autolaunch'], false),
       api: readBoolean(runtime, ['api'], false),
+      gerror: readBoolean(runtime, ['gerror'], false),
       genlog: readBoolean(runtime, ['genlog'], false),
       backend: readString(runtime, ['backend'], 'unknown'),
       onnxProvider: readString(runtime, ['onnxProvider', 'onnx_provider'], 'auto'),
@@ -1607,6 +1853,10 @@ function normalizeLogEvent(value: unknown): ProLogEvent | null {
 function normalizeRuntime(value: unknown): ProRuntimeStatus {
   const record = asRecord(value)
   const fallback = getFallbackRuntime()
+  const nextGerror = readBoolean(record, ['gerror'], fallback.gerror)
+  if (nextGerror !== gerrorEnabled) {
+    setGerrorEnabled(nextGerror)
+  }
   const resourceValue = readUnknown(record, ['resources', 'usage'])
   const loadedModelRecord = readRecord(record, ['loaded_model', 'loadedModel', 'model'])
   const resources = normalizeResources(resourceValue, fallback.resources)
@@ -1623,6 +1873,7 @@ function normalizeRuntime(value: unknown): ProRuntimeStatus {
       fallback.maxResolution,
     ),
     queueCount: readNumber(record, ['queue_count', 'queueCount', 'queue'], fallback.queueCount),
+    gerror: nextGerror,
     resources,
     job: normalizeRuntimeJob(readRecord(record, ['job']), fallback.job),
     loadedModel: normalizeLoadedModel(loadedModelRecord, fallback.loadedModel),
@@ -1638,7 +1889,7 @@ function normalizeRuntimeJob(value: Record<string, unknown>, fallback: ProRuntim
     totalSteps: readNumber(value, ['totalSteps', 'total_steps', 'total'], fallback.totalSteps),
     message: readString(value, ['message', 'detail'], fallback.message),
     hasResult: readBoolean(value, ['hasResult', 'has_result'], fallback.hasResult),
-    error: readString(value, ['error'], fallback.error),
+    error: gerrorDisplay(readString(value, ['error'], fallback.error), 'generation'),
     previewUrl: normalizeAssetUrl(readString(value, ['previewUrl', 'preview_url', 'dataUrl', 'data_url'], fallback.previewUrl)),
   }
 }
@@ -2148,6 +2399,9 @@ function normalizeCreationMode(value: unknown, fallback: CreationMode): Creation
 }
 
 function normalizePipelineBackend(value: unknown, fallback: PipelineBackend): PipelineBackend {
+  if (value === 'dual' || value === 'both') {
+    return 'dual'
+  }
   if (value === 'sdcpp' || value === 'stable-diffusion.cpp' || value === 'stable_diffusion_cpp') {
     return 'sdcpp'
   }

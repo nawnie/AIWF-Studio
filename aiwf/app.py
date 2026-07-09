@@ -215,6 +215,11 @@ def _parse_cli() -> RuntimeFlags:
     parser.add_argument("--api-rate-limit-per-minute", type=int, default=0)
     parser.add_argument("--allow-private-download-urls", action="store_true")
     parser.add_argument(
+        "--gerror",
+        action="store_true",
+        help="Show playful user-facing error messages while keeping real details in logs and support reports.",
+    )
+    parser.add_argument(
         "--genlog",
         action="store_true",
         help="Append local generation speed/settings entries to outputs/genlog/generation-log.jsonl",
@@ -242,9 +247,12 @@ def _parse_cli() -> RuntimeFlags:
     )
     parser.add_argument(
         "--inference-backend",
-        choices=["diffusers", "onnx"],
+        choices=["diffusers", "onnx", "sdcpp", "dual"],
         default="diffusers",
-        help="Studio image pipeline family: diffusers or onnx",
+        help=(
+            "Studio image pipeline family: diffusers, onnx, sdcpp (stable-diffusion.cpp only), "
+            "or dual (Diffusers + stable-diffusion.cpp routed per request)"
+        ),
     )
     parser.add_argument(
         "--onnx-provider",
@@ -350,6 +358,7 @@ def _parse_cli() -> RuntimeFlags:
         api_cors_origins=args.api_cors_origins,
         api_rate_limit_per_minute=args.api_rate_limit_per_minute,
         block_private_download_urls=not args.allow_private_download_urls,
+        gerror=args.gerror,
         genlog=args.genlog,
         no_half=args.no_half,
         fp8=args.fp8,
@@ -364,7 +373,7 @@ def _parse_cli() -> RuntimeFlags:
         highvram=vram_profile == "high",
         attention_backend=(
             args.attention_backend
-            or ("xformers" if args.xformers else "sdpa" if args.opt_sdp_attention or args.opt_split_attention else "sage_sdpa")
+            or ("xformers" if args.xformers else "sdpa")
         ),
         xformers=args.xformers,
         opt_sdp_attention=args.opt_sdp_attention,

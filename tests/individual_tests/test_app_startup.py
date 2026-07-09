@@ -36,10 +36,16 @@ def test_friendly_library_message_when_no_models_exist():
     )
 
 
-def test_attention_label_prefers_sage_when_available(monkeypatch):
+def test_attention_label_defaults_to_sdpa_when_sage_is_available(monkeypatch):
     monkeypatch.setattr("aiwf.core.user_messages.sageattention_2_available", lambda: True)
 
-    assert attention_display_label(RuntimeFlags()) == "Sage"
+    assert attention_display_label(RuntimeFlags()) == "SDPA"
+
+
+def test_attention_label_reports_sage_when_explicit(monkeypatch):
+    monkeypatch.setattr("aiwf.core.user_messages.sageattention_2_available", lambda: True)
+
+    assert attention_display_label(RuntimeFlags(attention_backend="sage_sdpa")) == "Sage"
 
 
 def test_attention_label_reports_sdpa_when_explicit():

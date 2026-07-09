@@ -141,6 +141,7 @@ project grows.
 - ONNX LoRA, textual inversion, and VAE swapping are not implemented.
 - TensorRT engine cache, shape ranges, and LoRA refit are Engine Lab only.
 - SageAttention and similar acceleration paths remain benchmark-gated.
+- Runtime attention diagram: [CUDA 13 attention experiment](experiments/runtime-attention-cuda13.md).
 - Wan resident/streamed offload modes remain under performance validation.
 - VQA/image QA helper for Pro UI is planned but not wired yet.
 - Plugin ecosystem and workflow authoring are planned.

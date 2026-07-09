@@ -92,8 +92,13 @@ class StableDiffusionCppBackend:
     library binding without touching the UI.
     """
 
-    def __init__(self, flags: RuntimeFlags) -> None:
+    def __init__(self, flags: RuntimeFlags, devices=None) -> None:
         self.flags = flags
+        if devices is None:
+            from aiwf.infrastructure.torch.devices import DeviceManager
+
+            devices = DeviceManager(flags)
+        self.devices = devices
         self._checkpoints: list[Checkpoint] | None = None
         self._loras: list[LoraInfo] | None = None
         self._vaes: list[VaeInfo] | None = None

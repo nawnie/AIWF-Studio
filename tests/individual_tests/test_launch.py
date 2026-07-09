@@ -37,10 +37,10 @@ def test_launch_settings_argv_includes_vram_profile_aliases():
 
 
 def test_launch_settings_argv_includes_attention_backend():
-    settings = LaunchSettings(attention_backend="sdpa")
+    settings = LaunchSettings(attention_backend="xformers")
     argv = settings.argv()
     assert "--attention-backend" in argv
-    assert "sdpa" in argv
+    assert "xformers" in argv
 
 
 def test_launch_settings_argv_includes_api_security_flags():
@@ -48,6 +48,7 @@ def test_launch_settings_argv_includes_api_security_flags():
         api_cors_origins="http://127.0.0.1:3000, https://studio.example",
         api_rate_limit_per_minute=120,
         block_private_download_urls=False,
+        gerror=True,
         genlog=True,
     )
     argv = settings.argv()
@@ -57,6 +58,7 @@ def test_launch_settings_argv_includes_api_security_flags():
     assert "--api-rate-limit-per-minute" in argv
     assert "120" in argv
     assert "--allow-private-download-urls" in argv
+    assert "--gerror" in argv
     assert "--genlog" in argv
 
 
@@ -101,6 +103,14 @@ def test_launch_settings_argv_includes_pipeline_and_engine_flags():
     assert "--channels-last" in argv
     assert "--nvenc" in argv
     assert "--hevc" in argv
+
+
+def test_launch_settings_accepts_dual_backend_profile():
+    settings = LaunchSettings(inference_backend="dual")
+    argv = settings.argv()
+
+    assert "--inference-backend" in argv
+    assert "dual" in argv
 
 
 def test_launch_settings_argv_includes_external_tool_paths():
@@ -170,7 +180,7 @@ def test_merge_launch_settings_respects_explicit_normal_vram_cli(tmp_path: Path)
 
 
 def test_merge_launch_settings_applies_saved_attention_backend(tmp_path: Path):
-    cli = RuntimeFlags(data_dir=tmp_path, attention_backend="sage_sdpa")
+    cli = RuntimeFlags(data_dir=tmp_path, attention_backend="sdpa")
     saved = LaunchSettings(attention_backend="xformers", xformers=True)
     merged = merge_launch_settings(cli, saved, explicit=set())
     assert merged.attention_backend == "xformers"
@@ -201,6 +211,15 @@ def test_merge_launch_settings_respects_explicit_genlog_cli(tmp_path: Path):
     merged = merge_launch_settings(cli, saved, explicit={"--genlog"})
 
     assert merged.genlog is False
+
+
+def test_merge_launch_settings_applies_gerror(tmp_path: Path):
+    cli = RuntimeFlags(data_dir=tmp_path)
+    saved = LaunchSettings(gerror=True)
+
+    merged = merge_launch_settings(cli, saved, explicit=set())
+
+    assert merged.gerror is True
 
 
 def test_merge_launch_settings_respects_explicit_no_autolaunch_cli(tmp_path: Path):
@@ -259,6 +278,15 @@ def test_merge_launch_settings_applies_pipeline_and_engine_flags(tmp_path: Path)
     assert merged.channels_last is True
     assert merged.nvenc is True
     assert merged.hevc is True
+
+
+def test_merge_launch_settings_applies_dual_backend(tmp_path: Path):
+    cli = RuntimeFlags(data_dir=tmp_path)
+    saved = LaunchSettings(inference_backend="dual")
+
+    merged = merge_launch_settings(cli, saved, explicit=set())
+
+    assert merged.inference_backend == "dual"
 
 
 def test_merge_launch_settings_applies_external_tool_paths(tmp_path: Path):

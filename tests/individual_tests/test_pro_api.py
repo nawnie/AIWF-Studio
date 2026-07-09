@@ -257,6 +257,17 @@ def test_runtime_endpoint_reports_warm_latency_under_budget(tmp_path):
     assert roundtrip_ms < 75
 
 
+def test_runtime_endpoint_reports_gerror_flag(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.flags = ctx.flags.model_copy(update={"gerror": True})
+    client = _client(ctx)
+
+    response = client.get("/api/pro/runtime")
+
+    assert response.status_code == 200
+    assert response.json()["gerror"] is True
+
+
 def test_startup_endpoint_tracks_window_ready_callback(tmp_path):
     ctx = _ctx(tmp_path)
     client = _client(ctx)
@@ -287,6 +298,7 @@ def test_bootstrap_returns_catalog_defaults_runtime_and_recent_images(tmp_path):
     assert response.status_code == 200
     data = response.json()
     assert data["runtime"]["device"] == "CPU (test)"
+    assert data["runtime"]["gerror"] is False
     assert data["settings"]["width"] == 640
     assert data["checkpoints"][0]["id"] == "model-a"
     assert data["checkpoints"][0]["engineId"] == "sdxl"
@@ -691,10 +703,92 @@ def test_generate_maps_payload_and_returns_first_image(tmp_path):
     assert data["recentOutputs"][0]["url"].startswith("data:image/png;base64,")
     assert data["recentOutputs"][0]["path"].endswith("generated.png")
     assert data["recentOutputs"][0]["modelName"] == "model-a"
+    assert data["recentOutputs"][0]["generationSettings"]["prompt"] == "cat"
+    assert data["recentOutputs"][0]["generationSettings"]["negativePrompt"] == "blurry"
+    assert data["recentOutputs"][0]["generationSettings"]["modelId"] == "model-a"
+    assert data["recentOutputs"][0]["generationSettings"]["width"] == 512
+    assert data["recentOutputs"][0]["generationSettings"]["height"] == 768
+    assert data["recentOutputs"][0]["generationSettings"]["enableHires"] is True
     assert data["status"] == "completed"
     assert data["job"]["state"] == "completed"
     assert data["seeds"] == [1234]
     assert data["artifacts"][0]["path"].endswith("generated.png")
+
+
+def test_generate_maps_pipeline_backend_to_request_when_dual_runtime(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.flags = ctx.flags.model_copy(update={"inference_backend": "dual"})
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/generate",
+        json={
+            "prompt": "cat",
+            "mode": "image",
+            "model_id": "model-a",
+            "pipelineBackend": "sdcpp",
+        },
+    )
+
+    assert response.status_code == 200
+    assert ctx.generation.submitted[0].pipeline_backend == "sdcpp"
+
+
+def test_generate_maps_dual_pipeline_backend_to_request_when_dual_runtime(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.flags = ctx.flags.model_copy(update={"inference_backend": "dual"})
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/generate",
+        json={
+            "prompt": "cat",
+            "mode": "image",
+            "model_id": "model-a",
+            "pipelineBackend": "dual",
+        },
+    )
+
+    assert response.status_code == 200
+    assert ctx.generation.submitted[0].pipeline_backend == "sdcpp"
+
+
+def test_generate_rejects_sdcpp_pipeline_backend_without_cpp_runtime(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/generate",
+        json={
+            "prompt": "cat",
+            "mode": "image",
+            "model_id": "model-a",
+            "pipelineBackend": "sdcpp",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "dual (or sdcpp)" in response.json()["detail"]
+    assert ctx.generation.submitted == []
+
+
+def test_generate_rejects_dual_pipeline_backend_without_cpp_runtime(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/generate",
+        json={
+            "prompt": "cat",
+            "mode": "image",
+            "model_id": "model-a",
+            "pipelineBackend": "dual",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "dual (or sdcpp)" in response.json()["detail"]
+    assert ctx.generation.submitted == []
 
 
 def test_generate_maps_controlnet_unit(tmp_path):
@@ -1376,6 +1470,7 @@ def test_settings_endpoint_updates_generation_and_ui_defaults(tmp_path):
                 "livePreview": False,
                 "showProgressEveryNSteps": 3,
                 "livePreviewDecoder": "vae",
+                "livePreviewTitleProgress": False,
             },
         },
     )
@@ -1388,9 +1483,11 @@ def test_settings_endpoint_updates_generation_and_ui_defaults(tmp_path):
     assert data["ui"]["galleryColumns"] == 4
     assert data["ui"]["livePreview"] is False
     assert data["ui"]["showProgressEveryNSteps"] == 3
+    assert data["ui"]["livePreviewTitleProgress"] is False
     assert ctx.settings.default_width == 768
     assert ctx.settings.default_height == 1024
     assert ctx.settings.enable_live_preview is False
+    assert ctx.settings.live_preview_title_progress is False
     assert saved == [True]
 
 

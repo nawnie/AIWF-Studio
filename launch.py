@@ -14,18 +14,113 @@ ROOT = Path(__file__).resolve().parent
 VENV = ROOT / "venv"
 REQUIREMENTS = ROOT / "requirements.txt"
 ENGINES_CONFIG = ROOT / "engines.json"
-TORCH_INDEX = os.environ.get("TORCH_INDEX_URL", "https://download.pytorch.org/whl/cu124")
+TORCH_INDEX = os.environ.get("TORCH_INDEX_URL", "https://download.pytorch.org/whl/cu130")
 PYPI_INDEX = os.environ.get("PYPI_INDEX_URL", "https://pypi.org/simple")
-TORCH_CUDA_VERSION = os.environ.get("TORCH_CUDA_VERSION", "2.6.0+cu124")
-TORCHVISION_CUDA_VERSION = os.environ.get("TORCHVISION_CUDA_VERSION", "0.21.0+cu124")
-TORCHAUDIO_CUDA_VERSION = os.environ.get("TORCHAUDIO_CUDA_VERSION", "2.6.0+cu124")
-XFORMERS_PACKAGE = os.environ.get("XFORMERS_PACKAGE", "xformers==0.0.29.post3")
+TORCH_CUDA_VERSION = os.environ.get("TORCH_CUDA_VERSION", "2.13.0+cu130")
+TORCHVISION_CUDA_VERSION = os.environ.get("TORCHVISION_CUDA_VERSION", "0.28.0+cu130")
+TORCHAUDIO_CUDA_VERSION = os.environ.get("TORCHAUDIO_CUDA_VERSION", "")
+XFORMERS_PACKAGE = os.environ.get("XFORMERS_PACKAGE", "")
 LAUNCH_ONLY_FLAGS = {
+    "--terminal",
     "--install-sageattention",
     "--sageattention",
     "--skip-sageattention",
     "--skip-ltx",
 }
+
+
+# ---------------------------------------------------------------------------
+# Launch status server
+#
+# Serves /api/pro/startup on the app port while the launcher prepares the
+# environment, so the Pro loading window can show live boot stages before
+# the real backend takes over the port. Payloads carry "launcher": true so
+# the loading page can tell them apart from the real backend's response.
+# ---------------------------------------------------------------------------
+
+class LaunchStatusServer:
+    PHASES = (
+        "launcher",
+        "environment",
+        "cuda",
+        "dependencies",
+        "imports",
+        "engines",
+        "frontend",
+        "spawning",
+    )
+
+    def __init__(self, port: int) -> None:
+        import threading
+
+        self.port = port
+        self._lock = threading.Lock()
+        self._state = {"phase": "launcher", "message": "Starting AIWF Studio Pro...", "detail": ""}
+        self._http = None
+        self._thread = None
+
+    def update(self, phase: str, message: str, *, detail: str = "") -> None:
+        with self._lock:
+            self._state = {"phase": phase, "message": message, "detail": detail}
+        print(f"[AIWF launch] {message}", flush=True)
+
+    def _snapshot(self) -> dict:
+        with self._lock:
+            payload = dict(self._state)
+        payload["launcher"] = True
+        payload["ready"] = False
+        return payload
+
+    def start(self) -> bool:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args) -> None:  # noqa: N802 - stdlib signature
+                return
+
+            def do_GET(self) -> None:  # noqa: N802 - stdlib signature
+                if self.path.split("?", 1)[0] == "/api/pro/startup":
+                    body = json.dumps(server._snapshot()).encode("utf-8")
+                    code = 200
+                else:
+                    body = json.dumps({"detail": "AIWF Studio Pro is still starting."}).encode("utf-8")
+                    code = 503
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                # The loading window is a file:// page; it needs CORS to read the phase.
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+
+        class ExclusiveServer(ThreadingHTTPServer):
+            # Windows SO_REUSEADDR would happily double-bind an active port;
+            # we need the bind to FAIL when the backend is already running.
+            allow_reuse_address = False
+
+        try:
+            self._http = ExclusiveServer(("127.0.0.1", self.port), Handler)
+        except OSError:
+            # Port already taken (backend already running, or another launcher).
+            self._http = None
+            return False
+        self._thread = threading.Thread(target=self._http.serve_forever, daemon=True, name="aiwf-launch-status")
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        if self._http is None:
+            return
+        self._http.shutdown()
+        self._http.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+        self._http = None
+        self._thread = None
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +409,12 @@ def requirements_satisfied(py: str) -> bool:
 
 def install_cuda_torch(py: str) -> None:
     print(f"Installing CUDA PyTorch from {TORCH_INDEX} ...")
+    packages = [
+        f"torch=={TORCH_CUDA_VERSION}",
+        f"torchvision=={TORCHVISION_CUDA_VERSION}",
+    ]
+    if TORCHAUDIO_CUDA_VERSION.strip():
+        packages.append(f"torchaudio=={TORCHAUDIO_CUDA_VERSION}")
     subprocess.check_call(
         [
             py,
@@ -324,9 +425,7 @@ def install_cuda_torch(py: str) -> None:
             "--disable-pip-version-check",
             "--upgrade",
             "--force-reinstall",
-            f"torch=={TORCH_CUDA_VERSION}",
-            f"torchvision=={TORCHVISION_CUDA_VERSION}",
-            f"torchaudio=={TORCHAUDIO_CUDA_VERSION}",
+            *packages,
             "--index-url",
             TORCH_INDEX,
             "--extra-index-url",
@@ -336,6 +435,9 @@ def install_cuda_torch(py: str) -> None:
 
 
 def install_xformers(py: str) -> None:
+    if not XFORMERS_PACKAGE.strip():
+        print("xFormers install skipped: no default package is configured for this torch/CUDA lane.")
+        return
     print(f"Installing {XFORMERS_PACKAGE} (no-deps to protect CUDA torch)...")
     subprocess.check_call(
         [
@@ -484,14 +586,26 @@ def _prepare_engine_venv(spec: EngineSpec, argv: list[str]) -> None:
     print(f"[{spec.label}] Engine venv ready.")
 
 
-def prepare(skip_prepare: bool, skip_install: bool, argv: list[str]) -> None:
+def _report(status: LaunchStatusServer | None, phase: str, message: str, *, detail: str = "") -> None:
+    if status is not None:
+        status.update(phase, message, detail=detail)
+
+
+def prepare(
+    skip_prepare: bool,
+    skip_install: bool,
+    argv: list[str],
+    status: LaunchStatusServer | None = None,
+) -> None:
     if skip_prepare:
         return
 
     # ------------------------------------------------------------------
     # Main AIWF venv (UI shell + generation engine, shared)
     # ------------------------------------------------------------------
+    _report(status, "environment", "Checking Python environment...")
     if not VENV.exists():
+        _report(status, "environment", "Creating virtual environment...")
         print("Creating virtual environment...")
         subprocess.check_call([sys.executable, "-m", "venv", str(VENV)])
 
@@ -501,10 +615,14 @@ def prepare(skip_prepare: bool, skip_install: bool, argv: list[str]) -> None:
             install_xformers(py)
         return
 
+    _report(status, "cuda", "Verifying CUDA / PyTorch...")
     if not torch_cuda_ready(py):
+        _report(status, "cuda", "Installing CUDA PyTorch (first run can take a while)...")
         install_cuda_torch(py)
 
+    _report(status, "dependencies", "Checking Python requirements...")
     if not requirements_satisfied(py):
+        _report(status, "dependencies", "Installing missing Python requirements...")
         print("Installing missing Python requirements...")
         subprocess.check_call(
             [
@@ -524,6 +642,7 @@ def prepare(skip_prepare: bool, skip_install: bool, argv: list[str]) -> None:
 
     # Optional accelerator. Do not build/install it during normal startup; Wan
     # keeps a torch SDPA fallback and benchmark-gates SageAttention separately.
+    _report(status, "imports", "Verifying ML libraries (torch, diffusers, transformers)...")
     if should_install_sageattention(argv) and not sageattention_ready(py):
         install_sageattention(py)
 
@@ -533,6 +652,7 @@ def prepare(skip_prepare: bool, skip_install: bool, argv: list[str]) -> None:
     # ------------------------------------------------------------------
     # Training engine venvs (Kohya, ED2, LLM) â€” opt-in via engines.json
     # ------------------------------------------------------------------
+    _report(status, "engines", "Preparing backend engines...")
     engines_cfg = _load_engines_config()
     for spec in _build_engine_registry():
         if spec.enabled_by_default:
@@ -541,6 +661,7 @@ def prepare(skip_prepare: bool, skip_install: bool, argv: list[str]) -> None:
             continue
         if spec.skip_flag and spec.skip_flag in argv:
             continue
+        _report(status, "engines", f"Preparing {spec.label} engine...", detail=spec.label)
         _prepare_engine_venv(spec, argv)
 
 
@@ -553,9 +674,25 @@ def _tee_run(cmd: list[str], env: dict, log_path: Path) -> int:
         log_f.write(header)
         log_f.flush()
 
+        hide_window = _hide_child_console()
+        if hide_window:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                cwd=str(ROOT),
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                **_hidden_subprocess_kwargs(),
+            )
+            proc.wait()
+            exit_code = proc.returncode
+            log_f.write("\n[AIWF launch] Process exited with code " + str(exit_code) + "\n")
+            return exit_code
+
         proc = subprocess.Popen(
             cmd,
             env=env,
+            cwd=str(ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=0,
@@ -577,6 +714,30 @@ def _tee_run(cmd: list[str], env: dict, log_path: Path) -> int:
         exit_code = proc.returncode
         log_f.write("\n[AIWF launch] Process exited with code " + str(exit_code) + "\n")
         return exit_code
+
+
+def _hide_child_console() -> bool:
+    if os.name != "nt":
+        return False
+    if "--terminal" in sys.argv[1:]:
+        return False
+    executable = Path(sys.executable).name.lower()
+    if executable == "pythonw.exe":
+        return True
+    stdout = getattr(sys, "stdout", None)
+    return stdout is None
+
+
+def _hidden_subprocess_kwargs() -> dict:
+    if os.name != "nt":
+        return {}
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 0
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": info,
+    }
 
 
 def main() -> None:

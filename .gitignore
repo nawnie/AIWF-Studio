@@ -173,5 +173,8 @@ node_modules/
 *.tmp
 *.bak
 
+# Generated launcher icon sidecars
+.*.icon.ico
+
 # Local research output (not runtime)
 research runs/

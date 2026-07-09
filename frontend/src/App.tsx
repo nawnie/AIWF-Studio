@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   CSSProperties,
   ChangeEvent as ReactChangeEvent,
@@ -16,7 +16,10 @@ import {
   Brush,
   CircleHelp,
   Database,
+  Clipboard,
   Cpu,
+  Eye,
+  EyeOff,
   FileImage,
   Hand,
   HardDrive,
@@ -86,6 +89,7 @@ import {
   requestProRestart,
   runEnhanceImage,
   saveProSettings,
+  setGerrorEnabled,
   streamProRuntime,
   stopProGeneration,
   unloadProModel,
@@ -124,7 +128,7 @@ interface IconItem<T extends string> {
   icon: LucideIcon
 }
 
-type ToolModalId = 'segmentation' | 'hires' | 'enhance' | 'reactor' | 'xyPlot' | 'about' | null
+type ToolModalId = 'segmentation' | 'hires' | 'enhance' | 'reactor' | 'controlnet' | 'xyPlot' | 'about' | null
 type MenuBarId = 'file' | 'edit' | 'view' | 'options' | 'help' | null
 type DragTarget = 'left' | 'right' | 'bottom'
 
@@ -145,6 +149,13 @@ interface SupportIssue {
   context?: Record<string, unknown>
 }
 
+interface ControlNetCompatibility {
+  supported: boolean
+  message: string
+  modelFamily: 'sd15' | 'sdxl' | null
+  controlNetFamily: 'sd15' | 'sdxl' | null
+}
+
 const IMAGE_FILE_ACCEPT = 'image/*,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.avif'
 const VIDEO_FILE_ACCEPT = 'video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.wmv,.flv,.mpeg,.mpg,.ts,.mts,.m2ts,.3gp,.ogv'
 const MODEL_FILE_ACCEPT = '.safetensors,.ckpt,.pt,.pth,.bin,.gguf,.onnx'
@@ -153,6 +164,35 @@ const VIDEO_FILE_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', 
 const MODEL_FILE_EXTENSIONS = new Set(['.safetensors', '.ckpt', '.pt', '.pth', '.bin', '.gguf', '.onnx'])
 const XY_PLOT_DEFAULT_CELLS = 4
 const XY_PLOT_MAX_CELLS = 12
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.readOnly = true
+  textarea.setAttribute('aria-hidden', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.top = '0'
+  textarea.style.left = '-9999px'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  try {
+    textarea.focus()
+    textarea.select()
+    textarea.setSelectionRange(0, text.length)
+
+    const copied = document.execCommand('copy')
+    if (!copied) {
+      throw new Error('Clipboard copy failed.')
+    }
+  } finally {
+    document.body.removeChild(textarea)
+  }
+}
 
 interface DragState {
   target: DragTarget
@@ -180,6 +220,7 @@ interface LayoutPreferences {
   rightPanelWidth: number
   bottomDockHeight: number
   bottomDockVisible: boolean
+  outputPreviewVisible: boolean
 }
 
 const DEFAULT_LAYOUT_PREFERENCES: LayoutPreferences = {
@@ -187,6 +228,7 @@ const DEFAULT_LAYOUT_PREFERENCES: LayoutPreferences = {
   rightPanelWidth: 320,
   bottomDockHeight: 196,
   bottomDockVisible: true,
+  outputPreviewVisible: true,
 }
 
 const PRO_APP_ICON = '/app-icon.png'
@@ -206,10 +248,12 @@ const LAYOUT_STORAGE_KEY = 'aiwf.pro.layout.v1'
 
 const MODE_TABS: IconItem<ProMode>[] = [
   { id: 'image', label: 'Image', icon: Image },
-  { id: 'video', label: 'Video', icon: Video },
   { id: 'inpaint', label: 'Inpaint', icon: Brush },
+  { id: 'video', label: 'Video', icon: Video },
+  { id: 'audio', label: 'Audio', icon: Wand2 },
   { id: 'models', label: 'Models', icon: Boxes },
   { id: 'data', label: 'Data', icon: Database },
+  { id: 'settings', label: 'Settings', icon: Settings },
 ]
 
 const RAIL_ITEMS: IconItem<string>[] = [
@@ -230,6 +274,25 @@ const RAIL_ITEMS: IconItem<string>[] = [
 ]
 
 const RAIL_IDS = new Set(RAIL_ITEMS.map((item) => item.id))
+const RAIL_ITEM_BY_ID = new Map(RAIL_ITEMS.map((item) => [item.id, item]))
+
+const RAILS_BY_MODE: Record<string, string[]> = {
+  image: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'projects', 'data', 'monitor', 'logs'],
+  inpaint: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'data', 'monitor', 'logs'],
+  video: ['create', 'workflow', 'models', 'pipeline', 'projects', 'data', 'monitor', 'logs'],
+  audio: ['audiolab', 'projects', 'data', 'monitor', 'logs'],
+  settings: ['settings', 'models', 'data', 'monitor', 'logs', 'assistant'],
+  models: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'projects', 'data', 'monitor', 'logs'],
+  data: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'projects', 'data', 'monitor', 'logs'],
+}
+
+const STUDIO_RAIL_ATTRIBUTE: Record<string, string> = {
+  projects: 'project',
+  assistant: 'agent',
+  audiolab: 'audio',
+}
+
+const FULL_SURFACE_RAILS = new Set(['workflow', 'families', 'foundry', 'pipeline', 'projects', 'assistant', 'audiolab'])
 
 const SANA_QUANTIZATION_OPTIONS = [
   { value: 'auto', label: 'Auto' },
@@ -354,6 +417,7 @@ const WAN_RUNTIME_MODE_OPTIONS = [
 
 const RUNTIME_BACKEND_OPTIONS = [
   { id: 'diffusers', label: 'Diffusers' },
+  { id: 'dual', label: 'Dual (Diffusers + C++)' },
   { id: 'sdcpp', label: 'stable-diffusion.cpp' }, // AIWF-SDCPP-BACKEND-OPTION
   { id: 'onnx', label: 'ONNX' },
 ]
@@ -435,7 +499,7 @@ function App() {
   const [generationReceiptPath, setGenerationReceiptPath] = useState('')
   const [generationError, setGenerationError] = useState('')
   const [supportIssue, setSupportIssue] = useState<SupportIssue | null>(null)
-  const [activeMode, setActiveMode] = useState<ProMode>('image')
+  const [activeMode, setActiveMode] = useState<ProMode>(readInitialMode)
   const [activeRail, setActiveRail] = useState(readInitialRail)
   const [workflowBlocks, setWorkflowBlocks] = useState<WorkflowCodeBlock[]>(() => loadWorkflowBlocksFromStorage())
   const [workflowStatus, setWorkflowStatus] = useState('')
@@ -474,6 +538,7 @@ function App() {
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
   const [bottomDockVisible, setBottomDockVisible] = useState(initialLayout.bottomDockVisible)
+  const [outputPreviewVisible, setOutputPreviewVisible] = useState(initialLayout.outputPreviewVisible)
   const [bottomDockHeight, setBottomDockHeight] = useState(initialLayout.bottomDockHeight)
   const [activeModal, setActiveModal] = useState<ToolModalId>(null)
   const [openMenu, setOpenMenu] = useState<MenuBarId>(null)
@@ -512,20 +577,32 @@ function App() {
   const runtimeJobActive = isRuntimeJobActive(runtime.job)
   const generationActive = isGenerating || runtime.state.toLowerCase() === 'running' || runtimeJobActive
   const sdcppRuntimeAvailable = isSdcppRuntime(runtime)
+  const dualRuntimeAvailable = isDualRuntime(runtime)
 
   useEffect(() => {
-    if (settings.pipelineBackend !== 'sdcpp' || sdcppRuntimeAvailable) {
+    setGerrorEnabled(runtime.gerror)
+  }, [runtime.gerror])
+
+  useEffect(() => {
+    if (settings.pipelineBackend === 'dual' && !dualRuntimeAvailable) {
+      setSettings((current) => (
+        current.pipelineBackend === 'dual'
+          ? { ...current, pipelineBackend: sdcppRuntimeAvailable ? 'sdcpp' : 'aiwf' }
+          : current
+      ))
       return
     }
-    setSettings((current) => (
-      current.pipelineBackend === 'sdcpp'
-        ? { ...current, pipelineBackend: 'aiwf' }
-        : current
-    ))
-  }, [sdcppRuntimeAvailable, settings.pipelineBackend])
+    if (settings.pipelineBackend === 'sdcpp' && !sdcppRuntimeAvailable) {
+      setSettings((current) => (
+        current.pipelineBackend === 'sdcpp'
+          ? { ...current, pipelineBackend: 'aiwf' }
+          : current
+      ))
+    }
+  }, [dualRuntimeAvailable, sdcppRuntimeAvailable, settings.pipelineBackend])
 
   const setDisconnectedRuntime = useCallback((message: string) => {
-    setRuntime({
+    setRuntime((current) => ({
       ...fallbackRuntime,
       state: backendRecovering ? 'Recovering' : 'Disconnected',
       backend: 'Backend unreachable',
@@ -533,7 +610,8 @@ function App() {
       job: { ...fallbackRuntime.job, message },
       resources: fallbackRuntime.resources.map((metric) => ({ ...metric })),
       loadedModel: { ...fallbackRuntime.loadedModel },
-    })
+      gerror: current.gerror,
+    }))
   }, [backendRecovering, fallbackRuntime])
 
   const markBackendDisconnected = useCallback((message: string) => {
@@ -715,12 +793,19 @@ function App() {
     return () => controller.abort()
   }, [fallbackBootstrap.defaults])
 
+  // Read via ref so the stream effect does not tear down and rebuild the
+  // EventSource every time the recovery flag flips.
+  const backendRecoveringRef = useRef(backendRecovering)
+  useEffect(() => {
+    backendRecoveringRef.current = backendRecovering
+  }, [backendRecovering])
+
   useEffect(() => {
     return streamProRuntime(
       (nextRuntime) => {
         setRuntime(nextRuntime)
         setBackendConnected(true)
-        if (backendRecovering) {
+        if (backendRecoveringRef.current) {
           setBackendRecovering(false)
           setStatusMessage('Backend reconnected.')
         }
@@ -729,7 +814,7 @@ function App() {
         setRuntimeStreamConnected(connected)
       },
     )
-  }, [backendRecovering])
+  }, [])
 
   useEffect(() => {
     let disposed = false
@@ -981,6 +1066,19 @@ function App() {
     }
   }, [markBackendDisconnected, showSupportIssue])
 
+  const handleCopyGenerationError = useCallback(async () => {
+    const text = generationError || runtime.job.error
+    if (!text) {
+      return
+    }
+    try {
+      await copyTextToClipboard(text)
+      setStatusMessage('Error copied.')
+    } catch {
+      setStatusMessage('Could not copy the error text.')
+    }
+  }, [generationError, runtime.job.error])
+
   useEffect(() => {
     if (!dragState) {
       return
@@ -1027,8 +1125,14 @@ function App() {
         setActiveMode('models')
       } else if (nextRail === 'data') {
         setActiveMode('data')
+      } else if (nextRail === 'settings') {
+        setActiveMode('settings')
+      } else if (nextRail === 'audiolab') {
+        setActiveMode('audio')
       } else if (nextRail === 'create') {
         setActiveMode('image')
+      } else {
+        setActiveMode((current) => modeContainingRail(nextRail, current))
       }
     }
     window.addEventListener('hashchange', onHashChange)
@@ -1041,13 +1145,14 @@ function App() {
       rightPanelWidth,
       bottomDockHeight,
       bottomDockVisible,
+      outputPreviewVisible,
     }
     try {
       window.localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(nextPreferences))
     } catch {
       // Layout persistence is a convenience; the app should stay usable if storage is blocked.
     }
-  }, [bottomDockHeight, bottomDockVisible, leftPanelWidth, rightPanelWidth])
+  }, [bottomDockHeight, bottomDockVisible, leftPanelWidth, outputPreviewVisible, rightPanelWidth])
 
   useEffect(() => {
     return () => {
@@ -1100,6 +1205,11 @@ function App() {
     }
     return ''
   }, [bootstrap.models, selectedModel, settings.mode, settings.modelId])
+
+  const controlNetCompatibility = useMemo(
+    () => getControlNetCompatibility(selectedModel, settings.controlNetModel),
+    [selectedModel, settings.controlNetModel],
+  )
 
   useEffect(() => {
     saveWorkflowBlocksToStorage(workflowBlocks)
@@ -1250,10 +1360,65 @@ function App() {
         })
       }
       setActiveRail('create')
+      if (window.location.hash !== `#${mode}`) {
+        window.history.replaceState(null, '', `#${mode}`)
+      }
+    } else if (mode === 'audio') {
+      setActiveRail('audiolab')
+      if (window.location.hash !== '#audiolab') {
+        window.history.replaceState(null, '', '#audiolab')
+      }
+    } else if (mode === 'settings') {
+      setActiveRail('settings')
+      if (window.location.hash !== '#settings') {
+        window.history.replaceState(null, '', '#settings')
+      }
     } else {
       setActiveRail(mode)
+      if (window.location.hash !== `#${mode}`) {
+        window.history.replaceState(null, '', `#${mode}`)
+      }
     }
   }, [bootstrap.aspectRatios, bootstrap.models, settings.modelId])
+
+  useEffect(() => {
+    if (!isCreationMode(activeMode) || settings.mode === activeMode) {
+      return
+    }
+    if (activeMode === 'video') {
+      const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
+      const videoModels = modelsForCreationMode(bootstrap.models, 'video')
+      const currentIsVideo = currentModel ? modelFitsCreationMode(currentModel, 'video') : false
+      const videoModel = currentIsVideo
+        ? currentModel
+        : videoModels.find((model) => model.engineId === 'wan') ??
+          videoModels.find((model) => model.engineId === 'sana_video') ??
+          videoModels[0]
+      setEngineFilter(videoModel?.engineId ?? 'sana_video')
+      setSettings((current) => ({
+        ...current,
+        mode: activeMode,
+        modelId: videoModel?.id ?? current.modelId,
+        aspectRatioId: '16:9',
+        width: 832,
+        height: 480,
+        batchSize: 1,
+      }))
+      return
+    }
+    const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
+    const routeModels = modelsForCreationMode(bootstrap.models, activeMode)
+    const routeModel = currentModel && modelFitsCreationMode(currentModel, activeMode) ? currentModel : routeModels[0]
+    setEngineFilter(routeModel?.engineId ?? 'all')
+    setSettings((current) => {
+      const next = {
+        ...current,
+        mode: activeMode,
+        modelId: routeModel?.id ?? current.modelId,
+      }
+      return routeModel ? applyModelPresetSettings(next, routeModel, bootstrap.aspectRatios) : next
+    })
+  }, [activeMode, bootstrap.aspectRatios, bootstrap.models, settings.mode, settings.modelId])
 
   const handleRailSelect = useCallback((id: string) => {
     setActiveRail(id)
@@ -1264,24 +1429,31 @@ function App() {
       setActiveMode('models')
     } else if (id === 'data') {
       setActiveMode('data')
-    } else if (id === 'tools') {
-      setActiveMode('image')
+    } else if (id === 'settings') {
+      setActiveMode('settings')
+    } else if (id === 'audiolab') {
+      setActiveMode('audio')
     } else if (id === 'create') {
-      setActiveMode('image')
-      const imageModels = modelsForCreationMode(bootstrap.models, 'image')
+      const nextMode: CreationMode = isCreationMode(activeMode) ? activeMode : settings.mode
+      setActiveMode(nextMode)
+      const imageModels = modelsForCreationMode(bootstrap.models, nextMode)
       const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
-      const imageModel = currentModel && modelFitsCreationMode(currentModel, 'image') ? currentModel : imageModels[0]
+      const imageModel = currentModel && modelFitsCreationMode(currentModel, nextMode) ? currentModel : imageModels[0]
       setEngineFilter(imageModel?.engineId ?? 'all')
       setSettings((current) => {
         const next = {
           ...current,
-          mode: 'image' as CreationMode,
+          mode: nextMode,
           modelId: imageModel?.id ?? current.modelId,
         }
         return imageModel ? applyModelPresetSettings(next, imageModel, bootstrap.aspectRatios) : next
       })
+    } else {
+      // Rails like projects/families/tools can be reached from any mode via
+      // menu or hash; keep the mode consistent so the rail list contains them.
+      setActiveMode((current) => modeContainingRail(id, current))
     }
-  }, [bootstrap.aspectRatios, bootstrap.models, settings.modelId])
+  }, [activeMode, bootstrap.aspectRatios, bootstrap.models, settings.mode, settings.modelId])
 
   const handleRatioSelect = useCallback((ratio: AspectRatioOption) => {
     setSettings((current) => ({
@@ -1599,6 +1771,15 @@ function App() {
       }
       if (selectedModel && !['sd15', 'sdxl', 'flux_fill'].includes(selectedModel.engineId ?? 'unknown')) {
         const message = 'Inpainting supports SD 1.5, SDXL, and Flux Fill checkpoints. Pick one of those models.'
+        setGenerationError(message)
+        setStatusMessage(message)
+        return false
+      }
+    }
+    if (settings.controlNetEnabled) {
+      const controlNetStatus = getControlNetCompatibility(selectedModel, settings.controlNetModel)
+      if (!controlNetStatus.supported) {
+        const message = controlNetStatus.message
         setGenerationError(message)
         setStatusMessage(message)
         return false
@@ -1965,22 +2146,9 @@ function App() {
   }, [settings.negativePrompt, settings.prompt])
 
   const handleApplyOutputSettings = useCallback((output: RecentOutput) => {
-    const patch: GenerationSettingsPatch = output.generationSettings ?? {
-      mode: output.mode === 'video' ? undefined : output.mode,
-      prompt: output.prompt,
-      negativePrompt: output.negativePrompt,
-      width: output.width,
-      height: output.height,
-      steps: output.steps,
-      cfgScale: output.cfgScale,
-      clipSkip: output.clipSkip,
-      sampler: output.sampler,
-      scheduler: output.scheduler,
-      seed: output.seed,
-      modelName: output.modelName,
-    }
+    const patch = buildOutputGenerationSettingsPatch(output)
     setSettings((current) => applyGenerationSettingsPatch(current, patch, bootstrap.models, bootstrap.aspectRatios))
-    if (patch.mode === 'image' || patch.mode === 'inpaint') {
+    if (patch.mode === 'image' || patch.mode === 'inpaint' || patch.mode === 'video') {
       setActiveMode(patch.mode)
     } else {
       setActiveMode('image')
@@ -2136,6 +2304,7 @@ function App() {
     setRightPanelCollapsed(false)
     setBottomDockHeight(196)
     setBottomDockVisible(true)
+    setOutputPreviewVisible(true)
   }, [])
 
   const startHorizontalDrag = useCallback(
@@ -2161,7 +2330,65 @@ function App() {
     [bottomDockHeight],
   )
 
-  const workspaceStyle = activeRail === 'models'
+  // Stable callbacks so the memoized shell components (PromptPanel, canvas,
+  // dock, menus) skip re-rendering on every runtime stream tick.
+  const settingsRef = useRef(settings)
+  useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
+  const openSegmentationModal = useCallback(() => setActiveModal('segmentation'), [])
+  const openHiresModal = useCallback(() => setActiveModal('hires'), [])
+  const openEnhanceModal = useCallback(() => setActiveModal('enhance'), [])
+  const openReactorModal = useCallback(() => setActiveModal('reactor'), [])
+  const openControlNetModal = useCallback(() => setActiveModal('controlnet'), [])
+  const toggleBottomDock = useCallback(() => setBottomDockVisible((value) => !value), [])
+  const toggleOutputPreview = useCallback(() => setOutputPreviewVisible((value) => !value), [])
+  const toggleAdvanced = useCallback(() => setShowAdvanced((value) => !value), [])
+  const collapseLeftPanel = useCallback(() => setLeftPanelCollapsed(true), [])
+  const toggleRightPanel = useCallback(() => setRightPanelCollapsed((value) => !value), [])
+  const startLeftDrag = useCallback(() => startHorizontalDrag('left'), [startHorizontalDrag])
+  const startRightDrag = useCallback(() => startHorizontalDrag('right'), [startHorizontalDrag])
+  const openSettingsRail = useCallback(() => handleRailSelect('settings'), [handleRailSelect])
+
+  const handleMenuAction = useCallback((action: string) => {
+    setOpenMenu(null)
+    if (action === 'toggle-dock') {
+      setBottomDockVisible((value) => !value)
+    } else if (action === 'reset-layout') {
+      handleLayoutReset()
+    } else if (action === 'open-hires') {
+      setActiveModal('hires')
+    } else if (action === 'open-segmentation') {
+      setActiveModal('segmentation')
+    } else if (action === 'open-reactor') {
+      setActiveModal('reactor')
+    } else if (action === 'open-enhance') {
+      setActiveModal('enhance')
+    } else if (action === 'open-controlnet') {
+      setActiveModal('controlnet')
+    } else if (action === 'copy-last') {
+      void navigator.clipboard?.writeText(settingsRef.current.prompt)
+      setStatusMessage('Prompt copied to clipboard.')
+    } else if (action === 'new-prompt') {
+      setSettings((current) => ({ ...current, prompt: '', negativePrompt: '' }))
+      setStatusMessage('Prompt cleared.')
+    } else if (action === 'open-models') {
+      handleRailSelect('models')
+    } else if (action === 'open-data') {
+      handleRailSelect('data')
+    } else if (action === 'open-tools') {
+      handleRailSelect('tools')
+    } else if (action === 'open-monitor') {
+      handleRailSelect('monitor')
+    } else if (action === 'open-settings') {
+      handleRailSelect('settings')
+    } else if (action === 'open-help') {
+      setActiveModal('about')
+    }
+  }, [handleLayoutReset, handleRailSelect])
+
+  const workspaceIsFullSurface = FULL_SURFACE_RAILS.has(activeRail)
+  const workspaceStyle = activeRail === 'models' || workspaceIsFullSurface
     ? undefined
     : ({
         '--left-panel-width': `${leftPanelWidth}px`,
@@ -2169,14 +2396,17 @@ function App() {
       } as CSSProperties)
   const workspaceClassName = [
     'pro-workspace',
+    workspaceIsFullSurface ? 'pro-workspace-full-surface' : '',
     activeRail === 'create' && leftPanelCollapsed ? 'pro-workspace-left-collapsed' : '',
     activeRail === 'create' && rightPanelCollapsed ? 'pro-workspace-right-collapsed' : '',
   ].filter(Boolean).join(' ')
+  const activeRailItems = railsForMode(activeMode, activeRail)
 
   return (
     <div
       className={`aiwf-pro-shell theme-preset-1${fileDropActive ? ' is-file-drop-active' : ''}`}
       data-mode={activeMode}
+      data-rail={STUDIO_RAIL_ATTRIBUTE[activeRail] ?? activeRail}
       onDragEnter={handleFileDragEnter}
       onDragOver={handleFileDragOver}
       onDragLeave={handleFileDragLeave}
@@ -2197,8 +2427,12 @@ function App() {
           issue={supportIssue}
           onClose={() => setSupportIssue(null)}
           onCopy={async () => {
-            await navigator.clipboard?.writeText(JSON.stringify(supportIssue, null, 2))
-            setStatusMessage('Error report copied.')
+            try {
+              await copyTextToClipboard(JSON.stringify(supportIssue, null, 2))
+              setStatusMessage('Error report copied.')
+            } catch {
+              setStatusMessage('Could not copy the error report.')
+            }
           }}
           onSubmit={() => {
             reportProClientError({
@@ -2215,7 +2449,7 @@ function App() {
           }}
         />
       ) : null}
-      <aside className="pro-rail" aria-label="Primary navigation">
+      <aside className="pro-rail" aria-label="Subnavigation">
         <button
           type="button"
           className="pro-logo-button"
@@ -2225,7 +2459,7 @@ function App() {
           <img className="pro-logo-image" src={PRO_APP_ICON} alt="" />
         </button>
         <nav className="pro-rail-nav">
-          {RAIL_ITEMS.map((item) => (
+          {activeRailItems.map((item) => (
             <RailButton
               key={item.id}
               item={item}
@@ -2246,40 +2480,7 @@ function App() {
         <MenuBar
           openMenu={openMenu}
           onMenuChange={setOpenMenu}
-          onAction={(action) => {
-            setOpenMenu(null)
-            if (action === 'toggle-dock') {
-              setBottomDockVisible((value) => !value)
-            } else if (action === 'reset-layout') {
-              handleLayoutReset()
-            } else if (action === 'open-hires') {
-              setActiveModal('hires')
-            } else if (action === 'open-segmentation') {
-              setActiveModal('segmentation')
-            } else if (action === 'open-reactor') {
-              setActiveModal('reactor')
-            } else if (action === 'open-enhance') {
-              setActiveModal('enhance')
-            } else if (action === 'copy-last') {
-              void navigator.clipboard?.writeText(settings.prompt)
-              setStatusMessage('Prompt copied to clipboard.')
-            } else if (action === 'new-prompt') {
-              setSettings((current) => ({ ...current, prompt: '', negativePrompt: '' }))
-              setStatusMessage('Prompt cleared.')
-            } else if (action === 'open-models') {
-              handleRailSelect('models')
-            } else if (action === 'open-data') {
-              handleRailSelect('data')
-            } else if (action === 'open-tools') {
-              handleRailSelect('tools')
-            } else if (action === 'open-monitor') {
-              handleRailSelect('monitor')
-            } else if (action === 'open-settings') {
-              handleRailSelect('settings')
-            } else if (action === 'open-help') {
-              setActiveModal('about')
-            }
-          }}
+          onAction={handleMenuAction}
         />
         <TopBar
           bootstrap={bootstrap}
@@ -2291,8 +2492,10 @@ function App() {
           generationProgress={generationProgress}
           backendConnected={backendConnected}
           backendRecovering={backendRecovering}
+          liveStreamConnected={runtimeStreamConnected}
           onRecoverBackend={handleRecoverBackend}
-          onOpenSettings={() => handleRailSelect('settings')}
+          onOpenSettings={openSettingsRail}
+          onCopyGenerationError={handleCopyGenerationError}
         />
         <ModeTabs activeMode={activeMode} onSelect={handleModeSelect} />
 
@@ -2353,7 +2556,7 @@ function App() {
               <ResizeHandle
                 axis="vertical"
                 label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
+                onMouseDown={startLeftDrag}
               />
               <DataWorkspace
                 bootstrap={bootstrap}
@@ -2365,7 +2568,7 @@ function App() {
               <ResizeHandle
                 axis="vertical"
                 label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
+                onMouseDown={startRightDrag}
               />
             </>
           ) : activeRail === 'tools' ? (
@@ -2386,7 +2589,7 @@ function App() {
               <ResizeHandle
                 axis="vertical"
                 label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
+                onMouseDown={startLeftDrag}
               />
               <ToolsWorkspace
                 capabilitiesStatus={capabilitiesStatus}
@@ -2405,7 +2608,7 @@ function App() {
               <ResizeHandle
                 axis="vertical"
                 label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
+                onMouseDown={startRightDrag}
               />
             </>
           ) : activeRail === 'monitor' ? (
@@ -2419,7 +2622,7 @@ function App() {
               <ResizeHandle
                 axis="vertical"
                 label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
+                onMouseDown={startLeftDrag}
               />
               <MonitorWorkspace
                 runtime={runtime}
@@ -2430,7 +2633,7 @@ function App() {
               <ResizeHandle
                 axis="vertical"
                 label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
+                onMouseDown={startRightDrag}
               />
             </>
           ) : activeRail === 'logs' ? (
@@ -2444,7 +2647,7 @@ function App() {
               <ResizeHandle
                 axis="vertical"
                 label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
+                onMouseDown={startLeftDrag}
               />
               <LogsWorkspace
                 runtime={runtime}
@@ -2458,7 +2661,7 @@ function App() {
               <ResizeHandle
                 axis="vertical"
                 label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
+                onMouseDown={startRightDrag}
               />
             </>
           ) : activeRail === 'settings' ? (
@@ -2481,7 +2684,7 @@ function App() {
               <ResizeHandle
                 axis="vertical"
                 label="Resize left panel"
-                onMouseDown={() => startHorizontalDrag('left')}
+                onMouseDown={startLeftDrag}
               />
               <SettingsWorkspace
                 bootstrap={bootstrap}
@@ -2507,7 +2710,7 @@ function App() {
               <ResizeHandle
                 axis="vertical"
                 label="Resize right panel"
-                onMouseDown={() => startHorizontalDrag('right')}
+                onMouseDown={startRightDrag}
               />
             </>
           ) : (
@@ -2541,19 +2744,14 @@ function App() {
                   onStopGenerate={handleStopGenerate}
                   onToggleContinuousGenerate={handleToggleContinuousGenerate}
                   onSendToWorkflow={handleSendToWorkflow}
-                  onToggleAdvanced={() => setShowAdvanced((value) => !value)}
-                  onToggleLeftPanel={() => setLeftPanelCollapsed(true)}
-                  onToggleRightPanel={() => setRightPanelCollapsed((value) => !value)}
-                  onToggleBottomDock={() => setBottomDockVisible((value) => !value)}
-                  onOpenSegmentation={() => setActiveModal('segmentation')}
-                  onOpenHires={() => setActiveModal('hires')}
-                  onOpenEnhance={() => setActiveModal('enhance')}
-                  onOpenReactor={() => setActiveModal('reactor')}
+                  onToggleAdvanced={toggleAdvanced}
+                  onToggleLeftPanel={collapseLeftPanel}
+                  onToggleRightPanel={toggleRightPanel}
                   onOpenXyPlot={handleOpenXyPlot}
                   onPromptAnalyze={handlePromptAnalyze}
                   selectedModelWarning={selectedModelWarning}
-                  bottomDockVisible={bottomDockVisible}
                   rightPanelCollapsed={rightPanelCollapsed}
+                  dualRuntimeAvailable={dualRuntimeAvailable}
                   sdcppRuntimeAvailable={sdcppRuntimeAvailable}
                 />
               )}
@@ -2563,7 +2761,7 @@ function App() {
                 <ResizeHandle
                   axis="vertical"
                   label="Resize left panel"
-                  onMouseDown={() => startHorizontalDrag('left')}
+                  onMouseDown={startLeftDrag}
                 />
               )}
               <div className="pro-center-column">
@@ -2573,7 +2771,11 @@ function App() {
                     onSettingsChange={setSettings}
                     statusMessage={statusMessage}
                     preview={preview}
-                    onOpenSegmentation={() => setActiveModal('segmentation')}
+                    onOpenSegmentation={openSegmentationModal}
+                    onOpenControlNet={openControlNetModal}
+                    controlNetEnabled={settings.controlNetEnabled}
+                    controlNetAvailable={controlNetCompatibility.supported}
+                    controlNetUnavailableMessage={controlNetCompatibility.message}
                     leftPanelCollapsed={leftPanelCollapsed}
                     isGenerating={generationActive}
                     isContinuousGenerating={continuousGenerating}
@@ -2589,12 +2791,18 @@ function App() {
                     statusMessage={statusMessage}
                     width={settings.width}
                     height={settings.height}
-                    onOpenSegmentation={() => setActiveModal('segmentation')}
-                    onOpenHires={() => setActiveModal('hires')}
-                    onOpenEnhance={() => setActiveModal('enhance')}
-                    onOpenReactor={() => setActiveModal('reactor')}
+                    onOpenSegmentation={openSegmentationModal}
+                    onOpenHires={openHiresModal}
+                    onOpenEnhance={openEnhanceModal}
+                    onOpenReactor={openReactorModal}
+                    onOpenControlNet={openControlNetModal}
+                    controlNetEnabled={settings.controlNetEnabled}
+                    controlNetAvailable={controlNetCompatibility.supported}
+                    controlNetUnavailableMessage={controlNetCompatibility.message}
                     bottomDockVisible={bottomDockVisible}
-                    onToggleBottomDock={() => setBottomDockVisible((value) => !value)}
+                    outputPreviewVisible={outputPreviewVisible}
+                    onToggleBottomDock={toggleBottomDock}
+                    onToggleOutputPreview={toggleOutputPreview}
                     leftPanelCollapsed={leftPanelCollapsed}
                     isGenerating={generationActive}
                     isContinuousGenerating={continuousGenerating}
@@ -2615,7 +2823,7 @@ function App() {
                   onPreviewSelect={setPreview}
                   onApplyOutputSettings={handleApplyOutputSettings}
                   onResizeStart={startBottomDrag}
-                  onToggleVisible={() => setBottomDockVisible((value) => !value)}
+                  onToggleVisible={toggleBottomDock}
                 />
               </div>
               {rightPanelCollapsed ? (
@@ -2624,12 +2832,12 @@ function App() {
                 <ResizeHandle
                   axis="vertical"
                   label="Resize right panel"
-                  onMouseDown={() => startHorizontalDrag('right')}
+                  onMouseDown={startRightDrag}
                 />
               )}
             </>
           )}
-          {activeRail === 'create' && rightPanelCollapsed ? (
+          {workspaceIsFullSurface ? null : activeRail === 'create' && rightPanelCollapsed ? (
             <CollapsedPanelButton side="right" label="Show system column" icon={PanelRight} onClick={() => setRightPanelCollapsed(false)} />
           ) : (
             <RuntimePanel
@@ -2654,6 +2862,14 @@ function App() {
           onRemoveCell={handleRemoveXyPlotCell}
           onReset={handleResetXyPlot}
           onRun={handleRunXyPlot}
+        />
+      </ToolModal>
+
+      <ToolModal open={activeModal === 'controlnet'} title="ControlNet" onClose={() => setActiveModal(null)}>
+        <ControlNetSettingsModal
+          settings={settings}
+          onSettingsChange={setSettings}
+          compatibility={controlNetCompatibility}
         />
       </ToolModal>
 
@@ -3055,7 +3271,9 @@ function XyPlotSetupModal({
   )
 }
 
-function MenuBar({
+const MenuBar = memo(MenuBarImpl)
+
+function MenuBarImpl({
   openMenu,
   onMenuChange,
   onAction,
@@ -3096,6 +3314,20 @@ function MenuBar({
   )
 }
 
+function runtimeLightClass(state: string, hasError: boolean, connected = true): string {
+  const normalized = state.trim().toLowerCase()
+  if (!connected || ['failed', 'error', 'cancelled', 'canceled', 'disconnected', 'offline'].includes(normalized)) {
+    return 'is-danger'
+  }
+  if (hasError) {
+    return 'is-warning'
+  }
+  if (['running', 'connecting', 'loading', 'queued', 'recovering', 'starting'].includes(normalized)) {
+    return 'is-processing'
+  }
+  return 'is-good'
+}
+
 function TopBar({
   bootstrap,
   runtime,
@@ -3106,8 +3338,10 @@ function TopBar({
   generationProgress,
   backendConnected,
   backendRecovering,
+  liveStreamConnected,
   onRecoverBackend,
   onOpenSettings,
+  onCopyGenerationError,
 }: {
   bootstrap: ProBootstrap
   runtime: ProRuntimeStatus
@@ -3118,8 +3352,10 @@ function TopBar({
   generationProgress: GenerationProgressEvent[]
   backendConnected: boolean
   backendRecovering: boolean
+  liveStreamConnected: boolean
   onRecoverBackend: () => void
   onOpenSettings: () => void
+  onCopyGenerationError: () => void | Promise<void>
 }) {
   const latestProgress = generationProgress[generationProgress.length - 1]
   const runtimeJob = runtime.job
@@ -3156,12 +3392,40 @@ function TopBar({
           {progressStep ? <span>{progressStep}</span> : null}
           <span>{selectedModelName}</span>
         </div>
+        {activeError ? (
+          <button
+            type="button"
+            className="pro-icon-button pro-generation-copy-button"
+            aria-label="Copy generation error"
+            title="Copy generation error"
+            onClick={onCopyGenerationError}
+          >
+            <Clipboard size={14} aria-hidden="true" />
+          </button>
+        ) : null}
       </div>
       <div className="pro-topbar-status">
-        <div className="pro-engine-status" data-state={runtime.state.toLowerCase()}>
-          <span className="pro-status-dot" aria-hidden="true" />
+        <div
+          className="pro-engine-status"
+          data-state={runtime.state.toLowerCase()}
+          title={
+            !backendConnected
+              ? 'Backend unreachable.'
+              : liveStreamConnected
+                ? 'Live runtime stream connected.'
+                : 'Live stream degraded — falling back to polling.'
+          }
+        >
+          <span
+            className={`pro-status-dot ${runtimeLightClass(
+              backendRecovering ? 'recovering' : runtime.state,
+              Boolean(activeError) || (backendConnected && !liveStreamConnected),
+              backendConnected,
+            )}`}
+            aria-hidden="true"
+          />
           <span>Local Engine</span>
-          <strong>{runtime.state}</strong>
+          <strong>{backendConnected ? runtime.state : 'Disconnected'}</strong>
         </div>
         {!backendConnected || backendRecovering ? (
           <button
@@ -3252,7 +3516,9 @@ function SupportIssueDialog({
   )
 }
 
-function ModeTabs({
+const ModeTabs = memo(ModeTabsImpl)
+
+function ModeTabsImpl({
   activeMode,
   onSelect,
 }: {
@@ -3281,7 +3547,9 @@ function ModeTabs({
   )
 }
 
-function PromptPanel({
+const PromptPanel = memo(PromptPanelImpl)
+
+function PromptPanelImpl({
   settings,
   bootstrap,
   filteredModels,
@@ -3310,16 +3578,11 @@ function PromptPanel({
   onToggleAdvanced,
   onToggleLeftPanel,
   onToggleRightPanel,
-  onToggleBottomDock,
-  onOpenSegmentation,
-  onOpenHires,
-  onOpenEnhance,
-  onOpenReactor,
   onOpenXyPlot,
   onPromptAnalyze,
   selectedModelWarning,
-  bottomDockVisible,
   rightPanelCollapsed,
+  dualRuntimeAvailable,
   sdcppRuntimeAvailable,
 }: {
   settings: GenerationSettings
@@ -3350,16 +3613,11 @@ function PromptPanel({
   onToggleAdvanced: () => void
   onToggleLeftPanel: () => void
   onToggleRightPanel: () => void
-  onToggleBottomDock: () => void
-  onOpenSegmentation: () => void
-  onOpenHires: () => void
-  onOpenEnhance: () => void
-  onOpenReactor: () => void
   onOpenXyPlot: () => void
   onPromptAnalyze: () => void
   selectedModelWarning: string
-  bottomDockVisible: boolean
   rightPanelCollapsed: boolean
+  dualRuntimeAvailable: boolean
   sdcppRuntimeAvailable: boolean
 }) {
   const handlePromptKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
@@ -3434,27 +3692,6 @@ function PromptPanel({
         ...current,
         sourceImageDataUrl: value,
         sourceImageName: file.name,
-      }))
-    }
-    reader.readAsDataURL(file)
-  }
-
-  const handleControlNetImageChange = (event: ReactChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file) {
-      return
-    }
-    const reader = new FileReader()
-    reader.onload = () => {
-      const value = typeof reader.result === 'string' ? reader.result : ''
-      if (!value) {
-        return
-      }
-      onSettingsChange((current) => ({
-        ...current,
-        controlNetImageDataUrl: value,
-        controlNetImageName: file.name,
       }))
     }
     reader.readAsDataURL(file)
@@ -3622,6 +3859,22 @@ function PromptPanel({
           </button>
           <button
             type="button"
+            className={settings.pipelineBackend === 'dual' ? 'active' : ''}
+            aria-pressed={settings.pipelineBackend === 'dual'}
+            disabled={settings.mode === 'video' || !dualRuntimeAvailable}
+            title={
+              settings.mode === 'video'
+                ? 'Dual mode is image-only in Pro right now.'
+                : dualRuntimeAvailable
+                  ? 'Use the dual Diffusers plus C++ runtime for this image run.'
+                  : 'Restart Pro with the Dual backend before using this option.'
+            }
+            onClick={() => onSettingsChange((current) => ({ ...current, pipelineBackend: 'dual' }))}
+          >
+            Dual mode
+          </button>
+          <button
+            type="button"
             className={settings.pipelineBackend === 'sdcpp' ? 'active' : ''}
             aria-pressed={settings.pipelineBackend === 'sdcpp'}
             disabled={settings.mode === 'video' || !sdcppRuntimeAvailable}
@@ -3638,10 +3891,6 @@ function PromptPanel({
           </button>
         </div>
         <div className="pro-visibility-actions">
-          <button type="button" className="pro-secondary-button" onClick={onToggleBottomDock}>
-            {bottomDockVisible ? <Rows3 size={14} aria-hidden="true" /> : <Layers2 size={14} aria-hidden="true" />}
-            <span>{bottomDockVisible ? 'Hide output' : 'Show output'}</span>
-          </button>
           <button type="button" className="pro-secondary-button" onClick={onToggleLeftPanel}>
             <PanelLeft size={14} aria-hidden="true" />
             <span>Hide left</span>
@@ -3658,155 +3907,6 @@ function PromptPanel({
           <span>{selectedModelWarning}</span>
           {selectedModel?.suggestedAction ? <small>{selectedModel.suggestedAction}</small> : null}
         </div>
-      ) : null}
-
-      {settings.mode !== 'video' ? (
-        <section className="pro-image-tool-stack" aria-label="Image tools">
-          <div className="pro-section-label">Image tools</div>
-          <div className="pro-tool-launchers">
-            <button type="button" className="pro-tool-button" onClick={onOpenSegmentation}>
-              <ScanSearch size={15} aria-hidden="true" />
-              <span>Segment</span>
-            </button>
-            <button type="button" className="pro-tool-button" onClick={onOpenHires}>
-              <Highlighter size={15} aria-hidden="true" />
-              <span>High-res</span>
-            </button>
-            <button type="button" className="pro-tool-button" onClick={onOpenEnhance}>
-              <Sparkles size={15} aria-hidden="true" />
-              <span>Enhance / VSR</span>
-            </button>
-            <button type="button" className="pro-tool-button" onClick={onOpenReactor}>
-              <Wand2 size={15} aria-hidden="true" />
-              <span>ReActor</span>
-            </button>
-          </div>
-          <section className="pro-controlnet-card" aria-label="ControlNet unit">
-            <div className="pro-controlnet-header">
-              <label className="pro-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.controlNetEnabled}
-                  onChange={(event) =>
-                    onSettingsChange((current) => ({ ...current, controlNetEnabled: event.target.checked }))
-                  }
-                />
-                <span>ControlNet unit 1</span>
-              </label>
-              <small>Gradio Lab has the multi-unit stack.</small>
-            </div>
-            <label className="pro-field pro-compact-field">
-              <FieldLabel
-                label="ControlNet model"
-                tooltip="Use a local ControlNet model id or path that matches the selected SD/SDXL family."
-              />
-              <input
-                value={settings.controlNetModel}
-                placeholder="control_v11p_sd15_canny, diffusers folder, or local path"
-                onChange={(event) =>
-                  onSettingsChange((current) => ({ ...current, controlNetModel: event.target.value }))
-                }
-              />
-            </label>
-            <label className="pro-field pro-compact-field">
-              <FieldLabel
-                label="Preprocessor"
-                tooltip="Choose none if the image is already prepared. Canny, depth, pose, line, and segmentation preprocessors run before the ControlNet pass when available."
-              />
-              <select
-                value={settings.controlNetModule}
-                onChange={(event) =>
-                  onSettingsChange((current) => ({ ...current, controlNetModule: event.target.value }))
-                }
-              >
-                {CONTROLNET_MODULE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="pro-controlnet-upload-row">
-              {settings.controlNetImageDataUrl ? (
-                <img className="pro-controlnet-preview" src={settings.controlNetImageDataUrl} alt="" />
-              ) : (
-                <div className="pro-controlnet-empty">No control image</div>
-              )}
-              <div className="pro-controlnet-upload-actions">
-                <span>{settings.controlNetImageName || 'Upload an edge, pose, depth, or reference image.'}</span>
-                <label className="pro-secondary-button" htmlFor="pro-controlnet-image-input">
-                  <FileImage size={15} aria-hidden="true" />
-                  <span>Upload image</span>
-                </label>
-                <input
-                  id="pro-controlnet-image-input"
-                  className="pro-file-input-hidden"
-                  type="file"
-                  accept={IMAGE_FILE_ACCEPT}
-                  onChange={handleControlNetImageChange}
-                />
-                {settings.controlNetImageDataUrl ? (
-                  <button
-                    type="button"
-                    className="pro-secondary-button ghost"
-                    onClick={() =>
-                      onSettingsChange((current) => ({
-                        ...current,
-                        controlNetImageDataUrl: '',
-                        controlNetImageName: '',
-                      }))
-                    }
-                  >
-                    Clear
-                  </button>
-                ) : null}
-              </div>
-            </div>
-            <RangeField
-              label="Weight"
-              tooltip="ControlNet weight decides how strongly the control image steers the generation."
-              min={0}
-              max={2}
-              step={0.05}
-              value={settings.controlNetWeight}
-              onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetWeight: value }))}
-            />
-            <div className="pro-controlnet-window">
-              <RangeField
-                label="Start"
-                min={0}
-                max={1}
-                step={0.01}
-                value={settings.controlNetGuidanceStart}
-                onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceStart: value }))}
-              />
-              <RangeField
-                label="End"
-                min={0}
-                max={1}
-                step={0.01}
-                value={settings.controlNetGuidanceEnd}
-                onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceEnd: value }))}
-              />
-            </div>
-            <label className="pro-field pro-compact-field">
-              <FieldLabel label="Processor resolution" compact />
-              <input
-                type="number"
-                min={64}
-                max={4096}
-                step={64}
-                value={settings.controlNetProcessorRes}
-                onChange={(event) =>
-                  onSettingsChange((current) => ({
-                    ...current,
-                    controlNetProcessorRes: Number(event.target.value),
-                  }))
-                }
-              />
-            </label>
-          </section>
-        </section>
       ) : null}
 
       <section className="pro-prompt-insight-card" aria-label="Prompt helper">
@@ -4204,10 +4304,6 @@ function PromptPanel({
           <div className="pro-advanced-note">
             Secondary controls stay nearby, but the frequent run-to-run variables remain on the main surface.
           </div>
-          <label className="pro-toggle">
-            <input type="checkbox" checked={bottomDockVisible} onChange={() => undefined} readOnly />
-            <span>Bottom dock visible</span>
-          </label>
         </div>
       ) : null}
 
@@ -4266,6 +4362,176 @@ function OutputMedia({ item }: { item: RecentOutput }) {
 
 function isVideoUrl(value: string): boolean {
   return value.endsWith('.mp4') || value.endsWith('.webm') || value.endsWith('.mov')
+}
+
+function ControlNetSettingsModal({
+  settings,
+  onSettingsChange,
+  compatibility,
+}: {
+  settings: GenerationSettings
+  onSettingsChange: Dispatch<SetStateAction<GenerationSettings>>
+  compatibility: ControlNetCompatibility
+}) {
+  const handleControlNetImageChange = (event: ReactChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => {
+      const value = typeof reader.result === 'string' ? reader.result : ''
+      if (!value) {
+        return
+      }
+      onSettingsChange((current) => ({
+        ...current,
+        controlNetImageDataUrl: value,
+        controlNetImageName: file.name,
+      }))
+    }
+    reader.readAsDataURL(file)
+  }
+  const disabled = !compatibility.supported
+
+  return (
+    <div className="pro-modal-form">
+      <div className={disabled ? 'pro-controlnet-status is-blocked' : 'pro-controlnet-status'} role={disabled ? 'alert' : undefined}>
+        <strong>{disabled ? 'ControlNet unavailable' : 'ControlNet ready'}</strong>
+        <span>{compatibility.message}</span>
+      </div>
+      <section className="pro-controlnet-card" aria-label="ControlNet unit">
+        <div className="pro-controlnet-header">
+          <label className="pro-toggle">
+            <input
+              type="checkbox"
+              checked={settings.controlNetEnabled && !disabled}
+              disabled={disabled}
+              onChange={(event) =>
+                onSettingsChange((current) => ({ ...current, controlNetEnabled: event.target.checked }))
+              }
+            />
+            <span>ControlNet unit 1</span>
+          </label>
+          <small>SD 1.5 and SDXL only. Flux, Qwen, Sana, and video routes stay off.</small>
+        </div>
+        <label className="pro-field pro-compact-field">
+          <FieldLabel
+            label="ControlNet model"
+            tooltip="Use a local ControlNet model id or path that matches the selected SD/SDXL family."
+          />
+          <input
+            value={settings.controlNetModel}
+            placeholder="control_v11p_sd15_canny, diffusers folder, or local path"
+            onChange={(event) =>
+              onSettingsChange((current) => ({ ...current, controlNetModel: event.target.value }))
+            }
+          />
+        </label>
+        <label className="pro-field pro-compact-field">
+          <FieldLabel
+            label="Preprocessor"
+            tooltip="Choose none if the image is already prepared. Canny, depth, pose, line, and segmentation preprocessors run before the ControlNet pass when available."
+          />
+          <select
+            value={settings.controlNetModule}
+            disabled={disabled}
+            onChange={(event) =>
+              onSettingsChange((current) => ({ ...current, controlNetModule: event.target.value }))
+            }
+          >
+            {CONTROLNET_MODULE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="pro-controlnet-upload-row">
+          {settings.controlNetImageDataUrl ? (
+            <img className="pro-controlnet-preview" src={settings.controlNetImageDataUrl} alt="" />
+          ) : (
+            <div className="pro-controlnet-empty">No control image</div>
+          )}
+          <div className="pro-controlnet-upload-actions">
+            <span>{settings.controlNetImageName || 'Upload an edge, pose, depth, or reference image.'}</span>
+            <label className={disabled ? 'pro-secondary-button is-disabled' : 'pro-secondary-button'} htmlFor="pro-controlnet-image-input">
+              <FileImage size={15} aria-hidden="true" />
+              <span>Upload image</span>
+            </label>
+            <input
+              id="pro-controlnet-image-input"
+              className="pro-file-input-hidden"
+              type="file"
+              accept={IMAGE_FILE_ACCEPT}
+              disabled={disabled}
+              onChange={handleControlNetImageChange}
+            />
+            {settings.controlNetImageDataUrl ? (
+              <button
+                type="button"
+                className="pro-secondary-button ghost"
+                onClick={() =>
+                  onSettingsChange((current) => ({
+                    ...current,
+                    controlNetImageDataUrl: '',
+                    controlNetImageName: '',
+                  }))
+                }
+              >
+                Clear
+              </button>
+            ) : null}
+          </div>
+        </div>
+        <RangeField
+          label="Weight"
+          tooltip="ControlNet weight decides how strongly the control image steers the generation."
+          min={0}
+          max={2}
+          step={0.05}
+          value={settings.controlNetWeight}
+          onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetWeight: value }))}
+        />
+        <div className="pro-controlnet-window">
+          <RangeField
+            label="Start"
+            min={0}
+            max={1}
+            step={0.01}
+            value={settings.controlNetGuidanceStart}
+            onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceStart: value }))}
+          />
+          <RangeField
+            label="End"
+            min={0}
+            max={1}
+            step={0.01}
+            value={settings.controlNetGuidanceEnd}
+            onChange={(value) => onSettingsChange((current) => ({ ...current, controlNetGuidanceEnd: value }))}
+          />
+        </div>
+        <label className="pro-field pro-compact-field">
+          <FieldLabel label="Processor resolution" compact />
+          <input
+            type="number"
+            min={64}
+            max={4096}
+            step={64}
+            disabled={disabled}
+            value={settings.controlNetProcessorRes}
+            onChange={(event) =>
+              onSettingsChange((current) => ({
+                ...current,
+                controlNetProcessorRes: Number(event.target.value),
+              }))
+            }
+          />
+        </label>
+      </section>
+    </div>
+  )
 }
 
 function buildOutputDetailRows(item: RecentOutput): Array<{ label: string; value: string }> {
@@ -4454,7 +4720,9 @@ function SanaStageReceipt({
   )
 }
 
-function ModelsWorkspace({
+const ModelsWorkspace = memo(ModelsWorkspaceImpl)
+
+function ModelsWorkspaceImpl({
   engineFilter,
   engines,
   models,
@@ -5797,8 +6065,12 @@ function SettingsWorkspace({
     livePreview: true,
     showProgressEveryNSteps: 5,
     livePreviewDecoder: 'vae',
+    livePreviewTitleProgress: true,
     hiddenTabs: [],
   }
+  const livePreviewSummary = uiSettings.livePreview
+    ? `Preview decode every ${uiSettings.showProgressEveryNSteps} denoise step${uiSettings.showProgressEveryNSteps === 1 ? '' : 's'}. Higher values are lighter on SDXL.`
+    : 'Live preview is off. Final images still render normally.'
   const outputSettings = settingsStatus?.output ?? {
     imageFormat: 'png',
     imageQuality: 95,
@@ -5843,6 +6115,7 @@ function SettingsWorkspace({
     share: false,
     autolaunch: false,
     api: false,
+    gerror: false,
     genlog: false,
     backend: 'diffusers',
     onnxProvider: 'auto',
@@ -6011,6 +6284,7 @@ function SettingsWorkspace({
   const runtimeToggles: Array<{ key: keyof ProSettingsStatus['runtime']; label: string }> = [
     { key: 'listen', label: 'Listen on LAN' },
     { key: 'api', label: 'Enable API' },
+    { key: 'gerror', label: 'Funny errors' },
     { key: 'genlog', label: 'Generation log' },
     { key: 'share', label: 'Public share link' },
     { key: 'autolaunch', label: 'Auto launch browser' },
@@ -6202,8 +6476,8 @@ function SettingsWorkspace({
           </div>
         </InfoCard>
         )}
-        {show('interface', 'ui interface live preview gallery columns dock height decoder progress steps') && (
-        <InfoCard title="UI defaults" subtitle="Live preview and output dock behavior.">
+        {show('interface', 'ui interface live preview decoder progress steps title slow sdxl') && (
+        <InfoCard title="Live preview" subtitle="Control preview decoding while image jobs run.">
           <div className="pro-form-stack">
             <label className="pro-toggle">
               <input
@@ -6215,13 +6489,47 @@ function SettingsWorkspace({
               <span>Live preview enabled</span>
             </label>
             <RangeField
-              label="Preview every N steps"
+              label="Preview interval"
+              tooltip="Raise this if SDXL previews make the UI feel slow."
               min={1}
               max={20}
               step={1}
               value={uiSettings.showProgressEveryNSteps}
               onChange={(value) => updateUiSetting({ showProgressEveryNSteps: value })}
             />
+            <p className="pro-field-note">{livePreviewSummary}</p>
+            <label className="pro-field">
+              <FieldLabel label="Preview decoder" />
+              <select
+                value={uiSettings.livePreviewDecoder}
+                onChange={(event) => updateUiSetting({ livePreviewDecoder: event.target.value })}
+                disabled={!settingsStatus}
+              >
+                <option value="vae">VAE</option>
+              </select>
+              <p className="pro-field-note">Live previews currently decode SD 1.5 and SDXL image routes only.</p>
+            </label>
+            <label className="pro-toggle">
+              <input
+                type="checkbox"
+                checked={uiSettings.livePreviewTitleProgress}
+                onChange={(event) => updateUiSetting({ livePreviewTitleProgress: event.target.checked })}
+                disabled={!settingsStatus}
+              />
+              <span>Show generation progress in the window title</span>
+            </label>
+            <div className="pro-settings-actions">
+              <button type="button" className="pro-primary-button" onClick={onSaveSettings} disabled={!settingsStatus}>
+                Save settings
+              </button>
+              <span>{settingsSaveStatus || (settingsStatus ? 'Connected' : 'Backend not connected')}</span>
+            </div>
+          </div>
+        </InfoCard>
+        )}
+        {show('interface', 'ui interface gallery columns dock height output dock layout') && (
+        <InfoCard title="Output dock" subtitle="Gallery density and dock size.">
+          <div className="pro-form-stack">
             <div className="pro-control-grid">
               <RangeField
                 label="Gallery columns"
@@ -6240,17 +6548,12 @@ function SettingsWorkspace({
                 onChange={(value) => updateUiSetting({ galleryHeight: value })}
               />
             </div>
-            <label className="pro-field">
-              <FieldLabel label="Preview decoder" />
-              <select
-                value={uiSettings.livePreviewDecoder}
-                onChange={(event) => updateUiSetting({ livePreviewDecoder: event.target.value })}
-                disabled={!settingsStatus}
-              >
-                <option value="vae">VAE</option>
-              </select>
-              <p className="pro-field-note">Live previews currently decode SD 1.5 and SDXL image routes only.</p>
-            </label>
+            <div className="pro-settings-actions">
+              <button type="button" className="pro-primary-button" onClick={onSaveSettings} disabled={!settingsStatus}>
+                Save settings
+              </button>
+              <span>{settingsSaveStatus || (settingsStatus ? 'Connected' : 'Backend not connected')}</span>
+            </div>
           </div>
         </InfoCard>
         )}
@@ -6868,7 +7171,9 @@ function SettingsWorkspace({
   )
 }
 
-function CanvasPreview({
+const CanvasPreview = memo(CanvasPreviewImpl)
+
+function CanvasPreviewImpl({
   activeMode,
   preview,
   statusMessage,
@@ -6878,8 +7183,14 @@ function CanvasPreview({
   onOpenHires,
   onOpenEnhance,
   onOpenReactor,
+  onOpenControlNet,
+  controlNetEnabled,
+  controlNetAvailable,
+  controlNetUnavailableMessage,
   bottomDockVisible,
+  outputPreviewVisible,
   onToggleBottomDock,
+  onToggleOutputPreview,
   leftPanelCollapsed,
   isGenerating,
   isContinuousGenerating,
@@ -6897,8 +7208,14 @@ function CanvasPreview({
   onOpenHires: () => void
   onOpenEnhance: () => void
   onOpenReactor: () => void
+  onOpenControlNet: () => void
+  controlNetEnabled: boolean
+  controlNetAvailable: boolean
+  controlNetUnavailableMessage: string
   bottomDockVisible: boolean
+  outputPreviewVisible: boolean
   onToggleBottomDock: () => void
+  onToggleOutputPreview: () => void
   leftPanelCollapsed: boolean
   isGenerating: boolean
   isContinuousGenerating: boolean
@@ -6964,6 +7281,9 @@ function CanvasPreview({
     }
   }, [aspectRatio, previewFrameSize.height, previewFrameSize.width])
   const outputReceiptText = preview ? formatOutputReceiptText(preview) : ''
+  const previewVisibilityLabel = activeMode === 'video'
+    ? outputPreviewVisible ? 'Hide video' : 'Show video'
+    : outputPreviewVisible ? 'Hide image' : 'Show image'
   const emptyCanvas = activeMode === 'video'
     ? {
         className: 'pro-empty-preview pro-stage-empty pro-stage-empty-video',
@@ -6978,6 +7298,7 @@ function CanvasPreview({
         message: 'Generate an image or select one from the output dock. Settings and history stay below the canvas.',
       }
   const EmptyIcon = emptyCanvas.icon
+  const showImageTools = activeMode !== 'video'
 
   return (
     <section className="pro-canvas" aria-label="Canvas and output preview">
@@ -7011,22 +7332,36 @@ function CanvasPreview({
               </button>
             </>
           ) : null}
-          <button type="button" className="pro-tool-chip" onClick={onOpenSegmentation}>
-            <ScanSearch size={14} aria-hidden="true" />
-            <span>Segment</span>
-          </button>
-          <button type="button" className="pro-tool-chip" onClick={onOpenHires}>
-            <Highlighter size={14} aria-hidden="true" />
-            <span>Hi-res</span>
-          </button>
-          <button type="button" className="pro-tool-chip" onClick={onOpenEnhance}>
-            <Sparkles size={14} aria-hidden="true" />
-            <span>Enhance</span>
-          </button>
-          <button type="button" className="pro-tool-chip" onClick={onOpenReactor}>
-            <Wand2 size={14} aria-hidden="true" />
-            <span>ReActor</span>
-          </button>
+          {showImageTools ? (
+            <>
+              <button
+                type="button"
+                className={controlNetEnabled && controlNetAvailable ? 'pro-tool-chip is-active' : 'pro-tool-chip'}
+                disabled={!controlNetAvailable}
+                title={controlNetAvailable ? 'Configure ControlNet for this SD/SDXL model.' : controlNetUnavailableMessage}
+                onClick={onOpenControlNet}
+              >
+                <SlidersHorizontal size={14} aria-hidden="true" />
+                <span>ControlNet</span>
+              </button>
+              <button type="button" className="pro-tool-chip" onClick={onOpenSegmentation}>
+                <ScanSearch size={14} aria-hidden="true" />
+                <span>Segment</span>
+              </button>
+              <button type="button" className="pro-tool-chip" onClick={onOpenHires}>
+                <Highlighter size={14} aria-hidden="true" />
+                <span>Hi-res</span>
+              </button>
+              <button type="button" className="pro-tool-chip" onClick={onOpenEnhance}>
+                <Sparkles size={14} aria-hidden="true" />
+                <span>Enhance</span>
+              </button>
+              <button type="button" className="pro-tool-chip" onClick={onOpenReactor}>
+                <Wand2 size={14} aria-hidden="true" />
+                <span>ReActor</span>
+              </button>
+            </>
+          ) : null}
           <button type="button" className="pro-icon-button" aria-label="Pan preview">
             <Hand size={16} aria-hidden="true" />
           </button>
@@ -7034,6 +7369,10 @@ function CanvasPreview({
             <Maximize2 size={16} aria-hidden="true" />
           </button>
           <button type="button" className="pro-zoom-button">100%</button>
+          <button type="button" className="pro-tool-chip" onClick={onToggleOutputPreview}>
+            {outputPreviewVisible ? <EyeOff size={14} aria-hidden="true" /> : <Eye size={14} aria-hidden="true" />}
+            <span>{previewVisibilityLabel}</span>
+          </button>
           <button type="button" className="pro-tool-chip" onClick={onToggleBottomDock}>
             {bottomDockVisible ? <Rows3 size={14} aria-hidden="true" /> : <Layers2 size={14} aria-hidden="true" />}
             <span>{bottomDockVisible ? 'Hide dock' : 'Show dock'}</span>
@@ -7042,6 +7381,7 @@ function CanvasPreview({
       </div>
 
       <div className="pro-preview-stage" ref={previewStageRef}>
+        {outputPreviewVisible ? (
         <div className="pro-output-frame" style={outputFrameStyle}>
           {previewIsVideo ? (
             <video src={preview.url} controls playsInline />
@@ -7055,6 +7395,13 @@ function CanvasPreview({
             </div>
           )}
         </div>
+        ) : (
+          <div className="pro-output-hidden">
+            {activeMode === 'video' ? <Video size={32} aria-hidden="true" /> : <Image size={32} aria-hidden="true" />}
+            <strong>{activeMode === 'video' ? 'Video hidden' : 'Image hidden'}</strong>
+            <span>{statusMessage || outputReceiptText}</span>
+          </div>
+        )}
       </div>
 
       <div className="pro-canvas-footer">
@@ -7066,12 +7413,18 @@ function CanvasPreview({
   )
 }
 
-function InpaintCanvas({
+const InpaintCanvas = memo(InpaintCanvasImpl)
+
+function InpaintCanvasImpl({
   settings,
   onSettingsChange,
   statusMessage,
   preview,
   onOpenSegmentation,
+  onOpenControlNet,
+  controlNetEnabled,
+  controlNetAvailable,
+  controlNetUnavailableMessage,
   leftPanelCollapsed,
   isGenerating,
   isContinuousGenerating,
@@ -7085,6 +7438,10 @@ function InpaintCanvas({
   statusMessage: string
   preview: RecentOutput | null
   onOpenSegmentation: () => void
+  onOpenControlNet: () => void
+  controlNetEnabled: boolean
+  controlNetAvailable: boolean
+  controlNetUnavailableMessage: string
   leftPanelCollapsed: boolean
   isGenerating: boolean
   isContinuousGenerating: boolean
@@ -7410,6 +7767,20 @@ function InpaintCanvas({
           ) : null}
           <button
             type="button"
+            className={controlNetEnabled && controlNetAvailable ? 'pro-tool-chip is-active' : 'pro-tool-chip'}
+            disabled={!controlNetAvailable}
+            title={controlNetAvailable ? 'Configure ControlNet for this SD/SDXL model.' : controlNetUnavailableMessage}
+            onClick={onOpenControlNet}
+          >
+            <SlidersHorizontal size={14} aria-hidden="true" />
+            <span>ControlNet</span>
+          </button>
+          <button type="button" className="pro-tool-chip" onClick={onOpenSegmentation}>
+            <ScanSearch size={14} aria-hidden="true" />
+            <span>Segment</span>
+          </button>
+          <button
+            type="button"
             className="pro-tool-chip"
             aria-pressed={!erasing}
             onClick={() => setErasing(false)}
@@ -7493,10 +7864,6 @@ function InpaintCanvas({
         >
           <ScanSearch size={14} aria-hidden="true" />
           {autoMaskBusy ? 'Segmenting…' : 'Generate mask'}
-        </button>
-        <button type="button" className="pro-secondary-button" onClick={onOpenSegmentation}>
-          <SlidersHorizontal size={14} aria-hidden="true" />
-          Mask settings
         </button>
         {autoMaskStatus ? <span className="pro-muted">{autoMaskStatus}</span> : null}
       </div>
@@ -7606,7 +7973,9 @@ function InpaintCanvas({
   )
 }
 
-function BottomDock({
+const BottomDock = memo(BottomDockImpl)
+
+function BottomDockImpl({
   visible,
   height,
   recentOutputs,
@@ -7763,7 +8132,10 @@ function RuntimePanel({
         <span>System</span>
         <div className="pro-status-heading-actions">
           <strong>
-            <span className="pro-status-dot" aria-hidden="true" />
+            <span
+              className={`pro-status-dot ${runtimeLightClass(runtime.state, Boolean(runtime.job.error))}`}
+              aria-hidden="true"
+            />
             {runtime.state}
           </strong>
           <button type="button" className="pro-icon-button" aria-label="Hide system column" onClick={onToggleRightPanel}>
@@ -7849,6 +8221,76 @@ function buildEngineFilterOptions(engines: EngineSummary[]): Array<{ value: Engi
       label: `${engine.label} (${engine.count})`,
     })),
   ]
+}
+
+function getControlNetCompatibility(model: ProModelOption | undefined, controlNetModel: string): ControlNetCompatibility {
+  const modelFamily = controlNetFamilyForModel(model)
+  const controlNetFamily = controlNetFamilyForName(controlNetModel)
+  if (!modelFamily) {
+    return {
+      supported: false,
+      modelFamily: null,
+      controlNetFamily,
+      message: 'ControlNet is enabled only for SD 1.5 and SDXL routes. Flux, Qwen, Sana, SD3.5, and video routes will not receive SD ControlNet units.',
+    }
+  }
+  if (controlNetFamily && controlNetFamily !== modelFamily) {
+    return {
+      supported: false,
+      modelFamily,
+      controlNetFamily,
+      message: `The selected model is ${controlNetFamilyLabel(modelFamily)}, but the ControlNet entry looks like ${controlNetFamilyLabel(controlNetFamily)}.`,
+    }
+  }
+  return {
+    supported: true,
+    modelFamily,
+    controlNetFamily,
+    message: controlNetFamily
+      ? `Ready for ${controlNetFamilyLabel(modelFamily)} ControlNet.`
+      : `Ready for ${controlNetFamilyLabel(modelFamily)} ControlNet. Use a matching local model id or path.`,
+  }
+}
+
+function controlNetFamilyForModel(model: ProModelOption | undefined): 'sd15' | 'sdxl' | null {
+  const engineId = model?.engineId ?? 'unknown'
+  if (engineId === 'sd15' || engineId === 'sdxl') {
+    return engineId
+  }
+  const text = `${model?.architecture ?? ''} ${model?.name ?? ''} ${model?.id ?? ''}`.toLowerCase()
+  if (text.includes('sdxl') || text.includes('stable diffusion xl')) {
+    return 'sdxl'
+  }
+  if (text.includes('sd15') || text.includes('sd1.5') || text.includes('stable diffusion 1.5')) {
+    return 'sd15'
+  }
+  return null
+}
+
+function controlNetFamilyForName(value: string): 'sd15' | 'sdxl' | null {
+  const text = value.toLowerCase()
+  if (!text.trim()) {
+    return null
+  }
+  if (text.includes('sdxl') || text.includes('_xl') || text.includes('-xl') || text.includes('controlnet-xl')) {
+    return 'sdxl'
+  }
+  if (
+    text.includes('sd15') ||
+    text.includes('sd_15') ||
+    text.includes('sd-15') ||
+    text.includes('sd1.5') ||
+    text.includes('v11') ||
+    text.includes('v1-1') ||
+    text.includes('control_v')
+  ) {
+    return 'sd15'
+  }
+  return null
+}
+
+function controlNetFamilyLabel(family: 'sd15' | 'sdxl'): string {
+  return family === 'sdxl' ? 'SDXL' : 'SD 1.5'
 }
 
 function modelFitsCreationMode(model: ProModelOption, mode: CreationMode): boolean {
@@ -8072,7 +8514,9 @@ function ResizeHandle({
   )
 }
 
-function RailButton({
+const RailButton = memo(RailButtonImpl)
+
+function RailButtonImpl({
   item,
   active,
   onSelect,
@@ -8342,6 +8786,104 @@ function collectGenerateOutputs(result: ProGenerateResult, modelName: string): R
   }))
 }
 
+function buildOutputGenerationSettingsPatch(output: RecentOutput): GenerationSettingsPatch {
+  const flatPatch = normalizeGenerationSettingsPatch({
+    mode: output.mode,
+    prompt: output.prompt,
+    negativePrompt: output.negativePrompt,
+    width: output.width,
+    height: output.height,
+    steps: output.steps,
+    cfgScale: output.cfgScale,
+    clipSkip: output.clipSkip,
+    sampler: output.sampler,
+    scheduler: output.scheduler,
+    seed: output.seed,
+    modelName: output.modelName,
+  })
+  const embeddedPatch = normalizeGenerationSettingsPatch(output.generationSettings)
+  return { ...flatPatch, ...embeddedPatch }
+}
+
+function normalizeGenerationSettingsPatch(value: unknown): GenerationSettingsPatch {
+  const record = looseRecord(value)
+  const patch: GenerationSettingsPatch = {}
+  const mode = readPatchMode(record, ['mode'])
+  if (mode) {
+    patch.mode = mode
+  }
+  assignStringPatch(patch, record, 'prompt', ['prompt'])
+  assignStringPatch(patch, record, 'negativePrompt', ['negativePrompt', 'negative_prompt'])
+  assignStringPatch(patch, record, 'modelId', ['modelId', 'model_id', 'checkpointId', 'checkpoint_id'])
+  assignStringPatch(patch, record, 'modelName', ['modelName', 'model_name', 'model'])
+  const pipelineBackend = readPatchPipelineBackend(record, ['pipelineBackend', 'pipeline_backend'])
+  if (pipelineBackend) {
+    patch.pipelineBackend = pipelineBackend
+  }
+  assignStringPatch(patch, record, 'sampler', ['sampler'])
+  assignStringPatch(patch, record, 'scheduler', ['scheduler'])
+  assignStringPatch(patch, record, 'hiresUpscaler', ['hiresUpscaler', 'hires_upscaler', 'hrUpscaler', 'hr_upscaler'])
+  assignStringPatch(patch, record, 'sourceImageDataUrl', ['sourceImageDataUrl', 'source_image_data_url'])
+  assignStringPatch(patch, record, 'sourceImageName', ['sourceImageName', 'source_image_name'])
+  assignStringPatch(patch, record, 'sanaQuantization', ['sanaQuantization', 'sana_quantization'])
+  assignStringPatch(patch, record, 'sanaVaeTiling', ['sanaVaeTiling', 'sana_vae_tiling', 'vaeTiling', 'vae_tiling'])
+  assignStringPatch(patch, record, 'wanRuntimeMode', ['wanRuntimeMode', 'wan_runtime_mode', 'runtimeMode', 'runtime_mode'])
+  assignStringPatch(patch, record, 'highNoiseModelId', ['highNoiseModelId', 'high_noise_model_id'])
+  assignStringPatch(patch, record, 'lowNoiseModelId', ['lowNoiseModelId', 'low_noise_model_id'])
+  assignStringPatch(patch, record, 'highNoiseLoraId', ['highNoiseLoraId', 'high_noise_lora_id'])
+  assignStringPatch(patch, record, 'lowNoiseLoraId', ['lowNoiseLoraId', 'low_noise_lora_id'])
+  assignStringPatch(patch, record, 'vaeId', ['vaeId', 'vae_id'])
+  assignStringPatch(patch, record, 'textEncoderPath', ['textEncoderPath', 'text_encoder_path'])
+  assignStringPatch(patch, record, 'wanOffload', ['wanOffload', 'wan_offload', 'offload'])
+  assignStringPatch(patch, record, 'wanSigmaType', ['wanSigmaType', 'wan_sigma_type', 'sigmaType', 'sigma_type'])
+  assignStringPatch(patch, record, 'wanSampler', ['wanSampler', 'wan_sampler'])
+  assignStringPatch(patch, record, 'initImageDataUrl', ['initImageDataUrl', 'init_image_data_url'])
+  assignStringPatch(patch, record, 'maskImageDataUrl', ['maskImageDataUrl', 'mask_image_data_url'])
+  assignStringPatch(patch, record, 'inpaintMaskContent', ['inpaintMaskContent', 'inpaint_mask_content'])
+  assignStringPatch(patch, record, 'controlNetModel', ['controlNetModel', 'controlnet_model'])
+  assignStringPatch(patch, record, 'controlNetModule', ['controlNetModule', 'controlnet_module'])
+  assignStringPatch(patch, record, 'controlNetImageDataUrl', ['controlNetImageDataUrl', 'controlnet_image_data_url'])
+  assignStringPatch(patch, record, 'controlNetImageName', ['controlNetImageName', 'controlnet_image_name'])
+
+  assignNumberPatch(patch, record, 'width', ['width'])
+  assignNumberPatch(patch, record, 'height', ['height'])
+  assignNumberPatch(patch, record, 'steps', ['steps'])
+  assignNumberPatch(patch, record, 'cfgScale', ['cfgScale', 'cfg_scale'])
+  assignNumberPatch(patch, record, 'seed', ['seed'])
+  assignNumberPatch(patch, record, 'clipSkip', ['clipSkip', 'clip_skip'])
+  assignNumberPatch(patch, record, 'batchSize', ['batchSize', 'batch_size'])
+  assignNumberPatch(patch, record, 'batchCount', ['batchCount', 'batch_count'])
+  assignNumberPatch(patch, record, 'hiresScale', ['hiresScale', 'hires_scale', 'hrScale', 'hr_scale'])
+  assignNumberPatch(patch, record, 'hiresSteps', ['hiresSteps', 'hires_steps', 'hrSteps', 'hr_steps'])
+  assignNumberPatch(patch, record, 'hiresDenoise', ['hiresDenoise', 'hires_denoise', 'hrDenoisingStrength', 'hr_denoising_strength'])
+  assignNumberPatch(patch, record, 'frames', ['frames'])
+  assignNumberPatch(patch, record, 'fps', ['fps'])
+  assignNumberPatch(patch, record, 'highNoiseSteps', ['highNoiseSteps', 'high_noise_steps'])
+  assignNumberPatch(patch, record, 'lowNoiseSteps', ['lowNoiseSteps', 'low_noise_steps'])
+  assignNumberPatch(patch, record, 'boundaryRatio', ['boundaryRatio', 'boundary_ratio'])
+  assignNumberPatch(patch, record, 'highNoiseLoraScale', ['highNoiseLoraScale', 'high_noise_lora_scale'])
+  assignNumberPatch(patch, record, 'lowNoiseLoraScale', ['lowNoiseLoraScale', 'low_noise_lora_scale'])
+  assignNumberPatch(patch, record, 'wanFlowShift', ['wanFlowShift', 'wan_flow_shift', 'flowShift', 'flow_shift'])
+  assignNumberPatch(patch, record, 'denoisingStrength', ['denoisingStrength', 'denoising_strength'])
+  assignNumberPatch(patch, record, 'maskBlur', ['maskBlur', 'mask_blur'])
+  assignNumberPatch(patch, record, 'inpaintMaskedPadding', ['inpaintMaskedPadding', 'inpaint_masked_padding'])
+  assignNumberPatch(patch, record, 'inpaintMaskOpacity', ['inpaintMaskOpacity', 'inpaint_mask_opacity'])
+  assignNumberPatch(patch, record, 'controlNetWeight', ['controlNetWeight', 'controlnet_weight'])
+  assignNumberPatch(patch, record, 'controlNetGuidanceStart', ['controlNetGuidanceStart', 'controlnet_guidance_start'])
+  assignNumberPatch(patch, record, 'controlNetGuidanceEnd', ['controlNetGuidanceEnd', 'controlnet_guidance_end'])
+  assignNumberPatch(patch, record, 'controlNetProcessorRes', ['controlNetProcessorRes', 'controlnet_processor_res'])
+
+  assignBooleanPatch(patch, record, 'enableHires', ['enableHires', 'enable_hires', 'enableHr', 'enable_hr'])
+  assignBooleanPatch(patch, record, 'offloadTextEncoderAfterEncode', ['offloadTextEncoderAfterEncode', 'offload_text_encoder_after_encode'])
+  assignBooleanPatch(patch, record, 'useSageAttention', ['useSageAttention', 'use_sage_attention'])
+  assignBooleanPatch(patch, record, 'generateAudio', ['generateAudio', 'generate_audio'])
+  assignBooleanPatch(patch, record, 'inpaintOnlyMasked', ['inpaintOnlyMasked', 'inpaint_only_masked'])
+  assignBooleanPatch(patch, record, 'autoMaskEnabled', ['autoMaskEnabled', 'auto_mask_enabled'])
+  assignBooleanPatch(patch, record, 'controlNetEnabled', ['controlNetEnabled', 'controlnet_enabled'])
+  assignBooleanPatch(patch, record, 'saveImages', ['saveImages', 'save_images'])
+  return patch
+}
+
 function applyGenerationSettingsPatch(
   current: GenerationSettings,
   patch: GenerationSettingsPatch,
@@ -8352,7 +8894,7 @@ function applyGenerationSettingsPatch(
   let next: GenerationSettings = model
     ? applyModelPresetSettings({ ...current, modelId: model.id }, model, aspectRatios)
     : { ...current }
-  const mode = patch.mode === 'inpaint' ? 'inpaint' : patch.mode === 'image' ? 'image' : undefined
+  const mode = patch.mode === 'inpaint' ? 'inpaint' : patch.mode === 'video' ? 'video' : patch.mode === 'image' ? 'image' : undefined
   const width = finiteNumber(patch.width)
   const height = finiteNumber(patch.height)
   next = {
@@ -8367,6 +8909,7 @@ function applyGenerationSettingsPatch(
     clipSkip: patch.clipSkip !== undefined ? clamp(Math.round(finiteNumber(patch.clipSkip) ?? next.clipSkip), 1, 12) : next.clipSkip,
     sampler: typeof patch.sampler === 'string' && patch.sampler.length > 0 ? patch.sampler : next.sampler,
     scheduler: typeof patch.scheduler === 'string' && patch.scheduler.length > 0 ? patch.scheduler : next.scheduler,
+    pipelineBackend: patch.pipelineBackend === 'dual' || patch.pipelineBackend === 'sdcpp' || patch.pipelineBackend === 'aiwf' ? patch.pipelineBackend : next.pipelineBackend,
     seed: patch.seed !== undefined ? Math.round(finiteNumber(patch.seed) ?? next.seed) : next.seed,
     batchSize: patch.batchSize !== undefined ? clamp(Math.round(finiteNumber(patch.batchSize) ?? next.batchSize), 1, 4) : next.batchSize,
     batchCount: patch.batchCount !== undefined ? clamp(Math.round(finiteNumber(patch.batchCount) ?? next.batchCount), 1, 4) : next.batchCount,
@@ -8375,7 +8918,31 @@ function applyGenerationSettingsPatch(
     hiresSteps: patch.hiresSteps !== undefined ? clamp(Math.round(finiteNumber(patch.hiresSteps) ?? next.hiresSteps), 1, 150) : next.hiresSteps,
     hiresDenoise: patch.hiresDenoise !== undefined ? clamp(finiteNumber(patch.hiresDenoise) ?? next.hiresDenoise, 0, 1) : next.hiresDenoise,
     hiresUpscaler: typeof patch.hiresUpscaler === 'string' && patch.hiresUpscaler.length > 0 ? patch.hiresUpscaler : next.hiresUpscaler,
+    frames: patch.frames !== undefined ? clamp(Math.round(finiteNumber(patch.frames) ?? next.frames), 1, 241) : next.frames,
+    fps: patch.fps !== undefined ? clamp(Math.round(finiteNumber(patch.fps) ?? next.fps), 1, 60) : next.fps,
+    sourceImageDataUrl: typeof patch.sourceImageDataUrl === 'string' ? patch.sourceImageDataUrl : next.sourceImageDataUrl,
+    sourceImageName: typeof patch.sourceImageName === 'string' ? patch.sourceImageName : next.sourceImageName,
+    sanaQuantization: typeof patch.sanaQuantization === 'string' && patch.sanaQuantization.length > 0 ? patch.sanaQuantization : next.sanaQuantization,
+    sanaVaeTiling: typeof patch.sanaVaeTiling === 'string' && patch.sanaVaeTiling.length > 0 ? patch.sanaVaeTiling : next.sanaVaeTiling,
+    offloadTextEncoderAfterEncode: typeof patch.offloadTextEncoderAfterEncode === 'boolean' ? patch.offloadTextEncoderAfterEncode : next.offloadTextEncoderAfterEncode,
+    useSageAttention: typeof patch.useSageAttention === 'boolean' ? patch.useSageAttention : next.useSageAttention,
+    generateAudio: typeof patch.generateAudio === 'boolean' ? patch.generateAudio : next.generateAudio,
+    wanRuntimeMode: typeof patch.wanRuntimeMode === 'string' && patch.wanRuntimeMode.length > 0 ? patch.wanRuntimeMode : next.wanRuntimeMode,
+    highNoiseModelId: typeof patch.highNoiseModelId === 'string' ? patch.highNoiseModelId : next.highNoiseModelId,
+    lowNoiseModelId: typeof patch.lowNoiseModelId === 'string' ? patch.lowNoiseModelId : next.lowNoiseModelId,
+    highNoiseSteps: patch.highNoiseSteps !== undefined ? clamp(Math.round(finiteNumber(patch.highNoiseSteps) ?? next.highNoiseSteps), 1, 150) : next.highNoiseSteps,
+    lowNoiseSteps: patch.lowNoiseSteps !== undefined ? clamp(Math.round(finiteNumber(patch.lowNoiseSteps) ?? next.lowNoiseSteps), 1, 150) : next.lowNoiseSteps,
+    boundaryRatio: patch.boundaryRatio !== undefined ? clamp(finiteNumber(patch.boundaryRatio) ?? next.boundaryRatio, 0, 1) : next.boundaryRatio,
+    highNoiseLoraId: typeof patch.highNoiseLoraId === 'string' ? patch.highNoiseLoraId : next.highNoiseLoraId,
+    highNoiseLoraScale: patch.highNoiseLoraScale !== undefined ? clamp(finiteNumber(patch.highNoiseLoraScale) ?? next.highNoiseLoraScale, 0, 3) : next.highNoiseLoraScale,
+    lowNoiseLoraId: typeof patch.lowNoiseLoraId === 'string' ? patch.lowNoiseLoraId : next.lowNoiseLoraId,
+    lowNoiseLoraScale: patch.lowNoiseLoraScale !== undefined ? clamp(finiteNumber(patch.lowNoiseLoraScale) ?? next.lowNoiseLoraScale, 0, 3) : next.lowNoiseLoraScale,
     vaeId: typeof patch.vaeId === 'string' ? patch.vaeId : next.vaeId,
+    textEncoderPath: typeof patch.textEncoderPath === 'string' ? patch.textEncoderPath : next.textEncoderPath,
+    wanOffload: typeof patch.wanOffload === 'string' && patch.wanOffload.length > 0 ? patch.wanOffload : next.wanOffload,
+    wanSigmaType: typeof patch.wanSigmaType === 'string' && patch.wanSigmaType.length > 0 ? patch.wanSigmaType : next.wanSigmaType,
+    wanSampler: typeof patch.wanSampler === 'string' && patch.wanSampler.length > 0 ? patch.wanSampler : next.wanSampler,
+    wanFlowShift: patch.wanFlowShift !== undefined ? clamp(finiteNumber(patch.wanFlowShift) ?? next.wanFlowShift, 0, 20) : next.wanFlowShift,
     denoisingStrength: patch.denoisingStrength !== undefined ? clamp(finiteNumber(patch.denoisingStrength) ?? next.denoisingStrength, 0, 1) : next.denoisingStrength,
     maskBlur: patch.maskBlur !== undefined ? clamp(Math.round(finiteNumber(patch.maskBlur) ?? next.maskBlur), 0, 64) : next.maskBlur,
     inpaintOnlyMasked: typeof patch.inpaintOnlyMasked === 'boolean' ? patch.inpaintOnlyMasked : next.inpaintOnlyMasked,
@@ -8414,6 +8981,103 @@ function findImportedModel(models: ProModelOption[], patch: GenerationSettingsPa
 function finiteNumber(value: unknown): number | undefined {
   const numberValue = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(numberValue) ? numberValue : undefined
+}
+
+function looseRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+}
+
+function readPatchUnknown(record: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      return record[key]
+    }
+  }
+  return undefined
+}
+
+function readPatchString(record: Record<string, unknown>, keys: string[]): string | undefined {
+  const value = readPatchUnknown(record, keys)
+  if (typeof value === 'string') {
+    return value
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+  return undefined
+}
+
+function readPatchNumber(record: Record<string, unknown>, keys: string[]): number | undefined {
+  return finiteNumber(readPatchUnknown(record, keys))
+}
+
+function readPatchBoolean(record: Record<string, unknown>, keys: string[]): boolean | undefined {
+  const value = readPatchUnknown(record, keys)
+  if (typeof value === 'boolean') {
+    return value
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (['true', '1', 'yes', 'on'].includes(normalized)) {
+      return true
+    }
+    if (['false', '0', 'no', 'off'].includes(normalized)) {
+      return false
+    }
+  }
+  if (typeof value === 'number') {
+    return value !== 0
+  }
+  return undefined
+}
+
+function readPatchMode(record: Record<string, unknown>, keys: string[]): CreationMode | undefined {
+  const value = readPatchString(record, keys)?.toLowerCase()
+  if (value === 'image' || value === 'txt2img' || value === 'img2img') {
+    return 'image'
+  }
+  if (value === 'inpaint') {
+    return 'inpaint'
+  }
+  if (value === 'video') {
+    return 'video'
+  }
+  return undefined
+}
+
+function readPatchPipelineBackend(record: Record<string, unknown>, keys: string[]): GenerationSettings['pipelineBackend'] | undefined {
+  const value = readPatchString(record, keys)?.toLowerCase()
+  if (value === 'dual' || value === 'both') {
+    return 'dual'
+  }
+  if (value === 'sdcpp' || value === 'stable-diffusion.cpp' || value === 'stable_diffusion_cpp') {
+    return 'sdcpp'
+  }
+  if (value === 'aiwf' || value === 'diffusers' || value === 'pipeline') {
+    return 'aiwf'
+  }
+  return undefined
+}
+
+function assignStringPatch(patch: GenerationSettingsPatch, record: Record<string, unknown>, key: keyof GenerationSettingsPatch, keys: string[]): void {
+  const value = readPatchString(record, keys)
+  if (value !== undefined) {
+    ;(patch as Record<string, unknown>)[key] = value
+  }
+}
+
+function assignNumberPatch(patch: GenerationSettingsPatch, record: Record<string, unknown>, key: keyof GenerationSettingsPatch, keys: string[]): void {
+  const value = readPatchNumber(record, keys)
+  if (value !== undefined) {
+    ;(patch as Record<string, unknown>)[key] = value
+  }
+}
+
+function assignBooleanPatch(patch: GenerationSettingsPatch, record: Record<string, unknown>, key: keyof GenerationSettingsPatch, keys: string[]): void {
+  const value = readPatchBoolean(record, keys)
+  if (value !== undefined) {
+    ;(patch as Record<string, unknown>)[key] = value
+  }
 }
 
 function readReceiptNumber(receipt: Record<string, unknown>, key: string): number | undefined {
@@ -8594,7 +9258,12 @@ function isRuntimeJobActive(job: ProRuntimeStatus['job']): boolean {
 
 function isSdcppRuntime(runtime: ProRuntimeStatus): boolean {
   const backend = `${runtime.backend} ${runtime.loadedModel.type}`.toLowerCase()
-  return backend.includes('sdcpp') || backend.includes('stable-diffusion.cpp') || backend.includes('stable diffusion.cpp')
+  return backend.includes('dual') || backend.includes('sdcpp') || backend.includes('stable-diffusion.cpp') || backend.includes('stable diffusion.cpp')
+}
+
+function isDualRuntime(runtime: ProRuntimeStatus): boolean {
+  const backend = `${runtime.backend} ${runtime.loadedModel.type}`.toLowerCase()
+  return backend.includes('dual')
 }
 
 function mergeBootstrapDefaults(
@@ -8723,6 +9392,33 @@ function isCreationMode(mode: ProMode): mode is CreationMode {
   return mode === 'image' || mode === 'video' || mode === 'inpaint'
 }
 
+function railsForMode(mode: ProMode, activeRail?: string): IconItem<string>[] {
+  const railIds = RAILS_BY_MODE[mode] ?? RAILS_BY_MODE.image
+  const items = railIds
+    .map((id) => RAIL_ITEM_BY_ID.get(id))
+    .filter((item): item is IconItem<string> => Boolean(item))
+  // The active rail must always be visible, even when hash navigation or a
+  // menu action lands on a rail outside the current mode's list — otherwise
+  // the user is stranded on a surface with no highlighted way back.
+  if (activeRail && !railIds.includes(activeRail)) {
+    const item = RAIL_ITEM_BY_ID.get(activeRail)
+    if (item) {
+      items.push(item)
+    }
+  }
+  return items
+}
+
+function modeContainingRail(railId: string, currentMode: ProMode): ProMode {
+  if ((RAILS_BY_MODE[currentMode] ?? []).includes(railId)) {
+    return currentMode
+  }
+  const fallback = (Object.keys(RAILS_BY_MODE) as ProMode[]).find((mode) =>
+    RAILS_BY_MODE[mode].includes(railId),
+  )
+  return fallback ?? 'image'
+}
+
 function fileExtension(file: File): string {
   const name = file.name || ''
   const dot = name.lastIndexOf('.')
@@ -8785,7 +9481,34 @@ function isGenerationCancelResult(error: unknown): boolean {
 
 function readInitialRail(): string {
   const hash = window.location.hash.replace(/^#/, '').trim()
+  if (hash === 'image' || hash === 'inpaint' || hash === 'video') {
+    return 'create'
+  }
+  if (hash === 'audio') {
+    return 'audiolab'
+  }
+  if (hash === 'settings') {
+    return 'settings'
+  }
   return RAIL_IDS.has(hash) ? hash : 'create'
+}
+
+function readInitialMode(): ProMode {
+  const hash = window.location.hash.replace(/^#/, '').trim()
+  if (hash === 'image' || hash === 'inpaint' || hash === 'video' || hash === 'audio' || hash === 'models' || hash === 'data' || hash === 'settings') {
+    return hash
+  }
+  const rail = readInitialRail()
+  if (rail === 'models' || rail === 'data') {
+    return rail
+  }
+  if (rail === 'settings') {
+    return 'settings'
+  }
+  if (rail === 'audiolab') {
+    return 'audio'
+  }
+  return 'image'
 }
 
 function readLayoutPreferences(): LayoutPreferences {
@@ -8803,6 +9526,10 @@ function readLayoutPreferences(): LayoutPreferences {
         typeof parsed.bottomDockVisible === 'boolean'
           ? parsed.bottomDockVisible
           : DEFAULT_LAYOUT_PREFERENCES.bottomDockVisible,
+      outputPreviewVisible:
+        typeof parsed.outputPreviewVisible === 'boolean'
+          ? parsed.outputPreviewVisible
+          : DEFAULT_LAYOUT_PREFERENCES.outputPreviewVisible,
     }
   } catch {
     return DEFAULT_LAYOUT_PREFERENCES
@@ -8852,6 +9579,7 @@ const MENU_BAR_ITEMS: Array<{
       { id: 'open-settings', label: 'Settings' },
       { id: 'open-segmentation', label: 'Segmentation' },
       { id: 'open-hires', label: 'High-res fix' },
+      { id: 'open-controlnet', label: 'ControlNet' },
       { id: 'open-enhance', label: 'Enhance / VSR' },
       { id: 'open-reactor', label: 'ReActor' },
     ],

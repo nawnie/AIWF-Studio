@@ -37,7 +37,7 @@
       }
 
       main {
-        width: min(360px, calc(100vw - 32px));
+        width: min(440px, calc(100vw - 32px));
         display: grid;
         justify-items: center;
         gap: 18px;
@@ -96,6 +96,89 @@
         min-height: 20px;
         margin: 0;
         color: rgba(255, 246, 230, 0.78);
+      }
+
+      .steps {
+        width: 100%;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 2px;
+        list-style: none;
+        text-align: left;
+      }
+
+      .step {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 7px 12px;
+        border-radius: 10px;
+        color: rgba(255, 246, 230, 0.55);
+        transition: background 200ms ease, color 200ms ease;
+      }
+
+      .step.active {
+        background: rgba(243, 223, 189, 0.08);
+        color: var(--cream);
+      }
+
+      .step.done {
+        color: rgba(255, 246, 230, 0.78);
+      }
+
+      .step-icon {
+        position: relative;
+        width: 16px;
+        height: 16px;
+        flex: 0 0 auto;
+        display: inline-block;
+        border: 2px solid currentColor;
+        border-radius: 999px;
+        opacity: 0.55;
+      }
+
+      .step.done .step-icon {
+        border: 0;
+        opacity: 1;
+        color: #38b98a;
+      }
+
+      .step.done .step-icon::before {
+        content: "";
+        position: absolute;
+        left: 3px;
+        top: 7px;
+        width: 5px;
+        height: 2px;
+        background: currentColor;
+        transform: rotate(45deg);
+        border-radius: 2px;
+      }
+
+      .step.done .step-icon::after {
+        content: "";
+        position: absolute;
+        left: 6px;
+        top: 6px;
+        width: 9px;
+        height: 2px;
+        background: currentColor;
+        transform: rotate(-50deg);
+        border-radius: 2px;
+      }
+
+      .step.active .step-icon {
+        border-color: var(--coral);
+        border-top-color: transparent;
+        opacity: 1;
+        animation: spin 900ms linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
       }
 
       .bar {
@@ -169,7 +252,8 @@
         <span class="core"></span>
       </div>
       <h1>AIWF Studio Pro</h1>
-      <p id="status">Starting local backend...</p>
+      <p id="status">Starting AIWF Studio Pro...</p>
+      <ol id="steps" class="steps" aria-hidden="false"></ol>
       <div class="bar" aria-hidden="true"><span></span></div>
     </main>
     <script>
@@ -177,22 +261,91 @@
       const target = params.get("target") || "http://127.0.0.1:7860"
       const ready = params.get("ready") || `${target.replace(/\/$/, "")}/api/pro/startup`
       const status = document.getElementById("status")
+      const stepsHost = document.getElementById("steps")
       const started = Date.now()
+      const FALLBACK_AFTER_MS = 240000
+
+      // Mirrors LaunchStatusServer.PHASES in launch.py, plus the handover
+      // ("spawning") and final web-app stages the launcher cannot report.
+      const STEPS = [
+        { phase: "launcher", label: "Launcher" },
+        { phase: "environment", label: "Python environment" },
+        { phase: "cuda", label: "CUDA / PyTorch" },
+        { phase: "dependencies", label: "Dependencies" },
+        { phase: "imports", label: "ML libraries" },
+        { phase: "engines", label: "Backend engines" },
+        { phase: "frontend", label: "Frontend build" },
+        { phase: "spawning", label: "Backend server" },
+        { phase: "web", label: "Web app" },
+      ]
+
+      const items = STEPS.map((step) => {
+        const li = document.createElement("li")
+        li.className = "step"
+        li.innerHTML = '<span class="step-icon" aria-hidden="true"></span><span>' + step.label + "</span>"
+        stepsHost.appendChild(li)
+        return li
+      })
+
+      let highestIndex = 0
+
+      function renderPhase(phase) {
+        let index = STEPS.findIndex((step) => step.phase === phase)
+        if (index < 0) {
+          index = highestIndex
+        }
+        // Stages never move backwards; a launcher restart mid-boot should not
+        // uncheck finished steps.
+        highestIndex = Math.max(highestIndex, index)
+        items.forEach((li, i) => {
+          li.className = "step" + (i < highestIndex ? " done" : i === highestIndex ? " active" : "")
+        })
+      }
+
+      renderPhase("launcher")
+
+      function openApp() {
+        renderPhase("web")
+        status.textContent = "Opening workspace..."
+        window.location.replace(target)
+      }
 
       async function probe() {
         try {
-          await fetch(`${ready}?t=${Date.now()}`, { cache: "no-store", mode: "no-cors" })
-          status.textContent = "Opening workspace..."
-          window.location.replace(target)
-          return
+          const response = await fetch(`${ready}?t=${Date.now()}`, { cache: "no-store" })
+          const payload = await response.json()
+          if (payload && payload.launcher) {
+            // Launcher status server: show its live phase and keep polling.
+            renderPhase(payload.phase || "launcher")
+            if (payload.message) {
+              status.textContent = payload.message
+            }
+          } else {
+            // Real backend answered: hand over.
+            openApp()
+            return
+          }
         } catch (_) {
-          const elapsed = Math.floor((Date.now() - started) / 1000)
-          status.textContent = elapsed > 20 ? "Still loading local tools..." : "Starting local backend..."
-          window.setTimeout(probe, 700)
+          // Nothing readable on the port: either the backend is still binding
+          // (handover window) or an older backend without CORS is up.
+          if (Date.now() - started > FALLBACK_AFTER_MS) {
+            try {
+              await fetch(`${ready}?t=${Date.now()}`, { cache: "no-store", mode: "no-cors" })
+              openApp()
+              return
+            } catch (_ignored) {
+              /* keep waiting */
+            }
+          }
+          if (highestIndex >= STEPS.findIndex((step) => step.phase === "spawning")) {
+            renderPhase("spawning")
+            status.textContent = "Starting backend server..."
+          }
         }
+        window.setTimeout(probe, 500)
       }
 
-      window.setTimeout(probe, 400)
+      window.setTimeout(probe, 300)
     </script>
   </body>
 </html>

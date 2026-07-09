@@ -55,8 +55,8 @@ def attention_display_label(flags) -> str:
         return "xFormers"
     if backend in {"sdpa", "sdp"} or getattr(flags, "opt_sdp_attention", False) or getattr(flags, "opt_split_attention", False):
         return "SDPA"
-    if backend in {"", "sage", "sageattention", "sage_sdpa"}:
+    if backend in {"sage", "sageattention", "sage_sdpa"}:
         return "Sage" if sageattention_2_available() else "SDPA"
     if backend == "none":
         return "Default"
-    return "Sage" if sageattention_2_available() else "SDPA"
+    return "SDPA"

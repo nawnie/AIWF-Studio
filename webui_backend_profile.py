@@ -14,6 +14,8 @@ def _normalize_backend(value: str | None) -> str:
         "stable-diffusion-cpp": "sdcpp",
         "sdcpp": "sdcpp",
         "sd-cpp": "sdcpp",
+        "dual": "dual",
+        "both": "dual",
         "diffusers": "diffusers",
         "onnx": "onnx",
     }
@@ -25,7 +27,7 @@ def main() -> None:
     parser.add_argument(
         "--backend",
         default=os.environ.get("AIWF_PROFILE_BACKEND", "diffusers"),
-        help="Image backend profile: diffusers, sdcpp, or onnx.",
+        help="Image backend profile: diffusers, dual, sdcpp, or onnx.",
     )
     args, passthrough = parser.parse_known_args()
     backend = _normalize_backend(args.backend)

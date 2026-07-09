@@ -1,4 +1,6 @@
-# torch/torchvision/torchaudio installed by launch.py with CUDA wheels (cu124)
+# torch/torchvision are installed by launch.py with CUDA wheels (cu130).
+# torchaudio is not part of the default image runtime because the cu130 wheel
+# cadence can lag behind torch/torchvision; set TORCHAUDIO_CUDA_VERSION to opt in.
 diffusers>=0.39.0
 transformers>=4.44.0,<5.0.0
 accelerate>=0.27.0
@@ -31,7 +33,7 @@ bitsandbytes>=0.46.0
 # launch.py may attempt a best-effort install and must fall back cleanly.
 # Treat any speed claim as benchmark-gated on the local machine.
 # Manual current-upstream test: pip install sageattention==2.2.0 --no-build-isolation
-# Skip auto-install: pass --skip-sageattention to launch.py
+# Opt in during setup: pass --install-sageattention to launch.py
 #
 # Optional - faster Wan attention when buildable on your CUDA toolchain:
 # pip install flash-attn
@@ -59,4 +61,4 @@ onnxruntime>=1.17.0
 
 # Optional audio note: do not add `audiocraft` to the shared Studio venv.
 # AudioCraft 1.3.0 pins torch==2.1.0 / torchvision==0.16.0, which conflicts
-# with the current CUDA 12.4 torch stack. AIWF uses Transformers MusicGen here.
+# with the current CUDA 13 torch stack. AIWF uses Transformers MusicGen here.

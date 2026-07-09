@@ -41,6 +41,7 @@ class RuntimeFlags(BaseSettings):
     api_cors_origins: str = ""
     api_rate_limit_per_minute: int = 0
     block_private_download_urls: bool = True
+    gerror: bool = False
     genlog: bool = False
     no_half: bool = False
     fp8: bool = False
@@ -61,7 +62,7 @@ class RuntimeFlags(BaseSettings):
     medvram: bool = False
     lowvram: bool = False
     highvram: bool = False
-    attention_backend: str = "sage_sdpa"
+    attention_backend: str = "sdpa"
     xformers: bool = False
     opt_sdp_attention: bool = False
     opt_split_attention: bool = False
@@ -92,7 +93,7 @@ class RuntimeFlags(BaseSettings):
     @field_validator("attention_backend")
     @classmethod
     def validate_attention_backend(cls, value: str) -> str:
-        normalized = (value or "sage_sdpa").strip().lower().replace("-", "_")
+        normalized = (value or "sdpa").strip().lower().replace("-", "_")
         if normalized in {"sage", "sageattention"}:
             normalized = "sage_sdpa"
         if normalized not in {"sage_sdpa", "sdpa", "xformers", "none"}:

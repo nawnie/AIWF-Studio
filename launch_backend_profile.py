@@ -12,7 +12,7 @@ import launch
 from aiwf.runtime.bootstrap_env import apply_from_argv
 
 PROFILE_PATH = launch.ROOT / "_local" / "backend_profile.json"
-VALID_BACKENDS = {"diffusers", "sdcpp", "onnx"}
+VALID_BACKENDS = {"diffusers", "sdcpp", "onnx", "dual"}
 LAUNCH_PROFILE_ONLY_FLAGS = {"--terminal", "--set-default", "--skip-frontend-build"}
 
 
@@ -109,6 +109,8 @@ def _normalize_backend(value: str | None) -> str:
         "stable-diffusion-cpp": "sdcpp",
         "sd-cpp": "sdcpp",
         "sdcpp": "sdcpp",
+        "dual": "dual",
+        "both": "dual",
         "diffusers": "diffusers",
         "onnx": "onnx",
     }
@@ -210,11 +212,19 @@ def main() -> None:
         _write_default_backend(backend)
 
     passthrough = _strip_profile_only_args(with_backend_removed)
+    port = _extract_port(passthrough)
     loading_window = None
     if not show_terminal and "--no-autolaunch" not in passthrough:
-        loading_window = _open_loading_window(_extract_port(passthrough))
+        loading_window = _open_loading_window(port)
         if loading_window is not None:
             passthrough.append("--no-autolaunch")
+
+    # Serve live boot stages on the app port so the loading window can show
+    # a checklist while the environment prepares. Silently skipped when the
+    # port is already taken (backend already running).
+    launch_status = launch.LaunchStatusServer(port)
+    if not launch_status.start():
+        launch_status = None
 
     sys.path.insert(0, str(launch.ROOT))
     apply_from_argv(passthrough)
@@ -223,8 +233,16 @@ def main() -> None:
 
     skip_prepare = "--skip-prepare-environment" in passthrough
     skip_install = "--skip-install" in passthrough
-    launch.prepare(skip_prepare, skip_install, passthrough)
-    _ensure_frontend(argv)
+    try:
+        launch.prepare(skip_prepare, skip_install, passthrough, status=launch_status)
+        if launch_status is not None:
+            launch_status.update("frontend", "Checking Pro frontend build...")
+        _ensure_frontend(argv)
+    finally:
+        # Free the port for the real backend, whether prepare succeeded or not.
+        if launch_status is not None:
+            launch_status.update("spawning", "Starting backend server...")
+            launch_status.stop()
     pro_argv = launch.strip_launch_only_args(passthrough)
 
     env = os.environ.copy()

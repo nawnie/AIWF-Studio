@@ -33,11 +33,12 @@ class LaunchSettings(BaseSettings):
     # Security default for model downloads: block loopback/LAN/private targets
     # unless the user intentionally enables local private URL fetching.
     block_private_download_urls: bool = True
+    gerror: bool = False
     genlog: bool = False
     share: bool = False
     medvram: bool = False
     lowvram: bool = False
-    attention_backend: str = "sage_sdpa"
+    attention_backend: str = "sdpa"
     xformers: bool = False
     opt_sdp_attention: bool = False
     opt_split_attention: bool = False
@@ -99,8 +100,8 @@ class LaunchSettings(BaseSettings):
     @classmethod
     def validate_inference_backend(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"diffusers", "onnx"}:
-            raise ValueError("inference_backend must be diffusers or onnx")
+        if normalized not in {"diffusers", "onnx", "sdcpp", "dual"}:
+            raise ValueError("inference_backend must be diffusers, onnx, sdcpp, or dual")
         return normalized
 
     @field_validator("onnx_provider")
@@ -114,7 +115,7 @@ class LaunchSettings(BaseSettings):
     @field_validator("attention_backend")
     @classmethod
     def validate_attention_backend(cls, value: str) -> str:
-        normalized = (value or "sage_sdpa").strip().lower().replace("-", "_")
+        normalized = (value or "sdpa").strip().lower().replace("-", "_")
         if normalized in {"sage", "sageattention"}:
             normalized = "sage_sdpa"
         if normalized not in {"sage_sdpa", "sdpa", "xformers", "none"}:
@@ -148,6 +149,7 @@ class LaunchSettings(BaseSettings):
             api_cors_origins=flags.api_cors_origins,
             api_rate_limit_per_minute=flags.api_rate_limit_per_minute,
             block_private_download_urls=flags.block_private_download_urls,
+            gerror=flags.gerror,
             genlog=flags.genlog,
             share=flags.share,
             medvram=flags.medvram,
@@ -204,6 +206,7 @@ class LaunchSettings(BaseSettings):
                 "api_cors_origins": self.api_cors_origins,
                 "api_rate_limit_per_minute": self.api_rate_limit_per_minute,
                 "block_private_download_urls": self.block_private_download_urls,
+                "gerror": self.gerror,
                 "genlog": self.genlog,
                 "share": self.share,
                 "attention_backend": self.attention_backend,
@@ -276,6 +279,8 @@ class LaunchSettings(BaseSettings):
             args.extend(["--api-rate-limit-per-minute", str(self.api_rate_limit_per_minute)])
         if not self.block_private_download_urls:
             args.append("--allow-private-download-urls")
+        if self.gerror:
+            args.append("--gerror")
         if self.genlog:
             args.append("--genlog")
         if self.share:
@@ -288,7 +293,7 @@ class LaunchSettings(BaseSettings):
             args.append("--lowvram")
         if vram_profile == "high":
             args.append("--highvram")
-        if self.attention_backend != "sage_sdpa":
+        if self.attention_backend != "sdpa":
             args.extend(["--attention-backend", self.attention_backend])
         if self.xformers:
             args.append("--xformers")
@@ -422,6 +427,7 @@ def merge_launch_settings(
         "api_cors_origins": "--api-cors-origins",
         "api_rate_limit_per_minute": "--api-rate-limit-per-minute",
         "block_private_download_urls": "--allow-private-download-urls",
+        "gerror": "--gerror",
         "genlog": "--genlog",
         "share": "--share",
         "vram_profile": vram_flags,
