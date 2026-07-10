@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import gc
+import importlib.util
+import json
 import logging
 import os
 import random
 import shutil
 import subprocess
+import sys
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +23,26 @@ from aiwf.core.domain.engine import EngineTenant
 from aiwf.infrastructure.video.processing import VideoProcessor, _resolve_ffmpeg
 
 logger = logging.getLogger(__name__)
+
+_MINIMUM_AUDIO_SETUP_LOCK = threading.Lock()
+_MUSICGEN_MINIMUM_FILES = (
+    "config.json",
+    "generation_config.json",
+    "model.safetensors",
+    "preprocessor_config.json",
+    "spiece.model",
+    "tokenizer.json",
+    "tokenizer_config.json",
+)
+_MMAUDIO_SHARED_FILES = (
+    Path("ext_weights") / "synchformer_state_dict.pth",
+)
+_MMAUDIO_16K_FILES = (
+    Path("weights") / "mmaudio_small_16k.pth",
+    Path("ext_weights") / "v1-16.pth",
+    Path("ext_weights") / "best_netG.pt",
+    *_MMAUDIO_SHARED_FILES,
+)
 
 
 class AudioUnavailable(RuntimeError):
@@ -42,53 +66,184 @@ class AudioGenerationService:
             yield
             return
         try:
-            with self.supervisor.tenant_session(EngineTenant.VIDEO, reason=reason):
+            with self.supervisor.tenant_session(EngineTenant.AUDIO, reason=reason):
                 yield
         except RuntimeError as exc:
             raise AudioUnavailable(f"GPU busy: {exc}") from exc
 
     def folder_help(self) -> str:
         return (
-            "Audio generation is optional. Video-conditioned audio uses an isolated MMAudio engine when installed. "
-            "Standalone music uses Transformers MusicGen. "
-            "`torchaudio` is installed by `launch.py` with the CUDA torch stack. "
-            "AudioCraft is kept out of the shared venv because current releases pin older torch packages."
+            "Music uses Transformers MusicGen. Sound effects and video-conditioned audio use an isolated "
+            "MMAudio engine. AudioCraft stays out of the shared Studio environment because its current release "
+            "pins an older PyTorch stack. Use the minimum setup button before the first audio run."
         )
 
     def music_model_choices(self) -> list[tuple[str, str]]:
         return [
-            ("MusicGen small", "facebook/musicgen-small"),
-            ("MusicGen medium", "facebook/musicgen-medium"),
-            ("MusicGen melody", "facebook/musicgen-melody"),
-            ("MusicGen stereo small", "facebook/musicgen-stereo-small"),
+            ("MusicGen small (minimum)", "facebook/musicgen-small"),
+            ("MusicGen medium (downloads on first use)", "facebook/musicgen-medium"),
+            ("MusicGen melody (downloads on first use)", "facebook/musicgen-melody"),
+            ("MusicGen stereo small (downloads on first use)", "facebook/musicgen-stereo-small"),
         ]
 
     def sfx_model_choices(self) -> list[tuple[str, str]]:
         return [
-            ("AudioGen medium", "facebook/audiogen-medium"),
+            ("MMAudio small 16k (minimum)", "mmaudio:small_16k"),
+            ("AudioGen medium (AudioCraft required)", "facebook/audiogen-medium"),
         ]
 
     def video_audio_model_choices(self) -> list[tuple[str, str]]:
         return [
-            ("MMAudio large 44k v2", "mmaudio:large_44k_v2"),
-            ("MMAudio large 44k", "mmaudio:large_44k"),
-            ("MMAudio medium 44k", "mmaudio:medium_44k"),
-            ("MMAudio small 44k", "mmaudio:small_44k"),
-            ("MMAudio small 16k", "mmaudio:small_16k"),
+            ("MMAudio small 16k (minimum)", "mmaudio:small_16k"),
+            ("MMAudio large 44k v2 (downloads on first use)", "mmaudio:large_44k_v2"),
+            ("MMAudio large 44k (downloads on first use)", "mmaudio:large_44k"),
+            ("MMAudio medium 44k (downloads on first use)", "mmaudio:medium_44k"),
+            ("MMAudio small 44k (downloads on first use)", "mmaudio:small_44k"),
         ]
 
+    def available_video_audio_model_choices(self) -> list[tuple[str, str]]:
+        return [
+            choice
+            for choice in self.video_audio_model_choices()
+            if self._mmaudio_variant_ready(self._mmaudio_variant(choice[1]))
+        ]
+
+    def setup_status(self, *, deep: bool = False) -> dict[str, Any]:
+        root = self.flags.data_dir.resolve()
+        musicgen_root = self._minimum_musicgen_root()
+        musicgen_missing = [name for name in _MUSICGEN_MINIMUM_FILES if not (musicgen_root / name).is_file()]
+        dependency_modules = ("torch", "transformers", "scipy", "huggingface_hub")
+        missing_dependencies = [name for name in dependency_modules if importlib.util.find_spec(name) is None]
+
+        mmaudio_root = self._mmaudio_root()
+        mmaudio_python = self._audio_engine_python()
+        mmaudio_demo = mmaudio_root / "demo.py"
+        mmaudio_missing = [str(path) for path in _MMAUDIO_16K_FILES if not (mmaudio_root / path).is_file()]
+        mmaudio_import_ok = mmaudio_python.is_file() and mmaudio_demo.is_file()
+        mmaudio_import_error = ""
+        if deep and mmaudio_import_ok:
+            result = subprocess.run(
+                [str(mmaudio_python), "-c", "import mmaudio; print('ok')"],
+                cwd=str(mmaudio_root),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            mmaudio_import_ok = result.returncode == 0
+            if not mmaudio_import_ok:
+                mmaudio_import_error = (result.stderr or result.stdout or "MMAudio import failed").strip()[-1200:]
+
+        from aiwf.services.audio_lab import AudioLabService
+
+        lab_status = AudioLabService(self.flags.resolved_output_dir()).status(deep=deep)
+        music_ready = not missing_dependencies and not musicgen_missing
+        mmaudio_ready = mmaudio_import_ok and not mmaudio_missing
+        lab_ready = bool(lab_status.installed)
+        ffmpeg = _resolve_ffmpeg()
+        minimum_ready = music_ready and mmaudio_ready and lab_ready and bool(ffmpeg)
+        if minimum_ready:
+            message = "Minimum Audio setup is ready."
+        elif _MINIMUM_AUDIO_SETUP_LOCK.locked():
+            message = "Minimum Audio setup is running. Keep Studio open until it finishes."
+        else:
+            message = "Download the minimum audio models and isolated dependencies before the first run."
+
+        return {
+            "minimumReady": minimum_ready,
+            "installing": _MINIMUM_AUDIO_SETUP_LOCK.locked(),
+            "musicReady": music_ready,
+            "sfxReady": mmaudio_ready,
+            "videoAudioReady": mmaudio_ready,
+            "labReady": lab_ready,
+            "muxReady": bool(ffmpeg),
+            "message": message,
+            "estimatedDownload": "Up to about 10 GB on a clean install; existing files are reused.",
+            "licenseNotice": (
+                "MusicGen and MMAudio released model weights are CC-BY-NC 4.0 / non-commercial research assets."
+            ),
+            "defaults": {
+                "music": "facebook/musicgen-small",
+                "sfx": "mmaudio:small_16k",
+                "videoAudio": "mmaudio:small_16k",
+            },
+            "components": [
+                {
+                    "id": "musicgen-small",
+                    "label": "MusicGen Small",
+                    "ready": music_ready,
+                    "path": str(musicgen_root),
+                    "missing": [*missing_dependencies, *musicgen_missing],
+                },
+                {
+                    "id": "mmaudio-small-16k",
+                    "label": "MMAudio Small 16 kHz",
+                    "ready": mmaudio_ready,
+                    "path": str(mmaudio_root),
+                    "missing": mmaudio_missing,
+                    "error": mmaudio_import_error,
+                },
+                {
+                    "id": "audio-lab",
+                    "label": "Audio Lab DSP",
+                    "ready": lab_ready,
+                    "path": str(lab_status.python_path or root / "engines" / "audio_lab" / ".venv"),
+                    "missing": [] if lab_ready else [lab_status.message],
+                },
+                {
+                    "id": "ffmpeg",
+                    "label": "FFmpeg audio mux",
+                    "ready": bool(ffmpeg),
+                    "path": str(ffmpeg or ""),
+                    "missing": [] if ffmpeg else ["ffmpeg"],
+                },
+            ],
+        }
+
+    def install_minimum(self) -> dict[str, Any]:
+        if not _MINIMUM_AUDIO_SETUP_LOCK.acquire(blocking=False):
+            raise AudioUnavailable("Minimum Audio setup is already running.")
+        try:
+            root = self.flags.data_dir.resolve()
+            script = root / "scripts" / "bootstrap_audio_minimum.py"
+            if not script.is_file():
+                raise AudioUnavailable(f"Minimum Audio setup script is missing: {script}")
+            result = subprocess.run(
+                [sys.executable, str(script), "--repo", str(root), "--json"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=4 * 60 * 60,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "Minimum Audio setup failed").strip()
+                raise AudioUnavailable(detail[-5000:])
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            receipt: dict[str, Any] = {}
+            for line in reversed(lines):
+                try:
+                    decoded = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(decoded, dict):
+                    receipt = decoded
+                    break
+            status = self.setup_status(deep=True)
+            status["receipt"] = receipt
+            return status
+        finally:
+            _MINIMUM_AUDIO_SETUP_LOCK.release()
+
     def video_audio_status(self) -> str:
+        status = self.setup_status(deep=False)
         root = self._mmaudio_root()
-        demo = root / "demo.py"
-        python = self._audio_engine_python()
-        if demo.is_file() and python.is_file():
+        if status["videoAudioReady"]:
             return (
-                f"Video audio ready: MMAudio at {root}. "
+                f"Video audio ready: MMAudio Small 16 kHz at {root}. "
                 "MMAudio checkpoints are CC-BY-NC 4.0; use for non-commercial work unless licensed otherwise."
             )
         return (
-            f"Video audio needs MMAudio installed at {root} with engine Python at {python}. "
-            "This route is video-conditioned audio for generated Wan clips."
+            f"Video audio needs the minimum MMAudio setup at {root}. "
+            "Use the Download minimum audio models & dependencies button first."
         )
 
     def output_path(self, *, stem: str = "audio", suffix: str = ".wav") -> Path:
@@ -115,21 +270,23 @@ class AudioGenerationService:
             raise AudioUnavailable("Enter an audio prompt first.")
         if str(options.kind or "").lower() == "video_audio":
             raise AudioUnavailable("Video-conditioned audio needs a target video.")
-        dest = Path(output_path) if output_path else self.output_path(stem=self._safe_stem(prompt))
+        mmaudio_text = options.kind == "sfx" and str(options.model_id or "").startswith("mmaudio:")
+        suffix = ".flac" if mmaudio_text else ".wav"
+        dest = Path(output_path) if output_path else self.output_path(stem=self._safe_stem(prompt), suffix=suffix)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         with self._gpu_tenant("Audio generation"):
             if options.seed is not None and int(options.seed) >= 0:
                 self._set_seed(int(options.seed))
             try:
-                if options.kind == "sfx":
+                if mmaudio_text:
+                    sample_rate = self._generate_mmaudio_text_audio(options, dest)
+                elif options.kind == "sfx":
                     sample_rate = self._generate_audiocraft(options, dest)
                 else:
-                    sample_rate = self._generate_audiocraft(options, dest)
-            except AudioUnavailable:
-                if options.kind == "sfx":
-                    raise
-                sample_rate = self._generate_transformers_musicgen(options, dest)
+                    sample_rate = self._generate_transformers_musicgen(options, dest)
+            finally:
+                self._park_cached_model_on_cpu()
 
         infotext = f"Audio {options.kind}: {options.model_id}, {options.duration_seconds:.1f}s"
         return AudioGenerationResult(
@@ -295,6 +452,8 @@ class AudioGenerationService:
     def _load_audiocraft_model(self, model_cls, model_id: str, kind: str):
         key = ("audiocraft", kind, model_id)
         if self._model is not None and self._model_key == key:
+            if hasattr(self._model, "to"):
+                self._model.to(self._device_string())
             return self._model
         device = self._device_string()
         try:
@@ -312,18 +471,32 @@ class AudioGenerationService:
             from transformers import AutoProcessor, MusicgenForConditionalGeneration
         except Exception as exc:
             raise AudioUnavailable(
-                "MusicGen fallback needs `transformers`, `scipy`, and `torch`; AudioCraft is recommended."
+                "MusicGen needs `transformers`, `scipy`, and `torch`. Run the minimum Audio setup first."
             ) from exc
 
+        if float(options.duration_seconds) > 30.0:
+            raise AudioUnavailable(
+                "The minimum MusicGen backend supports clips up to 30 seconds per render. "
+                "Use Audio Lab to arrange or crossfade longer pieces."
+            )
         model_id = options.model_id or "facebook/musicgen-small"
+        model_source = self._musicgen_model_source(model_id)
         key = ("transformers", "music", model_id)
         if self._model is None or self._model_key != key:
-            processor = AutoProcessor.from_pretrained(model_id)
-            model = MusicgenForConditionalGeneration.from_pretrained(model_id)
-            model.to(self._device_string())
+            processor = AutoProcessor.from_pretrained(model_source)
+            device = self._device_string()
+            load_options: dict[str, Any] = {"low_cpu_mem_usage": True, "use_safetensors": True}
+            if device == "cuda":
+                load_options.update(dtype=torch.float16, attn_implementation="sdpa")
+                torch.backends.cuda.matmul.allow_tf32 = True
+            model = MusicgenForConditionalGeneration.from_pretrained(model_source, **load_options)
+            model.to(device)
             self._model = (processor, model)
             self._model_key = key
         processor, model = self._model
+        device = self._device_string()
+        if str(model.device) != device:
+            model.to(device)
         inputs = processor(text=[options.prompt], padding=True, return_tensors="pt").to(model.device)
         token_rate = 50
         max_new_tokens = max(16, int(float(options.duration_seconds) * token_rate))
@@ -333,6 +506,7 @@ class AudioGenerationService:
                 do_sample=True,
                 guidance_scale=float(options.cfg_coef),
                 temperature=float(options.temperature),
+                top_k=int(options.top_k),
                 max_new_tokens=max_new_tokens,
             )
         sample_rate = int(model.config.audio_encoder.sampling_rate)
@@ -343,13 +517,54 @@ class AudioGenerationService:
         scipy.io.wavfile.write(str(dest), sample_rate, audio)
         return sample_rate
 
+    def _generate_mmaudio_text_audio(self, options: AudioGenerationOptions, dest: Path) -> int:
+        root = self._mmaudio_root()
+        demo = root / "demo.py"
+        python = self._audio_engine_python()
+        if not demo.is_file() or not python.is_file():
+            raise AudioUnavailable("MMAudio is not installed. Run the minimum Audio setup first.")
+        variant = self._mmaudio_variant(options.model_id)
+        if variant == "small_16k" and not self._mmaudio_variant_ready(variant):
+            raise AudioUnavailable("MMAudio Small 16 kHz is incomplete. Run the minimum Audio setup first.")
+        run_dir = dest.parent / f"{dest.stem}_mmaudio"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        seed = int(options.seed) if options.seed is not None and int(options.seed) >= 0 else random.randint(0, 2**31 - 1)
+        command = [
+            str(python),
+            str(demo),
+            "--variant",
+            variant,
+            "--prompt",
+            options.prompt,
+            "--negative_prompt",
+            options.negative_prompt or "",
+            "--duration",
+            f"{float(options.duration_seconds):.3f}",
+            "--cfg_strength",
+            f"{float(options.cfg_coef):.3f}",
+            "--num_steps",
+            str(int(options.steps)),
+            "--seed",
+            str(seed),
+            "--output",
+            str(run_dir),
+            "--skip_video_composite",
+        ]
+        result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, timeout=3600)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise AudioUnavailable(f"MMAudio sound generation failed: {detail}")
+        source = self._find_mmaudio_audio_output(run_dir, expected_stem=None)
+        if source.resolve() != dest.resolve():
+            if dest.exists():
+                dest.unlink()
+            shutil.move(str(source), str(dest))
+        return 44100 if "44k" in variant else 16000
+
     def _generate_mmaudio_video_audio(self, video_path: Path, options: AudioGenerationOptions, dest: Path) -> int:
-        # VAP is internal shorthand for this post-processing route: a finished video
-        # conditions audio generation through the isolated local MMAudio CLI bridge.
-        # Come back here when the MVP is proven: parse MMAudio's real output metadata
-        # instead of inferring sample rate from the variant name, and expose a small
-        # install/status probe so the UI can distinguish "not installed" from "installed
-        # but missing checkpoints".
+        # A finished video conditions audio generation through the isolated MMAudio bridge.
+        # The subprocess exits after each render, so its CUDA allocation cannot leak into
+        # the next image or video job.
         root = self._mmaudio_root()
         demo = root / "demo.py"
         python = self._audio_engine_python()
@@ -359,6 +574,8 @@ class AudioGenerationService:
             raise AudioUnavailable(f"MMAudio engine Python not found: {python}")
 
         variant = self._mmaudio_variant(options.model_id)
+        if variant == "small_16k" and not self._mmaudio_variant_ready(variant):
+            raise AudioUnavailable("MMAudio Small 16 kHz is incomplete. Run the minimum Audio setup first.")
         run_dir = dest.parent / f"{dest.stem}_mmaudio"
         run_dir.mkdir(parents=True, exist_ok=True)
         seed = int(options.seed) if options.seed is not None and int(options.seed) >= 0 else random.randint(0, 2**31 - 1)
@@ -397,9 +614,9 @@ class AudioGenerationService:
         return 44100 if "44k" in variant else 16000
 
     @staticmethod
-    def _find_mmaudio_audio_output(run_dir: Path, *, expected_stem: str) -> Path:
-        expected = run_dir / f"{expected_stem}.flac"
-        if expected.is_file() and expected.stat().st_size > 0:
+    def _find_mmaudio_audio_output(run_dir: Path, *, expected_stem: str | None) -> Path:
+        expected = run_dir / f"{expected_stem}.flac" if expected_stem else None
+        if expected is not None and expected.is_file() and expected.stat().st_size > 0:
             return expected
         candidates = sorted(
             (
@@ -413,10 +630,46 @@ class AudioGenerationService:
         if len(candidates) == 1:
             return candidates[0]
         found = ", ".join(path.name for path in candidates[:5]) or "none"
+        expected_text = str(expected) if expected is not None else "one generated .flac file"
         raise AudioUnavailable(
-            f"MMAudio did not create expected audio: {expected}. "
+            f"MMAudio did not create expected audio: {expected_text}. "
             f"Found {len(candidates)} .flac file(s): {found}"
         )
+
+    def _minimum_musicgen_root(self) -> Path:
+        return self.flags.data_dir.resolve() / "models" / "audio" / "MusicGen" / "musicgen-small"
+
+    def _musicgen_model_source(self, model_id: str) -> str:
+        if model_id == "facebook/musicgen-small":
+            root = self._minimum_musicgen_root()
+            if all((root / name).is_file() for name in _MUSICGEN_MINIMUM_FILES):
+                return str(root)
+        return model_id
+
+    def _mmaudio_variant_ready(self, variant: str) -> bool:
+        root = self._mmaudio_root()
+        if not (root / "demo.py").is_file() or not self._audio_engine_python().is_file():
+            return False
+        if variant == "small_16k":
+            required = _MMAUDIO_16K_FILES
+        else:
+            weight = Path("weights") / f"mmaudio_{variant}.pth"
+            required = (weight, Path("ext_weights") / "v1-44.pth", *_MMAUDIO_SHARED_FILES)
+        return all((root / path).is_file() and (root / path).stat().st_size > 0 for path in required)
+
+    def _park_cached_model_on_cpu(self) -> None:
+        cached = self._model
+        model = cached[1] if isinstance(cached, tuple) and len(cached) == 2 else cached
+        if model is None or not hasattr(model, "to"):
+            return
+        try:
+            model.to("cpu")
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            logger.debug("Could not park the cached audio model on CPU", exc_info=True)
 
     def _mmaudio_root(self) -> Path:
         return self.flags.data_dir.resolve() / "engines" / "audio" / "MMAudio"

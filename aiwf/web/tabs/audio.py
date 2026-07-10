@@ -66,6 +66,21 @@ def _engine_markdown(status) -> str:
     return f"{icon} **{status.message}**{python}"
 
 
+def _minimum_setup_markdown(status: dict) -> str:
+    components = status.get("components") or []
+    rows = [
+        f"{'Ready' if item.get('ready') else 'Needs setup'}: **{item.get('label', 'Audio component')}**"
+        for item in components
+    ]
+    detail = " · ".join(rows)
+    return (
+        f"### Minimum Audio setup\n{status.get('message', 'Audio setup status unavailable.')}  \n"
+        f"{detail}  \n"
+        f"{status.get('estimatedDownload', '')}  \n"
+        f"**License:** {status.get('licenseNotice', '')}"
+    )
+
+
 def _build_mix_panel(ctx: AppContext, service: AudioLabService) -> None:
     initial = preset_audio_settings("music_sweeten")
     initial_stages = normalize_audio_stages(initial.stages)
@@ -464,7 +479,7 @@ def _build_generate_panel(ctx: AppContext, service: AudioGenerationService) -> N
                 model = gr.Dropdown(
                     label="Model",
                     choices=video_audio_models,
-                    value=video_audio_models[0][1] if video_audio_models else "mmaudio:large_44k_v2",
+                    value=video_audio_models[0][1] if video_audio_models else "mmaudio:small_16k",
                     allow_custom_value=True,
                 )
             with gr.Row():
@@ -485,13 +500,13 @@ def _build_generate_panel(ctx: AppContext, service: AudioGenerationService) -> N
         selected = str(kind_value or "video_audio")
         if selected == "sfx":
             choices = sfx_models
-            fallback = "facebook/audiogen-medium"
+            fallback = "mmaudio:small_16k"
         elif selected == "music":
             choices = music_models
             fallback = "facebook/musicgen-small"
         else:
             choices = video_audio_models
-            fallback = "mmaudio:large_44k_v2"
+            fallback = "mmaudio:small_16k"
         return gr.update(choices=choices, value=choices[0][1] if choices else fallback)
 
     kind.change(_sync_kind, inputs=[kind], outputs=[model], show_progress=False)
@@ -504,11 +519,11 @@ def _build_generate_panel(ctx: AppContext, service: AudioGenerationService) -> N
             model_id=str(
                 model_v
                 or (
-                    "facebook/audiogen-medium"
+                    "mmaudio:small_16k"
                     if kind_v == "sfx"
                     else "facebook/musicgen-small"
                     if kind_v == "music"
-                    else "mmaudio:large_44k_v2"
+                    else "mmaudio:small_16k"
                 )
             ),
             duration_seconds=float(duration_v or 8),
@@ -619,6 +634,7 @@ def register_audio(registry: WebRegistry) -> None:
     def build(ctx: AppContext, tab: gr.Tab | None = None) -> None:
         generation = _generation_service(ctx)
         lab = _lab_service(ctx)
+        setup = generation.setup_status(deep=False)
         with gr.Column(elem_classes=["aiwf-audio", "aiwf-video"]):
             with gr.Column(elem_classes=["aiwf-page-header"]):
                 gr.Markdown("AUDIO LAB", elem_classes=["aiwf-section-label"])
@@ -628,6 +644,29 @@ def register_audio(registry: WebRegistry) -> None:
                     elem_classes=["aiwf-page-intro"],
                 )
                 gr.Markdown(generation.folder_help(), elem_classes=["aiwf-page-path"])
+
+            with gr.Row(equal_height=True, elem_classes=["aiwf-panel", "aiwf-audio-setup"]):
+                setup_status = gr.Markdown(_minimum_setup_markdown(setup))
+                setup_button = gr.Button(
+                    "Download minimum models & dependencies",
+                    variant="primary",
+                    min_width=260,
+                )
+
+            def _install_minimum_audio():
+                try:
+                    result = generation.install_minimum()
+                except AudioUnavailable as exc:
+                    raise gr.Error(str(exc)) from exc
+                return _minimum_setup_markdown(result)
+
+            setup_button.click(
+                _install_minimum_audio,
+                outputs=[setup_status],
+                show_progress="full",
+                concurrency_limit=1,
+                concurrency_id="aiwf-audio-setup",
+            )
 
             with gr.Tabs(elem_classes=["aiwf-enhance-tabs"]):
                 with gr.Tab("Mix & Sweeten"):

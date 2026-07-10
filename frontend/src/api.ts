@@ -121,6 +121,9 @@ export interface ProApiLatencySample {
   path: string
   status: number
   clientMs: number
+  headersMs: number
+  bodyMs: number
+  parseMs: number
   serverMs: number | null
   createdAt: string
 }
@@ -446,8 +449,7 @@ export function streamProRuntime(
 
   const source = new EventSource(`${API_BASE}/api/pro/runtime/stream`)
   let lastEventData = ''
-  // The backend ticks every 75 ms while a job runs and each setRuntime
-  // re-renders the whole shell, so React falls behind the stream. Coalesce:
+  // The backend ticks at this cadence while a job runs. Coalesce anyway:
   // keep only the LATEST payload and apply it at most once per animation
   // frame with a minimum spacing, trailing-edge included so the final
   // state always lands.
@@ -697,6 +699,128 @@ export async function importGenerationMetadataFromImage(
     signal,
   })
   return normalizeImportedGenerationMetadata(payload)
+}
+
+export interface AudioSetupComponent {
+  id: string
+  label: string
+  ready: boolean
+  path: string
+  missing: string[]
+  error: string
+}
+
+export interface ProAudioStatus {
+  minimumReady: boolean
+  installing: boolean
+  musicReady: boolean
+  sfxReady: boolean
+  videoAudioReady: boolean
+  labReady: boolean
+  muxReady: boolean
+  message: string
+  estimatedDownload: string
+  licenseNotice: string
+  defaults: {
+    music: string
+    sfx: string
+    videoAudio: string
+  }
+  components: AudioSetupComponent[]
+}
+
+export interface ProAudioGenerateRequest {
+  prompt: string
+  negativePrompt?: string
+  kind: 'music' | 'sfx'
+  modelId: string
+  durationSeconds: number
+  temperature: number
+  cfgCoef: number
+  topK: number
+  steps: number
+  seed: number
+}
+
+export interface ProAudioGenerateResult {
+  status: string
+  message: string
+  outputPath: string
+  url: string
+  prompt: string
+  kind: string
+  modelId: string
+  durationSeconds: number
+  sampleRate: number
+  infotext: string
+}
+
+function normalizeAudioStatus(value: unknown): ProAudioStatus {
+  const record = asRecord(value)
+  const defaults = readRecord(record, ['defaults'])
+  return {
+    minimumReady: readBoolean(record, ['minimumReady', 'minimum_ready'], false),
+    installing: readBoolean(record, ['installing'], false),
+    musicReady: readBoolean(record, ['musicReady', 'music_ready'], false),
+    sfxReady: readBoolean(record, ['sfxReady', 'sfx_ready'], false),
+    videoAudioReady: readBoolean(record, ['videoAudioReady', 'video_audio_ready'], false),
+    labReady: readBoolean(record, ['labReady', 'lab_ready'], false),
+    muxReady: readBoolean(record, ['muxReady', 'mux_ready'], false),
+    message: readString(record, ['message'], 'Audio setup status is unavailable.'),
+    estimatedDownload: readString(record, ['estimatedDownload', 'estimated_download'], ''),
+    licenseNotice: readString(record, ['licenseNotice', 'license_notice'], ''),
+    defaults: {
+      music: readString(defaults, ['music'], 'facebook/musicgen-small'),
+      sfx: readString(defaults, ['sfx'], 'mmaudio:small_16k'),
+      videoAudio: readString(defaults, ['videoAudio', 'video_audio'], 'mmaudio:small_16k'),
+    },
+    components: readArray(record, ['components']).map((item) => {
+      const component = asRecord(item)
+      return {
+        id: readString(component, ['id'], ''),
+        label: readString(component, ['label'], 'Audio component'),
+        ready: readBoolean(component, ['ready'], false),
+        path: readString(component, ['path'], ''),
+        missing: readArray(component, ['missing']).map((entry) => `${entry}`),
+        error: readString(component, ['error'], ''),
+      }
+    }),
+  }
+}
+
+export async function fetchProAudioStatus(signal?: AbortSignal): Promise<ProAudioStatus> {
+  const payload = await requestJson('/api/pro/audio/status', { cache: 'no-store', signal })
+  return normalizeAudioStatus(payload)
+}
+
+export async function installMinimumProAudio(signal?: AbortSignal): Promise<ProAudioStatus> {
+  const payload = await requestJson('/api/pro/audio/setup/minimum', { method: 'POST', signal })
+  return normalizeAudioStatus(payload)
+}
+
+export async function generateProAudio(
+  request: ProAudioGenerateRequest,
+  signal?: AbortSignal,
+): Promise<ProAudioGenerateResult> {
+  const payload = await requestJson('/api/pro/audio/generate', {
+    body: JSON.stringify(request),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+    signal,
+  })
+  const record = asRecord(payload)
+  return {
+    status: readString(record, ['status'], ''),
+    message: readString(record, ['message'], ''),
+    outputPath: readString(record, ['outputPath', 'output_path'], ''),
+    url: readString(record, ['url'], ''),
+    prompt: readString(record, ['prompt'], ''),
+    kind: readString(record, ['kind'], ''),
+    modelId: readString(record, ['modelId', 'model_id'], ''),
+    durationSeconds: readNumber(record, ['durationSeconds', 'duration_seconds'], 0),
+    sampleRate: readNumber(record, ['sampleRate', 'sample_rate'], 0),
+    infotext: readString(record, ['infotext'], ''),
+  }
 }
 
 export interface VideoLabProbe {
@@ -1270,30 +1394,49 @@ async function requestJson(path: string, init: RequestInit = {}): Promise<unknow
       ...init.headers,
     },
   })
-  const clientMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt
+  const headersAt = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  const headersMs = headersAt - startedAt
   const serverHeader = response.headers.get('X-AIWF-Elapsed-Ms')
   const parsedServerMs = serverHeader === null ? NaN : Number.parseFloat(serverHeader)
   const serverMs = Number.isFinite(parsedServerMs) ? parsedServerMs : null
-  recordApiLatency({
-    path,
-    status: response.status,
-    clientMs,
-    serverMs,
-    createdAt: new Date().toISOString(),
-  })
 
   const text = await response.text()
+  const bodyReadAt = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  const bodyMs = bodyReadAt - headersAt
+  const recordLatency = (parseMs = 0) => {
+    recordApiLatency({
+      path,
+      status: response.status,
+      clientMs: bodyReadAt + parseMs - startedAt,
+      headersMs,
+      bodyMs,
+      parseMs,
+      serverMs,
+      createdAt: new Date().toISOString(),
+    })
+  }
   if (!response.ok) {
     const error = readResponseError(text, response.statusText)
-    throw new ProApiError(path, response.status, error.message, error.detail, { clientMs, serverMs })
+    recordLatency()
+    throw new ProApiError(path, response.status, error.message, error.detail, { clientMs: bodyReadAt - startedAt, serverMs })
   }
   if (!text) {
+    recordLatency()
     return {}
   }
+  const parseStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now()
   try {
-    return JSON.parse(text) as unknown
+    const payload = JSON.parse(text) as unknown
+    const parseMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - parseStartedAt
+    recordLatency(parseMs)
+    return payload
   } catch {
-    throw new ProApiError(path, response.status, 'Response was not valid JSON.', undefined, { clientMs, serverMs })
+    const parseMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - parseStartedAt
+    recordLatency(parseMs)
+    throw new ProApiError(path, response.status, 'Response was not valid JSON.', undefined, {
+      clientMs: bodyReadAt + parseMs - startedAt,
+      serverMs,
+    })
   }
 }
 

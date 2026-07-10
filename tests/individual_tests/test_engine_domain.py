@@ -29,6 +29,7 @@ class TestEngineTenant:
         for tenant in (
             EngineTenant.IMAGE,
             EngineTenant.VIDEO,
+            EngineTenant.AUDIO,
             EngineTenant.LORA_TRAINING,
             EngineTenant.FULL_TRAINING,
             EngineTenant.ENHANCE,

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import ipaddress
+import secrets
 import socket
 import time
 import urllib.parse
 from collections import defaultdict, deque
 from collections.abc import Iterable
+from pathlib import Path
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -13,6 +15,7 @@ from starlette.responses import JSONResponse
 
 
 API_PREFIXES = ("/api/", "/sdapi/")
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
 def parse_cors_origins(value: str | Iterable[str] | None) -> list[str]:
@@ -90,4 +93,40 @@ class ApiRateLimitMiddleware(BaseHTTPMiddleware):
                 headers={"Retry-After": "60"},
             )
         hits.append(now)
+        return await call_next(request)
+
+
+class MobileTokenAuthMiddleware(BaseHTTPMiddleware):
+    """Requires ``X-AIWF-Token`` on ``/api/pro`` requests from non-loopback clients.
+
+    Desktop traffic (the app's own frontend, always loopback) is never
+    challenged. ``/api/pro/ping`` stays reachable without a token so an
+    unpaired phone can discover and identify the server before it has one.
+    Enforcement is read fresh from disk on every request (not cached at
+    process start) so toggling mobile access on/off in Settings takes effect
+    immediately, without restarting the backend.
+    """
+
+    _OPEN_PATHS = {"/api/pro/ping"}
+
+    def __init__(self, app, *, data_dir: Path) -> None:
+        super().__init__(app)
+        self.data_dir = Path(data_dir)
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if not path.startswith("/api/pro") or path in self._OPEN_PATHS:
+            return await call_next(request)
+        client_host = request.client.host if request.client else ""
+        if client_host in LOOPBACK_HOSTS:
+            return await call_next(request)
+
+        from aiwf.core.config.mobile_auth import load_mobile_auth
+
+        state = load_mobile_auth(self.data_dir)
+        if not state["enabled"] or not state["token"]:
+            return await call_next(request)
+        supplied = request.headers.get("x-aiwf-token", "")
+        if not supplied or not secrets.compare_digest(supplied, state["token"]):
+            return JSONResponse({"detail": "Missing or invalid mobile pairing token."}, status_code=401)
         return await call_next(request)

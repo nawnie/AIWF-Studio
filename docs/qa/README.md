@@ -5,6 +5,7 @@
 Current release bucket report:
 
 - `RELEASE_READINESS_STEP3.md`
+- `AUDIO_WORKSPACE_TEST_GUIDE.md` for the first Audio Studio, MMAudio, and DSP-lab review.
 
 Source:
 

@@ -215,6 +215,7 @@ class EngineSupervisor:
         aliases = {
             "generation": EngineTenant.IMAGE,
             "wan": EngineTenant.VIDEO,
+            "audio": EngineTenant.AUDIO,
             "kohya": EngineTenant.LORA_TRAINING,
             "ed2": EngineTenant.FULL_TRAINING,
             "ollama": EngineTenant.CHAT,

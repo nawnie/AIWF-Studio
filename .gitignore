@@ -35,6 +35,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+build/
+*.egg-info/
 
 # --- Generated output & media ---
 outputs/

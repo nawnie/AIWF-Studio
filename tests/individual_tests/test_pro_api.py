@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -253,6 +254,7 @@ def test_runtime_endpoint_reports_warm_latency_under_budget(tmp_path):
 
     assert response.status_code == 200
     server_ms = float(response.headers["X-AIWF-Elapsed-Ms"])
+    assert response.headers["Server-Timing"].startswith("aiwf;dur=")
     assert server_ms < 75
     assert roundtrip_ms < 75
 
@@ -1785,3 +1787,247 @@ def test_capabilities_endpoint_keeps_working_when_readiness_fails(tmp_path, monk
     assert data["readiness"]["total"] == 0
     assert data["readiness"]["counts"]["working"] == 0
     assert "readiness scan failed" in data["readiness"]["error"]
+
+
+def test_ping_reports_name_version_and_auth_state(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    response = client.get("/api/pro/ping")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "AIWF Studio Pro"
+    assert data["version"]
+    assert data["authRequired"] is False
+
+
+def test_mobile_pairing_get_requires_loopback(tmp_path):
+    ctx = _ctx(tmp_path)
+    app = create_app(ctx, frontend_dist=Path("__missing_frontend_dist__"))
+
+    loopback_client = TestClient(app, client=("127.0.0.1", 51000))
+    remote_client = TestClient(app, client=("192.168.1.50", 51000))
+
+    ok = loopback_client.get("/api/pro/mobile-pairing")
+    blocked = remote_client.get("/api/pro/mobile-pairing")
+
+    assert ok.status_code == 200
+    assert ok.json()["enabled"] is False
+    # A token is provisioned eagerly (so Settings can show/QR it before the
+    # user flips mobile access on), but enforcement stays off until enabled.
+    assert ok.json()["token"]
+    assert blocked.status_code == 403
+
+
+def test_mobile_pairing_enable_then_enforces_token_for_remote_clients(tmp_path):
+    ctx = _ctx(tmp_path)
+    app = create_app(ctx, frontend_dist=Path("__missing_frontend_dist__"))
+
+    loopback_client = TestClient(app, client=("127.0.0.1", 51000))
+    remote_client = TestClient(app, client=("192.168.1.50", 51000))
+
+    enable_response = loopback_client.post("/api/pro/mobile-pairing", json={"enabled": True})
+    assert enable_response.status_code == 200
+    payload = enable_response.json()
+    assert payload["enabled"] is True
+    token = payload["token"]
+    assert token
+    assert payload["pairingUri"].startswith("aiwf://pair?")
+
+    # Remote client without the token is rejected on any /api/pro route...
+    denied = remote_client.get("/api/pro/runtime")
+    assert denied.status_code == 401
+
+    # ...but succeeds once it presents the correct token.
+    allowed = remote_client.get("/api/pro/runtime", headers={"X-AIWF-Token": token})
+    assert allowed.status_code == 200
+
+    # /ping never requires the token, so an unpaired phone can still discover the server.
+    ping = remote_client.get("/api/pro/ping")
+    assert ping.status_code == 200
+    assert ping.json()["authRequired"] is True
+
+    # The loopback desktop app itself is never challenged.
+    loopback_runtime = loopback_client.get("/api/pro/runtime")
+    assert loopback_runtime.status_code == 200
+
+    # Rotating invalidates the old token immediately.
+    rotated = loopback_client.post("/api/pro/mobile-pairing", json={"enabled": True, "rotate": True})
+    new_token = rotated.json()["token"]
+    assert new_token != token
+    assert remote_client.get("/api/pro/runtime", headers={"X-AIWF-Token": token}).status_code == 401
+    assert remote_client.get("/api/pro/runtime", headers={"X-AIWF-Token": new_token}).status_code == 200
+
+    # Disabling drops enforcement again without needing a restart.
+    loopback_client.post("/api/pro/mobile-pairing", json={"enabled": False})
+    assert remote_client.get("/api/pro/runtime").status_code == 200
+
+
+def test_outputs_thumb_query_param_returns_resized_jpeg(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+    image_path = ctx.flags.output_dir / "txt2img-images" / "thumb-source.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (800, 600), "green").save(image_path)
+
+    full = client.get("/api/pro/outputs/txt2img-images/thumb-source.png")
+    thumbed = client.get("/api/pro/outputs/txt2img-images/thumb-source.png?thumb=128")
+
+    assert full.status_code == 200
+    assert thumbed.status_code == 200
+    assert thumbed.headers["content-type"] == "image/jpeg"
+    thumb_image = Image.open(io.BytesIO(thumbed.content))
+    assert max(thumb_image.size) <= 128
+    assert len(thumbed.content) < len(full.content)
+
+
+def test_outputs_index_paginates_by_recency(tmp_path):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+    out_dir = ctx.flags.output_dir / "txt2img-images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for index in range(5):
+        path = out_dir / f"page-{index}.png"
+        Image.new("RGB", (8, 8), "red").save(path)
+        paths.append(path)
+        os.utime(path, (1_700_000_000 + index, 1_700_000_000 + index))
+
+    page1 = client.get("/api/pro/outputs-index?offset=0&limit=2")
+    page2 = client.get("/api/pro/outputs-index?offset=2&limit=2")
+
+    assert page1.status_code == 200
+    data1 = page1.json()
+    data2 = page2.json()
+    assert data1["total"] == 5
+    assert len(data1["items"]) == 2
+    assert len(data2["items"]) == 2
+    # Most recently modified files come first, and pages don't overlap.
+    assert data1["items"][0]["path"].endswith("page-4.png")
+    assert data1["items"][1]["path"].endswith("page-3.png")
+    assert data2["items"][0]["path"].endswith("page-2.png")
+    page1_paths = {item["path"] for item in data1["items"]}
+    page2_paths = {item["path"] for item in data2["items"]}
+    assert page1_paths.isdisjoint(page2_paths)
+
+
+class _AudioStub:
+    def __init__(self, output_root: Path):
+        self.output_root = output_root
+        self.generated = []
+        self.installed = False
+
+    def setup_status(self, *, deep=False):
+        ready = self.installed
+        return {
+            "minimumReady": ready,
+            "installing": False,
+            "musicReady": ready,
+            "sfxReady": ready,
+            "videoAudioReady": ready,
+            "labReady": ready,
+            "muxReady": True,
+            "message": "ready" if ready else "setup needed",
+            "estimatedDownload": "test",
+            "licenseNotice": "test license",
+            "defaults": {
+                "music": "facebook/musicgen-small",
+                "sfx": "mmaudio:small_16k",
+                "videoAudio": "mmaudio:small_16k",
+            },
+            "components": [],
+            "deep": deep,
+        }
+
+    def install_minimum(self):
+        self.installed = True
+        return self.setup_status(deep=True)
+
+    def music_model_choices(self):
+        return [("MusicGen small", "facebook/musicgen-small")]
+
+    def sfx_model_choices(self):
+        return [("MMAudio small 16k", "mmaudio:small_16k")]
+
+    def video_audio_model_choices(self):
+        return [("MMAudio small 16k", "mmaudio:small_16k")]
+
+    def available_video_audio_model_choices(self):
+        return self.video_audio_model_choices() if self.installed else []
+
+    def generate(self, options):
+        self.generated.append(options)
+        path = self.output_root / "audio" / "test.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"RIFFaudio")
+        return SimpleNamespace(
+            output_path=str(path),
+            prompt=options.prompt,
+            kind=options.kind,
+            model_id=options.model_id,
+            duration_seconds=options.duration_seconds,
+            sample_rate=32000,
+            message="Audio complete.",
+            infotext="Audio music: test",
+        )
+
+
+def test_audio_status_and_minimum_setup_routes_share_one_contract(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.audio = _AudioStub(ctx.flags.output_dir)
+    client = _client(ctx)
+
+    before = client.get("/api/pro/audio/status")
+    installed = client.post("/api/pro/audio/setup/minimum")
+    after = client.get("/api/pro/audio/status?deep=true")
+
+    assert before.status_code == 200
+    assert before.headers["cache-control"] == "no-store"
+    assert before.json()["minimumReady"] is False
+    assert before.json()["models"]["music"][0]["id"] == "facebook/musicgen-small"
+    assert installed.status_code == 200
+    assert installed.json()["minimumReady"] is True
+    assert after.json()["minimumReady"] is True
+
+
+def test_audio_generate_route_returns_playable_output_url(tmp_path):
+    ctx = _ctx(tmp_path)
+    audio = _AudioStub(ctx.flags.output_dir)
+    audio.installed = True
+    ctx.audio = audio
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/audio/generate",
+        json={
+            "prompt": "quiet modular synth pulse",
+            "kind": "music",
+            "modelId": "facebook/musicgen-small",
+            "durationSeconds": 8,
+            "cfgCoef": 3,
+            "steps": 25,
+            "seed": 11,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "complete"
+    assert data["url"].startswith("/api/pro/outputs/")
+    assert client.get(data["url"]).content == b"RIFFaudio"
+    assert audio.generated[0].model_id == "facebook/musicgen-small"
+    assert audio.generated[0].seed == 11
+
+
+def test_audio_generate_route_rejects_video_conditioned_kind(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.audio = _AudioStub(ctx.flags.output_dir)
+    client = _client(ctx)
+
+    response = client.post(
+        "/api/pro/audio/generate",
+        json={"prompt": "footsteps", "kind": "video_audio", "modelId": "mmaudio:small_16k"},
+    )
+
+    assert response.status_code == 422

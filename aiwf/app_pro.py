@@ -230,6 +230,10 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="AIWF Studio Pro", middleware=middleware or [])
 
+    from aiwf.api.security import MobileTokenAuthMiddleware
+
+    app.add_middleware(MobileTokenAuthMiddleware, data_dir=Path(ctx.flags.data_dir))
+
     @app.middleware("http")
     async def add_pro_timing_header(request, call_next):
         started = time.perf_counter()
@@ -237,6 +241,7 @@ def create_app(
         if request.url.path.startswith("/api/pro"):
             elapsed_ms = (time.perf_counter() - started) * 1000
             response.headers["X-AIWF-Elapsed-Ms"] = f"{elapsed_ms:.1f}"
+            response.headers["Server-Timing"] = f"aiwf;dur={elapsed_ms:.1f}"
         return response
 
     app.include_router(build_client_log_router(ctx), prefix="/api/v1")

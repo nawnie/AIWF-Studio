@@ -4,6 +4,8 @@
 
 The optional engine lives in `engines/audio_lab/.venv` and is installed by `scripts/bootstrap_audio_lab.py`. It is intentionally separate from the image/video Python environment.
 
+The Audio tab's minimum setup button runs `scripts/bootstrap_audio_minimum.py`. It prepares MusicGen Small, MMAudio Small 16 kHz, the isolated DSP environment, and then reports the readiness of FFmpeg. Use `docs/qa/AUDIO_WORKSPACE_TEST_GUIDE.md` for the first hands-on review.
+
 Core processing uses:
 
 - Pedalboard for gate, filters, EQ, compressor, pitch shift, gain, and limiter;

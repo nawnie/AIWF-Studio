@@ -9,6 +9,7 @@ import logging
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -19,12 +20,14 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from PIL import Image
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from aiwf import __version__ as AIWF_VERSION
 from aiwf.core.config.launch import LaunchSettings, save_launch_settings
+from aiwf.core.config.mobile_auth import ensure_mobile_token, load_mobile_auth, set_mobile_access_enabled
 from aiwf.core.config.settings import normalize_vram_profile
 from aiwf.core.domain.controlnet import ControlNetUnit
 from aiwf.core.domain.errors import GenerationCancelledError
@@ -61,7 +64,7 @@ _PRO_SANA_VIDEO_BACKEND_ENABLED = 1
 _PRO_RESTART_EXIT_CODE = 75
 _CAPABILITY_CACHE_TTL_SECONDS = 30.0
 _CAPABILITY_BACKGROUND_REFRESH_SECONDS = 300.0
-_RUNTIME_RUNNING_TICK_SECONDS = 0.075
+_RUNTIME_RUNNING_TICK_SECONDS = 0.15
 _RUNTIME_IDLE_TICK_SECONDS = 0.25
 _RUNTIME_RESOURCE_CACHE_SECONDS = 0.35
 _STARTUP_SPLASH_MIN_MS = 1800
@@ -338,6 +341,13 @@ class ProControlNetUnitPayload(BaseModel):
     guidance_start: float = Field(default=0.0, ge=0.0, le=1.0, validation_alias=AliasChoices("guidanceStart", "guidance_start"))
     guidance_end: float = Field(default=1.0, ge=0.0, le=1.0, validation_alias=AliasChoices("guidanceEnd", "guidance_end"))
     control_mode: str = Field(default="balanced", validation_alias=AliasChoices("controlMode", "control_mode"))
+
+
+class ProMobilePairingUpdatePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    enabled: bool
+    rotate: bool = False
 
 
 class ProMetadataImportPayload(BaseModel):
@@ -1319,6 +1329,71 @@ def _sana_video_model_payload(ctx: Any) -> dict[str, Any]:
         "backend": "Diffusers",
         "status": "Ready" if ready else "Needs snapshot",
     }
+
+
+def _require_loopback(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    if host not in {"127.0.0.1", "::1", "localhost"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Mobile pairing details are only available from the local machine.",
+        )
+
+
+def _local_lan_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return str(sock.getsockname()[0])
+    except OSError:
+        return "127.0.0.1"
+
+
+def _mobile_pairing_payload(ctx: Any, state: dict[str, Any]) -> dict[str, Any]:
+    port = int(getattr(ctx, "runtime_port", 0) or getattr(getattr(ctx, "flags", None), "port", 0) or 0)
+    enabled = bool(state.get("enabled")) and bool(state.get("token"))
+    pairing_uri = (
+        f"aiwf://pair?host={_local_lan_ip()}&port={port}&token={state.get('token', '')}&name=AIWF"
+        if enabled
+        else ""
+    )
+    return {
+        "enabled": enabled,
+        "token": str(state.get("token") or ""),
+        "port": port,
+        "pairingUri": pairing_uri,
+    }
+
+
+def _all_output_image_paths_from_disk(root: Path, *, scan_limit: int) -> list[Path]:
+    if not root.exists():
+        return []
+    rows: list[tuple[float, Path]] = []
+    inspected = 0
+    stack = [root]
+    while stack and inspected < scan_limit:
+        current = stack.pop()
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if inspected >= scan_limit:
+                break
+            try:
+                if entry.is_dir():
+                    if not entry.name.startswith("."):
+                        stack.append(entry)
+                    continue
+                if entry.suffix.lower() not in _IMAGE_EXTENSIONS:
+                    continue
+                inspected += 1
+                stat = entry.stat()
+            except OSError:
+                continue
+            rows.append((stat.st_mtime, entry))
+    rows.sort(key=lambda row: row[0], reverse=True)
+    return [row[1] for row in rows]
 
 
 def _recent_paths_from_disk(root: Path, *, limit: int) -> list[Path]:
@@ -3185,9 +3260,10 @@ def _runtime_summary(ctx: Any) -> dict[str, Any]:
 async def _runtime_sse_events(ctx: Any, request: Request):
     """Adaptive runtime stream.
 
-    - While a job runs, tick near the 75 ms UI budget so progress and previews feel
-      immediate, but only send each preview frame ONCE per (job, step) — the
-      base64 preview is by far the heaviest part of the payload.
+    - While a job runs, tick at the React apply cadence so progress and previews
+      feel responsive without serializing payloads the client will drop.
+      Preview frames still send only ONCE per (job, step) because the base64
+      preview is by far the heaviest part of the payload.
     - While idle, tick slowly and skip emits entirely when nothing changed,
       so an idle Pro tab costs almost nothing on either side.
     """
@@ -3965,10 +4041,10 @@ def _audio_service(ctx: Any):
     key = id(ctx)
     service = _AUDIO_SERVICES.get(key)
     if service is None:
-        from aiwf.services.audio import AudioService
+        from aiwf.services.audio import AudioGenerationService
 
         backend = getattr(getattr(ctx, "generation", None), "backend", None)
-        service = AudioService(
+        service = AudioGenerationService(
             getattr(ctx, "flags", None),
             getattr(ctx, "settings", None),
             devices=getattr(backend, "devices", None),
@@ -4004,6 +4080,41 @@ class ProVideoLabRunPayload(BaseModel):
     cfg_scale: float = Field(default=5.0, ge=1.0, le=20.0, validation_alias=AliasChoices("cfgScale", "cfg_scale"))
     seed: int = -1
     checkpoint_id: str = Field(default="", validation_alias=AliasChoices("checkpointId", "checkpoint_id", "modelId"))
+
+
+class ProAudioGeneratePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    prompt: str = ""
+    negative_prompt: str = Field(default="", validation_alias=AliasChoices("negativePrompt", "negative_prompt"))
+    kind: str = "music"
+    model_id: str = Field(
+        default="facebook/musicgen-small",
+        validation_alias=AliasChoices("modelId", "model_id", "audioModel", "audio_model"),
+    )
+    duration_seconds: float = Field(
+        default=8.0,
+        ge=1.0,
+        le=120.0,
+        validation_alias=AliasChoices("durationSeconds", "duration_seconds", "duration"),
+    )
+    temperature: float = Field(default=1.0, ge=0.1, le=2.0)
+    cfg_coef: float = Field(
+        default=3.0,
+        ge=0.1,
+        le=10.0,
+        validation_alias=AliasChoices("cfgCoef", "cfg_coef", "guidance"),
+    )
+    top_k: int = Field(default=250, ge=0, le=1000, validation_alias=AliasChoices("topK", "top_k"))
+    steps: int = Field(default=25, ge=1, le=200)
+    seed: int = -1
+
+    @model_validator(mode="after")
+    def supported_kind(self):
+        self.kind = str(self.kind or "music").strip().lower()
+        if self.kind not in {"music", "sfx"}:
+            raise ValueError("kind must be 'music' or 'sfx'; use Video Lab for video-conditioned audio.")
+        return self
 
 
 class ProAutoMaskPayload(BaseModel):
@@ -4273,7 +4384,8 @@ def _video_lab_run_audio(ctx: Any, src: Path, payload: ProVideoLabRunPayload) ->
     if not prompt:
         raise HTTPException(status_code=422, detail="Enter an audio prompt describing the soundtrack.")
     service = _audio_service(ctx)
-    video_audio_choices = [model_id for _, model_id in (service.video_audio_model_choices() or [])]
+    available_choices = getattr(service, "available_video_audio_model_choices", service.video_audio_model_choices)
+    video_audio_choices = [model_id for _, model_id in (available_choices() or [])]
     kind = "video_audio" if video_audio_choices else "music"
     model_id = (payload.audio_model or "").strip() or (
         video_audio_choices[0] if video_audio_choices else "facebook/musicgen-small"
@@ -4367,9 +4479,12 @@ def _video_lab_status_payload(ctx: Any) -> dict[str, Any]:
         rife_checkpoints = []
     audio = _audio_service(ctx)
     try:
-        video_audio_models = [model_id for _, model_id in (audio.video_audio_model_choices() or [])]
+        available_choices = getattr(audio, "available_video_audio_model_choices", audio.video_audio_model_choices)
+        video_audio_models = [model_id for _, model_id in (available_choices() or [])]
+        audio_setup = audio.setup_status(deep=False)
     except Exception:
         video_audio_models = []
+        audio_setup = {"videoAudioReady": False}
     return {
         "vsr": {
             "available": bool(info.available),
@@ -4386,11 +4501,66 @@ def _video_lab_status_payload(ctx: Any) -> dict[str, Any]:
         },
         "audio": {
             "videoAudioModels": video_audio_models,
+            "ready": bool(audio_setup.get("videoAudioReady")),
         },
         "extend": {
             "available": True,
             "note": "Uses the Wan TI2V-5B route: the clip's last frame becomes the i2v conditioning image.",
         },
+    }
+
+
+def _audio_status_payload(ctx: Any, *, deep: bool = False) -> dict[str, Any]:
+    service = _audio_service(ctx)
+    status = service.setup_status(deep=deep)
+    status["models"] = {
+        "music": [{"label": label, "id": model_id} for label, model_id in service.music_model_choices()],
+        "sfx": [{"label": label, "id": model_id} for label, model_id in service.sfx_model_choices()],
+        "videoAudio": [
+            {"label": label, "id": model_id} for label, model_id in service.video_audio_model_choices()
+        ],
+    }
+    return status
+
+
+def _generate_audio_response(ctx: Any, payload: ProAudioGeneratePayload) -> dict[str, Any]:
+    from aiwf.core.domain.audio import AudioGenerationOptions
+    from aiwf.services.audio import AudioUnavailable
+
+    prompt = (payload.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="Enter an audio prompt before generating.")
+    service = _audio_service(ctx)
+    options = AudioGenerationOptions(
+        prompt=prompt,
+        negative_prompt=payload.negative_prompt,
+        kind=payload.kind,
+        model_id=payload.model_id,
+        duration_seconds=payload.duration_seconds,
+        temperature=payload.temperature,
+        cfg_coef=payload.cfg_coef,
+        top_k=payload.top_k,
+        steps=payload.steps,
+        seed=payload.seed,
+    )
+    try:
+        result = service.generate(options)
+    except AudioUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    output = Path(result.output_path)
+    if not output.is_file() or output.stat().st_size <= 0:
+        raise HTTPException(status_code=500, detail="Audio generation did not produce a playable output file.")
+    return {
+        "status": "complete",
+        "message": result.message,
+        "outputPath": result.output_path,
+        "url": _output_asset_url(ctx, output),
+        "prompt": result.prompt,
+        "kind": result.kind,
+        "modelId": result.model_id,
+        "durationSeconds": result.duration_seconds,
+        "sampleRate": result.sample_rate,
+        "infotext": result.infotext,
     }
 
 
@@ -4475,6 +4645,37 @@ def build_router(ctx: Any) -> APIRouter:
     if not getattr(ctx, "_pro_startup_started_at", None):
         setattr(ctx, "_pro_startup_started_at", time.time())
     router = APIRouter(prefix="/api/pro")
+
+    @router.get("/ping")
+    def ping():
+        # Deliberately cheap and always reachable (even to an unpaired mobile
+        # client) so the Android app can discover/identify the server and
+        # learn whether it needs to present a pairing token before anything
+        # else. Never includes the token itself.
+        state = load_mobile_auth(Path(ctx.flags.data_dir))
+        return {
+            "name": "AIWF Studio Pro",
+            "version": AIWF_VERSION,
+            "authRequired": bool(state.get("enabled")) and bool(state.get("token")),
+        }
+
+    @router.get("/mobile-pairing")
+    def mobile_pairing(request: Request):
+        _require_loopback(request)
+        data_dir = Path(ctx.flags.data_dir)
+        ensure_mobile_token(data_dir)
+        state = load_mobile_auth(data_dir)
+        return _mobile_pairing_payload(ctx, state)
+
+    @router.post("/mobile-pairing")
+    def mobile_pairing_update(request: Request, payload: ProMobilePairingUpdatePayload):
+        _require_loopback(request)
+        state = set_mobile_access_enabled(
+            Path(ctx.flags.data_dir),
+            enabled=payload.enabled,
+            rotate=payload.rotate,
+        )
+        return _mobile_pairing_payload(ctx, state)
 
     @router.get("/startup")
     def startup():
@@ -4665,8 +4866,51 @@ def build_router(ctx: Any) -> APIRouter:
         return _unload_generation_model(ctx)
 
     @router.get("/outputs/{requested_path:path}")
-    def output_asset(requested_path: str):
-        return FileResponse(_output_asset_path(ctx, requested_path))
+    def output_asset(requested_path: str, thumb: int | None = Query(default=None, ge=32, le=2048)):
+        path = _output_asset_path(ctx, requested_path)
+        if thumb and path.suffix.lower() in _IMAGE_EXTENSIONS:
+            try:
+                with Image.open(path) as image:
+                    rendered = image.convert("RGB")
+                    rendered.thumbnail((thumb, thumb), Image.Resampling.LANCZOS)
+                    buf = io.BytesIO()
+                    rendered.save(buf, format="JPEG", quality=85)
+                return Response(
+                    content=buf.getvalue(),
+                    media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=3600"},
+                )
+            except OSError:
+                pass
+        return FileResponse(path)
+
+    @router.get("/outputs-index")
+    def outputs_index(
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=40, ge=1, le=200),
+    ):
+        root = _safe_output_root(ctx)
+        if root is None:
+            return {"items": [], "total": 0, "offset": offset, "limit": limit}
+        scan_limit = max(_RECENT_SCAN_LIMIT, offset + limit + 1)
+        all_paths = _all_output_image_paths_from_disk(root, scan_limit=scan_limit)
+        total = len(all_paths)
+        items: list[dict[str, Any]] = []
+        for path in all_paths[offset : offset + limit]:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            infotext = _read_output_infotext(path)
+            items.append(
+                {
+                    "path": _output_asset_url(ctx, path),
+                    "mtime": stat.st_mtime,
+                    "sizeBytes": stat.st_size,
+                    **_settings_from_infotext(infotext),
+                }
+            )
+        return {"items": items, "total": total, "offset": offset, "limit": limit}
 
     @router.post("/metadata/import")
     def metadata_import(payload: ProMetadataImportPayload):
@@ -4744,6 +4988,33 @@ def build_router(ctx: Any) -> APIRouter:
         if progress:
             response["progress"] = progress
         return response
+
+    @router.get("/audio/status")
+    def audio_status(deep: bool = Query(default=False)):
+        return JSONResponse(
+            _audio_status_payload(ctx, deep=deep),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @router.post("/audio/setup/minimum")
+    def audio_setup_minimum():
+        from aiwf.services.audio import AudioUnavailable
+
+        if _pro_video_job_running(ctx) or _image_generation_running(ctx) or _image_generation_pending(ctx):
+            raise HTTPException(
+                status_code=409,
+                detail="Wait for the active generation job to finish before installing Audio dependencies.",
+            )
+        try:
+            return _audio_service(ctx).install_minimum()
+        except AudioUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @router.post("/audio/generate")
+    def audio_generate(payload: ProAudioGeneratePayload):
+        if _pro_video_job_running(ctx) or _image_generation_running(ctx) or _image_generation_pending(ctx):
+            raise HTTPException(status_code=409, detail="A generation job is already running.")
+        return _generate_audio_response(ctx, payload)
 
     @router.get("/video-lab/status")
     def video_lab_status():

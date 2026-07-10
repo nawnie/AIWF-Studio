@@ -26,6 +26,7 @@ class EngineTenant(str, Enum):
     IDLE = "idle"
     IMAGE = "image"
     VIDEO = "video"
+    AUDIO = "audio"
     CHAT = "chat"
     LORA_TRAINING = "lora_training"
     FULL_TRAINING = "full_training"
@@ -40,6 +41,7 @@ class EngineTenant(str, Enum):
             "idle": "Idle",
             "image": "Image generation",
             "video": "Video generation",
+            "audio": "Audio generation",
             "chat": "Chat (Ollama)",
             "lora_training": "LoRA training",
             "full_training": "Full model training",
