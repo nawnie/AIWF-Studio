@@ -4,7 +4,7 @@ Use this guide for the first practical review of AIWF's local audio tools. The g
 
 ## Current routes
 
-- Pro Audio Studio generates music with `facebook/musicgen-small` through Transformers.
+- Pro Audio Studio generates music with `facebook/musicgen-small` and sound effects with MMAudio Small 16 kHz.
 - MMAudio Small 16 kHz generates text sound effects and video-conditioned audio in `engines/audio/.venv`.
 - Audio Lab cleans, mixes, normalizes, and exports existing audio in `engines/audio_lab/.venv`.
 - Video Lab attaches MMAudio output to an existing clip with FFmpeg.

@@ -30,7 +30,15 @@ import {
 import type { LayoutProps } from './LayoutTypes'
 import './studioLayouts.css'
 
-const AUDIO_PRESETS = ['Video Soundtrack', 'SFX Burst', 'Ambient Loop', 'Voice Cleanup', 'Loudness Master']
+type AudioKind = 'music' | 'sfx'
+
+const AUDIO_PRESETS: Array<{ label: string; kind: AudioKind | null; note: string; title: string }> = [
+  { label: 'Music Bed', kind: 'music', note: 'MusicGen', title: 'Generate a text-guided music clip.' },
+  { label: 'Sound Effects', kind: 'sfx', note: 'MMAudio', title: 'Generate text-guided sound effects.' },
+  { label: 'Video Soundtrack', kind: null, note: 'Video Lab', title: 'Use Pro Video Lab for video-conditioned audio.' },
+  { label: 'Voice Cleanup', kind: null, note: 'Gradio lab', title: 'Use Gradio Audio Lab for cleanup and mixing.' },
+  { label: 'Loudness Master', kind: null, note: 'Gradio lab', title: 'Use Gradio Audio Lab for loudness processing.' },
+]
 const AUDIO_EFFECTS = ['Noise Gate', 'EQ', 'Compressor', 'Limiter', 'Stereo Width', 'Reverb Send']
 const AUDIO_MODELS = [
   { id: 'music', label: 'MusicGen small' },
@@ -55,11 +63,15 @@ export function AudioStudioLayout({
   const [setupStatus, setSetupStatus] = useState<ProAudioStatus | null>(null)
   const [setupBusy, setSetupBusy] = useState(false)
   const [audioBusy, setAudioBusy] = useState(false)
+  const [audioKind, setAudioKind] = useState<AudioKind>('music')
   const [audioDuration, setAudioDuration] = useState(8)
   const [audioResult, setAudioResult] = useState<ProAudioGenerateResult | null>(null)
   const [audioError, setAudioError] = useState('')
   const sceneRows = useMemo(() => recentOutputs.slice(0, 6), [recentOutputs])
   const generationBusy = isGenerating || audioBusy
+  const selectedAudioReady = audioKind === 'music' ? setupStatus?.musicReady : setupStatus?.sfxReady
+  const selectedAudioModel = audioKind === 'music' ? setupStatus?.defaults.music : setupStatus?.defaults.sfx
+  const audioActionLabel = audioKind === 'music' ? 'Music' : 'Sound Effects'
 
   useEffect(() => {
     const controller = new AbortController()
@@ -91,8 +103,8 @@ export function AudioStudioLayout({
       setAudioError('Enter an audio prompt before generating.')
       return
     }
-    if (!setupStatus?.musicReady) {
-      setAudioError('Install the minimum Audio setup before generating music.')
+    if (!selectedAudioReady) {
+      setAudioError(`Install the minimum Audio setup before generating ${audioActionLabel.toLowerCase()}.`)
       return
     }
     setAudioBusy(true)
@@ -100,8 +112,8 @@ export function AudioStudioLayout({
     try {
       const result = await generateProAudio({
         prompt: settings.prompt,
-        kind: 'music',
-        modelId: setupStatus.defaults.music,
+        kind: audioKind,
+        modelId: selectedAudioModel || (audioKind === 'music' ? 'facebook/musicgen-small' : 'mmaudio:small_16k'),
         durationSeconds: audioDuration,
         temperature: 1,
         cfgCoef: settings.cfgScale,
@@ -115,7 +127,17 @@ export function AudioStudioLayout({
     } finally {
       setAudioBusy(false)
     }
-  }, [audioDuration, settings.cfgScale, settings.prompt, settings.seed, settings.steps, setupStatus])
+  }, [
+    audioActionLabel,
+    audioDuration,
+    audioKind,
+    selectedAudioModel,
+    selectedAudioReady,
+    settings.cfgScale,
+    settings.prompt,
+    settings.seed,
+    settings.steps,
+  ])
 
   const setupReadyFor = useCallback((id: (typeof AUDIO_MODELS)[number]['id']) => {
     if (!setupStatus) return false
@@ -146,18 +168,36 @@ export function AudioStudioLayout({
         </label>
         <section className="studio-audio-card-list">
           <h3>Audio Workflows</h3>
-          {AUDIO_PRESETS.map((preset, index) => (
-            <button key={preset} type="button" className={index === 0 ? 'active' : ''}>
+          {AUDIO_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              className={preset.kind === audioKind ? 'active' : ''}
+              disabled={preset.kind === null}
+              title={preset.title}
+              onClick={() => {
+                if (preset.kind) setAudioKind(preset.kind)
+              }}
+            >
               <Waves size={15} />
-              <span>{preset}</span>
-              <small>{index === 0 ? 'Video-aware' : 'Ready'}</small>
+              <span>{preset.label}</span>
+              <small>{preset.note}</small>
             </button>
           ))}
         </section>
         <section className="studio-audio-card-list">
           <h3>Audio stack</h3>
           {AUDIO_MODELS.map((model) => (
-            <button key={model.id} type="button" disabled title="Model selection is coming in the next Audio Studio pass.">
+            <button
+              key={model.id}
+              type="button"
+              className={model.id === audioKind ? 'active' : ''}
+              disabled={model.id === 'lab' || model.id === 'mux'}
+              title={model.id === 'music' || model.id === 'sfx' ? `Use ${model.label}.` : `${model.label} is managed by setup.`}
+              onClick={() => {
+                if (model.id === 'music' || model.id === 'sfx') setAudioKind(model.id)
+              }}
+            >
               <Radio size={15} />
               <span>{model.label}</span>
               <small>{setupReadyFor(model.id) ? 'ready' : 'setup needed'}</small>
@@ -193,7 +233,7 @@ export function AudioStudioLayout({
                 if (audioResult?.url) window.open(audioResult.url, '_blank', 'noopener,noreferrer')
               }}
             >
-              <Download size={15} /> Open WAV
+              <Download size={15} /> Open audio
             </button>
           </div>
         </header>
@@ -237,7 +277,7 @@ export function AudioStudioLayout({
           <div className="studio-audio-preview-panel">
             <header>
               <strong>Preview Monitor</strong>
-              <span>{audioResult?.modelId || setupStatus?.defaults.music || 'MusicGen small'}</span>
+              <span>{audioResult?.modelId || selectedAudioModel || 'Audio model'}</span>
             </header>
             <div className="studio-large-waveform" data-playing={generationBusy}>
               {Array.from({ length: 96 }, (_, index) => <span key={index} style={{ height: `${18 + ((index * 17) % 70)}%` }} />)}
@@ -255,10 +295,10 @@ export function AudioStudioLayout({
                 type="button"
                 className="primary"
                 onClick={() => void handleGenerateAudio()}
-                disabled={generationBusy || !setupStatus?.musicReady}
+                disabled={generationBusy || !selectedAudioReady}
               >
                 {audioBusy ? <Loader2 className="studio-spin" size={16} /> : <Play size={16} />}
-                {audioBusy ? 'Generating...' : 'Generate Music'}
+                {audioBusy ? 'Generating...' : `Generate ${audioActionLabel}`}
               </button>
               <button type="button" onClick={() => onSendToWorkflow?.('Audio Studio transport')}><Sparkles size={14} /> Send to workflow</button>
               <button type="button" disabled title="Use the player volume control for this build."><Volume2 size={14} /></button>
@@ -289,11 +329,16 @@ export function AudioStudioLayout({
                 {['00:00', '00:05', '00:10', '00:15', '00:20', '00:25', '00:30'].map((tick) => <span key={tick}>{tick}</span>)}
               </div>
               <AudioTrackRow label="V1" title="Video Reference" color="amber" blocks={['Scene image', 'Motion cue', 'Cut marker']} />
-              <AudioTrackRow label="A1" title="Music Bed" color="green" blocks={['Ambient score', 'Build section', 'Outro swell']} />
-              <AudioTrackRow label="A2" title="SFX" color="purple" blocks={['Wind', 'Helmet radio', 'Distant boom']} />
+              <AudioTrackRow
+                label="A1"
+                title={audioKind === 'music' ? 'Generated Music' : 'Generated Sound Effects'}
+                color="green"
+                blocks={audioKind === 'music' ? ['Intro', 'Main phrase', 'Outro'] : ['Primary event', 'Room tone', 'Tail']}
+              />
+              <AudioTrackRow label="A2" title="Additional SFX" color="purple" blocks={['Wind', 'Helmet radio', 'Distant boom']} />
               <AudioTrackRow label="A3" title="Voice / Foley" color="blue" blocks={['Footsteps', 'Breath', 'Suit servo']} />
               <AudioTrackRow label="FX" title="Master Effects" color="cyan" blocks={['EQ', 'Compressor', 'Limiter']} />
-              <AudioTrackRow label="MD" title="Metadata" color="slate" blocks={[`Prompt: ${settings.prompt.slice(0, 40) || 'Untitled'}`, 'Model: MMAudio', `Seed: ${settings.seed}`]} />
+              <AudioTrackRow label="MD" title="Metadata" color="slate" blocks={[`Prompt: ${settings.prompt.slice(0, 40) || 'Untitled'}`, `Model: ${selectedAudioModel || 'not ready'}`, `Seed: ${settings.seed}`]} />
               <div className="studio-playhead" />
             </div>
           ) : dockMode === 'scenes' ? (
@@ -347,6 +392,12 @@ export function AudioStudioLayout({
         </section>
         <section>
           <span className="studio-eyebrow">Generation Settings</span>
+          <label className="studio-field-mini">Type
+            <select value={audioKind} onChange={(event) => setAudioKind(event.target.value as AudioKind)}>
+              <option value="music">Music</option>
+              <option value="sfx">Sound effects</option>
+            </select>
+          </label>
           <label className="studio-field-mini">Duration
             <select value={audioDuration} onChange={(event) => setAudioDuration(Number(event.target.value))}>
               <option value={8}>8 sec</option>
@@ -360,10 +411,10 @@ export function AudioStudioLayout({
             type="button"
             className="studio-wide-button"
             onClick={() => void handleGenerateAudio()}
-            disabled={generationBusy || !setupStatus?.musicReady}
+            disabled={generationBusy || !selectedAudioReady}
           >
             {audioBusy ? <Loader2 className="studio-spin" size={14} /> : <Sparkles size={14} />}
-            {audioBusy ? 'Rendering audio...' : 'Render Music Pass'}
+            {audioBusy ? 'Rendering audio...' : `Render ${audioActionLabel} Pass`}
           </button>
           <button type="button" className="studio-wide-button" onClick={() => onSendToWorkflow?.('Audio Studio render pass')}><Sparkles size={14} /> Send to workflow</button>
         </section>
