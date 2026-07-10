@@ -14,10 +14,43 @@
     const ACTION_RING_MAX = 12;
     const HANDHELD_QUERY = "(max-width: 900px), (hover: none) and (pointer: coarse) and (max-width: 1100px)";
     const INITIAL_TITLE = document.title || "AIWF Studio";
+    const ROOT_STATE_CLASSES = ["aiwf-ui-ready", "aiwf-handheld", "aiwf-touch", "aiwf-studio-tab"];
 
     const BUSY_RE = /\*\*(generating|working|loading|running|stepping|step\s*\d|processing|saving|queued)\*\*/i;
     const DONE_RE = /\*\*(done|complete|saved|loaded|finished)\*\*/i;
     const ERROR_RE = /\*\*(error|failed|cancelled|canceled|stopped)\*\*/i;
+
+    function appRoot() {
+        const existing = document.querySelector('[data-aiwf-app-root="true"]');
+        const scopedRoot = document.querySelector(".gradio-container .contain > *");
+        if (scopedRoot && scopedRoot !== existing) {
+            if (existing) {
+                for (const className of ROOT_STATE_CLASSES) {
+                    scopedRoot.classList.toggle(className, existing.classList.contains(className));
+                }
+                existing.removeAttribute("data-aiwf-app-root");
+            }
+            scopedRoot.classList.add("aiwf-app");
+            scopedRoot.dataset.aiwfAppRoot = "true";
+            return scopedRoot;
+        }
+        if (existing) {
+            return existing;
+        }
+
+        // Gradio 6 scopes custom CSS below its internal .contain element and no
+        // longer carries Blocks.elem_classes onto a useful inner root. Put the
+        // runtime hook inside that scope so responsive and state selectors keep
+        // matching across Gradio releases.
+        const fallback =
+            scopedRoot ||
+            document.querySelector(APP) ||
+            document.querySelector(".gradio-container") ||
+            document.body;
+        fallback.classList.add("aiwf-app");
+        fallback.dataset.aiwfAppRoot = "true";
+        return fallback;
+    }
 
     function promptTextarea() {
         const byId = document.getElementById(PROMPT_ID);
@@ -82,14 +115,14 @@
     }
 
     function markUiReady() {
-        const app = document.querySelector(APP);
+        const app = appRoot();
         if (app && !app.classList.contains("aiwf-ui-ready")) {
             app.classList.add("aiwf-ui-ready");
         }
     }
 
     function syncDeviceClasses() {
-        const app = document.querySelector(APP);
+        const app = appRoot();
         if (!app) {
             return;
         }
@@ -100,7 +133,7 @@
     }
 
     function watchStudioTab() {
-        const app = document.querySelector(APP);
+        const app = appRoot();
         if (!app) {
             return;
         }
@@ -262,7 +295,7 @@
     }
 
     function isAppBusy() {
-        const app = document.querySelector(APP);
+        const app = appRoot();
         if (!app) {
             return false;
         }
@@ -423,7 +456,7 @@
         }
         lastObservedState = state;
 
-        const app = document.querySelector(APP);
+        const app = appRoot();
         if (app) {
             app.classList.toggle("aiwf-busy", state === "busy" || isAppBusy());
         }
@@ -493,7 +526,7 @@
         document.addEventListener("keydown", onEscapeKeydown, true);
         bindPromptHotkey();
 
-        const root = document.querySelector(APP) || document.body;
+        const root = appRoot();
         let pendingSync = false;
         let lastTopbarSyncAt = 0;
         const observer = new MutationObserver(() => {
@@ -551,7 +584,7 @@
     }
 
     function studioContext() {
-        const app = document.querySelector(APP);
+        const app = appRoot();
         const panel = activeTabPanel();
         const modeBtn = document.querySelector(`${STUDIO} .aiwf-mode-toggle button.selected`);
         const statusBar = panel ? panel.querySelector(".aiwf-status-bar") : null;
@@ -879,7 +912,7 @@
             }
         }, 15000);
 
-        const root = document.querySelector(APP) || document.body;
+        const root = appRoot();
         let pendingGenCheck = false;
         const observer = new MutationObserver(() => {
             // class/disabled flip constantly across the Gradio tree; coalesce to
@@ -955,6 +988,7 @@
     }
 
     function boot() {
+        appRoot();
         initStartupSplash();
         markUiReady();
         initDeviceWatchers();

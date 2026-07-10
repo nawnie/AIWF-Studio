@@ -74,16 +74,19 @@ def theme_css_overrides(*, preset: str = "mint") -> str:
 
 
 def build_theme(*, dark: bool = True, accent_preset: str = "mint") -> gr.Theme:
+    """Build the local Studio theme without remote font dependencies."""
+
     palette = _accent(accent_preset)
-    """AIWF Studio visual identity — refined studio pro on obsidian."""
+    ui_fonts = ("Segoe UI Variable", "Segoe UI", "ui-sans-serif", "system-ui", "sans-serif")
+    mono_fonts = ("Cascadia Code", "Cascadia Mono", "Consolas", "ui-monospace", "monospace")
     if not dark:
         return (
             gr.themes.Soft(
                 primary_hue=gr.themes.colors.blue,
                 secondary_hue=gr.themes.colors.slate,
                 neutral_hue=gr.themes.colors.gray,
-                font=gr.themes.GoogleFont("DM Sans"),
-                font_mono=gr.themes.GoogleFont("IBM Plex Mono"),
+                font=ui_fonts,
+                font_mono=mono_fonts,
             )
             .set(
                 body_background_fill="#f6f7fb",
@@ -100,8 +103,8 @@ def build_theme(*, dark: bool = True, accent_preset: str = "mint") -> gr.Theme:
             primary_hue=gr.themes.colors.blue,
             secondary_hue=gr.themes.colors.slate,
             neutral_hue=gr.themes.colors.gray,
-            font=gr.themes.GoogleFont("DM Sans"),
-            font_mono=gr.themes.GoogleFont("IBM Plex Mono"),
+            font=ui_fonts,
+            font_mono=mono_fonts,
         )
         .set(
             body_background_fill="#06070a",
@@ -119,9 +122,9 @@ def build_theme(*, dark: bool = True, accent_preset: str = "mint") -> gr.Theme:
             input_border_color="rgba(255,255,255,0.1)",
             input_radius="10px",
             button_large_radius="10px",
-            button_primary_background_fill=f"linear-gradient(180deg, {palette['primary_light']} 0%, {palette['primary_dark']} 100%)",
+            button_primary_background_fill=palette["primary_dark"],
             button_primary_text_color="#ffffff",
-            button_primary_background_fill_hover=f"linear-gradient(180deg, {palette['primary_hover_light']} 0%, {palette['primary_hover_dark']} 100%)",
+            button_primary_background_fill_hover=palette["primary_hover_dark"],
             button_secondary_background_fill="#161b26",
             button_secondary_text_color="#b8c0d4",
             button_secondary_background_fill_hover="#1c2230",

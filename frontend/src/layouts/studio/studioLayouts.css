@@ -1979,6 +1979,7 @@
   --px-blue: #3aa2ff;
   --px-gold: #ffc94d;
   --px-purple: #b06cff;
+  --px-coral: #ff7358;
   --px-orange: #ff8a4d;
   --px-teal: #2ef0cf;
   --px-cyan: #4dc3ff;
@@ -3024,6 +3025,7 @@
   --px-blue: #39a8ff;
   --px-gold: #ffd35a;
   --px-purple: #a56cff;
+  --px-coral: #ff7358;
   --px-orange: #ff9857;
   --px-teal: #2ce9db;
   --px-cyan: #4bc7ff;
@@ -3726,7 +3728,6 @@
 
 .studio-media-center,
 .studio-agent,
-.studio-audio,
 .studio-extensions,
 .studio-settings,
 .studio-plugin-workspace {
@@ -3885,25 +3886,52 @@
 
 .studio-audio-main {
   border-color: var(--px-line);
-  background:
-    radial-gradient(720px 320px at 50% 0%, rgba(44, 233, 219, 0.1), transparent 70%),
-    rgba(3, 7, 14, 0.42);
+  background: rgba(5, 9, 15, 0.94);
+}
+
+.studio-audio {
+  background: #070b12;
+}
+
+.studio-audio-card-list button.active {
+  border-color: color-mix(in srgb, var(--px-coral) 58%, transparent);
+  background: color-mix(in srgb, var(--px-coral) 12%, transparent);
 }
 
 .studio-large-waveform {
-  background:
-    radial-gradient(circle at 18% 32%, rgba(44,233,219,0.18), transparent 36%),
-    radial-gradient(circle at 72% 44%, rgba(138,92,255,0.16), transparent 42%),
-    rgba(3, 7, 14, 0.62);
+  background: rgba(3, 7, 13, 0.78);
 }
 
 .studio-large-waveform span {
-  background: linear-gradient(180deg, var(--px-cyan), var(--px-purple) 52%, var(--px-green));
-  box-shadow: 0 0 12px rgba(44,233,219,0.18);
+  background: var(--px-coral);
+  box-shadow: none;
+}
+
+.studio-large-waveform span:nth-child(3n) {
+  background: var(--px-cyan);
+}
+
+.studio-large-waveform span:nth-child(5n) {
+  background: var(--px-gold);
+}
+
+.studio-audio-transport .primary {
+  border-color: color-mix(in srgb, var(--px-coral) 70%, transparent);
+  background: var(--px-coral);
+  color: #160b08;
 }
 
 .studio-audio-scope span {
-  background: linear-gradient(180deg, var(--px-pink), var(--px-cyan));
+  background: var(--px-cyan);
+}
+
+.studio-audio-scope span:nth-child(4n) {
+  background: var(--px-coral);
+}
+
+.studio-audio .studio-playhead {
+  background: var(--px-coral);
+  box-shadow: none;
 }
 
 .studio-channel-meter {

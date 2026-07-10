@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Bot,
   Braces,
@@ -63,7 +63,7 @@ export function AgenticChatLayout({
 
   const visibleMessages = useMemo(() => messages.filter((message) => message.role !== 'system'), [messages])
 
-  const refreshBackend = () => {
+  const refreshBackend = useCallback(() => {
     setConnectionMessage('Checking Ollama at 127.0.0.1:11434...')
     fetchAgentModels()
       .then((nextModels) => {
@@ -79,11 +79,12 @@ export function AgenticChatLayout({
         setTools(nextTools)
       }
     }).catch(() => undefined)
-  }
+  }, [])
 
   useEffect(() => {
-    refreshBackend()
-  }, [])
+    const timeoutId = window.setTimeout(refreshBackend, 0)
+    return () => window.clearTimeout(timeoutId)
+  }, [refreshBackend])
 
   const send = async () => {
     const content = input.trim()

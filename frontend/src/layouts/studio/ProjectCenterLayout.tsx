@@ -115,7 +115,7 @@ export function ProjectCenterLayout({
       return assets.find((asset) => asset.path === preview.path) ?? null
     }
     return assets[0] ?? null
-  }, [assets, preview?.path])
+  }, [assets, preview])
 
   const activeProject = project ?? {
     id: 'default',

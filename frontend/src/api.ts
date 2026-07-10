@@ -1098,7 +1098,7 @@ export async function unloadProModel(): Promise<ProRuntimeStatus> {
 }
 
 export function formatApiError(error: unknown): string {
-  let raw = ''
+  let raw: string
   let category: GerrorCategory = 'default'
   if (error instanceof DOMException && error.name === 'AbortError') {
     raw = 'Request was cancelled.'

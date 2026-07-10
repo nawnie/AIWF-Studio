@@ -153,7 +153,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
 
         with gr.Row(equal_height=False, elem_classes=["aiwf-studio-body"]):
             with gr.Column(scale=4, min_width=340, elem_classes=["aiwf-sidebar"]):
-                with gr.Column(elem_classes=["aiwf-panel"]):
+                with gr.Column(elem_classes=["aiwf-panel", "aiwf-model-panel"]):
                     gr.Markdown("Model", elem_classes=["aiwf-section-label"])
                     engine_selector = gr.Dropdown(
                         label="Engine",
@@ -177,70 +177,6 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                     )
                     refresh = gr.Button("Refresh models", elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"])
 
-                with gr.Column(elem_classes=["aiwf-panel", "aiwf-generate-panel"]):
-                    with gr.Row(elem_classes=["aiwf-action-bar", "aiwf-mobile-dock"]):
-                        generate = gr.Button(
-                            "Generate",
-                            variant="primary",
-                            scale=3,
-                            elem_classes=["aiwf-generate-btn"],
-                            elem_id="aiwf-generate",
-                        )
-                        interrupt = gr.Button("Stop", elem_classes=["aiwf-btn-stop"])
-                        send_workflow = gr.Button(
-                            "Send to workflow",
-                            scale=2,
-                            elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm", "aiwf-send-workflow"],
-                        )
-                        continuous_toggle = gr.Checkbox(
-                            label="Continuous",
-                            value=False,
-                            scale=1,
-                            elem_classes=["aiwf-continuous-toggle"],
-                        )
-                        training_metadata_toggle = gr.Checkbox(
-                            label="AI training",
-                            value=False,
-                            scale=1,
-                            elem_classes=["aiwf-continuous-toggle", "aiwf-training-toggle"],
-                        )
-                    gr.Markdown(
-                        '<kbd>Shift</kbd> + <kbd>Enter</kbd> in the prompt runs Generate.',
-                        elem_classes=["aiwf-hotkey-hint"],
-                    )
-                    vsr_enabled = gr.Checkbox(
-                        label="Post-upscale with NVIDIA RTX VSR",
-                        value=False,
-                        elem_classes=["aiwf-vsr-toggle"],
-                    )
-                    with gr.Row(visible=False, elem_classes=["aiwf-vsr-settings"]) as vsr_settings_row:
-                        vsr_scale = gr.Dropdown(
-                            label="VSR Scale",
-                            choices=[("1.5x", 1.5), ("2x", 2.0), ("3x", 3.0), ("4x", 4.0)],
-                            value=2.0,
-                        )
-                        vsr_mode = gr.Dropdown(
-                            label="VSR Quality Mode",
-                            choices=[
-                                ("Mode 1 (Standard)", 1),
-                                ("Mode 2 (Improved)", 2),
-                                ("Mode 3 (High quality)", 3),
-                                ("Mode 4 (Highest quality)", 4)
-                            ],
-                            value=3,
-                        )
-                        vsr_strength = gr.Slider(0.0, 1.0, value=0.6, step=0.05, label="Sharpness", visible=False)
-
-                    def _update_vsr_visibility(enabled):
-                        return gr.update(visible=enabled)
-
-                    vsr_enabled.change(
-                        _update_vsr_visibility,
-                        inputs=[vsr_enabled],
-                        outputs=[vsr_settings_row],
-                        show_progress=False,
-                    )
-
                 with gr.Column(elem_classes=["aiwf-panel", "aiwf-prompt-panel"]):
                     gr.Markdown("Prompt", elem_classes=["aiwf-section-label"])
                     prompt = gr.Textbox(
@@ -251,6 +187,77 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                         elem_classes=["aiwf-prompt-input"],
                         elem_id="aiwf-prompt",
                     )
+                    with gr.Column(elem_classes=["aiwf-generate-panel"]):
+                        with gr.Row(elem_classes=["aiwf-action-bar", "aiwf-mobile-dock"]):
+                            generate = gr.Button(
+                                "Generate",
+                                variant="primary",
+                                scale=3,
+                                elem_classes=["aiwf-generate-btn"],
+                                elem_id="aiwf-generate",
+                            )
+                            interrupt = gr.Button("Stop", elem_classes=["aiwf-btn-stop"])
+                            send_workflow = gr.Button(
+                                "Send to workflow",
+                                scale=2,
+                                elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm", "aiwf-send-workflow"],
+                            )
+                            continuous_toggle = gr.Checkbox(
+                                label="Continuous",
+                                value=False,
+                                scale=1,
+                                elem_classes=["aiwf-continuous-toggle"],
+                            )
+                            training_metadata_toggle = gr.Checkbox(
+                                label="AI training",
+                                value=False,
+                                scale=1,
+                                elem_classes=["aiwf-continuous-toggle", "aiwf-training-toggle"],
+                            )
+                        gr.Markdown(
+                            '<kbd>Shift</kbd> + <kbd>Enter</kbd> in the prompt runs Generate.',
+                            elem_classes=["aiwf-hotkey-hint"],
+                        )
+                        vsr_enabled = gr.Checkbox(
+                            label="Post-upscale with NVIDIA RTX VSR",
+                            value=False,
+                            elem_classes=["aiwf-vsr-toggle"],
+                        )
+                        with gr.Row(visible=False, elem_classes=["aiwf-vsr-settings"]) as vsr_settings_row:
+                            vsr_scale = gr.Dropdown(
+                                label="VSR Scale",
+                                choices=[("1.5x", 1.5), ("2x", 2.0), ("3x", 3.0), ("4x", 4.0)],
+                                value=2.0,
+                            )
+                            vsr_mode = gr.Dropdown(
+                                label="VSR Quality Mode",
+                                choices=[
+                                    ("Mode 1 (Standard)", 1),
+                                    ("Mode 2 (Improved)", 2),
+                                    ("Mode 3 (High quality)", 3),
+                                    ("Mode 4 (Highest quality)", 4),
+                                ],
+                                value=3,
+                            )
+                            vsr_strength = gr.Slider(
+                                0.0,
+                                1.0,
+                                value=0.6,
+                                step=0.05,
+                                label="Sharpness",
+                                visible=False,
+                            )
+
+                        def _update_vsr_visibility(enabled):
+                            return gr.update(visible=enabled)
+
+                        vsr_enabled.change(
+                            _update_vsr_visibility,
+                            inputs=[vsr_enabled],
+                            outputs=[vsr_settings_row],
+                            show_progress=False,
+                        )
+
                     negative = gr.Textbox(
                         label="Negative prompt",
                         show_label=False,

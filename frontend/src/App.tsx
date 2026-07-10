@@ -565,7 +565,7 @@ function App() {
   const [xyPlotCells, setXyPlotCells] = useState<XyPlotCell[]>([])
   const [xyPlotStatus, setXyPlotStatus] = useState('')
   const generationAbortRef = useRef<AbortController | null>(null)
-  const startupSplashStartedAtRef = useRef(Date.now())
+  const [startupSplashStartedAt] = useState(() => Date.now())
   const startupWindowReadyReportedRef = useRef(false)
   const runtimeErrorLoggedRef = useRef(false)
   const auxiliaryErrorLoggedRef = useRef<Record<string, boolean>>({})
@@ -584,21 +584,24 @@ function App() {
   }, [runtime.gerror])
 
   useEffect(() => {
-    if (settings.pipelineBackend === 'dual' && !dualRuntimeAvailable) {
-      setSettings((current) => (
-        current.pipelineBackend === 'dual'
-          ? { ...current, pipelineBackend: sdcppRuntimeAvailable ? 'sdcpp' : 'aiwf' }
-          : current
-      ))
-      return
+    const nextBackend =
+      settings.pipelineBackend === 'dual' && !dualRuntimeAvailable
+        ? sdcppRuntimeAvailable
+          ? 'sdcpp'
+          : 'aiwf'
+        : settings.pipelineBackend === 'sdcpp' && !sdcppRuntimeAvailable
+          ? 'aiwf'
+          : null
+    if (!nextBackend) {
+      return undefined
     }
-    if (settings.pipelineBackend === 'sdcpp' && !sdcppRuntimeAvailable) {
-      setSettings((current) => (
-        current.pipelineBackend === 'sdcpp'
-          ? { ...current, pipelineBackend: 'aiwf' }
-          : current
-      ))
-    }
+    const currentBackend = settings.pipelineBackend
+    const timeoutId = window.setTimeout(() => {
+      setSettings((current) =>
+        current.pipelineBackend === currentBackend ? { ...current, pipelineBackend: nextBackend } : current,
+      )
+    }, 0)
+    return () => window.clearTimeout(timeoutId)
   }, [dualRuntimeAvailable, sdcppRuntimeAvailable, settings.pipelineBackend])
 
   const setDisconnectedRuntime = useCallback((message: string) => {
@@ -680,7 +683,7 @@ function App() {
     if (!startupSplashVisible) {
       return undefined
     }
-    const elapsedMs = Date.now() - startupSplashStartedAtRef.current
+    const elapsedMs = Date.now() - startupSplashStartedAt
     const minSplashMs = Math.max(0, startupStatus.minSplashMs || FALLBACK_STARTUP_STATUS.minSplashMs)
     const readyHoldMs = Math.max(0, startupStatus.readyHoldMs || FALLBACK_STARTUP_STATUS.readyHoldMs)
     const delayMs = backendConnected
@@ -690,7 +693,7 @@ function App() {
       setStartupSplashVisible(false)
     }, delayMs)
     return () => window.clearTimeout(timeoutId)
-  }, [backendConnected, startupSplashVisible, startupStatus.minSplashMs, startupStatus.readyHoldMs])
+  }, [backendConnected, startupSplashStartedAt, startupSplashVisible, startupStatus.minSplashMs, startupStatus.readyHoldMs])
 
   useEffect(() => {
     if (startupSplashVisible || startupWindowReadyReportedRef.current) {
@@ -791,7 +794,7 @@ function App() {
       })
 
     return () => controller.abort()
-  }, [fallbackBootstrap.defaults])
+  }, [fallbackBootstrap.defaults, setPreview])
 
   // Read via ref so the stream effect does not tear down and rebuild the
   // EventSource every time the recovery flag flips.
@@ -1019,9 +1022,9 @@ function App() {
   useEffect(() => {
     const job = runtime.job
     if (!isRuntimeJobActive(job) || !job.previewUrl || settings.mode !== 'image') {
-      return
+      return undefined
     }
-    setPreview({
+    const livePreview: RecentOutput = {
       id: `runtime-preview-${job.id}-${job.step}`,
       url: job.previewUrl,
       thumbnailUrl: job.previewUrl,
@@ -1033,17 +1036,17 @@ function App() {
       modelName: settings.modelId,
       status: 'preview',
       source: 'runtime-preview',
-    })
+    }
+    const timeoutId = window.setTimeout(() => setPreview(livePreview), 0)
+    return () => window.clearTimeout(timeoutId)
   }, [
-    runtime.job.id,
-    runtime.job.message,
-    runtime.job.previewUrl,
-    runtime.job.step,
+    runtime.job,
     settings.height,
     settings.mode,
     settings.modelId,
     settings.prompt,
     settings.width,
+    setPreview,
   ])
 
   const handleRecoverBackend = useCallback(async () => {
@@ -1238,26 +1241,32 @@ function App() {
 
   useEffect(() => {
     if (creationModels.length === 0) {
-      return
+      return undefined
     }
-    const filterHasModels = creationModels.some((model) => matchesEngineFilter(model, engineFilter))
-    if (!filterHasModels && engineFilter !== 'all') {
-      setEngineFilter('all')
+    const shouldResetFilter =
+      engineFilter !== 'all' && !creationModels.some((model) => matchesEngineFilter(model, engineFilter))
+    const replacement = creationModels.some((model) => model.id === settings.modelId) ? null : creationModels[0]
+    if (!shouldResetFilter && !replacement) {
+      return undefined
     }
-    if (creationModels.some((model) => model.id === settings.modelId)) {
-      return
-    }
-    const replacement = creationModels[0]
-    setSettings((current) =>
-      applyModelPresetSettings(
-        {
-          ...current,
-          modelId: replacement.id,
-        },
-        replacement,
-        bootstrap.aspectRatios,
-      ),
-    )
+    const timeoutId = window.setTimeout(() => {
+      if (shouldResetFilter) {
+        setEngineFilter('all')
+      }
+      if (replacement) {
+        setSettings((current) =>
+          applyModelPresetSettings(
+            {
+              ...current,
+              modelId: replacement.id,
+            },
+            replacement,
+            bootstrap.aspectRatios,
+          ),
+        )
+      }
+    }, 0)
+    return () => window.clearTimeout(timeoutId)
   }, [bootstrap.aspectRatios, creationModels, engineFilter, settings.modelId])
 
   const recentOutputs = useMemo(() => {
@@ -1289,32 +1298,6 @@ function App() {
         : current,
     )
   }, [])
-
-  // Shared props bundle fed to every migrated studio layout screen. Keeps the
-  // ex-paid layouts as pure presentation over my real state + handlers.
-  const buildLayoutProps = useCallback(
-    (): LayoutProps => ({
-      settings,
-      bootstrap,
-      runtime,
-      recentOutputs,
-      preview,
-      selectedModel,
-      selectedModelName: selectedModel?.name ?? settings.modelId,
-      statusMessage,
-      isGenerating,
-      onSettingsChange: setSettings,
-      onGenerate: handleGenerate,
-      onSendToWorkflow: handleSendToWorkflow,
-      workflowBlocks,
-      onWorkflowBlocksChange: setWorkflowBlocks,
-      onPreviewSelect: setPreview,
-      onOpenModels: () => handleRailSelect('models'),
-      onOpenSettings: () => handleRailSelect('settings'),
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [bootstrap, isGenerating, preview, recentOutputs, runtime, selectedModel, settings, statusMessage, workflowBlocks],
-  )
 
   const activeRatio = useMemo(
     () =>
@@ -1383,9 +1366,10 @@ function App() {
 
   useEffect(() => {
     if (!isCreationMode(activeMode) || settings.mode === activeMode) {
-      return
+      return undefined
     }
-    if (activeMode === 'video') {
+    const creationMode = activeMode
+    if (creationMode === 'video') {
       const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
       const videoModels = modelsForCreationMode(bootstrap.models, 'video')
       const currentIsVideo = currentModel ? modelFitsCreationMode(currentModel, 'video') : false
@@ -1394,30 +1378,35 @@ function App() {
         : videoModels.find((model) => model.engineId === 'wan') ??
           videoModels.find((model) => model.engineId === 'sana_video') ??
           videoModels[0]
-      setEngineFilter(videoModel?.engineId ?? 'sana_video')
-      setSettings((current) => ({
-        ...current,
-        mode: activeMode,
-        modelId: videoModel?.id ?? current.modelId,
-        aspectRatioId: '16:9',
-        width: 832,
-        height: 480,
-        batchSize: 1,
-      }))
-      return
+      const timeoutId = window.setTimeout(() => {
+        setEngineFilter(videoModel?.engineId ?? 'sana_video')
+        setSettings((current) => ({
+          ...current,
+          mode: creationMode,
+          modelId: videoModel?.id ?? current.modelId,
+          aspectRatioId: '16:9',
+          width: 832,
+          height: 480,
+          batchSize: 1,
+        }))
+      }, 0)
+      return () => window.clearTimeout(timeoutId)
     }
     const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
-    const routeModels = modelsForCreationMode(bootstrap.models, activeMode)
-    const routeModel = currentModel && modelFitsCreationMode(currentModel, activeMode) ? currentModel : routeModels[0]
-    setEngineFilter(routeModel?.engineId ?? 'all')
-    setSettings((current) => {
-      const next = {
-        ...current,
-        mode: activeMode,
-        modelId: routeModel?.id ?? current.modelId,
-      }
-      return routeModel ? applyModelPresetSettings(next, routeModel, bootstrap.aspectRatios) : next
-    })
+    const routeModels = modelsForCreationMode(bootstrap.models, creationMode)
+    const routeModel = currentModel && modelFitsCreationMode(currentModel, creationMode) ? currentModel : routeModels[0]
+    const timeoutId = window.setTimeout(() => {
+      setEngineFilter(routeModel?.engineId ?? 'all')
+      setSettings((current) => {
+        const next = {
+          ...current,
+          mode: creationMode,
+          modelId: routeModel?.id ?? current.modelId,
+        }
+        return routeModel ? applyModelPresetSettings(next, routeModel, bootstrap.aspectRatios) : next
+      })
+    }, 0)
+    return () => window.clearTimeout(timeoutId)
   }, [activeMode, bootstrap.aspectRatios, bootstrap.models, settings.mode, settings.modelId])
 
   const handleRailSelect = useCallback((id: string) => {
@@ -1453,7 +1442,7 @@ function App() {
       // menu or hash; keep the mode consistent so the rail list contains them.
       setActiveMode((current) => modeContainingRail(id, current))
     }
-  }, [activeMode, bootstrap.aspectRatios, bootstrap.models, settings.mode, settings.modelId])
+  }, [activeMode, bootstrap.aspectRatios, bootstrap.models, settings])
 
   const handleRatioSelect = useCallback((ratio: AspectRatioOption) => {
     setSettings((current) => ({
@@ -1875,7 +1864,46 @@ function App() {
       void fetchProRuntime().then(setRuntime).catch(() => undefined)
       void fetchProLogs().then(setLogStatus).catch(() => undefined)
     }
-  }, [bootstrap.models, commitRecentOutputs, generationActive, selectedModel, settings])
+  }, [bootstrap.models, commitRecentOutputs, generationActive, selectedModel, setPreview, settings, showSupportIssue])
+
+  // Shared props bundle for the full-surface studio layouts. These screens stay
+  // presentational while the shell owns runtime state and actions.
+  const buildLayoutProps = useCallback(
+    (): LayoutProps => ({
+      settings,
+      bootstrap,
+      runtime,
+      recentOutputs,
+      preview,
+      selectedModel,
+      selectedModelName: selectedModel?.name ?? settings.modelId,
+      statusMessage,
+      isGenerating,
+      onSettingsChange: setSettings,
+      onGenerate: handleGenerate,
+      onSendToWorkflow: handleSendToWorkflow,
+      workflowBlocks,
+      onWorkflowBlocksChange: setWorkflowBlocks,
+      onPreviewSelect: setPreview,
+      onOpenModels: () => handleRailSelect('models'),
+      onOpenSettings: () => handleRailSelect('settings'),
+    }),
+    [
+      bootstrap,
+      handleGenerate,
+      handleRailSelect,
+      handleSendToWorkflow,
+      isGenerating,
+      preview,
+      recentOutputs,
+      runtime,
+      selectedModel,
+      setPreview,
+      settings,
+      statusMessage,
+      workflowBlocks,
+    ],
+  )
 
   const handleOpenXyPlot = useCallback(() => {
     setXyPlotCells((current) => {
@@ -2044,7 +2072,7 @@ function App() {
       void fetchProRuntime().then(setRuntime).catch(() => undefined)
       void fetchProLogs().then(setLogStatus).catch(() => undefined)
     }
-  }, [commitRecentOutputs, generationActive, settings, showSupportIssue, xyPlotCells, xyPlotModels])
+  }, [commitRecentOutputs, generationActive, setPreview, settings, showSupportIssue, xyPlotCells, xyPlotModels])
 
   const handleStopGenerate = useCallback(() => {
     continuousGenerateRef.current = false
@@ -2171,7 +2199,7 @@ function App() {
       reader.onerror = () => reject(new Error('Could not read the current preview image.'))
       reader.readAsDataURL(blob)
     })
-  }, [preview?.url])
+  }, [preview])
 
   const handleEnhanceSourceChange = useCallback((event: ReactChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -2295,6 +2323,7 @@ function App() {
     settings.height,
     settings.width,
     setPreview,
+    showSupportIssue,
   ])
 
   const handleLayoutReset = useCallback(() => {
@@ -2813,6 +2842,7 @@ function App() {
                   />
                 )}
                 <BottomDock
+                  key={preview?.id ?? 'no-output'}
                   visible={bottomDockVisible}
                   height={bottomDockVisible ? bottomDockHeight : 0}
                   recentOutputs={recentOutputs}
@@ -4834,34 +4864,6 @@ function ModelsWorkspaceImpl({
         <p className="pro-download-note">
           Downloaded-model and installable-model browsers are coming soon.
         </p>
-        {false ? (
-        <div className="pro-download-chip-row">
-          {downloadSummary.items.map((item) =>
-            item.hfUrl ? (
-              <a
-                key={item.key}
-                className={item.installed ? 'pro-download-chip pro-download-chip-ready' : 'pro-download-chip pro-download-chip-link'}
-                href={item.hfUrl}
-                target="_blank"
-                rel="noreferrer"
-                title={`${item.destination}${item.notes ? ` — ${item.notes}` : ''}`}
-              >
-                <strong>{item.title}</strong>
-                <small>{item.installed ? 'Installed' : `${item.category} · Hugging Face ↗`}</small>
-              </a>
-            ) : (
-              <span
-                key={item.key}
-                className={item.installed ? 'pro-download-chip pro-download-chip-ready' : 'pro-download-chip'}
-                title={item.destination}
-              >
-                <strong>{item.title}</strong>
-                <small>{item.installed ? 'Installed' : item.category}</small>
-              </span>
-            ),
-          )}
-        </div>
-        ) : null}
       </section>
 
       {downloadsStatus && downloadsStatus.civitaiLinks.length > 0 ? (
@@ -5231,6 +5233,7 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
   const [extendPrompt, setExtendPrompt] = useState('')
   const [extendFrames, setExtendFrames] = useState(81)
   const [extendModelId, setExtendModelId] = useState('')
+  const resolvedExtendModelId = extendModelId || wanModels[0]?.id || ''
 
   useEffect(() => {
     const controller = new AbortController()
@@ -5239,12 +5242,6 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
       .catch(() => setLabStatus(null))
     return () => controller.abort()
   }, [])
-
-  useEffect(() => {
-    if (!extendModelId && wanModels.length > 0) {
-      setExtendModelId(wanModels[0].id)
-    }
-  }, [extendModelId, wanModels])
 
   const handleUpload = async (event: ReactChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -5290,7 +5287,7 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
         audioPrompt,
         prompt: extendPrompt,
         frames: extendFrames,
-        checkpointId: extendModelId,
+        checkpointId: resolvedExtendModelId,
       })
       setResultUrl(result.url)
       setMessage(result.message || 'Done.')
@@ -5452,7 +5449,7 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
               </label>
               <label className="pro-field">
                 <FieldLabel label="Wan model" />
-                <select value={extendModelId} onChange={(event) => setExtendModelId(event.target.value)} disabled={busy}>
+                <select value={resolvedExtendModelId} onChange={(event) => setExtendModelId(event.target.value)} disabled={busy}>
                   {wanModels.map((model) => (
                     <option key={model.id} value={model.id}>
                       {model.name}
@@ -8008,10 +8005,6 @@ function BottomDockImpl({
   const outputStatusText = selectedOutput
     ? buildOutputStatusText(selectedOutput)
     : statusMessage
-
-  useEffect(() => {
-    setCopyStatus('')
-  }, [selectedOutput?.id])
 
   useEffect(() => {
     if (!copyStatus) {

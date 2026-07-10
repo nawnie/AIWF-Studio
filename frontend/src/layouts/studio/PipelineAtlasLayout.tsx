@@ -141,12 +141,6 @@ export function PipelineAtlasLayout({
     [blocks, selectedBlockId],
   )
 
-  useEffect(() => {
-    if (!selectedBlock && blocks[0]) {
-      setSelectedBlockId(blocks[0].id)
-    }
-  }, [blocks, selectedBlock])
-
   const localValidation = useMemo(() => validateWorkflowBlocks(blocks), [blocks])
   const totalLines = useMemo(() => blocks.reduce((total, block) => total + blockCodeLineCount(block), 0), [blocks])
   const routeSummary = useMemo(() => {

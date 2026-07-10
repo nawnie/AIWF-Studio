@@ -59,7 +59,7 @@ def _topbar_runtime_html(ctx: AppContext, *, checkpoint_count: int | None = None
     attention = _safe_runtime_value("attention", "Auto", lambda: attention_display_label(ctx.flags))
     device = _safe_runtime_value("device", "Unavailable", lambda: ctx.generation.backend.devices.describe())
     if device.startswith("CUDA ("):
-        device = device.removeprefix("CUDA (").rstrip(")")
+        device = device.removeprefix("CUDA (").rstrip(")").split(",", 1)[0].strip()
     elif device.startswith("CPU ("):
         device = "CPU"
     models = _safe_runtime_value(
@@ -174,7 +174,7 @@ def create_web_ui(ctx: AppContext, *, checkpoint_count: int | None = None) -> tu
                             <span class="aiwf-edition">Studio</span>
                         </div>
                     </div>
-                    <p class="aiwf-tagline">Professional diffusion workspace</p>
+                    <p class="aiwf-tagline">Local image, video, and audio lab</p>
                 </div>
                 <div class="aiwf-topbar-end">
                     {_topbar_runtime_html(ctx, checkpoint_count=checkpoint_count)}

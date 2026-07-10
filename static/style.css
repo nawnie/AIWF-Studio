@@ -1,15 +1,13 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500&family=Sora:wght@500;600;700&display=swap");
-
 /* ── AIWF Studio — design system ─────────────────────────────────── */
 :root {
-    --aiwf-bg: #06070a;
-    --aiwf-bg-elevated: #0c0e14;
-    --aiwf-surface: #10141c;
-    --aiwf-surface-raised: #161b26;
-    --aiwf-surface-hover: #1c2230;
-    --aiwf-surface-glass: rgba(16, 20, 28, 0.82);
-    --aiwf-border: rgba(255, 255, 255, 0.08);
-    --aiwf-border-strong: rgba(255, 255, 255, 0.14);
+    --aiwf-bg: #090b0e;
+    --aiwf-bg-elevated: #0f1216;
+    --aiwf-surface: #14181d;
+    --aiwf-surface-raised: #1a1f25;
+    --aiwf-surface-hover: #222930;
+    --aiwf-surface-glass: rgba(15, 18, 22, 0.96);
+    --aiwf-border: rgba(231, 225, 214, 0.1);
+    --aiwf-border-strong: rgba(231, 225, 214, 0.2);
     --aiwf-border-focus: rgba(104, 195, 170, 0.55);
     --aiwf-text: #f2f4f8;
     --aiwf-text-muted: #8b93a8;
@@ -29,9 +27,9 @@
     --aiwf-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
     --aiwf-shadow-soft: 0 4px 20px rgba(0, 0, 0, 0.35);
     --aiwf-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-    --aiwf-font: "DM Sans", system-ui, sans-serif;
-    --aiwf-font-display: "Sora", var(--aiwf-font);
-    --aiwf-mono: "IBM Plex Mono", ui-monospace, monospace;
+    --aiwf-font: "Segoe UI Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    --aiwf-font-display: var(--aiwf-font);
+    --aiwf-mono: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
     --aiwf-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -60,11 +58,7 @@ footer {
     inset: 0;
     pointer-events: none;
     z-index: -2;
-    background:
-        radial-gradient(ellipse 70% 45% at 12% -8%, rgba(104, 195, 170, 0.09), transparent 55%),
-        radial-gradient(ellipse 55% 40% at 92% 8%, rgba(235, 174, 108, 0.05), transparent 50%),
-        radial-gradient(ellipse 50% 35% at 50% 100%, rgba(199, 125, 255, 0.04), transparent 55%),
-        var(--aiwf-bg);
+    background: linear-gradient(180deg, #0c0f13 0%, var(--aiwf-bg) 35%, #07090b 100%);
 }
 
 .aiwf-app::after {
@@ -279,12 +273,10 @@ footer {
     justify-content: space-between;
     gap: 1.5rem;
     padding: 0.9rem 1.35rem;
-    background: var(--aiwf-surface-glass);
-    backdrop-filter: blur(20px) saturate(1.2);
-    -webkit-backdrop-filter: blur(20px) saturate(1.2);
+    background: var(--aiwf-surface);
     border: 1px solid var(--aiwf-border);
-    border-radius: var(--aiwf-radius-xl);
-    box-shadow: var(--aiwf-shadow-soft), var(--aiwf-shadow-inset);
+    border-radius: var(--aiwf-radius-lg);
+    box-shadow: var(--aiwf-shadow-inset);
 }
 
 .aiwf-topbar-start {
@@ -364,9 +356,9 @@ footer {
     align-items: baseline;
     gap: 0.35rem;
     padding: 0.32rem 0.55rem;
-    border-radius: 999px;
+    border-radius: 6px;
     border: 1px solid var(--aiwf-border);
-    background: color-mix(in srgb, var(--aiwf-surface) 82%, transparent);
+    background: var(--aiwf-bg-elevated);
 }
 
 .aiwf-runtime-label {
@@ -451,12 +443,13 @@ footer {
 
 .aiwf-nav-tabs > .tab-nav {
     gap: 0.2rem !important;
-    padding: 0.3rem !important;
-    background: var(--aiwf-surface) !important;
-    border: 1px solid var(--aiwf-border) !important;
-    border-radius: var(--aiwf-radius-lg) !important;
+    padding: 0 !important;
+    background: transparent !important;
+    border: 0 !important;
+    border-bottom: 1px solid var(--aiwf-border) !important;
+    border-radius: 0 !important;
     margin-bottom: 0.85rem !important;
-    box-shadow: var(--aiwf-shadow-inset);
+    box-shadow: none;
 }
 
 .aiwf-nav-tabs .tab-nav button {
@@ -480,9 +473,9 @@ footer {
 
 .aiwf-nav-tabs .tab-nav button.selected {
     color: var(--aiwf-text) !important;
-    background: linear-gradient(180deg, var(--aiwf-surface-raised) 0%, var(--aiwf-bg-elevated) 100%) !important;
-    border-color: var(--aiwf-border-strong) !important;
-    box-shadow: var(--aiwf-shadow-inset), 0 2px 8px rgba(0, 0, 0, 0.25);
+    background: transparent !important;
+    border-color: transparent !important;
+    box-shadow: none;
 }
 
 .aiwf-nav-tabs .tab-nav button.selected::after {
@@ -738,16 +731,11 @@ footer {
     display: inline-flex !important;
     align-items: center !important;
     gap: 0.45rem !important;
-    background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0) 24%),
-        linear-gradient(180deg, rgba(6, 8, 12, 0.96) 0%, rgba(9, 11, 16, 0.99) 100%) !important;
-    border-radius: 14px !important;
-    padding: 8px !important;
-    border: 1px solid rgba(255, 255, 255, 0.07) !important;
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.05),
-        inset 0 -14px 22px rgba(0, 0, 0, 0.26),
-        0 10px 24px rgba(0, 0, 0, 0.18) !important;
+    background: var(--aiwf-bg-elevated) !important;
+    border-radius: var(--aiwf-radius) !important;
+    padding: 4px !important;
+    border: 1px solid var(--aiwf-border) !important;
+    box-shadow: none !important;
 }
 
 fieldset.aiwf-mode-toggle {
@@ -769,9 +757,8 @@ fieldset.aiwf-mode-toggle {
     margin: 0 !important;
     padding: 0.58rem 1.25rem 0.64rem !important;
     border-radius: 9px !important;
-    border: 1px solid rgba(255, 255, 255, 0.06) !important;
-    background:
-        linear-gradient(180deg, rgba(116, 126, 148, 0.22) 0%, rgba(73, 81, 99, 0.22) 14%, rgba(50, 57, 71, 0.96) 100%) !important;
+    border: 1px solid transparent !important;
+    background: transparent !important;
     cursor: pointer !important;
     font-family: var(--aiwf-font-display) !important;
     font-size: 0.84rem !important;
@@ -780,11 +767,7 @@ fieldset.aiwf-mode-toggle {
     letter-spacing: 0.01em;
     text-transform: none !important;
     color: #98a2b6 !important;
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.08),
-        inset 0 -1px 0 rgba(0, 0, 0, 0.25),
-        0 1px 0 rgba(255, 255, 255, 0.02),
-        0 6px 14px rgba(0, 0, 0, 0.22);
+    box-shadow: none;
     transition:
         transform 0.14s var(--aiwf-ease),
         box-shadow 0.14s var(--aiwf-ease),
@@ -795,23 +778,15 @@ fieldset.aiwf-mode-toggle {
 }
 
 .aiwf-mode-toggle label span::before {
-    content: "";
-    position: absolute;
-    inset: 1px 1px auto 1px;
-    height: 42%;
-    border-radius: 8px 8px 6px 6px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0));
-    pointer-events: none;
+    display: none;
 }
 
 .aiwf-mode-toggle label span:hover {
     color: #dde4f2 !important;
     border-color: rgba(255, 255, 255, 0.12) !important;
-    transform: translateY(-1px);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.11),
-        inset 0 -1px 0 rgba(0, 0, 0, 0.22),
-        0 10px 18px rgba(0, 0, 0, 0.28);
+    background: var(--aiwf-surface-hover) !important;
+    transform: none;
+    box-shadow: none;
 }
 
 .aiwf-mode-toggle input {
@@ -819,19 +794,14 @@ fieldset.aiwf-mode-toggle {
 }
 
 .aiwf-mode-toggle input:checked + span {
-    transform: translateY(1px);
-    background:
-        linear-gradient(180deg, rgba(132, 241, 213, 0.24) 0%, rgba(94, 208, 178, 0.14) 18%, rgba(22, 30, 38, 0.98) 100%) !important;
-    border-color: rgba(126, 221, 195, 0.4) !important;
-    box-shadow:
-        inset 0 2px 5px rgba(0, 0, 0, 0.28),
-        inset 0 1px 0 rgba(255, 255, 255, 0.08),
-        0 0 0 1px rgba(104, 195, 170, 0.1),
-        0 3px 10px rgba(0, 0, 0, 0.18) !important;
+    transform: none;
+    background: var(--aiwf-accent-soft) !important;
+    border-color: var(--aiwf-border-focus) !important;
+    box-shadow: none !important;
 }
 
 .aiwf-mode-toggle input:checked + span::before {
-    background: linear-gradient(180deg, rgba(202, 255, 241, 0.14), rgba(255, 255, 255, 0));
+    display: none;
 }
 
 .aiwf-mode-txt2img .aiwf-mode-toggle input:checked + span {
@@ -927,10 +897,9 @@ fieldset.aiwf-resolution-ratio-square {
     min-width: 3.3rem;
     margin: 0 !important;
     padding: 0.52rem 0.82rem 0.58rem !important;
-    border: 1px solid rgba(255, 255, 255, 0.06) !important;
+    border: 1px solid var(--aiwf-border) !important;
     border-radius: 10px !important;
-    background:
-        linear-gradient(180deg, rgba(116, 126, 148, 0.22) 0%, rgba(73, 81, 99, 0.22) 14%, rgba(50, 57, 71, 0.96) 100%) !important;
+    background: var(--aiwf-bg-elevated) !important;
     color: #9fa8bb !important;
     font-size: 0.78rem !important;
     font-family: var(--aiwf-font-display) !important;
@@ -940,11 +909,7 @@ fieldset.aiwf-resolution-ratio-square {
     cursor: pointer !important;
     white-space: nowrap;
     transition: transform 0.14s var(--aiwf-ease), box-shadow 0.14s var(--aiwf-ease), color 0.14s var(--aiwf-ease), border-color 0.14s var(--aiwf-ease), background 0.14s var(--aiwf-ease);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.08),
-        inset 0 -1px 0 rgba(0, 0, 0, 0.25),
-        0 1px 0 rgba(255, 255, 255, 0.02),
-        0 6px 14px rgba(0, 0, 0, 0.22);
+    box-shadow: none;
 }
 
 .aiwf-resolution-ratio-square > label,
@@ -958,23 +923,15 @@ fieldset.aiwf-resolution-ratio-square {
 }
 
 .aiwf-resolution-toggle label span::before {
-    content: "";
-    position: absolute;
-    inset: 1px 1px auto 1px;
-    height: 42%;
-    border-radius: 9px 9px 7px 7px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0));
-    pointer-events: none;
+    display: none;
 }
 
 .aiwf-resolution-toggle label span:hover {
     color: #d8deea !important;
     border-color: rgba(255, 255, 255, 0.12) !important;
-    transform: translateY(-1px);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.11),
-        inset 0 -1px 0 rgba(0, 0, 0, 0.22),
-        0 10px 18px rgba(0, 0, 0, 0.28);
+    background: var(--aiwf-surface-hover) !important;
+    transform: none;
+    box-shadow: none;
 }
 
 .aiwf-resolution-toggle input,
@@ -986,41 +943,31 @@ fieldset.aiwf-resolution-ratio-square {
 .aiwf-resolution-toggle input:checked + span,
 .aiwf-resolution-size input:checked + span,
 .aiwf-resolution-ratio input:checked + span {
-    background:
-        linear-gradient(180deg, rgba(132, 241, 213, 0.26) 0%, rgba(94, 208, 178, 0.16) 18%, rgba(25, 34, 42, 0.96) 100%) !important;
-    border-color: rgba(126, 221, 195, 0.42) !important;
-    color: #c2fff0 !important;
-    transform: translateY(1px);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.12),
-        inset 0 -1px 0 rgba(0, 0, 0, 0.32),
-        0 0 0 1px rgba(104, 195, 170, 0.12),
-        0 6px 18px rgba(34, 122, 104, 0.18);
+    background: var(--aiwf-accent-soft) !important;
+    border-color: var(--aiwf-border-focus) !important;
+    color: var(--aiwf-accent-bright) !important;
+    transform: none;
+    box-shadow: none;
 }
 
 .aiwf-resolution-toggle input:checked + span::before,
 .aiwf-resolution-size input:checked + span::before,
 .aiwf-resolution-ratio input:checked + span::before {
-    background: linear-gradient(180deg, rgba(202, 255, 241, 0.18), rgba(255, 255, 255, 0));
+    display: none;
 }
 
 .aiwf-preset-action button,
 .aiwf-preset-action {
     min-height: 2.1rem !important;
     border-radius: 10px !important;
-    border: 1px solid rgba(255, 255, 255, 0.06) !important;
-    background:
-        linear-gradient(180deg, rgba(116, 126, 148, 0.22) 0%, rgba(73, 81, 99, 0.22) 14%, rgba(50, 57, 71, 0.96) 100%) !important;
+    border: 1px solid var(--aiwf-border) !important;
+    background: var(--aiwf-bg-elevated) !important;
     color: #cfd6e4 !important;
     font-family: var(--aiwf-font-display) !important;
     font-size: 0.78rem !important;
     font-weight: 600 !important;
     line-height: 1.1 !important;
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.08),
-        inset 0 -1px 0 rgba(0, 0, 0, 0.25),
-        0 1px 0 rgba(255, 255, 255, 0.02),
-        0 6px 14px rgba(0, 0, 0, 0.22) !important;
+    box-shadow: none !important;
     transition:
         transform 0.14s var(--aiwf-ease),
         box-shadow 0.14s var(--aiwf-ease),
@@ -1033,13 +980,9 @@ fieldset.aiwf-resolution-ratio-square {
 .aiwf-preset-action:hover {
     color: #eef3ff !important;
     border-color: rgba(255, 255, 255, 0.12) !important;
-    background:
-        linear-gradient(180deg, rgba(128, 139, 164, 0.24) 0%, rgba(82, 91, 112, 0.22) 16%, rgba(54, 61, 77, 0.98) 100%) !important;
-    transform: translateY(-1px);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.11),
-        inset 0 -1px 0 rgba(0, 0, 0, 0.22),
-        0 10px 18px rgba(0, 0, 0, 0.28) !important;
+    background: var(--aiwf-surface-hover) !important;
+    transform: none;
+    box-shadow: none !important;
 }
 
 .aiwf-preset-action button:active,
@@ -1061,12 +1004,12 @@ fieldset.aiwf-resolution-ratio-square {
 }
 
 .aiwf-panel {
-    gap: 0.6rem !important;
-    padding: 0.9rem 1rem !important;
+    gap: 0.5rem !important;
+    padding: 0.8rem 0.9rem !important;
     background: var(--aiwf-surface);
     border: 1px solid var(--aiwf-border);
     border-radius: var(--aiwf-radius-lg);
-    box-shadow: var(--aiwf-shadow-inset);
+    box-shadow: none;
 }
 
 .aiwf-panel > .block {
@@ -1247,6 +1190,16 @@ fieldset.aiwf-resolution-ratio-square {
     border-radius: var(--aiwf-radius) !important;
 }
 
+.aiwf-model-panel .aiwf-model-status {
+    max-height: 4.25rem;
+    overflow: auto;
+}
+
+.aiwf-model-panel .aiwf-model-help {
+    max-height: 3.25rem;
+    overflow: auto;
+}
+
 .aiwf-model-status p {
     margin: 0 !important;
     font-size: 0.76rem !important;
@@ -1405,15 +1358,18 @@ fieldset.aiwf-resolution-ratio-square {
     letter-spacing: 0.04em !important;
     text-transform: uppercase !important;
     font-size: 0.76rem !important;
+    color: #07110e !important;
+    background: var(--aiwf-accent) !important;
     border-radius: var(--aiwf-radius) !important;
-    border: 1px solid color-mix(in srgb, var(--aiwf-accent-bright) 50%, transparent) !important;
-    box-shadow: 0 4px 24px var(--aiwf-accent-glow), var(--aiwf-shadow-inset) !important;
+    border: 1px solid color-mix(in srgb, var(--aiwf-accent-bright) 55%, transparent) !important;
+    box-shadow: none !important;
 }
 
 .aiwf-generate-btn button:hover,
 .aiwf-generate-btn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 8px 32px var(--aiwf-accent-glow), var(--aiwf-shadow-inset) !important;
+    transform: none;
+    filter: brightness(1.08);
+    box-shadow: none !important;
 }
 
 .aiwf-btn-stop button,
@@ -2716,6 +2672,85 @@ fieldset.aiwf-resolution-ratio-square {
 
 .aiwf-handheld.aiwf-studio-tab .aiwf-nav-tabs > .tab-nav button:not(.selected) {
     opacity: 0.85;
+}
+
+/* Gradio 6 can drop Blocks.elem_classes from the outer container. studio.js
+   restores the hook and these rules keep the repaired handheld shell inside
+   the viewport. */
+.aiwf-app.aiwf-handheld {
+    width: 100% !important;
+    max-width: 100vw !important;
+    margin: 0 !important;
+    padding: max(0.55rem, env(safe-area-inset-top)) max(0.55rem, env(safe-area-inset-right))
+        max(0.8rem, env(safe-area-inset-bottom)) max(0.55rem, env(safe-area-inset-left)) !important;
+}
+
+.aiwf-app.aiwf-handheld .main.fillable.app,
+.aiwf-app.aiwf-handheld .contain,
+.aiwf-app.aiwf-handheld .wrap,
+.aiwf-app.aiwf-handheld .aiwf-nav-tabs,
+.aiwf-app.aiwf-handheld .aiwf-studio,
+.aiwf-app.aiwf-handheld .aiwf-studio-body {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    margin-inline: 0 !important;
+}
+
+.aiwf-app.aiwf-handheld .main.fillable.app {
+    padding: 0 !important;
+}
+
+.aiwf-app.aiwf-handheld .aiwf-topbar {
+    width: 100%;
+    min-height: 3.5rem;
+    padding: 0.65rem 0.75rem;
+}
+
+.aiwf-app.aiwf-handheld .aiwf-topbar-end {
+    display: none;
+}
+
+.aiwf-app.aiwf-handheld .aiwf-studio-body .aiwf-sidebar,
+.aiwf-app.aiwf-handheld .aiwf-studio-body .aiwf-canvas-column {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+}
+
+.aiwf-app.aiwf-handheld .aiwf-studio-body .aiwf-sidebar {
+    order: 1 !important;
+}
+
+.aiwf-app.aiwf-handheld .aiwf-studio-body .aiwf-canvas-column {
+    order: 2 !important;
+}
+
+.aiwf-sidebar > * {
+    order: 2;
+}
+
+.aiwf-sidebar > .aiwf-prompt-panel {
+    order: 0;
+}
+
+.aiwf-sidebar > .aiwf-model-panel {
+    order: 1;
+}
+
+.aiwf-app.aiwf-handheld .aiwf-mobile-dock {
+    position: static;
+    inset: auto;
+    z-index: auto;
+    margin: 0 !important;
+    padding: 0.25rem 0 0 !important;
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    flex-wrap: wrap !important;
 }
 
 /* ── Responsive (desktop narrow) ─────────────────────────────────── */
