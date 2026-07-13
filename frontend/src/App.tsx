@@ -56,6 +56,7 @@ import { AgenticChatLayout } from './layouts/studio/AgenticChatLayout'
 import { PipelineAtlasLayout } from './layouts/studio/PipelineAtlasLayout'
 import { MediaFoundryImageLayout } from './layouts/studio/MediaFoundryImageLayout'
 import { AudioStudioLayout } from './layouts/studio/AudioStudioLayout'
+import { QwenImageEditorLayout } from './layouts/studio/QwenImageEditorLayout'
 import type { LayoutProps } from './layouts/studio/LayoutTypes'
 import {
   fetchProData,
@@ -249,6 +250,7 @@ const LAYOUT_STORAGE_KEY = 'aiwf.pro.layout.v1'
 const MODE_TABS: IconItem<ProMode>[] = [
   { id: 'image', label: 'Image', icon: Image },
   { id: 'inpaint', label: 'Inpaint', icon: Brush },
+  { id: 'qwen-edit', label: 'Qwen Edit', icon: Highlighter },
   { id: 'video', label: 'Video', icon: Video },
   { id: 'audio', label: 'Audio', icon: Wand2 },
   { id: 'models', label: 'Models', icon: Boxes },
@@ -258,6 +260,7 @@ const MODE_TABS: IconItem<ProMode>[] = [
 
 const RAIL_ITEMS: IconItem<string>[] = [
   { id: 'create', label: 'Create', icon: Sparkles },
+  { id: 'qwen-edit', label: 'Qwen Edit', icon: Highlighter },
   { id: 'workflow', label: 'Workflow', icon: WorkflowIcon },
   { id: 'models', label: 'Models', icon: Boxes },
   { id: 'families', label: 'Families', icon: Database },
@@ -279,6 +282,7 @@ const RAIL_ITEM_BY_ID = new Map(RAIL_ITEMS.map((item) => [item.id, item]))
 const RAILS_BY_MODE: Record<string, string[]> = {
   image: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'projects', 'data', 'monitor', 'logs'],
   inpaint: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'data', 'monitor', 'logs'],
+  'qwen-edit': ['qwen-edit', 'data', 'monitor', 'logs'],
   video: ['create', 'workflow', 'models', 'pipeline', 'projects', 'data', 'monitor', 'logs'],
   audio: ['audiolab', 'projects', 'data', 'monitor', 'logs'],
   settings: ['settings', 'models', 'data', 'monitor', 'logs', 'assistant'],
@@ -292,7 +296,7 @@ const STUDIO_RAIL_ATTRIBUTE: Record<string, string> = {
   audiolab: 'audio',
 }
 
-const FULL_SURFACE_RAILS = new Set(['workflow', 'families', 'foundry', 'pipeline', 'projects', 'assistant', 'audiolab'])
+const FULL_SURFACE_RAILS = new Set(['workflow', 'families', 'foundry', 'pipeline', 'projects', 'assistant', 'audiolab', 'qwen-edit'])
 
 const SANA_QUANTIZATION_OPTIONS = [
   { value: 'auto', label: 'Auto' },
@@ -2535,6 +2539,8 @@ function App() {
         >
           {activeRail === 'families' ? (
             <ModelFamilyMatrixLayout {...buildLayoutProps()} />
+          ) : activeRail === 'qwen-edit' ? (
+            <QwenImageEditorLayout />
           ) : activeRail === 'foundry' ? (
             <MediaFoundryImageLayout {...buildLayoutProps()} />
           ) : activeRail === 'pipeline' ? (
@@ -9488,7 +9494,7 @@ function readInitialRail(): string {
 
 function readInitialMode(): ProMode {
   const hash = window.location.hash.replace(/^#/, '').trim()
-  if (hash === 'image' || hash === 'inpaint' || hash === 'video' || hash === 'audio' || hash === 'models' || hash === 'data' || hash === 'settings') {
+  if (hash === 'image' || hash === 'inpaint' || hash === 'qwen-edit' || hash === 'video' || hash === 'audio' || hash === 'models' || hash === 'data' || hash === 'settings') {
     return hash
   }
   const rail = readInitialRail()

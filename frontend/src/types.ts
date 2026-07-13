@@ -1,7 +1,7 @@
 export type CreationMode = 'image' | 'video' | 'inpaint'
 export type PipelineBackend = 'aiwf' | 'dual' | 'sdcpp'
 
-export type ProMode = CreationMode | 'audio' | 'settings' | 'models' | 'data'
+export type ProMode = CreationMode | 'qwen-edit' | 'audio' | 'settings' | 'models' | 'data'
 
 export type EngineId = 'all' | 'flux' | 'flux_fill' | 'flux2' | 'sana_video' | 'wan' | 'sd15' | 'sdxl' | 'sd35' | 'zimage' | 'qwen' | 'sana' | 'unknown'
 

@@ -47,6 +47,142 @@
   accent-color: #8d61ff;
 }
 
+.qwen-editor-surface {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: #0d0e0d;
+}
+
+.qwen-editor-toolbar {
+  min-height: 48px;
+  padding: 7px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: #141512;
+}
+
+.qwen-editor-toolbar > div,
+.qwen-editor-actions,
+.qwen-editor-actions :is(button, a) {
+  display: flex;
+  align-items: center;
+}
+
+.qwen-editor-toolbar > div {
+  min-width: 0;
+  gap: 9px;
+}
+
+.qwen-editor-toolbar strong {
+  color: #e5e2d9;
+  font-size: 13px;
+}
+
+.qwen-editor-toolbar small {
+  color: #8c8a82;
+  font-size: 11px;
+}
+
+.qwen-editor-status {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #77766f;
+}
+
+.qwen-editor-status.is-online {
+  background: #80ad78;
+  box-shadow: 0 0 0 4px rgba(128, 173, 120, 0.12);
+}
+
+.qwen-editor-status.is-offline {
+  background: #d16b5d;
+  box-shadow: 0 0 0 4px rgba(209, 107, 93, 0.12);
+}
+
+.qwen-editor-actions {
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.qwen-editor-actions :is(button, a) {
+  min-height: 32px;
+  padding: 0 10px;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid #353630;
+  border-radius: 6px;
+  background: #1a1b18;
+  color: #c6c4bc;
+  font-size: 11px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.qwen-editor-actions :is(button, a):hover {
+  border-color: #67685f;
+  background: #22231f;
+}
+
+.qwen-editor-frame-wrap {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.qwen-editor-frame {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border: 0;
+  background: #0d0e0d;
+}
+
+.qwen-editor-offline {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 9px;
+  padding: 24px;
+  text-align: center;
+  background: rgba(13, 14, 13, 0.96);
+}
+
+.qwen-editor-offline strong {
+  color: #e5e2d9;
+  font-size: 16px;
+}
+
+.qwen-editor-offline span {
+  color: #96948b;
+  font-size: 12px;
+}
+
+.qwen-editor-offline button {
+  min-height: 36px;
+  margin-top: 4px;
+  padding: 0 14px;
+  border-color: #8b5b44;
+  background: #3a241b;
+}
+
+@media (max-width: 720px) {
+  .qwen-editor-toolbar small {
+    display: none;
+  }
+
+  .qwen-editor-actions :is(button, a) {
+    padding: 0 8px;
+  }
+}
+
 .studio-product-lockup {
   display: flex;
   align-items: center;

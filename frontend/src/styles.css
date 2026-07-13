@@ -5890,6 +5890,7 @@ kbd {
 }
 
 .theme-preset-1[data-rail="families"] .pro-main,
+.theme-preset-1[data-rail="qwen-edit"] .pro-main,
 .theme-preset-1[data-rail="foundry"] .pro-main,
 .theme-preset-1[data-rail="pipeline"] .pro-main,
 .theme-preset-1[data-rail="project"] .pro-main,
@@ -5901,6 +5902,7 @@ kbd {
 }
 
 .theme-preset-1[data-rail="families"] .pro-menu-bar,
+.theme-preset-1[data-rail="qwen-edit"] .pro-menu-bar,
 .theme-preset-1[data-rail="foundry"] .pro-menu-bar,
 .theme-preset-1[data-rail="pipeline"] .pro-menu-bar,
 .theme-preset-1[data-rail="project"] .pro-menu-bar,
@@ -5912,6 +5914,7 @@ kbd {
 }
 
 .theme-preset-1[data-rail="families"] .pro-topbar,
+.theme-preset-1[data-rail="qwen-edit"] .pro-topbar,
 .theme-preset-1[data-rail="foundry"] .pro-topbar,
 .theme-preset-1[data-rail="pipeline"] .pro-topbar,
 .theme-preset-1[data-rail="project"] .pro-topbar,
@@ -5925,6 +5928,7 @@ kbd {
 }
 
 .theme-preset-1[data-rail="families"] .pro-tabs,
+.theme-preset-1[data-rail="qwen-edit"] .pro-tabs,
 .theme-preset-1[data-rail="foundry"] .pro-tabs,
 .theme-preset-1[data-rail="pipeline"] .pro-tabs,
 .theme-preset-1[data-rail="project"] .pro-tabs,
@@ -5936,6 +5940,7 @@ kbd {
 }
 
 .theme-preset-1[data-rail="families"] .pro-workspace.pro-workspace-full-surface,
+.theme-preset-1[data-rail="qwen-edit"] .pro-workspace.pro-workspace-full-surface,
 .theme-preset-1[data-rail="foundry"] .pro-workspace.pro-workspace-full-surface,
 .theme-preset-1[data-rail="pipeline"] .pro-workspace.pro-workspace-full-surface,
 .theme-preset-1[data-rail="project"] .pro-workspace.pro-workspace-full-surface,
