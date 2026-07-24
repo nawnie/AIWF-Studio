@@ -42,6 +42,7 @@ import {
 } from 'lucide-react'
 import { Workflow as WorkflowIcon } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { useDialogFocus } from './useDialogFocus'
 import { WorkflowPanel } from './workflow/WorkflowPanel'
 import {
   createWorkflowBlocksFromSettings,
@@ -57,6 +58,7 @@ import { PipelineAtlasLayout } from './layouts/studio/PipelineAtlasLayout'
 import { MediaFoundryImageLayout } from './layouts/studio/MediaFoundryImageLayout'
 import { AudioStudioLayout } from './layouts/studio/AudioStudioLayout'
 import { QwenImageEditorLayout } from './layouts/studio/QwenImageEditorLayout'
+import { CommandPalette } from './layouts/studio/CommandPalette'
 import type { LayoutProps } from './layouts/studio/LayoutTypes'
 import {
   fetchProData,
@@ -546,6 +548,7 @@ function App() {
   const [bottomDockHeight, setBottomDockHeight] = useState(initialLayout.bottomDockHeight)
   const [activeModal, setActiveModal] = useState<ToolModalId>(null)
   const [openMenu, setOpenMenu] = useState<MenuBarId>(null)
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [dragState, setDragState] = useState<DragState | null>(null)
   const [enhanceSourceDataUrl, setEnhanceSourceDataUrl] = useState('')
   const [enhanceSourceName, setEnhanceSourceName] = useState('')
@@ -2482,6 +2485,12 @@ function App() {
           }}
         />
       ) : null}
+      <CommandPalette
+        open={commandPaletteOpen}
+        onOpenChange={setCommandPaletteOpen}
+        onNavigate={handleRailSelect}
+        onGenerate={handleGenerate}
+      />
       <aside className="pro-rail" aria-label="Subnavigation">
         <button
           type="button"
@@ -2783,6 +2792,7 @@ function App() {
                   onToggleLeftPanel={collapseLeftPanel}
                   onToggleRightPanel={toggleRightPanel}
                   onOpenXyPlot={handleOpenXyPlot}
+                  onOpenModels={() => handleRailSelect('models')}
                   onPromptAnalyze={handlePromptAnalyze}
                   selectedModelWarning={selectedModelWarning}
                   rightPanelCollapsed={rightPanelCollapsed}
@@ -3502,10 +3512,11 @@ function SupportIssueDialog({
   onCopy: () => void | Promise<void>
   onSubmit: () => void
 }) {
+  const dialogRef = useDialogFocus<HTMLElement>(true, onClose)
   const details = JSON.stringify({ detail: issue.detail, context: issue.context }, null, 2)
   return (
     <div className="pro-support-modal-backdrop" role="presentation">
-      <section className="pro-support-modal" role="dialog" aria-modal="true" aria-labelledby="support-issue-title">
+      <section ref={dialogRef} className="pro-support-modal" role="dialog" aria-modal="true" aria-labelledby="support-issue-title" tabIndex={-1}>
         <div className="pro-support-modal-header">
           <div>
             <span>Error report</span>
@@ -3615,6 +3626,7 @@ function PromptPanelImpl({
   onToggleLeftPanel,
   onToggleRightPanel,
   onOpenXyPlot,
+  onOpenModels,
   onPromptAnalyze,
   selectedModelWarning,
   rightPanelCollapsed,
@@ -3650,6 +3662,7 @@ function PromptPanelImpl({
   onToggleLeftPanel: () => void
   onToggleRightPanel: () => void
   onOpenXyPlot: () => void
+  onOpenModels: () => void
   onPromptAnalyze: () => void
   selectedModelWarning: string
   rightPanelCollapsed: boolean
@@ -4023,8 +4036,8 @@ function PromptPanelImpl({
               </option>
             ))}
           </select>
-          <button type="button" className="pro-icon-button" aria-label="Refresh models">
-            <RefreshCcw size={16} aria-hidden="true" />
+          <button type="button" className="pro-icon-button" aria-label="Open model workspace" onClick={onOpenModels}>
+            <Boxes size={16} aria-hidden="true" />
           </button>
         </div>
       </label>
@@ -7311,6 +7324,9 @@ function CanvasPreviewImpl({
           <small>{frameWidth}x{frameHeight}</small>
         </div>
         <div className="pro-canvas-tools" aria-label="Canvas tools">
+          <span id="pro-preview-controls-unavailable" className="pro-sr-only">
+            Preview pan and zoom controls are not available yet.
+          </span>
           {leftPanelCollapsed ? (
             <>
               <button
@@ -7365,13 +7381,13 @@ function CanvasPreviewImpl({
               </button>
             </>
           ) : null}
-          <button type="button" className="pro-icon-button" aria-label="Pan preview">
+          <button type="button" className="pro-icon-button" aria-label="Pan preview" aria-describedby="pro-preview-controls-unavailable" title="Preview pan and zoom controls are not available yet." disabled>
             <Hand size={16} aria-hidden="true" />
           </button>
-          <button type="button" className="pro-icon-button" aria-label="Fit preview">
+          <button type="button" className="pro-icon-button" aria-label="Fit preview" aria-describedby="pro-preview-controls-unavailable" title="Preview pan and zoom controls are not available yet." disabled>
             <Maximize2 size={16} aria-hidden="true" />
           </button>
-          <button type="button" className="pro-zoom-button">100%</button>
+          <button type="button" className="pro-zoom-button" aria-describedby="pro-preview-controls-unavailable" title="Preview pan and zoom controls are not available yet." disabled>Fit</button>
           <button type="button" className="pro-tool-chip" onClick={onToggleOutputPreview}>
             {outputPreviewVisible ? <EyeOff size={14} aria-hidden="true" /> : <Eye size={14} aria-hidden="true" />}
             <span>{previewVisibilityLabel}</span>
@@ -8614,12 +8630,13 @@ function ToolModal({
   children: ReactNode
   onClose: () => void
 }) {
+  const dialogRef = useDialogFocus<HTMLDivElement>(open, onClose)
   if (!open) {
     return null
   }
   return (
     <div className="pro-modal-backdrop" onClick={onClose}>
-      <div className="pro-modal" role="dialog" aria-modal="true" aria-label={title} onClick={(event) => event.stopPropagation()}>
+      <div ref={dialogRef} className="pro-modal" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} onClick={(event) => event.stopPropagation()}>
         <div className="pro-modal-header">
           <h2 className="pro-modal-title">{title}</h2>
           <button type="button" className="pro-icon-button" onClick={onClose} aria-label={`Close ${title}`}>

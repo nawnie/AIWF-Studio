@@ -102,8 +102,19 @@ def test_runtime_family_presets_are_sane_first_run_defaults():
     assert refiner["steps"] == 10
     assert refiner["width"] == 1024
     flux2 = resolve_model_preset({}, "FLUX.2-klein-4B", ARCH_FLUX2_KLEIN)
-    assert flux2["steps"] == 12
+    assert flux2["steps"] == 4
+    assert flux2["cfg_scale"] == 1.0
     assert flux2["sampler"] == "euler"
+    flux2_base = resolve_model_preset({}, "FLUX.2-klein-base-4B", ARCH_FLUX2_KLEIN)
+    assert flux2_base["steps"] == 50
+    assert flux2_base["cfg_scale"] == 5.0
+    flux2_distilled_with_incidental_base = resolve_model_preset(
+        {},
+        "my-base-flux2-klein-4B-distilled",
+        ARCH_FLUX2_KLEIN,
+    )
+    assert flux2_distilled_with_incidental_base["steps"] == 4
+    assert flux2_distilled_with_incidental_base["cfg_scale"] == 1.0
     z_image = resolve_model_preset({}, "Z-Image-Turbo", ARCH_Z_IMAGE)
     assert z_image["steps"] == 8
     assert z_image["sampler"] == "euler"

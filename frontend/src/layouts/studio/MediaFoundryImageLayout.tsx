@@ -28,9 +28,19 @@ const _CANVAS_FALLBACK = '/studio-astronaut-canvas.png'
 
 type DockMode = 'scenes' | 'tracks'
 type InspectorMode = 'inspector' | 'metadata'
+type AssetTab = 'all' | 'images' | 'styles' | 'models' | 'prompts'
 
 const EFFECTS = ['Color Grade', 'Curves', 'Contrast', 'Sharpen', 'Bloom']
 const LAYERS = ['Color Grade', 'Sky Adjust', 'Astronaut', 'Mountains', 'Atmosphere', 'Lighting', 'Background']
+const ASSET_TABS: Array<{ id: AssetTab; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'images', label: 'Images' },
+  { id: 'styles', label: 'Styles' },
+  { id: 'models', label: 'Models' },
+  { id: 'prompts', label: 'Prompts' },
+]
+const UNAVAILABLE_CONTROL_TITLE = 'This control is not available in the current Media Foundry build.'
+const UNAVAILABLE_CONTROL_ID = 'media-foundry-unavailable-controls'
 
 export function MediaFoundryImageLayout({
   settings,
@@ -50,6 +60,7 @@ export function MediaFoundryImageLayout({
 }: LayoutProps) {
   const [dockMode, setDockMode] = useState<DockMode>('scenes')
   const [inspectorMode, setInspectorMode] = useState<InspectorMode>('inspector')
+  const [assetTab, setAssetTab] = useState<AssetTab>('all')
   const [activeLayer, setActiveLayer] = useState('Astronaut')
   const activeOutput = selectedImage(preview, recentOutputs)
   const variants = useMemo(() => recentOutputs.slice(0, 8), [recentOutputs])
@@ -59,6 +70,7 @@ export function MediaFoundryImageLayout({
 
   return (
     <div className="studio-foundry studio-full-surface" aria-label="Media Foundry Image layout">
+      <span id={UNAVAILABLE_CONTROL_ID} className="pro-sr-only">{UNAVAILABLE_CONTROL_TITLE}</span>
       <aside className="studio-foundry-assets">
         <div className="studio-product-lockup compact">
           <span className="studio-logo-orb">A</span>
@@ -67,25 +79,34 @@ export function MediaFoundryImageLayout({
             <small>Media Foundry · Image · </small>
           </div>
         </div>
-        <div className="studio-foundry-tabs">
-          {['All', 'Images', 'Styles', 'Models', 'Prompts'].map((tab, index) => (
-            <button key={tab} type="button" className={index === 0 ? 'active' : ''}>{tab}</button>
+        <div className="studio-foundry-tabs" role="tablist" aria-label="Asset categories">
+          {ASSET_TABS.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={assetTab === tab.id}
+              className={assetTab === tab.id ? 'active' : ''}
+              onClick={() => setAssetTab(tab.id)}
+            >
+              {tab.label}
+            </button>
           ))}
         </div>
         <label className="studio-search-field">
           <Search size={14} aria-hidden="true" />
-          <input value="" placeholder="Search assets..." readOnly />
+          <input value="" placeholder="Asset search is not available yet" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled readOnly />
         </label>
-        <AssetSection title="Prompts" action="See all">
+        {assetTab === 'all' || assetTab === 'prompts' ? <AssetSection title="Prompts" action="See all" onAction={() => setAssetTab('prompts')}>
           {[settings.prompt || 'Astronaut explorer standing on a rocky outcrop...', 'Dramatic alien landscape at sunset, cinematic...', 'Futuristic city in the clouds, ultra detailed...'].map((prompt, index) => (
-            <button key={prompt} type="button" className="studio-prompt-pill">
+            <button key={prompt} type="button" className="studio-prompt-pill" onClick={() => onSettingsChange((current) => ({ ...current, prompt }))}>
               <Sparkles size={13} />
               <span>{prompt}</span>
               <small>{index === 0 ? '2m ago' : `${index}h ago`}</small>
             </button>
           ))}
-        </AssetSection>
-        <AssetSection title="Source Images" action="See all">
+        </AssetSection> : null}
+        {assetTab === 'all' || assetTab === 'images' ? <AssetSection title="Source Images" action="See all" onAction={() => setAssetTab('images')}>
           <div className="studio-thumb-grid">
             {assetRows.slice(0, 6).map((output) => (
               <button key={output.id} type="button" onClick={() => onPreviewSelect(output)}>
@@ -93,18 +114,27 @@ export function MediaFoundryImageLayout({
               </button>
             ))}
           </div>
-        </AssetSection>
-        <AssetSection title="Styles" action="See all">
+        </AssetSection> : null}
+        {assetTab === 'all' || assetTab === 'styles' ? <AssetSection title="Styles" action="See all" onAction={() => setAssetTab('styles')}>
           <div className="studio-style-grid">
             {['Cinematic', 'Photoreal', 'Concept Art', 'Matte Painting', 'Moody', 'Sci-Fi'].map((style, index) => (
-              <button key={style} type="button">
+              <button
+                key={style}
+                type="button"
+                onClick={() => onSettingsChange((current) => ({
+                  ...current,
+                  prompt: current.prompt.toLowerCase().includes(style.toLowerCase())
+                    ? current.prompt
+                    : `${current.prompt.trim()}${current.prompt.trim() ? ', ' : ''}${style.toLowerCase()} style`,
+                }))}
+              >
                 {assetRows[index % Math.max(1, assetRows.length)] ? <img src={assetRows[index % Math.max(1, assetRows.length)].thumbnailUrl} alt="" /> : null}
                 <span>{style}</span>
               </button>
             ))}
           </div>
-        </AssetSection>
-        <AssetSection title="Models" action="See all">
+        </AssetSection> : null}
+        {assetTab === 'all' || assetTab === 'models' ? <AssetSection title="Models" action="See all" onAction={() => setAssetTab('models')}>
           {bootstrap.models.slice(0, 5).map((model, index) => (
             <button key={model.id} type="button" className="studio-model-row" onClick={onOpenModels}>
               <span>{index + 1}</span>
@@ -114,7 +144,7 @@ export function MediaFoundryImageLayout({
               </div>
             </button>
           ))}
-        </AssetSection>
+        </AssetSection> : null}
       </aside>
 
       <main className="studio-foundry-stage">
@@ -127,10 +157,10 @@ export function MediaFoundryImageLayout({
             </div>
           </div>
           <div className="studio-foundry-top-actions">
-            <button type="button"><RefreshCcw size={15} /> Undo</button>
-            <button type="button">Redo</button>
-            <button type="button" onClick={onOpenSettings}><Settings2 size={15} /></button>
-            <button type="button" className="studio-export-button"><Download size={15} /> Export</button>
+            <button type="button" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled><RefreshCcw size={15} /> Undo</button>
+            <button type="button" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled>Redo</button>
+            <button type="button" aria-label="Open settings" onClick={onOpenSettings}><Settings2 size={15} /></button>
+            <button type="button" className="studio-export-button" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled><Download size={15} /> Export</button>
             <button type="button" onClick={() => onSendToWorkflow?.('Media Foundry')}><Sparkles size={15} /> Send to workflow</button>
           </div>
         </header>
@@ -145,18 +175,18 @@ export function MediaFoundryImageLayout({
             ['Variants', Layers3],
           ].map(([label, Icon]) => {
             const ToolIcon = Icon as typeof Library
-            return <button key={label as string} type="button"><ToolIcon size={14} />{label as string}</button>
+            return <button key={label as string} type="button" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled><ToolIcon size={14} />{label as string}</button>
           })}
         </div>
         <section className="studio-image-canvas">
           <div className="studio-floating-brushbar">
-            <button type="button"><Paintbrush size={15} /></button>
-            <button type="button"><Wand2 size={15} /></button>
-            <button type="button">120 px</button>
-            <label>Soft edge <input type="range" defaultValue="30" /></label>
-            <label>Opacity <input type="range" defaultValue="100" /></label>
-            <button type="button">Clear</button>
-            <button type="button" className="done"><Check size={15} /> Done</button>
+            <button type="button" aria-label="Brush tool" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled><Paintbrush size={15} /></button>
+            <button type="button" aria-label="Magic mask tool" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled><Wand2 size={15} /></button>
+            <button type="button" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled>120 px</button>
+            <label title={UNAVAILABLE_CONTROL_TITLE}>Soft edge <input type="range" defaultValue="30" aria-describedby={UNAVAILABLE_CONTROL_ID} disabled /></label>
+            <label title={UNAVAILABLE_CONTROL_TITLE}>Opacity <input type="range" defaultValue="100" aria-describedby={UNAVAILABLE_CONTROL_ID} disabled /></label>
+            <button type="button" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled>Clear</button>
+            <button type="button" className="done" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled><Check size={15} /> Done</button>
           </div>
           <div className="studio-canvas-frame">
             <img src={canvasUrl} alt={activeOutput?.prompt || 'Astronaut explorer'} />
@@ -171,10 +201,10 @@ export function MediaFoundryImageLayout({
               <small>{activeOutput?.prompt || 'No active scene'} · {displayDate(activeOutput?.createdAt || '')}</small>
             </div>
             <div className="studio-dock-tabs" role="tablist" aria-label="Bottom dock mode">
-              <button type="button" className={dockMode === 'scenes' ? 'active' : ''} onClick={() => setDockMode('scenes')}>Scenes</button>
-              <button type="button" className={dockMode === 'tracks' ? 'active' : ''} onClick={() => setDockMode('tracks')}>Tracks</button>
+              <button type="button" role="tab" aria-selected={dockMode === 'scenes'} className={dockMode === 'scenes' ? 'active' : ''} onClick={() => setDockMode('scenes')}>Scenes</button>
+              <button type="button" role="tab" aria-selected={dockMode === 'tracks'} className={dockMode === 'tracks' ? 'active' : ''} onClick={() => setDockMode('tracks')}>Tracks</button>
             </div>
-            <button type="button" className="studio-dock-close"><ChevronDown size={16} /></button>
+            <button type="button" className="studio-dock-close" aria-label="Collapse session dock" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled><ChevronDown size={16} /></button>
           </header>
           {dockMode === 'scenes' ? (
             <div className="studio-scene-board">
@@ -222,9 +252,9 @@ export function MediaFoundryImageLayout({
       </main>
 
       <aside className="studio-foundry-inspector">
-        <header className="studio-inspector-tabs">
-          <button type="button" className={inspectorMode === 'inspector' ? 'active' : ''} onClick={() => setInspectorMode('inspector')}>Inspector</button>
-          <button type="button" className={inspectorMode === 'metadata' ? 'active' : ''} onClick={() => setInspectorMode('metadata')}>Metadata</button>
+        <header className="studio-inspector-tabs" role="tablist" aria-label="Inspector view">
+          <button type="button" role="tab" aria-selected={inspectorMode === 'inspector'} className={inspectorMode === 'inspector' ? 'active' : ''} onClick={() => setInspectorMode('inspector')}>Inspector</button>
+          <button type="button" role="tab" aria-selected={inspectorMode === 'metadata'} className={inspectorMode === 'metadata' ? 'active' : ''} onClick={() => setInspectorMode('metadata')}>Metadata</button>
           <button type="button" className="studio-export-button" onClick={onGenerate} disabled={isGenerating}>Run</button>
         </header>
         {inspectorMode === 'metadata' ? (
@@ -241,7 +271,7 @@ export function MediaFoundryImageLayout({
         ) : (
           <>
             <InspectorSection title="Layers">
-              <label className="studio-blend-row">Normal <input type="range" defaultValue="100" /> 100%</label>
+              <label className="studio-blend-row" title={UNAVAILABLE_CONTROL_TITLE}>Normal <input type="range" defaultValue="100" aria-describedby={UNAVAILABLE_CONTROL_ID} disabled /> 100%</label>
               {LAYERS.map((layer, index) => (
                 <button
                   key={layer}
@@ -257,18 +287,18 @@ export function MediaFoundryImageLayout({
               ))}
             </InspectorSection>
             <InspectorSection title="Mask">
-              <div className="studio-mask-card"><Wand2 size={18} /><span>Mask 2</span><label><input type="checkbox" /> Invert</label></div>
+              <div className="studio-mask-card"><Wand2 size={18} /><span>Mask 2</span><label title={UNAVAILABLE_CONTROL_TITLE}><input type="checkbox" aria-describedby={UNAVAILABLE_CONTROL_ID} disabled /> Invert</label></div>
             </InspectorSection>
             <InspectorSection title="Effects Stack">
               {EFFECTS.map((effect, index) => (
-                <label key={effect} className="studio-effect-row">
-                  <input type="checkbox" defaultChecked />
+                <label key={effect} className="studio-effect-row" title={UNAVAILABLE_CONTROL_TITLE}>
+                  <input type="checkbox" defaultChecked aria-describedby={UNAVAILABLE_CONTROL_ID} disabled />
                   <span>{effect}</span>
-                  <input type="range" defaultValue={index === 3 ? 60 : 100} />
+                  <input type="range" defaultValue={index === 3 ? 60 : 100} aria-describedby={UNAVAILABLE_CONTROL_ID} disabled />
                   <output>{index === 3 ? '60' : '100'}</output>
                 </label>
               ))}
-              <button type="button" className="studio-add-effect"><Plus size={14} /> Add Effect</button>
+              <button type="button" className="studio-add-effect" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled><Plus size={14} /> Add Effect</button>
               <button type="button" className="studio-add-effect" onClick={() => onSendToWorkflow?.('Media Foundry inspector')}>Send to workflow</button>
             </InspectorSection>
             <InspectorSection title="Generation Settings">
@@ -287,11 +317,11 @@ export function MediaFoundryImageLayout({
             <InspectorSection title="Prompt Recipe">
               <textarea value={settings.prompt} onChange={(event) => onSettingsChange((current) => ({ ...current, prompt: event.target.value }))} />
               <div className="studio-recipe-actions">
-                <button type="button">Enhance</button>
-                <button type="button">Expand</button>
+                <button type="button" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled>Enhance</button>
+                <button type="button" aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled>Expand</button>
               </div>
             </InspectorSection>
-            <button type="button" className="studio-apply-button export" onClick={onGenerate} disabled={isGenerating}>Export Image</button>
+            <button type="button" className="studio-apply-button export" onClick={onGenerate} disabled={isGenerating}>{isGenerating ? 'Generating' : 'Generate Image'}</button>
           </>
         )}
       </aside>
@@ -299,12 +329,12 @@ export function MediaFoundryImageLayout({
   )
 }
 
-function AssetSection({ title, action, children }: { title: string; action: string; children: ReactNode }) {
-  return <section className="studio-asset-section"><header><h3>{title}</h3><button type="button">{action}</button></header>{children}</section>
+function AssetSection({ title, action, onAction, children }: { title: string; action: string; onAction: () => void; children: ReactNode }) {
+  return <section className="studio-asset-section"><header><h3>{title}</h3><button type="button" onClick={onAction}>{action}</button></header>{children}</section>
 }
 
 function InspectorSection({ title, children }: { title: string; children: ReactNode }) {
-  return <section className="studio-inspector-section"><header><h3>{title}</h3><button type="button">×</button></header>{children}</section>
+  return <section className="studio-inspector-section"><header><h3>{title}</h3><button type="button" aria-label={`Close ${title} section`} aria-describedby={UNAVAILABLE_CONTROL_ID} title={UNAVAILABLE_CONTROL_TITLE} disabled>×</button></header>{children}</section>
 }
 
 function Stat({ label, value }: { label: string; value: string }) {

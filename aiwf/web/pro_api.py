@@ -4189,6 +4189,11 @@ def _video_lab_upload_root(ctx: Any) -> Path:
     return root
 
 
+def _video_lab_upload_destination(root: Path, safe_stem: str, suffix: str) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    return root / f"{safe_stem}_{stamp}_{uuid4().hex[:12]}{suffix}"
+
+
 def _model_upload_root(ctx: Any) -> Path:
     flags = getattr(ctx, "flags", None)
     if flags is None:
@@ -4648,15 +4653,15 @@ def build_router(ctx: Any) -> APIRouter:
 
     @router.get("/ping")
     def ping():
-        # Deliberately cheap and always reachable (even to an unpaired mobile
-        # client) so the Android app can discover/identify the server and
-        # learn whether it needs to present a pairing token before anything
-        # else. Never includes the token itself.
+        # Keep discovery cheap and token-free. Every other non-loopback Pro
+        # request stays closed until mobile access is enabled and paired.
         state = load_mobile_auth(Path(ctx.flags.data_dir))
+        mobile_access_enabled = bool(state.get("enabled")) and bool(state.get("token"))
         return {
             "name": "AIWF Studio Pro",
             "version": AIWF_VERSION,
-            "authRequired": bool(state.get("enabled")) and bool(state.get("token")),
+            "authRequired": True,
+            "mobileAccessEnabled": mobile_access_enabled,
         }
 
     @router.get("/mobile-pairing")
@@ -5028,14 +5033,27 @@ def build_router(ctx: Any) -> APIRouter:
                 status_code=422,
                 detail=f"Unsupported video type '{suffix}'. Use mp4, mov, mkv, webm, or avi.",
             )
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safe_stem = "".join(
             ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in Path(file.filename or "upload").stem
         )[:64] or "upload"
-        dest = _video_lab_upload_root(ctx) / f"{safe_stem}_{stamp}{suffix}"
+        upload_root = _video_lab_upload_root(ctx)
+        dest: Path | None = None
+        upload_handle = None
+        for _ in range(8):
+            candidate = _video_lab_upload_destination(upload_root, safe_stem, suffix)
+            try:
+                upload_handle = candidate.open("xb")
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail=f"Could not store the upload: {exc}") from exc
+            dest = candidate
+            break
+        if dest is None or upload_handle is None:
+            raise HTTPException(status_code=500, detail="Could not allocate a unique upload path.")
         written = 0
         try:
-            with dest.open("wb") as handle:
+            with upload_handle as handle:
                 while True:
                     chunk = await file.read(8 * 1024 * 1024)
                     if not chunk:

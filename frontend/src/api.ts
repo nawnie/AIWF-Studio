@@ -28,10 +28,10 @@ import type {
   ResourceMetric,
   ResourceTone,
 } from './types'
+import { API_BASE } from './apiBase'
 
 type JsonRecord = Record<string, unknown>
 
-const API_BASE = (import.meta.env.VITE_AIWF_API_BASE ?? '').replace(/\/$/, '')
 const API_LATENCY_SAMPLE_LIMIT = 40
 type GerrorCategory =
   | 'auth'

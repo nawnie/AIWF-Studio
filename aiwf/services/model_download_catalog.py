@@ -481,14 +481,27 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
     # Flux.2 Klein and Z-Image runtime assets.
     CatalogEntry(
         key="flux2-klein-4b-diffusers",
-        title="Flux.2 Klein 4B full Diffusers pipeline",
+        title="Flux.2 Klein 4B distilled Diffusers pipeline",
         category="flux2_diffusers",
         source="huggingface",
         repo_id="black-forest-labs/FLUX.2-klein-4B",
         size_mb=13000,
         notes=(
-            "Recommended first Flux.2 Klein route for consumer GPUs. Full Apache-2.0 Diffusers "
-            "folder with transformer, Qwen text encoder, tokenizer, scheduler, and VAE."
+            "Recommended 4-step Flux.2 Klein route for this 16 GB workstation. Full Apache-2.0 "
+            "Diffusers folder with transformer, Qwen text encoder, tokenizer, scheduler, and VAE."
+        ),
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="flux2-klein-base-4b-diffusers",
+        title="Flux.2 Klein Base 4B Diffusers pipeline",
+        category="flux2_diffusers",
+        source="huggingface",
+        repo_id="black-forest-labs/FLUX.2-klein-base-4B",
+        size_mb=13000,
+        notes=(
+            "Undistilled Apache-2.0 4B route for fine-tuning and adapter research on a 16 GB GPU. "
+            "AIWF uses model CPU offload for Klein; runtime LoRA application remains gated."
         ),
         snapshot=True,
     ),

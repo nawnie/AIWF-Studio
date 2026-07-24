@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive,
   BadgeCheck,
@@ -109,6 +109,8 @@ export function ProjectCenterLayout({
   const [manifestText, setManifestText] = useState(DEFAULT_MANIFEST)
   const [compareMode, setCompareMode] = useState(false)
   const [newCharacterName, setNewCharacterName] = useState('')
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const refreshRequestId = useRef(0)
 
   const activeAsset = useMemo(() => {
     if (preview?.path) {
@@ -132,21 +134,65 @@ export function ProjectCenterLayout({
     stages: templates[0]?.stages ?? ['prompt', 'model', 'upscale', 'receipt', 'output'],
   }), [templates])
 
-  const refresh = () => {
-    void Promise.all([
-      fetchProject('default').then(setProject),
-      fetchAssets().then(setAssets),
-      fetchReceipts().then(setReceipts),
-      fetchQueue().then(setQueue),
-      fetchWorkflowTemplates().then(setTemplates),
-      fetchNodeRegistry().then((payload) => setNodes(payload.nodes)),
-      fetchExportPresets().then(setPresets),
-      fetchPlugins().then(setPlugins),
-      fetchAgentPermissions().then(setPermissions),
-    ]).then(() => setMessage('Project, assets, queue, nodes, plugins, and permissions refreshed.'))
-  }
+  const refresh = useCallback(async () => {
+    const requestId = ++refreshRequestId.current
+    setIsRefreshing(true)
+    setMessage('Refreshing project data…')
+    try {
+      const [
+        nextProject,
+        nextAssets,
+        nextReceipts,
+        nextQueue,
+        nextTemplates,
+        nextNodeRegistry,
+        nextPresets,
+        nextPlugins,
+        nextPermissions,
+      ] = await Promise.all([
+        fetchProject('default'),
+        fetchAssets(),
+        fetchReceipts(),
+        fetchQueue(),
+        fetchWorkflowTemplates(),
+        fetchNodeRegistry(),
+        fetchExportPresets(),
+        fetchPlugins(),
+        fetchAgentPermissions(),
+      ])
+      if (requestId !== refreshRequestId.current) {
+        return
+      }
+      setProject(nextProject)
+      setAssets(nextAssets)
+      setReceipts(nextReceipts)
+      setQueue(nextQueue)
+      setTemplates(nextTemplates)
+      setNodes(nextNodeRegistry.nodes)
+      setPresets(nextPresets)
+      setPlugins(nextPlugins)
+      setPermissions(nextPermissions)
+      setMessage('Project, assets, queue, nodes, plugins, and permissions refreshed.')
+    } catch (error) {
+      if (requestId === refreshRequestId.current) {
+        setMessage(error instanceof Error ? `Refresh failed: ${error.message}` : 'Project data could not be refreshed.')
+      }
+    } finally {
+      if (requestId === refreshRequestId.current) {
+        setIsRefreshing(false)
+      }
+    }
+  }, [])
 
-  useEffect(refresh, [])
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void refresh()
+    }, 0)
+    return () => {
+      window.clearTimeout(timer)
+      refreshRequestId.current += 1
+    }
+  }, [refresh])
 
   const handleSaveProject = async (nextProject: Project, nextMessage = 'Project saved.') => {
     setProject(nextProject)
@@ -285,10 +331,10 @@ export function ProjectCenterLayout({
           <div>
             <span className="studio-eyebrow">TRUE AI MEDIA CENTER</span>
             <h2>{activeProject.name}</h2>
-            <p>{message}</p>
+            <p role="status" aria-live="polite">{message}</p>
           </div>
           <div className="studio-toolbar-actions">
-            <button type="button" onClick={refresh}><Search size={14} /> Refresh</button>
+            <button type="button" onClick={refresh} disabled={isRefreshing}><Search size={14} /> {isRefreshing ? 'Refreshing' : 'Refresh'}</button>
             <button type="button" onClick={() => handleSaveProject(activeProject)}><Save size={14} /> Save Project</button>
             <button type="button" onClick={addQueue}><ListChecks size={14} /> Queue Workflow</button>
             <button type="button" className="studio-run-button" onClick={onGenerate} disabled={isGenerating}><Play size={14} /> {isGenerating ? 'Running' : 'Run Now'}</button>
@@ -308,7 +354,7 @@ export function ProjectCenterLayout({
             </div>
             <div className="studio-layer-stack">
               <span>Non-destructive stack</span>
-              {['Base image', 'Mask layer', 'Inpaint patch', 'Color grade', 'Upscale/VSR', 'Export receipt'].map((layer, index) => <button type="button" key={layer}><b>{index + 1}</b>{layer}</button>)}
+              {['Base image', 'Mask layer', 'Inpaint patch', 'Color grade', 'Upscale/VSR', 'Export receipt'].map((layer, index) => <div className="studio-layer-item" key={layer}><b>{index + 1}</b>{layer}</div>)}
             </div>
           </section>
 
@@ -332,7 +378,7 @@ function ProjectPanel({ project, templates, nodes, onSave }: { project: Project;
   return <div className="studio-panel-stack">
     <PanelTitle icon={FileJson} title="AIWF Project File" subtitle="Scenes, tracks, versions, workflows, receipts, and UI state." />
     <div className="studio-stat-grid"><span>Scenes <strong>{project.scenes?.length ?? 0}</strong></span><span>Tracks <strong>{project.tracks?.length ?? 0}</strong></span><span>Nodes <strong>{nodes.length}</strong></span><span>Templates <strong>{templates.length}</strong></span></div>
-    <div className="studio-scene-list">{(project.scenes ?? []).map((scene) => <button type="button" key={scene.id}><strong>{scene.title}</strong><small>{scene.status || 'draft'} · {scene.notes}</small></button>)}</div>
+    <div className="studio-scene-list">{(project.scenes ?? []).map((scene) => <article className="studio-static-card" key={scene.id}><strong>{scene.title}</strong><small>{scene.status || 'draft'} · {scene.notes}</small></article>)}</div>
     <button type="button" className="studio-wide-button" onClick={() => onSave({ ...project, scenes: [...(project.scenes ?? []), { id: `scene-${Date.now()}`, title: 'New scene', status: 'draft', notes: 'Timeline marker ready.' }] }, 'Scene marker added.')}>+ Add Scene Marker</button>
     <div className="studio-template-strip">{templates.map((template) => <span key={template.id}><GitBranch size={13} />{template.label}</span>)}</div>
   </div>
@@ -341,7 +387,7 @@ function ProjectPanel({ project, templates, nodes, onSave }: { project: Project;
 function AssetPanel({ assets, receipts, versions }: { assets: Asset[]; receipts: Receipt[]; versions: Version[] }) {
   return <div className="studio-panel-stack">
     <PanelTitle icon={Library} title="Asset Library + Version Tree" subtitle="Recent outputs become traceable project assets." />
-    <div className="studio-asset-mini-grid">{assets.slice(0, 12).map((asset) => <button type="button" key={`${asset.path}-${asset.id}`}><span>{asset.kind}</span><strong>{asset.name}</strong><small>{asset.tags?.join(', ')}</small></button>)}</div>
+    <div className="studio-asset-mini-grid">{assets.slice(0, 12).map((asset) => <article className="studio-static-card" key={`${asset.path}-${asset.id}`}><span>{asset.kind}</span><strong>{asset.name}</strong><small>{asset.tags?.join(', ')}</small></article>)}</div>
     <h3>Version tree</h3>
     <div className="studio-version-tree">{versions.length ? versions.map((version, index) => <div key={version.id}><b>{index === 0 ? '●' : '├'}</b><span>{version.label || version.id}</span><small>{version.summary || version.createdAt}</small></div>) : <p>No versions yet. Snapshot the canvas to start the tree.</p>}</div>
     <h3>Receipts</h3>
@@ -414,7 +460,7 @@ function CharactersPanel({ project, newCharacterName, setNewCharacterName, addCh
   return <div className="studio-panel-stack"><PanelTitle icon={Tags} title="Character / Object Consistency" subtitle="Reference cards for people, products, places, vehicles, and creatures." />
     <label className="studio-field-mini">New card name<input value={newCharacterName} onChange={(event) => setNewCharacterName(event.target.value)} placeholder="Astronaut, product, room, vehicle..." /></label>
     <button type="button" className="studio-wide-button" onClick={addCharacter}><PackagePlus size={14} /> Add Reference Card</button>
-    <div className="studio-character-grid">{(project.characters ?? []).map((card) => <button type="button" key={card.id}><strong>{card.name}</strong><small>{card.description}</small><p>{card.notes}</p></button>)}</div>
+    <div className="studio-character-grid">{(project.characters ?? []).map((card) => <article className="studio-static-card" key={card.id}><strong>{card.name}</strong><small>{card.description}</small><p>{card.notes}</p></article>)}</div>
   </div>
 }
 

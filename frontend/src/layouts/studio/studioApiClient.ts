@@ -1,4 +1,5 @@
 import type { GenerationSettings, RecentOutput } from '../../types'
+import { API_BASE } from '../../apiBase'
 import type { UserTab } from './LayoutTypes'
 
 export interface AgentModel { id: string; name: string; size?: string; modifiedAt?: string }
@@ -52,8 +53,6 @@ export interface ModelFamilyMatrix {
 
 const USER_TAB_STORAGE_KEY = 'aiwf.userTabs.v4'
 const PROJECT_AUTOSAVE_STORAGE_KEY = 'aiwf.projectAutosave.v4'
-const API_BASE = (import.meta.env.VITE_AIWF_API_BASE ?? '').replace(/\/$/, '')
-
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
@@ -161,7 +160,7 @@ export async function streamAgentChat(
   enabledTools: string[],
   onDelta: (text: string) => void,
 ): Promise<string> {
-  const response = await fetch('/api/pro/agent/chat/stream', {
+  const response = await fetch(`${API_BASE}/api/pro/agent/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, messages, enabledTools }),
@@ -395,9 +394,5 @@ export function fallbackModelFamilyMatrix(): ModelFamilyMatrix {
 }
 
 export async function fetchModelFamilies(): Promise<ModelFamilyMatrix> {
-  try {
-    return await requestJson<ModelFamilyMatrix>('/api/pro/model-families')
-  } catch {
-    return fallbackModelFamilyMatrix()
-  }
+  return requestJson<ModelFamilyMatrix>('/api/pro/model-families')
 }

@@ -63,6 +63,18 @@
   box-sizing: border-box;
 }
 
+.pro-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 html,
 body,
 #root {
@@ -1576,6 +1588,12 @@ a:hover {
   box-shadow: none;
 }
 
+.theme-preset-1 .pro-generate-button:disabled {
+  border-color: #47423d;
+  background: #24211f;
+  color: #91867d;
+}
+
 .pro-image-tool-stack {
   display: grid;
   gap: 10px;
@@ -3060,6 +3078,17 @@ a:hover {
   justify-content: space-between;
   gap: 8px;
   font-family: var(--font-mono);
+}
+
+.theme-preset-1 .pro-prompt-insight-header span,
+.theme-preset-1 .pro-prompt-insight-card p,
+.theme-preset-1 .pro-prompt-insight-meta,
+.theme-preset-1 .pro-prompt-suggestions {
+  color: #aeb8c7;
+}
+
+.theme-preset-1 .pro-model-helper-grid span {
+  color: #b9d3df;
 }
 
 .pro-prompt-signal-grid {

@@ -240,7 +240,10 @@ def _ctx(tmp_path: Path):
 
 
 def _client(ctx, frontend_dist: Path | None = None):
-    return TestClient(create_app(ctx, frontend_dist=frontend_dist or Path("__missing_frontend_dist__")))
+    return TestClient(
+        create_app(ctx, frontend_dist=frontend_dist or Path("__missing_frontend_dist__")),
+        client=("127.0.0.1", 51000),
+    )
 
 
 def test_runtime_endpoint_reports_warm_latency_under_budget(tmp_path):
@@ -1799,7 +1802,8 @@ def test_ping_reports_name_version_and_auth_state(tmp_path):
     data = response.json()
     assert data["name"] == "AIWF Studio Pro"
     assert data["version"]
-    assert data["authRequired"] is False
+    assert data["authRequired"] is True
+    assert data["mobileAccessEnabled"] is False
 
 
 def test_mobile_pairing_get_requires_loopback(tmp_path):
@@ -1814,10 +1818,23 @@ def test_mobile_pairing_get_requires_loopback(tmp_path):
 
     assert ok.status_code == 200
     assert ok.json()["enabled"] is False
-    # A token is provisioned eagerly (so Settings can show/QR it before the
-    # user flips mobile access on), but enforcement stays off until enabled.
+    # Loopback pairing can provision a token before the user enables access,
+    # while remote API enforcement remains closed until access is enabled.
     assert ok.json()["token"]
     assert blocked.status_code == 403
+    assert remote_client.get("/api/pro/runtime").status_code == 403
+
+
+def test_fresh_remote_client_is_blocked_before_pairing_provisions_a_token(tmp_path):
+    ctx = _ctx(tmp_path)
+    app = create_app(ctx, frontend_dist=Path("__missing_frontend_dist__"))
+    remote_client = TestClient(app, client=("192.168.1.50", 51000))
+
+    assert not (tmp_path / "_local" / "mobile_auth.json").exists()
+    response = remote_client.get("/api/pro/runtime")
+
+    assert response.status_code == 403
+    assert not (tmp_path / "_local" / "mobile_auth.json").exists()
 
 
 def test_mobile_pairing_enable_then_enforces_token_for_remote_clients(tmp_path):
@@ -1847,6 +1864,7 @@ def test_mobile_pairing_enable_then_enforces_token_for_remote_clients(tmp_path):
     ping = remote_client.get("/api/pro/ping")
     assert ping.status_code == 200
     assert ping.json()["authRequired"] is True
+    assert ping.json()["mobileAccessEnabled"] is True
 
     # The loopback desktop app itself is never challenged.
     loopback_runtime = loopback_client.get("/api/pro/runtime")
@@ -1859,9 +1877,67 @@ def test_mobile_pairing_enable_then_enforces_token_for_remote_clients(tmp_path):
     assert remote_client.get("/api/pro/runtime", headers={"X-AIWF-Token": token}).status_code == 401
     assert remote_client.get("/api/pro/runtime", headers={"X-AIWF-Token": new_token}).status_code == 200
 
-    # Disabling drops enforcement again without needing a restart.
+    # Disabling access closes the remote API without needing a restart.
     loopback_client.post("/api/pro/mobile-pairing", json={"enabled": False})
-    assert remote_client.get("/api/pro/runtime").status_code == 200
+    assert remote_client.get("/api/pro/runtime").status_code == 403
+    disabled_ping = remote_client.get("/api/pro/ping")
+    assert disabled_ping.status_code == 200
+    assert disabled_ping.json()["authRequired"] is True
+    assert disabled_ping.json()["mobileAccessEnabled"] is False
+
+
+def test_video_lab_uploads_with_same_name_get_unique_paths(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+
+    def fake_probe(path: Path):
+        return {"path": str(path), "filename": path.name}
+
+    monkeypatch.setattr(pro_api, "_video_lab_probe", fake_probe)
+
+    first = client.post(
+        "/api/pro/video-lab/upload",
+        files={"file": ("clip.mp4", b"first-video", "video/mp4")},
+    )
+    second = client.post(
+        "/api/pro/video-lab/upload",
+        files={"file": ("clip.mp4", b"second-video", "video/mp4")},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_path = Path(first.json()["path"])
+    second_path = Path(second.json()["path"])
+    assert first_path != second_path
+    assert first_path.read_bytes() == b"first-video"
+    assert second_path.read_bytes() == b"second-video"
+
+
+def test_video_lab_upload_collision_preserves_existing_file(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    client = _client(ctx)
+    upload_root = pro_api._video_lab_upload_root(ctx)
+    existing_path = upload_root / "clip_existing.mp4"
+    new_path = upload_root / "clip_unique.mp4"
+    existing_path.write_bytes(b"existing-video")
+    destinations = iter((existing_path, new_path))
+
+    monkeypatch.setattr(pro_api, "_video_lab_upload_destination", lambda *_args: next(destinations))
+    monkeypatch.setattr(
+        pro_api,
+        "_video_lab_probe",
+        lambda path: {"path": str(path), "filename": path.name},
+    )
+
+    response = client.post(
+        "/api/pro/video-lab/upload",
+        files={"file": ("clip.mp4", b"new-video", "video/mp4")},
+    )
+
+    assert response.status_code == 200
+    assert Path(response.json()["path"]) == new_path
+    assert existing_path.read_bytes() == b"existing-video"
+    assert new_path.read_bytes() == b"new-video"
 
 
 def test_outputs_thumb_query_param_returns_resized_jpeg(tmp_path):

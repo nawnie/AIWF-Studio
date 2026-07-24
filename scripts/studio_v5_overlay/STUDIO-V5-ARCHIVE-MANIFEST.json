@@ -71,12 +71,12 @@
       "sha256": "40656e661613f5689e0cdac67400672b8b36b6014e58ede9f8b7873d3add6472"
     },
     "STUDIO-V5-OVERLAY.json": {
-      "size": 6795,
-      "sha256": "195b329aca54d88ef3c6ac2d65f6e399f7dd81944ea771f8b5dacc68da8ca947"
+      "size": 6713,
+      "sha256": "78a589b8386270af682f9de326919cd1c77164e65d60685b6c9e9f330fdaf6d1"
     },
     "STUDIO-V5-QA.bat": {
-      "size": 993,
-      "sha256": "897faf892d22b98ea18cce2bed52acfe915bb4d64019f06d2f7081a2ac76fcc1"
+      "size": 1057,
+      "sha256": "ea732fd36c813e8e01b4cd095ec45d63a714428576573247f03869c3374ebffd"
     },
     "STUDIO-V5-README.txt": {
       "size": 3441,
@@ -249,10 +249,6 @@
     "tests/individual_tests/test_rife.py": {
       "size": 1425,
       "sha256": "93661212ca349bea2519a9e311eab44107b0dc9de3ab91964588b65ac0bd05a3"
-    },
-    "tests/individual_tests/test_studio_v4_update.py": {
-      "size": 1583,
-      "sha256": "7f948314e1bf20fbc9d9accc71e870f5d7e5f2a0b853b850506d2e6e5bfa4053"
     },
     "tests/individual_tests/test_studio_v5_labs.py": {
       "size": 4139,

@@ -46,18 +46,23 @@ export function ModelFamilyMatrixLayout(props: LayoutProps) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<FamilyFilter>('all')
   const [selectedId, setSelectedId] = useState('wan')
+  const [loadError, setLoadError] = useState('')
 
   useEffect(() => {
     let active = true
-    fetchModelFamilies().then((nextMatrix) => {
-      if (!active) return
-      setMatrix(nextMatrix)
-      if (!nextMatrix.families.some((family) => family.id === selectedId)) {
-        setSelectedId(nextMatrix.families[0]?.id ?? '')
-      }
-    })
+    fetchModelFamilies()
+      .then((nextMatrix) => {
+        if (!active) return
+        setMatrix(nextMatrix)
+        setLoadError('')
+      })
+      .catch(() => {
+        if (!active) return
+        setMatrix(fallbackModelFamilyMatrix())
+        setLoadError('Live support data is unavailable. Showing the offline fallback matrix.')
+      })
     return () => { active = false }
-  }, [selectedId])
+  }, [])
 
   const filteredFamilies = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -89,7 +94,9 @@ export function ModelFamilyMatrixLayout(props: LayoutProps) {
           <span className="studio-logo-orb"><ShieldCheck size={19} aria-hidden="true" /></span>
           <div>
             <strong>Model Family Support</strong>
-            <small>{props.bootstrap.workspaceName} · code-indexed loader map</small>
+            <small role={loadError ? 'alert' : undefined} aria-live="polite">
+              {loadError || `${props.bootstrap.workspaceName} · code-indexed loader map`}
+            </small>
           </div>
         </div>
         <div className="studio-family-search studio-search-field">

@@ -125,7 +125,10 @@ class MobileTokenAuthMiddleware(BaseHTTPMiddleware):
 
         state = load_mobile_auth(self.data_dir)
         if not state["enabled"] or not state["token"]:
-            return await call_next(request)
+            return JSONResponse(
+                {"detail": "Mobile API access is disabled. Enable pairing from the local AIWF Studio app."},
+                status_code=403,
+            )
         supplied = request.headers.get("x-aiwf-token", "")
         if not supplied or not secrets.compare_digest(supplied, state["token"]):
             return JSONResponse({"detail": "Missing or invalid mobile pairing token."}, status_code=401)

@@ -1,10 +1,12 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { resolveLoopbackApiBase } from './src/apiBasePolicy'
 
-const proApiTarget =
+const configuredProApiTarget =
   process.env.AIWF_PRO_API_TARGET ??
   process.env.VITE_AIWF_PRO_API_TARGET ??
   'http://127.0.0.1:7861'
+const proApiTarget = resolveLoopbackApiBase(configuredProApiTarget, 'AIWF_PRO_API_TARGET')
 
 // https://vite.dev/config/
 export default defineConfig({

@@ -39,9 +39,8 @@ def save_mobile_auth(data_dir: Path, *, enabled: bool, token: str) -> dict[str, 
 def ensure_mobile_token(data_dir: Path) -> str:
     """Return the persisted pairing token, generating one on first use.
 
-    Generating a token does not enable enforcement; a user must explicitly
-    flip `enabled` (via set_mobile_access_enabled) before any client is
-    challenged for it.
+    Generating a token does not enable remote access. The user must enable
+    mobile access before a non-loopback client can use it.
     """
     state = load_mobile_auth(data_dir)
     if state["token"]:

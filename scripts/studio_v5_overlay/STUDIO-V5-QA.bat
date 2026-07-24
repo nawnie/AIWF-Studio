@@ -11,7 +11,6 @@ set "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1"
 "%PYTHON%" -m pytest -q ^
   tests\individual_tests\test_rife.py ^
   tests\individual_tests\test_video_lab.py ^
-  tests\individual_tests\test_studio_v4_update.py ^
   tests\individual_tests\test_studio_v5_labs.py ^
   tests\individual_tests\test_studio_v5_ui_contracts.py ^
   tests\individual_tests\test_image_workflow_service.py ^

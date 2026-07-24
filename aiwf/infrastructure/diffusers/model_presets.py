@@ -9,6 +9,7 @@ Resolution order (first match wins):
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from aiwf.infrastructure.diffusers.model_arch import (
@@ -44,7 +45,10 @@ ARCHITECTURE_PRESETS: dict[str, dict[str, Any]] = {
     ARCH_FLUX: {"steps": 20, "cfg_scale": 0.0, "sampler": "euler_a", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_FLUX_FILL: {"steps": 28, "cfg_scale": 3.5, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_FLUX_KONTEXT: {"steps": 28, "cfg_scale": 3.5, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
-    ARCH_FLUX2_KLEIN: {"steps": 12, "cfg_scale": 1.0, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
+    # The default Klein route is the distilled 4B model: four steps and embedded
+    # guidance. It is the intended consumer-GPU starting point for this 16 GB
+    # workstation. Base checkpoints are detected below and get their own recipe.
+    ARCH_FLUX2_KLEIN: {"steps": 4, "cfg_scale": 1.0, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_Z_IMAGE: {"steps": 8, "cfg_scale": 1.0, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_KREA2: {"steps": 8, "cfg_scale": 0.0, "sampler": "euler", "scheduler": "automatic", "width": 1024, "height": 1024},
     ARCH_ANIMA: {"steps": 36, "cfg_scale": 4.5, "sampler": "euler_a", "scheduler": "automatic", "width": 1024, "height": 1024},
@@ -90,6 +94,15 @@ KREA2_TURBO_PRESET: dict[str, Any] = {
     "height": 1024,
 }
 
+FLUX2_KLEIN_BASE_PRESET: dict[str, Any] = {
+    "steps": 50,
+    "cfg_scale": 5.0,
+    "sampler": "euler",
+    "scheduler": "automatic",
+    "width": 1024,
+    "height": 1024,
+}
+
 # The generation-relevant fields we remember per checkpoint and may apply as
 # UI defaults. Keep this list narrow - we don't want to silently change things
 # like prompts, seed, or batch size when the user just switches models.
@@ -101,6 +114,11 @@ _DISTILLED_MARKERS = ("lightning", "turbo", "lcm", "hyper", "tcd")
 def _checkpoint_looks_distilled(checkpoint_id: str | None) -> bool:
     text = (checkpoint_id or "").lower()
     return any(marker in text for marker in _DISTILLED_MARKERS)
+
+
+def _checkpoint_is_flux2_klein_base(checkpoint_id: str | None) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "-", (checkpoint_id or "").casefold()).strip("-")
+    return "klein-base" in normalized
 
 
 def _safe_last_used_preset(
@@ -152,6 +170,8 @@ def resolve_model_preset(
             preset.update(KREA2_RAW_PRESET)
         elif "turbo" in checkpoint_text:
             preset.update(KREA2_TURBO_PRESET)
+    if architecture == ARCH_FLUX2_KLEIN and _checkpoint_is_flux2_klein_base(checkpoint_id):
+        preset.update(FLUX2_KLEIN_BASE_PRESET)
     if checkpoint_id:
         last_used = model_settings.get(checkpoint_id)
         if last_used:

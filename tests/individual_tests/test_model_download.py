@@ -547,6 +547,7 @@ def test_catalog_lists_entries(tmp_path: Path):
     assert "flux-clip-l" in keys
     assert "flux-ae-vae" in keys
     assert "flux2-klein-4b-components" in keys
+    assert "flux2-klein-base-4b-diffusers" in keys
     assert "flux2-klein-9b-components" in keys
     assert "fluxtrait-klein9b-v2-q4km" in keys
     assert "fluxtrait-zimage-v2-q4" in keys
