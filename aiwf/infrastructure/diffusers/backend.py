@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import gc
+import importlib.util
 import json
 import logging
 import random
@@ -160,6 +161,15 @@ from aiwf.infrastructure.quant.bnb_nf4_format import (
     resolve_transformer_load_format,
 )
 from aiwf.infrastructure.diffusers.flux_bnb_loader import load_flux_original_bnb_transformer
+from aiwf.infrastructure.diffusers.flux_prompt_conditioning import (
+    FLUX_CONDITIONING_DISTILLT5_CONTROL,
+    FLUX_CONDITIONING_TEACHER,
+    FLUX_CONDITIONING_UNIVERSAL,
+    FluxPromptConditioningConfig,
+    load_distillt5_control,
+    load_universal_conditioner,
+    validate_flux_conditioning,
+)
 from aiwf.services.qwen_nunchaku import QwenNunchakuService, QwenNunchakuUnavailable
 
 logger = logging.getLogger(__name__)
@@ -397,6 +407,9 @@ class DiffusersBackend:
         self._flux_text_encoder_override: str | None = None
         self._flux_clip_device: torch.device | None = None
         self._flux_t5_device: torch.device | None = None
+        self._flux_prompt_conditioning = FluxPromptConditioningConfig.from_environment()
+        self._flux_conditioning_scope: str | None = None
+        self._flux_universal_conditioner = None
         self._flux_prompt_cache: OrderedDict[str, tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
         self._flux2_prompt_cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         # Rolling average encode duration per family, used to show a live ETA
@@ -553,6 +566,8 @@ class DiffusersBackend:
         if self._active.path != checkpoint.path:
             return False
         if is_flux_architecture(checkpoint.architecture):
+            if self._flux_prompt_conditioning.mode == FLUX_CONDITIONING_UNIVERSAL:
+                return self._flux_universal_conditioner is not None
             return (
                 self._flux_text_encoder is not None
                 and self._flux_text_encoder_2 is not None
@@ -1101,6 +1116,20 @@ class DiffusersBackend:
                         return candidate.resolve()
         return None
 
+    def _find_flux_component_dir(
+        self,
+        dirnames: tuple[str, ...],
+        subdirs: tuple[str, ...],
+    ) -> Path | None:
+        for dirname in dirnames:
+            for root in self._flux_search_roots():
+                for subdir in subdirs:
+                    base = root / subdir if subdir else root
+                    candidate = base / dirname
+                    if candidate.is_dir():
+                        return candidate.resolve()
+        return None
+
     def _diffusers_component_search_roots(self) -> list[Path]:
         return self._flux_search_roots()
 
@@ -1425,6 +1454,8 @@ class DiffusersBackend:
         cls._aiwf_input_dtype_patch = True
 
     def _resolve_flux_component_paths(self) -> dict[str, Path]:
+        conditioning = self._resolved_flux_prompt_conditioning()
+        mode = conditioning.mode
         clip = self._find_flux_component(
             ("clip_l.safetensors",),
             ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders", "Clip", "clip"),
@@ -1450,19 +1481,93 @@ class DiffusersBackend:
             ("ae.safetensors",),
             ("flux/VAE", "VAE", "vae"),
         )
+        required = [("Flux VAE", vae)]
+        if mode == FLUX_CONDITIONING_TEACHER:
+            required.extend((("CLIP-L", clip), ("T5-XXL", t5)))
+        elif mode == FLUX_CONDITIONING_DISTILLT5_CONTROL:
+            required.append(("CLIP-L", clip))
+            required.extend(
+                (
+                    ("DistillT5 control", conditioning.distillt5_path),
+                    (
+                        "T5-base control tokenizer",
+                        conditioning.distillt5_tokenizer_path,
+                    ),
+                )
+            )
+        elif mode == FLUX_CONDITIONING_UNIVERSAL:
+            adapter_path = conditioning.universal_adapter_path
+            required.extend(
+                (
+                    (
+                        "universal adapter_config.json",
+                        adapter_path / "adapter_config.json"
+                        if adapter_path is not None
+                        else None,
+                    ),
+                    (
+                        "universal adapter.safetensors",
+                        adapter_path / "adapter.safetensors"
+                        if adapter_path is not None
+                        else None,
+                    ),
+                    (
+                        "local UMT5-base core",
+                        Path(conditioning.universal_core_model).expanduser(),
+                    ),
+                )
+            )
+        directory_requirements = {
+            "DistillT5 control",
+            "T5-base control tokenizer",
+            "local UMT5-base core",
+        }
         missing = [
             name
-            for name, value in (("CLIP-L", clip), ("T5-XXL", t5), ("Flux VAE", vae))
+            for name, value in required
             if value is None
+            or not (
+                Path(value).is_dir()
+                if name in directory_requirements
+                else Path(value).is_file()
+            )
         ]
+        if (
+            mode == FLUX_CONDITIONING_UNIVERSAL
+            and importlib.util.find_spec("ute") is None
+        ):
+            missing.append("universal-text-encoder package")
         if missing:
             roots = ", ".join(str(root) for root in self._flux_search_roots())
+            if mode == FLUX_CONDITIONING_UNIVERSAL:
+                recovery = (
+                    "Set AIWF_FLUX_UNIVERSAL_ADAPTER_PATH to a trained adapter "
+                    "directory and AIWF_FLUX_UNIVERSAL_CORE_MODEL to a complete "
+                    "local UMT5-base snapshot, then install the reviewed "
+                    "universal-text-encoder package into this runtime."
+                )
+            elif mode == FLUX_CONDITIONING_DISTILLT5_CONTROL:
+                recovery = (
+                    "Install DistillT5 and t5-v1_1-base under "
+                    "models/flux/Textencoder, or set the two AIWF_FLUX_DISTILLT5_* "
+                    "path variables."
+                )
+            else:
+                recovery = (
+                    "Put CLIP-L and T5-XXL under models/flux/Textencoder and "
+                    "ae.safetensors under models/flux/VAE, or add a shared model "
+                    "root in Settings."
+                )
             raise ModelNotFoundError(
-                "Flux generation needs local CLIP-L, T5-XXL, and ae.safetensors assets. "
-                f"Missing: {', '.join(missing)}. Put them under models/flux/Textencoder and "
-                f"models/flux/VAE, or add a shared model root in Settings. Searched: {roots}"
+                f"Flux {mode} conditioning is missing required local assets. "
+                f"Missing: {', '.join(missing)}. {recovery} Searched: {roots}"
             )
-        return {"clip_l": clip, "t5xxl": t5, "vae": vae}  # type: ignore[dict-item]
+        resolved = {"vae": vae}
+        if clip is not None:
+            resolved["clip_l"] = clip
+        if t5 is not None:
+            resolved["t5xxl"] = t5
+        return resolved  # type: ignore[dict-item]
 
     def list_flux_text_encoders(self) -> list[tuple[str, str]]:
         """Return (label, path) for Flux-compatible T5-XXL text encoders found locally.
@@ -1528,6 +1633,76 @@ class DiffusersBackend:
                     out.append((f"{path.stem}  [{info.size_label()}]", str(path.resolve())))
         return out
 
+    def _resolved_flux_prompt_conditioning(self) -> FluxPromptConditioningConfig:
+        config = self._flux_prompt_conditioning
+        if config.mode != FLUX_CONDITIONING_DISTILLT5_CONTROL:
+            return config
+        distillt5_path = config.distillt5_path or self._find_flux_component_dir(
+            ("DistillT5", "distillt5"),
+            ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders"),
+        )
+        tokenizer_path = (
+            config.distillt5_tokenizer_path
+            or self._find_flux_component_dir(
+                ("t5-v1_1-base", "t5-base"),
+                ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders"),
+            )
+        )
+        return config.updated(
+            distillt5_path=distillt5_path,
+            distillt5_tokenizer_path=tokenizer_path,
+        )
+
+    def _clear_flux_prompt_models(self) -> None:
+        self._flux_text_encoder = None
+        self._flux_text_encoder_2 = None
+        self._flux_tokenizer = None
+        self._flux_tokenizer_2 = None
+        self._flux_component_paths = {}
+        self._flux_clip_device = None
+        self._flux_t5_device = None
+        self._flux_universal_conditioner = None
+        self._flux_conditioning_scope = None
+        self._flux_prompt_cache.clear()
+        for pipe in (self._txt2img, self._img2img, self._inpaint):
+            if pipe is not None and hasattr(pipe, "_aiwf_flux_components"):
+                try:
+                    delattr(pipe, "_aiwf_flux_components")
+                except Exception:
+                    logger.debug("Could not clear cached Flux components on pipe", exc_info=True)
+        gc.collect()
+        self.devices.empty_cache()
+
+    def set_flux_prompt_conditioning(
+        self,
+        mode: str,
+        *,
+        distillt5_path: str | Path | None = None,
+        distillt5_tokenizer_path: str | Path | None = None,
+        universal_adapter_path: str | Path | None = None,
+        universal_core_model: str | None = None,
+        universal_core_revision: str | None = None,
+    ) -> None:
+        """Select an explicit FLUX conditioning route and invalidate resident state."""
+
+        changes: dict[str, object] = {"mode": mode}
+        if distillt5_path is not None:
+            changes["distillt5_path"] = Path(distillt5_path)
+        if distillt5_tokenizer_path is not None:
+            changes["distillt5_tokenizer_path"] = Path(distillt5_tokenizer_path)
+        if universal_adapter_path is not None:
+            changes["universal_adapter_path"] = Path(universal_adapter_path)
+        if universal_core_model is not None:
+            changes["universal_core_model"] = universal_core_model
+        if universal_core_revision is not None:
+            changes["universal_core_revision"] = universal_core_revision
+        new_config = self._flux_prompt_conditioning.updated(**changes)
+        if new_config == self._flux_prompt_conditioning:
+            return
+        self._flux_prompt_conditioning = new_config
+        self._clear_flux_prompt_models()
+        logger.info("Flux prompt-conditioning mode set to: %s", new_config.mode)
+
     def set_flux_text_encoder(self, path: str | None) -> None:
         """Choose which T5-XXL text encoder Flux uses (None = automatic best).
 
@@ -1539,22 +1714,7 @@ class DiffusersBackend:
         if new == self._flux_text_encoder_override:
             return
         self._flux_text_encoder_override = new
-        self._flux_text_encoder = None
-        self._flux_text_encoder_2 = None
-        self._flux_tokenizer = None
-        self._flux_tokenizer_2 = None
-        self._flux_component_paths = {}
-        self._flux_clip_device = None
-        self._flux_t5_device = None
-        self._flux_prompt_cache.clear()
-        for pipe in (self._txt2img, self._img2img):
-            if pipe is not None and hasattr(pipe, "_aiwf_flux_components"):
-                try:
-                    delattr(pipe, "_aiwf_flux_components")
-                except Exception:
-                    logger.debug("Could not clear cached Flux components on pipe", exc_info=True)
-        gc.collect()
-        self.devices.empty_cache()
+        self._clear_flux_prompt_models()
         logger.info("Flux text encoder set to: %s", new or "automatic")
 
     @staticmethod
@@ -1565,16 +1725,62 @@ class DiffusersBackend:
         return str(target)
 
     def _load_flux_prompt_models(self, component_paths: dict[str, Path]) -> None:
+        conditioning = self._resolved_flux_prompt_conditioning()
+        component_signature = {
+            key: str(value) for key, value in component_paths.items()
+        }
+        conditioning_scope = conditioning.cache_scope(component_paths)
+        if conditioning.mode == FLUX_CONDITIONING_UNIVERSAL:
+            if (
+                self._flux_universal_conditioner is not None
+                and self._flux_conditioning_scope == conditioning_scope
+            ):
+                return
+            device = (
+                self.devices.device()
+                if self.devices.device().type == "cuda"
+                else torch.device("cpu")
+            )
+            dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+            conditioner = load_universal_conditioner(
+                conditioning,
+                device=device,
+                dtype=dtype,
+            )
+            self._flux_text_encoder = None
+            self._flux_text_encoder_2 = None
+            self._flux_tokenizer = None
+            self._flux_tokenizer_2 = None
+            self._flux_clip_device = None
+            self._flux_t5_device = None
+            self._flux_universal_conditioner = conditioner
+            self._flux_component_paths = component_signature
+            self._flux_conditioning_scope = conditioning_scope
+            self._flux_prompt_cache.clear()
+            logger.info(
+                "Flux universal UMT5 conditioner warm on %s (scope=%s)",
+                device,
+                conditioning_scope[:12],
+            )
+            return
+
         if (
             self._flux_text_encoder is not None
             and self._flux_text_encoder_2 is not None
             and self._flux_tokenizer is not None
             and self._flux_tokenizer_2 is not None
-            and self._flux_component_paths == {key: str(value) for key, value in component_paths.items()}
+            and self._flux_component_paths == component_signature
+            and self._flux_conditioning_scope == conditioning_scope
         ):
             return
 
-        from transformers import CLIPTextConfig, CLIPTextModel, CLIPTokenizer, T5Config, T5EncoderModel, T5TokenizerFast
+        from transformers import (
+            CLIPTextConfig,
+            CLIPTextModel,
+            CLIPTokenizer,
+            T5Config,
+            T5TokenizerFast,
+        )
 
         clip_config = CLIPTextConfig(
             vocab_size=49408,
@@ -1590,7 +1796,6 @@ class DiffusersBackend:
             pad_token_id=1,
             projection_dim=768,
         )
-        t5_path = component_paths["t5xxl"]
         clip_device = self.devices.device() if self.devices.device().type == "cuda" else torch.device("cpu")
 
         clip = CLIPTextModel(clip_config)
@@ -1598,35 +1803,62 @@ class DiffusersBackend:
         clip.eval()
         clip = clip.to(dtype=torch.float16, device=clip_device)
 
-        t5_config = T5Config(
-            vocab_size=32128,
-            d_model=4096,
-            d_ff=10240,
-            d_kv=64,
-            num_layers=24,
-            num_decoder_layers=24,
-            num_heads=64,
-            relative_attention_num_buckets=32,
-            relative_attention_max_distance=128,
-            dropout_rate=0.0,
-            layer_norm_epsilon=1e-6,
-            feed_forward_proj="gated-gelu",
-            is_encoder_decoder=False,
-            use_cache=False,
-            pad_token_id=0,
-            eos_token_id=1,
-        )
-        t5, t5_device = self._load_flux_t5_encoder(t5_path, t5_config)
+        if conditioning.mode == FLUX_CONDITIONING_DISTILLT5_CONTROL:
+            t5_device = (
+                self.devices.device()
+                if self.devices.device().type == "cuda"
+                else torch.device("cpu")
+            )
+            t5_dtype = torch.float16 if t5_device.type == "cuda" else torch.float32
+            t5, tokenizer_2, t5_device = load_distillt5_control(
+                conditioning,
+                device=t5_device,
+                dtype=t5_dtype,
+            )
+        else:
+            t5_config = T5Config(
+                vocab_size=32128,
+                d_model=4096,
+                d_ff=10240,
+                d_kv=64,
+                num_layers=24,
+                num_decoder_layers=24,
+                num_heads=64,
+                relative_attention_num_buckets=32,
+                relative_attention_max_distance=128,
+                dropout_rate=0.0,
+                layer_norm_epsilon=1e-6,
+                feed_forward_proj="gated-gelu",
+                is_encoder_decoder=False,
+                use_cache=False,
+                pad_token_id=0,
+                eos_token_id=1,
+            )
+            t5, t5_device = self._load_flux_t5_encoder(
+                component_paths["t5xxl"],
+                t5_config,
+            )
+            tokenizer_2 = T5TokenizerFast.from_pretrained(
+                "google/t5-v1_1-xxl",
+                legacy=True,
+            )
 
         self._flux_text_encoder = clip
         self._flux_text_encoder_2 = t5
         self._flux_clip_device = clip_device
         self._flux_t5_device = t5_device
         self._flux_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
-        self._flux_tokenizer_2 = T5TokenizerFast.from_pretrained("google/t5-v1_1-xxl", legacy=True)
-        self._flux_component_paths = {key: str(value) for key, value in component_paths.items()}
+        self._flux_tokenizer_2 = tokenizer_2
+        self._flux_universal_conditioner = None
+        self._flux_component_paths = component_signature
+        self._flux_conditioning_scope = conditioning_scope
         self._flux_prompt_cache.clear()
-        logger.info("Flux text encoders warm: CLIP-L on %s, T5 on %s", clip_device, t5_device)
+        logger.info(
+            "Flux %s text encoders warm: CLIP-L on %s, sequence encoder on %s",
+            conditioning.mode,
+            clip_device,
+            t5_device,
+        )
 
     def _prompt_cache_get(self, cache: dict, key, family: str):
         cached = cache.get(key)
@@ -1710,6 +1942,34 @@ class DiffusersBackend:
         )
         return kwargs, "bnb_nf4"
 
+    def _flux_prompt_cache_key(
+        self,
+        prompt: str,
+        batch_size: int,
+        max_sequence_length: int,
+    ) -> str:
+        scope = self._flux_conditioning_scope or self._flux_prompt_conditioning.cache_scope(
+            self._flux_component_paths
+        )
+        return f"{scope}|{prompt}|{batch_size}|{max_sequence_length}"
+
+    @staticmethod
+    def _repeat_flux_conditioning(
+        prompt_embeds: torch.Tensor,
+        pooled: torch.Tensor,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if batch_size == 1:
+            return prompt_embeds, pooled
+        if prompt_embeds.shape[0] != 1 or pooled.shape[0] != 1:
+            raise RuntimeError(
+                "FLUX prompt cache stores one conditioning row before batch expansion."
+            )
+        return (
+            prompt_embeds.repeat(batch_size, 1, 1),
+            pooled.repeat(batch_size, 1),
+        )
+
     def _encode_flux_prompt(
         self,
         prompt: str,
@@ -1718,50 +1978,80 @@ class DiffusersBackend:
         batch_size: int,
         max_sequence_length: int = 256,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self._flux_text_encoder is not None
-        assert self._flux_text_encoder_2 is not None
-        assert self._flux_tokenizer is not None
-        assert self._flux_tokenizer_2 is not None
-
-        cache_key = f"{prompt}|{batch_size}|{max_sequence_length}"
+        mode = self._flux_prompt_conditioning.mode
+        cache_key = self._flux_prompt_cache_key(
+            prompt,
+            batch_size,
+            max_sequence_length,
+        )
         cached = self._prompt_cache_get(self._flux_prompt_cache, cache_key, "Flux")
         if cached is not None:
             prompt_embeds, pooled = cached
-            return (
+            prompt_embeds, pooled = (
                 prompt_embeds.to(dtype=torch.bfloat16, device=device),
                 pooled.to(dtype=torch.bfloat16, device=device),
             )
+            return self._repeat_flux_conditioning(
+                prompt_embeds,
+                pooled,
+                batch_size,
+            )
 
-        clip_device = self._flux_clip_device or device
-        t5_device = self._flux_t5_device or device
-        clip_inputs = self._flux_tokenizer(
-            [prompt],
-            padding="max_length",
-            max_length=77,
-            truncation=True,
-            return_tensors="pt",
-        )
-        t5_inputs = self._flux_tokenizer_2(
-            [prompt],
-            padding="max_length",
-            max_length=max_sequence_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        clip_inputs = clip_inputs.to(clip_device)
-        t5_inputs = t5_inputs.to(t5_device)
         encode_t0 = time.perf_counter()
-        with torch.no_grad():
-            pooled = self._flux_text_encoder(clip_inputs.input_ids, output_hidden_states=False).pooler_output
-            prompt_embeds = self._flux_text_encoder_2(
-                t5_inputs.input_ids,
-                output_hidden_states=False,
-            )[0]
+        if mode == FLUX_CONDITIONING_UNIVERSAL:
+            if self._flux_universal_conditioner is None:
+                raise RuntimeError(
+                    "FLUX universal conditioner was not loaded before prompt encoding."
+                )
+            conditioning = self._flux_universal_conditioner.encode(prompt)
+            prompt_embeds, pooled = validate_flux_conditioning(
+                conditioning,
+                expected_batch=1,
+                expected_sequence_length=max_sequence_length,
+            )
+            source_devices = str(getattr(self._flux_universal_conditioner, "device", "unknown"))
+        else:
+            assert self._flux_text_encoder is not None
+            assert self._flux_text_encoder_2 is not None
+            assert self._flux_tokenizer is not None
+            assert self._flux_tokenizer_2 is not None
+
+            clip_device = self._flux_clip_device or device
+            t5_device = self._flux_t5_device or device
+            clip_inputs = self._flux_tokenizer(
+                [prompt],
+                padding="max_length",
+                max_length=77,
+                truncation=True,
+                return_tensors="pt",
+            )
+            t5_inputs = self._flux_tokenizer_2(
+                [prompt],
+                padding="max_length",
+                max_length=max_sequence_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            clip_inputs = clip_inputs.to(clip_device)
+            t5_inputs = t5_inputs.to(t5_device)
+            with torch.no_grad():
+                pooled = self._flux_text_encoder(
+                    clip_inputs.input_ids,
+                    output_hidden_states=False,
+                ).pooler_output
+                t5_kwargs = {
+                    "input_ids": t5_inputs.input_ids,
+                    "output_hidden_states": False,
+                }
+                if mode == FLUX_CONDITIONING_DISTILLT5_CONTROL:
+                    t5_kwargs["attention_mask"] = t5_inputs.attention_mask
+                prompt_embeds = self._flux_text_encoder_2(**t5_kwargs)[0]
+            source_devices = f"CLIP {clip_device}, sequence {t5_device}"
         logger.info(
-            "Flux prompt encoded in %.2fs (CLIP %s, T5 %s)",
+            "Flux prompt encoded in %.2fs (%s; mode=%s)",
             time.perf_counter() - encode_t0,
-            clip_device,
-            t5_device,
+            source_devices,
+            mode,
         )
         prompt_embeds = prompt_embeds.to(dtype=torch.bfloat16, device=device)
         pooled = pooled.to(dtype=torch.bfloat16, device=device)
@@ -1774,10 +2064,11 @@ class DiffusersBackend:
             ),
             "Flux",
         )
-        if batch_size > 1:
-            prompt_embeds = prompt_embeds.repeat(batch_size, 1, 1)
-            pooled = pooled.repeat(batch_size, 1)
-        return prompt_embeds, pooled
+        return self._repeat_flux_conditioning(
+            prompt_embeds,
+            pooled,
+            batch_size,
+        )
 
     def _encode_flux_prompt_fast(
         self,
@@ -1797,11 +2088,17 @@ class DiffusersBackend:
         Anything unexpected falls back to the original CPU encode, so this is
         never slower-than-broken: the worst case is today's behaviour.
         """
+        if self._flux_prompt_conditioning.mode != FLUX_CONDITIONING_TEACHER:
+            return self._encode_flux_prompt(
+                prompt,
+                device=device,
+                batch_size=batch_size,
+            )
         cuda = self.devices.device()
         t5_on_cpu = self._flux_t5_device is not None and self._flux_t5_device.type == "cpu"
 
         # Cached prompts don't benefit from the swap.
-        cache_key = f"{prompt}|{batch_size}|256"
+        cache_key = self._flux_prompt_cache_key(prompt, batch_size, 256)
         already_cached = self._flux_prompt_cache.get(cache_key) is not None
         if (
             cuda.type != "cuda"
@@ -2440,7 +2737,7 @@ class DiffusersBackend:
                         break
                     if warmed and time.perf_counter() - started >= budget_seconds:
                         break
-                    cache_key = f"{prompt}|1|256"
+                    cache_key = self._flux_prompt_cache_key(prompt, 1, 256)
                     if cache_key in self._flux_prompt_cache:
                         continue
                     self._encode_flux_prompt(prompt, device=device, batch_size=1)
@@ -4007,10 +4304,8 @@ class DiffusersBackend:
         self._refiner_active = None
         self._active_vae_id = None
         self._controlnet_cache.clear()
-        # The Flux CLIP-L + T5-XXL text encoders are identical across every Flux
-        # checkpoint, and T5 is ~9.8 GB to read from disk. When switching between
-        # two Flux transformers we keep them resident (T5 lives on CPU, CLIP is
-        # tiny) so the next generation skips a multi-second disk reload.
+        # The selected FLUX conditioner is shared across compatible FLUX
+        # transformers, so checkpoint switches may retain it for warm reuse.
         if not keep_flux_encoders:
             self._flux_text_encoder = None
             self._flux_text_encoder_2 = None
@@ -4019,6 +4314,8 @@ class DiffusersBackend:
             self._flux_component_paths = {}
             self._flux_clip_device = None
             self._flux_t5_device = None
+            self._flux_universal_conditioner = None
+            self._flux_conditioning_scope = None
             self._flux_prompt_cache.clear()
         self._flux2_prompt_cache.clear()
         self._z_image_prompt_cache.clear()
