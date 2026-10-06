@@ -1,0 +1,256 @@
+{
+  "unet": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "clip": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_w4a8.safetensors",
+      "type": "qwen_image"
+    },
+    "_meta": {
+      "title": "Load Text Encoder (Qwen3-VL 8B)"
+    }
+  },
+  "vae": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "_meta": {
+      "title": "Load RGBA VAE"
+    }
+  },
+  "kv_cache": {
+    "class_type": "QwenImage21Cache",
+    "inputs": {
+      "model": [
+        "unet",
+        0
+      ],
+      "device": "cpu",
+      "dtype": "int8"
+    },
+    "_meta": {
+      "title": "Qwen Image 2.1 Cache"
+    }
+  },
+  "ref_1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/ref_01.png"
+    },
+    "_meta": {
+      "title": "Reference image_1"
+    }
+  },
+  "ref_2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/ref_02.png"
+    },
+    "_meta": {
+      "title": "Reference image_2"
+    }
+  },
+  "ref_3": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/ref_03.png"
+    },
+    "_meta": {
+      "title": "Reference image_3"
+    }
+  },
+  "ref_4": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/ref_04.png"
+    },
+    "_meta": {
+      "title": "Reference image_4"
+    }
+  },
+  "ref_5": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/ref_05.png"
+    },
+    "_meta": {
+      "title": "Reference image_5"
+    }
+  },
+  "ref_6": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/ref_06.png"
+    },
+    "_meta": {
+      "title": "Reference image_6"
+    }
+  },
+  "ref_7": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/ref_07.png"
+    },
+    "_meta": {
+      "title": "Reference image_7"
+    }
+  },
+  "ref_8": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/ref_08.png"
+    },
+    "_meta": {
+      "title": "Reference image_8"
+    }
+  },
+  "ref_9": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/ref_09.png"
+    },
+    "_meta": {
+      "title": "Reference image_9"
+    }
+  },
+  "ref_10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/ref_10.png"
+    },
+    "_meta": {
+      "title": "Reference image_10"
+    }
+  },
+  "encode": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "clip",
+        0
+      ],
+      "prompt": "Compose a group photo: the person from <image1> in the center, the people from <image2> to <image6> around them, wearing the outfits from <image7> and <image8>, in the location from <image9>, lit like <image10>",
+      "negative_prompt": "",
+      "vae": [
+        "vae",
+        0
+      ],
+      "resolution": 1024,
+      "images.image_1": [
+        "ref_1",
+        0
+      ],
+      "images.image_2": [
+        "ref_2",
+        0
+      ],
+      "images.image_3": [
+        "ref_3",
+        0
+      ],
+      "images.image_4": [
+        "ref_4",
+        0
+      ],
+      "images.image_5": [
+        "ref_5",
+        0
+      ],
+      "images.image_6": [
+        "ref_6",
+        0
+      ],
+      "images.image_7": [
+        "ref_7",
+        0
+      ],
+      "images.image_8": [
+        "ref_8",
+        0
+      ],
+      "images.image_9": [
+        "ref_9",
+        0
+      ],
+      "images.image_10": [
+        "ref_10",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Text Encode Qwen Image 2.1"
+    }
+  },
+  "sample": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "kv_cache",
+        0
+      ],
+      "seed": 42,
+      "steps": 25,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": [
+        "encode",
+        0
+      ],
+      "negative": [
+        "encode",
+        1
+      ],
+      "latent_image": [
+        "encode",
+        2
+      ],
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "decode": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "sample",
+        0
+      ],
+      "vae": [
+        "vae",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "VAE Decode (RGBA aware)"
+    }
+  },
+  "save": {
+    "class_type": "SaveImageAdvanced",
+    "inputs": {
+      "images": [
+        "decode",
+        0
+      ],
+      "filename_prefix": "Qwen_image_2.1",
+      "format": "png",
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB"
+    },
+    "_meta": {
+      "title": "Save PNG (keeps alpha)"
+    }
+  }
+}

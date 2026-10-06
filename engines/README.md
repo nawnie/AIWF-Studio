@@ -25,6 +25,10 @@ missing.
 - `kohya`: LoRA training stack boundary.
 - `audio`: optional video-conditioned audio post-processing; MMAudio lives under
   `engines/audio/MMAudio` when installed.
+- `qwen_image_2_1`: Qwen-Image 2.1 Studio, a PySide6 desktop app that drives a
+  running ComfyUI for generate/edit (10 references, RGBA, LoRA stack, Fun
+  ControlNet) and wraps ai-toolkit / DiffSynth-Studio for LoRA training; the
+  optional ai-toolkit checkout lives under `engines/qwen_image_2_1/ai-toolkit`.
 - `pipeline_accel`: acceleration experiments; treat benchmark claims as invalid
   until reproduced with receipts.
 - NVIDIA sample SDK folders may exist locally for VideoFX work, but they are

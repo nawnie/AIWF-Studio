@@ -1,0 +1,125 @@
+{
+  "unet": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "clip": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image"
+    },
+    "_meta": {
+      "title": "Load Text Encoder (Qwen3-VL 8B)"
+    }
+  },
+  "vae": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "_meta": {
+      "title": "Load RGBA VAE"
+    }
+  },
+  "ref_1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "qwen21/portrait.png"
+    },
+    "_meta": {
+      "title": "Reference image_1"
+    }
+  },
+  "encode": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "clip",
+        0
+      ],
+      "prompt": "Change the jacket in <image1> to a light blue denim jacket, keep everything else",
+      "negative_prompt": "",
+      "vae": [
+        "vae",
+        0
+      ],
+      "resolution": 1024,
+      "images.image_1": [
+        "ref_1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Text Encode Qwen Image 2.1"
+    }
+  },
+  "sample": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "unet",
+        0
+      ],
+      "seed": 42,
+      "steps": 25,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": [
+        "encode",
+        0
+      ],
+      "negative": [
+        "encode",
+        1
+      ],
+      "latent_image": [
+        "encode",
+        2
+      ],
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "decode": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "sample",
+        0
+      ],
+      "vae": [
+        "vae",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "VAE Decode (RGBA aware)"
+    }
+  },
+  "save": {
+    "class_type": "SaveImageAdvanced",
+    "inputs": {
+      "images": [
+        "decode",
+        0
+      ],
+      "filename_prefix": "Qwen_image_2.1",
+      "format": "png",
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB"
+    },
+    "_meta": {
+      "title": "Save PNG (keeps alpha)"
+    }
+  }
+}

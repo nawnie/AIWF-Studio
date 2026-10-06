@@ -1,0 +1,6 @@
+# Qwen Image 2.1 Studio (desktop app). Python 3.10+.
+# Talks to ComfyUI over HTTP/WebSocket; no torch in this venv.
+PySide6>=6.7
+websocket-client>=1.7
+Pillow>=10.0
+PyYAML>=6.0

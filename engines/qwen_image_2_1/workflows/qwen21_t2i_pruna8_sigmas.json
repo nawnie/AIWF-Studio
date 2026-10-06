@@ -1,0 +1,155 @@
+{
+  "unet": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "clip": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image"
+    },
+    "_meta": {
+      "title": "Load Text Encoder (Qwen3-VL 8B)"
+    }
+  },
+  "vae": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "_meta": {
+      "title": "Load RGBA VAE"
+    }
+  },
+  "accel_lora": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "unet",
+        0
+      ],
+      "lora_name": "p_qwen_image_2.1_8step_v0.1.safetensors",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "Accelerator LoRA: Pruna 8-step (ManualSigmas)"
+    }
+  },
+  "encode": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "clip",
+        0
+      ],
+      "prompt": "A small corner bookstore at dusk, warm window light, a chalkboard sign reading \"New Arrivals\" in neat hand lettering, wet cobblestones reflecting the glow, 35mm photo, shallow depth of field",
+      "negative_prompt": ""
+    },
+    "_meta": {
+      "title": "Text Encode Qwen Image 2.1"
+    }
+  },
+  "latent": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "Empty latent (canvas)"
+    }
+  },
+  "sampler_select": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "sigmas": {
+    "class_type": "ManualSigmas",
+    "inputs": {
+      "sigmas": "1, 0.933333333, 0.857142857, 0.769230769, 0.666666667, 0.545454545, 0.4, 0.222222222, 0"
+    },
+    "_meta": {
+      "title": "Sigmas: Pruna 8-step (ManualSigmas)"
+    }
+  },
+  "sample": {
+    "class_type": "SamplerCustom",
+    "inputs": {
+      "model": [
+        "accel_lora",
+        0
+      ],
+      "add_noise": true,
+      "noise_seed": 42,
+      "cfg": 1.0,
+      "positive": [
+        "encode",
+        0
+      ],
+      "negative": [
+        "encode",
+        1
+      ],
+      "sampler": [
+        "sampler_select",
+        0
+      ],
+      "sigmas": [
+        "sigmas",
+        0
+      ],
+      "latent_image": [
+        "latent",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "SamplerCustom (distilled schedule)"
+    }
+  },
+  "decode": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "sample",
+        0
+      ],
+      "vae": [
+        "vae",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "VAE Decode (RGBA aware)"
+    }
+  },
+  "save": {
+    "class_type": "SaveImageAdvanced",
+    "inputs": {
+      "images": [
+        "decode",
+        0
+      ],
+      "filename_prefix": "Qwen_image_2.1",
+      "format": "png",
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB"
+    },
+    "_meta": {
+      "title": "Save PNG (keeps alpha)"
+    }
+  }
+}

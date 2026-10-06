@@ -1,0 +1,157 @@
+{
+  "unet": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "clip": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image"
+    },
+    "_meta": {
+      "title": "Load Text Encoder (Qwen3-VL 8B)"
+    }
+  },
+  "vae": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "_meta": {
+      "title": "Load RGBA VAE"
+    }
+  },
+  "pe_clip": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
+      "type": "qwen_image"
+    },
+    "_meta": {
+      "title": "Load prompt enhancer"
+    }
+  },
+  "prompt_enhancer": {
+    "class_type": "TextGenerate",
+    "inputs": {
+      "clip": [
+        "pe_clip",
+        0
+      ],
+      "prompt": "bookstore at dusk with a New Arrivals sign",
+      "max_length": 4096,
+      "sampling_mode": "on",
+      "sampling_mode.temperature": 1.0,
+      "sampling_mode.top_k": 20,
+      "sampling_mode.top_p": 0.95,
+      "sampling_mode.min_p": 0.0,
+      "sampling_mode.repetition_penalty": 1.0,
+      "sampling_mode.seed": 42,
+      "sampling_mode.presence_penalty": 1.5,
+      "thinking": false,
+      "use_default_template": true,
+      "mtp": "auto",
+      "system_prompt": "(see engines/qwen_image_2_1/prompts/pe_t2i_system.txt)"
+    },
+    "_meta": {
+      "title": "Prompt enhancer (TextGenerate)"
+    }
+  },
+  "encode": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "clip",
+        0
+      ],
+      "prompt": [
+        "prompt_enhancer",
+        0
+      ],
+      "negative_prompt": ""
+    },
+    "_meta": {
+      "title": "Text Encode Qwen Image 2.1"
+    }
+  },
+  "latent": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "Empty latent (canvas)"
+    }
+  },
+  "sample": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "unet",
+        0
+      ],
+      "seed": 42,
+      "steps": 25,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": [
+        "encode",
+        0
+      ],
+      "negative": [
+        "encode",
+        1
+      ],
+      "latent_image": [
+        "latent",
+        0
+      ],
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "decode": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "sample",
+        0
+      ],
+      "vae": [
+        "vae",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "VAE Decode (RGBA aware)"
+    }
+  },
+  "save": {
+    "class_type": "SaveImageAdvanced",
+    "inputs": {
+      "images": [
+        "decode",
+        0
+      ],
+      "filename_prefix": "Qwen_image_2.1",
+      "format": "png",
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB"
+    },
+    "_meta": {
+      "title": "Save PNG (keeps alpha)"
+    }
+  }
+}

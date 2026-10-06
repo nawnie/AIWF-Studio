@@ -32,6 +32,7 @@ project grows.
 
 - txt2img, img2img, and inpaint modes through the Diffusers backend.
 - Stable Diffusion 1.5, SDXL, SD3.5, Flux, Flux.2 Klein, Z-Image, Qwen Image, SANA, and related local checkpoint families where wired.
+- Qwen-Image 2.1 through the ComfyUI-backed desktop app in `engines/qwen_image_2_1` (generate, multi-reference edit, RGBA, LoRA training); see `docs/QWEN_IMAGE_2_1.md`.
 - sampler, scheduler, steps, CFG, seed, size, VAE, clip skip, and hires fix controls where supported by the selected family.
 - live preview, interrupt, continuous generation, and job history in Studio.
 - prompt styles, wildcards, prompt files, dynamic prompt syntax, and Compel support.

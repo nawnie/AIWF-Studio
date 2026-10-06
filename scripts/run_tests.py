@@ -56,6 +56,7 @@ SUITES: dict[str, tuple[str, ...]] = {
         "test_vram_budget.py",
         "test_worker_probe.py",
         "test_worker_tenant.py",
+        "test_qwen21_app.py",
     ),
     "generation": (
         "test_checkpoint_selection.py",

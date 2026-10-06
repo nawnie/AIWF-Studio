@@ -1,0 +1,146 @@
+{
+  "unet": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "clip": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image"
+    },
+    "_meta": {
+      "title": "Load Text Encoder (Qwen3-VL 8B)"
+    }
+  },
+  "vae": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "_meta": {
+      "title": "Load RGBA VAE"
+    }
+  },
+  "lora_1": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "unet",
+        0
+      ],
+      "lora_name": "my_qwen21_character_lora.safetensors",
+      "strength_model": 0.9
+    },
+    "_meta": {
+      "title": "LoRA 1: my_qwen21_character_lora.safetensors"
+    }
+  },
+  "lora_2": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "lora_1",
+        0
+      ],
+      "lora_name": "qwen-image-2.1-fix-1.0-comfy.safetensors",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "LoRA 2: qwen-image-2.1-fix-1.0-comfy.safetensors"
+    }
+  },
+  "encode": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "clip",
+        0
+      ],
+      "prompt": "ohwx_subject portrait, soft window light, 85mm",
+      "negative_prompt": ""
+    },
+    "_meta": {
+      "title": "Text Encode Qwen Image 2.1"
+    }
+  },
+  "latent": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "Empty latent (canvas)"
+    }
+  },
+  "sample": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "lora_2",
+        0
+      ],
+      "seed": 42,
+      "steps": 25,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": [
+        "encode",
+        0
+      ],
+      "negative": [
+        "encode",
+        1
+      ],
+      "latent_image": [
+        "latent",
+        0
+      ],
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "decode": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "sample",
+        0
+      ],
+      "vae": [
+        "vae",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "VAE Decode (RGBA aware)"
+    }
+  },
+  "save": {
+    "class_type": "SaveImageAdvanced",
+    "inputs": {
+      "images": [
+        "decode",
+        0
+      ],
+      "filename_prefix": "Qwen_image_2.1",
+      "format": "png",
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB"
+    },
+    "_meta": {
+      "title": "Save PNG (keeps alpha)"
+    }
+  }
+}

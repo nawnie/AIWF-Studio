@@ -71,6 +71,10 @@ engines/rtx-video-sdk/
 engines/audio/MMAudio/
 engines/ed2/EveryDream2trainer/
 engines/ltx/LTX-2/
+engines/qwen_image_2_1/ai-toolkit/
+engines/qwen_image_2_1/DiffSynth-Studio/
+engines/qwen_image_2_1/.scratch/
+engines/qwen_image_2_1/qwen21.settings.json
 training/EveryDream2trainer/
 
 # --- Local-only workspace bucket ---
