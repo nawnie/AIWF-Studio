@@ -1,0 +1,391 @@
+# Simple AI Chat model registry.
+#
+# VRAM estimate per model = weights_gib + mmproj_gib (if mmproj_on_gpu)
+#                         + ctx * kv_kib_per_token_f16 * kv_type factor + overhead_gib
+# Sizes are from the Hugging Face file listings (GiB). "est." marks guesses that
+# the ModelManager replaces with NVML measurements after the first load.
+#
+# residency: pinned | warm | transient | cpu      (see docs/ARCHITECTURE.md)
+# rank: lower wins when several enabled models provide the same capability.
+# Files live in models/<id>/<file>. launch keys become llama-server flags.
+# "# verify filename" marks community-GGUF names not yet checked against the repo.
+
+toggles:
+  thinking: true
+  reasoning_effort: medium      # Bonsai: only medium / xhigh are meaningful ("high" -> HTTP 500)
+  preserve_thinking: true       # disabled automatically inside tool loops on Bonsai
+  prompt_enhancer: true         # Qwen-Image-2.1 PE models before image gen/edit
+  speak_replies: false          # TTS every brain reply
+  moderation: false             # Qwen3Guard pass on input / fetched content
+  mtp: true                     # only affects mainline Qwen3.8 / Qwen3.5 profiles
+  dflash2: false                # third-party drafter for mainline Qwen3.8-27B
+  cloud_fallback: false         # Qwen Cloud API (Qwen3.8-Max, Omni-Flash, LiveTranslate)
+
+profiles:
+  chat:     {thinking: true,  reasoning_effort: medium, temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.05, presence_penalty: 0.0}
+  code:     {thinking: true,  reasoning_effort: xhigh,  temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.05, presence_penalty: 0.0}
+  research: {thinking: true,  reasoning_effort: xhigh,  temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.05, presence_penalty: 0.0}
+  game:     {thinking: true,  reasoning_effort: medium, temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.05, presence_penalty: 0.0}
+  fast:     {thinking: false, temperature: 0.7, top_p: 0.80, top_k: 20, min_p: 0.0, presence_penalty: 1.5}
+
+models:
+  # ---------------------------------------------------------------- brain
+  - id: bonsai2-27b
+    name: Ternary Bonsai 2 27B (Qwen3.8-27B, PTQ1_0)
+    backend: llama-prism
+    capabilities: [chat, reasoning, code, vision, tools]
+    residency: pinned
+    priority: 100
+    rank: 1
+    repo: prism-ml/Ternary-Bonsai-2-27B-gguf
+    files:
+      model: Ternary-Bonsai-2-27B-PTQ1_0.gguf      # PTQ1_0 decodes faster on Ada; PQ2_0 (6.71 GiB) prefills faster
+      mmproj: Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf
+    weights_gib: 5.54
+    mmproj_gib: 0.59
+    mmproj_on_gpu: true
+    kv_kib_per_token_f16: 64      # 16 full-attention layers x 4 KV heads x 256 dim
+    ctx: 32768
+    kv_type: f16
+    overhead_gib: 1.2             # compute buffers (248K vocab) + DeltaNet state, est.
+    launch:
+      n_gpu_layers: 99
+      flash_attn: "on"
+      parallel: 1
+      cache_ram: 24576            # avoid re-prefill every turn (Bonsai KNOWN_ISSUES)
+      n_predict: 16384            # thinking eats the output budget
+      reasoning: auto             # lets clients send reasoning_effort "none"
+      jinja: true
+    license: Apache-2.0
+    notes: Needs the PrismML llama.cpp fork. No speculative decoding for Bonsai 2 yet.
+
+  - id: qwen38-27b-iq3-mtp
+    name: Qwen3.8-27B UD-IQ3_XXS + MTP (mainline A/B profile)
+    backend: llama
+    capabilities: [chat, reasoning, code, vision, tools]
+    residency: warm
+    exclusive: true
+    enabled: false
+    priority: 95
+    rank: 2
+    repo: unsloth/Qwen3.8-27B-GGUF
+    files:
+      model: Qwen3.8-27B-UD-IQ3_XXS.gguf
+      draft: mtp-Qwen3.8-27B-Q4_0.gguf             # from the repo's MTP/ folder
+      mmproj: mmproj-F16.gguf
+    weights_gib: 11.46            # 10.18 model + 1.28 MTP sidecar
+    mmproj_gib: 0.86
+    mmproj_on_gpu: false
+    kv_kib_per_token_f16: 64
+    ctx: 32768
+    kv_type: q4_0
+    overhead_gib: 1.2
+    launch:
+      n_gpu_layers: 99
+      flash_attn: "on"
+      parallel: 1                 # speculative decoding gains vanish with parallel > 1
+      spec_type: draft-mtp
+      spec_draft_n_max: 2
+      spec_draft_model: "{draft}"
+      jinja: true
+    license: Apache-2.0
+    notes: Exclusive. Verify --spec-* flag names against the pinned llama.cpp build.
+
+  - id: qwen36-35b-a3b
+    name: Qwen3.6-35B-A3B (MoE speed brain, experts on CPU)
+    backend: llama
+    capabilities: [chat, reasoning, code, tools]
+    residency: warm
+    enabled: false
+    priority: 80
+    rank: 3
+    repo: unsloth/Qwen3.6-35B-A3B-GGUF
+    files:
+      model: Qwen3.6-35B-A3B-UD-Q4_K_M.gguf       # verify filename
+    weights_gib: 3.0              # GPU share with --n-cpu-moe, est.
+    ram_gib: 18.0
+    kv_kib_per_token_f16: 20
+    ctx: 32768
+    overhead_gib: 1.0
+    launch: {n_gpu_layers: 99, n_cpu_moe: 40, flash_attn: "on", parallel: 1, jinja: true}
+    license: Apache-2.0
+
+  # ---------------------------------------------------------------- router
+  - id: qwen35-0.8b
+    name: Qwen3.5-0.8B (router / titles / triage)
+    backend: llama
+    capabilities: [route, chat]
+    residency: warm
+    priority: 40
+    rank: 50
+    repo: unsloth/Qwen3.5-0.8B-GGUF
+    files:
+      model: Qwen3.5-0.8B-Q8_0.gguf
+    weights_gib: 0.76
+    ctx: 8192
+    overhead_gib: 0.4             # KV + compute, est.
+    launch: {n_gpu_layers: 99, flash_attn: "on", parallel: 1, jinja: true}
+    license: Apache-2.0
+
+  - id: qwen35-2b
+    name: Qwen3.5-2B (larger router)
+    backend: llama
+    capabilities: [route, chat]
+    residency: warm
+    enabled: false
+    priority: 40
+    rank: 51
+    repo: unsloth/Qwen3.5-2B-GGUF
+    files:
+      model: Qwen3.5-2B-Q4_K_M.gguf
+    weights_gib: 1.19
+    ctx: 8192
+    overhead_gib: 0.6
+    launch: {n_gpu_layers: 99, flash_attn: "on", parallel: 1, jinja: true}
+    license: Apache-2.0
+
+  # ---------------------------------------------------------------- voice
+  - id: qwen3-asr-0.6b
+    name: Qwen3-ASR-0.6B
+    backend: llama
+    capabilities: [asr]
+    residency: warm
+    priority: 60
+    rank: 1
+    repo: ggml-org/Qwen3-ASR-0.6B-GGUF
+    files:
+      model: Qwen3-ASR-0.6B-Q8_0.gguf
+      mmproj: mmproj-Qwen3-ASR-0.6B-Q8_0.gguf
+    weights_gib: 0.75
+    mmproj_gib: 0.20
+    ctx: 8192
+    overhead_gib: 0.3
+    launch: {n_gpu_layers: 99, parallel: 1}
+    license: Apache-2.0
+
+  - id: qwen3-asr-1.7b
+    name: Qwen3-ASR-1.7B
+    backend: llama
+    capabilities: [asr]
+    residency: warm
+    enabled: false
+    priority: 60
+    rank: 2
+    repo: ggml-org/Qwen3-ASR-1.7B-GGUF
+    files:
+      model: Qwen3-ASR-1.7B-Q8_0.gguf
+      mmproj: mmproj-Qwen3-ASR-1.7B-Q8_0.gguf
+    weights_gib: 2.02
+    mmproj_gib: 0.33
+    ctx: 8192
+    overhead_gib: 0.3
+    launch: {n_gpu_layers: 99, parallel: 1}
+    license: Apache-2.0
+
+  - id: qwen3-tts-1.7b-customvoice
+    name: Qwen3-TTS 1.7B CustomVoice (9 premium timbres + style control)
+    backend: qwentts
+    capabilities: [tts]
+    residency: warm
+    priority: 60
+    rank: 1
+    repo: Serveurperso/Qwen3-TTS-GGUF
+    files:
+      talker: qwen-talker-1.7b-customvoice-Q8_0.gguf
+      tokenizer: qwen-tokenizer-12hz-Q8_0.gguf
+    weights_gib: 2.21             # 1.94 talker + 0.27 tokenizer
+    overhead_gib: 0.4
+    license: Apache-2.0
+
+  - id: qwen3-tts-1.7b-voicedesign
+    name: Qwen3-TTS 1.7B VoiceDesign (voice from a text description)
+    backend: qwentts
+    capabilities: [tts]
+    residency: transient
+    enabled: false
+    priority: 60
+    rank: 2
+    repo: Serveurperso/Qwen3-TTS-GGUF
+    files:
+      talker: qwen-talker-1.7b-voicedesign-Q8_0.gguf
+      tokenizer: qwen-tokenizer-12hz-Q8_0.gguf
+    weights_gib: 2.21
+    overhead_gib: 0.4
+    license: Apache-2.0
+
+  - id: qwen3-tts-0.6b-customvoice
+    name: Qwen3-TTS 0.6B CustomVoice (low-VRAM voice)
+    backend: qwentts
+    capabilities: [tts]
+    residency: warm
+    enabled: false
+    priority: 60
+    rank: 3
+    repo: Serveurperso/Qwen3-TTS-GGUF
+    files:
+      talker: qwen-talker-0.6b-customvoice-Q8_0.gguf
+      tokenizer: qwen-tokenizer-12hz-Q8_0.gguf
+    weights_gib: 1.19
+    overhead_gib: 0.3
+    license: Apache-2.0
+
+  - id: qwen3-omni-30b-a3b
+    name: Qwen3-Omni-30B-A3B-Instruct (audio understanding, experts on CPU)
+    backend: llama
+    capabilities: [audio_understanding]
+    residency: transient
+    enabled: false
+    priority: 50
+    rank: 1
+    repo: Qwen/Qwen3-Omni-30B-A3B-Instruct     # use a community GGUF + mmproj
+    files:
+      model: Qwen3-Omni-30B-A3B-Instruct-Q4_K_M.gguf          # verify filename
+      mmproj: mmproj-Qwen3-Omni-30B-A3B-Instruct-Q8_0.gguf    # verify filename
+    weights_gib: 3.0              # GPU share with --n-cpu-moe, est.
+    mmproj_gib: 1.0               # est.
+    ram_gib: 17.0
+    ctx: 16384
+    overhead_gib: 1.5             # est.
+    launch: {n_gpu_layers: 99, n_cpu_moe: 48, parallel: 1}
+    license: Apache-2.0
+    notes: llama.cpp audio input is marked experimental.
+
+  # ---------------------------------------------------------------- memory / RAG (CPU)
+  - id: qwen3-embedding-0.6b
+    name: Qwen3-Embedding-0.6B
+    backend: llama
+    capabilities: [embed]
+    residency: cpu
+    priority: 30
+    rank: 1
+    repo: Qwen/Qwen3-Embedding-0.6B-GGUF
+    files:
+      model: Qwen3-Embedding-0.6B-Q8_0.gguf
+    weights_gib: 0.60
+    ram_gib: 1.0
+    ctx: 8192
+    launch: {n_gpu_layers: 0, embedding: true, pooling: last}
+    license: Apache-2.0
+
+  - id: qwen3-reranker-0.6b
+    name: Qwen3-Reranker-0.6B
+    backend: llama
+    capabilities: [rerank]
+    residency: cpu
+    priority: 30
+    rank: 1
+    repo: ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF
+    files:
+      model: qwen3-reranker-0.6b-q8_0.gguf
+    weights_gib: 0.60
+    ram_gib: 1.0
+    ctx: 8192
+    launch: {n_gpu_layers: 0, reranking: true}
+    license: Apache-2.0
+
+  - id: qwen3guard-gen-0.6b
+    name: Qwen3Guard-Gen-0.6B (moderation toggle)
+    backend: llama
+    capabilities: [moderate]
+    residency: cpu
+    priority: 30
+    rank: 1
+    repo: Qwen/Qwen3Guard-Gen-0.6B             # use a community GGUF
+    files:
+      model: Qwen3Guard-Gen-0.6B-Q8_0.gguf        # verify filename
+    weights_gib: 0.64
+    ram_gib: 1.0
+    ctx: 8192
+    launch: {n_gpu_layers: 0}
+    license: Apache-2.0
+
+  # ---------------------------------------------------------------- image
+  - id: qwen-image-2.1
+    name: Qwen-Image-2.1 (T2I + edit + RGBA, 7B DiT)
+    backend: sdcpp
+    capabilities: [image_gen, image_edit]
+    residency: transient
+    exclusive: true
+    priority: 70
+    rank: 1
+    repo: leejet/Qwen-Image-2.1-GGUF
+    files:
+      diffusion_model: qwen_image_2.1-Q8_0.gguf
+      vae: qwen_image_2.1_vae.safetensors        # from Qwen/Qwen-Image-2.1 vae/
+      text_encoder: Qwen3-VL-8B-Q4_K_M.gguf      # verify name in sd.cpp docs/qwen_image_2.1.md
+    weights_gib: 8.42             # 7.16 DiT Q8_0 + 1.26 VAE; text encoder offloaded after conditioning
+    overhead_gib: 2.5             # activations at ~2048px, est.
+    license: Qwen Research License (personal/research use)
+    notes: AIWF Studio's sd.cpp lane can serve this instead of a private sd-server.
+
+  - id: qwen-image-2.1-pe-t2i
+    name: Qwen-Image-2.1-PE-T2I (official prompt enhancer, Qwen3.5-VL 9B)
+    backend: llama
+    capabilities: [prompt_enhance]
+    residency: transient
+    priority: 65
+    rank: 1
+    repo: prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF
+    files:
+      model: Qwen-Image-2.1-PE-T2I.Q4_K_M.gguf
+    weights_gib: 5.24
+    ctx: 16384
+    overhead_gib: 1.0             # est.
+    launch: {n_gpu_layers: 99, flash_attn: "on", parallel: 1, jinja: true}
+    license: Qwen Research License
+    notes: Alternative with no swap - run the brain with this model's system_prompt.txt.
+
+  - id: qwen-image-2.1-pe-i2i
+    name: Qwen-Image-2.1-PE-I2I (official edit-prompt enhancer)
+    backend: llama
+    capabilities: [prompt_enhance_edit]
+    residency: transient
+    priority: 65
+    rank: 1
+    repo: prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF
+    files:
+      model: Qwen-Image-2.1-PE-I2I.Q4_K_M.gguf
+      mmproj: Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf
+    weights_gib: 5.24
+    mmproj_gib: 0.86
+    ctx: 16384
+    overhead_gib: 1.0             # est.
+    launch: {n_gpu_layers: 99, flash_attn: "on", parallel: 1, jinja: true}
+    license: Qwen Research License
+
+  # ---------------------------------------------------------------- simulation
+  - id: qwen-agentworld-35b-a3b
+    name: Qwen-AgentWorld-35B-A3B (environment world model, experts on CPU)
+    backend: llama
+    capabilities: [simulate]
+    residency: transient
+    priority: 50
+    rank: 1
+    repo: unsloth/Qwen-AgentWorld-35B-A3B-GGUF
+    files:
+      model: Qwen-AgentWorld-35B-A3B-UD-Q4_K_M.gguf
+    weights_gib: 3.0              # GPU share with all experts on CPU, est.
+    ram_gib: 18.0                 # experts (20.61 GiB file total)
+    kv_kib_per_token_f16: 20      # 10 full-attention layers x 2 KV heads x 256 dim
+    ctx: 131072                   # card advises >= 128K for multi-turn simulation
+    kv_type: q8_0
+    overhead_gib: 1.0
+    launch: {n_gpu_layers: 99, n_cpu_moe: 40, flash_attn: "on", parallel: 1, jinja: true}
+    license: Apache-2.0
+
+  - id: webworld-8b
+    name: WebWorld-8B (web page state simulator)
+    backend: llama
+    capabilities: [web_simulate]
+    residency: transient
+    enabled: false
+    priority: 45
+    rank: 1
+    repo: Qwen/WebWorld-8B                     # use a community GGUF
+    files:
+      model: WebWorld-8B-Q4_K_M.gguf              # verify filename
+    weights_gib: 4.7              # est.
+    ctx: 32768
+    overhead_gib: 1.5             # KV + compute, est.
+    launch: {n_gpu_layers: 99, flash_attn: "on", parallel: 1}
+    license: Apache-2.0

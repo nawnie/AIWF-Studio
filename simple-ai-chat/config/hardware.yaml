@@ -1,0 +1,25 @@
+# Hardware envelope for the VRAM planner.
+# Planning budget = total - reserved - safety margin (14.5 GiB on a 16 GB card).
+# Also set NVIDIA Control Panel -> "CUDA - Sysmem Fallback Policy" to
+# "Prefer No Sysmem Fallback" so over-commit fails loudly instead of silently
+# spilling into system RAM (see docs/RESEARCH.md section 1).
+
+gpu:
+  name: RTX 4070 Ti SUPER
+  total_gib: 16.0
+  reserved_gib: 1.0        # Windows WDDM, desktop, browser
+  safety_margin_gib: 0.5
+
+ram:
+  total_gib: 40
+  reserved_gib: 10         # OS + apps; the rest is page cache / MoE experts
+
+paths:
+  models_dir: models       # each model lives in models/<model-id>/
+  binaries:
+    llama-prism: bin/llama-prism/llama-server.exe   # PrismML fork, prism-b10709+ (CUDA 12.4 build)
+    llama: bin/llama/llama-server.exe               # mainline llama.cpp
+    sdcpp: bin/sdcpp/sd-server.exe                  # stable-diffusion.cpp
+    qwentts: bin/qwentts/qwentts-server.exe         # qwentts.cpp (name TBD in phase 3)
+
+base_port: 8100

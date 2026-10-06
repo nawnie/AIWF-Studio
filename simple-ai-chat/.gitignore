@@ -1,0 +1,7 @@
+# Local runtimes, weights and state for Simple AI Chat (never commit)
+bin/
+models/
+slots/
+logs/
+*.gguf
+*.safetensors
