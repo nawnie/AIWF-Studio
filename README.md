@@ -32,28 +32,47 @@
   <a href="https://www.aiembeddedsystems.com"><img src="https://img.shields.io/badge/Website-aiembeddedsystems.com-111111?logo=googlechrome&logoColor=white" alt="AI Embedded Systems website"></a>
 </p>
 
-AIWF Studio is focused on a usable local creative workspace first: model folders, prompt and workflow state, logs, receipts, typed API calls, and a React UI that can route to more than one backend. It is engineered by [AI Embedded Systems](https://www.aiembeddedsystems.com).
+AIWF Studio is an all-in-one local AI workstation: one project workspace for creating media, chatting with local models, organizing datasets, and preparing training runs across separately managed engines. It is engineered by [AI Embedded Systems](https://www.aiembeddedsystems.com).
 
-Diffusers is the current reference image backend because it gives the project a working local path today. It is not meant to be the whole product. The project direction is a stable frontend plus optional backend lanes such as stable-diffusion.cpp, ONNX, isolated video workers, and external local services.
+The product direction now pairs two interfaces over shared local services: a native Windows app for a focused Windows workstation experience, and a React web interface intended to make the workspace available across desktop platforms. The React interface is the existing public app; the native Windows app is an active prototype and is not part of the current public install yet. Both are designed to present one workspace over modular local engines rather than make users manage separate AI programs.
+
+The native prototype brings together GPU and engine status, local-model chat, image creation, dataset curation, project history, and training-plan preparation. Optional engines keep their own environments, so the all-in-one experience does not require every model stack to be installed in one runtime.
 
 This `main` branch is the stable sharing branch. It only advertises features intended for normal local use. Experimental work lives on `dev`.
 
 - Full feature inventory: [`docs/FEATURES.md`](docs/FEATURES.md)
 - LoRA pipeline direction: [`docs/LORA_PIPELINE_STRATEGY.md`](docs/LORA_PIPELINE_STRATEGY.md)
 
-## Start Here
+## One Workspace, Two Interfaces
 
-New users should start with **AIWF Studio Pro**. It is the cleaner React app and the steadier path for normal local use. Use **AIWF Studio Gradio Lab** for the broader beta workspace where pipeline experiments land first.
+### Native Windows app — prototype
 
-Both app tracks read and write the same model folders, output history, and settings. Switching between them is safe.
+The Windows-native prototype uses WinUI 3 and a shared local engine API. Its home screen brings GPU telemetry and engine status into the same workspace as chat, image creation, datasets, projects, and training-plan preparation. These screenshots were captured on October 7, 2026; the project selector has been generalized for privacy. They show the prototype UI, not a released Windows installer.
 
-### AIWF Studio Pro
+<p align="center">
+  <img src="docs/assets/aiwf-native-home-redacted.png" alt="AIWF Studio native Windows home with GPU telemetry and local engine status; project name generalized" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/aiwf-native-create-redacted.png" alt="AIWF Studio native Windows image creation workspace; project name generalized" width="49%">
+  <img src="docs/assets/aiwf-native-train-redacted.png" alt="AIWF Studio native Windows training plan workspace; project name generalized" width="49%">
+</p>
+
+The prototype is Windows-specific. Its scope and current limitations are documented in [`docs/NATIVE_WINDOWS_PROTOTYPE.md`](docs/NATIVE_WINDOWS_PROTOTYPE.md).
+
+### React web app — current public interface
+
+The existing **AIWF Studio Pro** is the React, TypeScript, and FastAPI app. The web interface is the route toward browser-based use across platforms through the shared API; this repository does not yet claim a released non-Windows deployment. Use **AIWF Studio Gradio Lab** for the broader experimental workspace.
+
+Pro and Gradio remain separate interfaces over shared model folders, output history, and settings.
+
+#### AIWF Studio Pro
 
 <p align="center">
   <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="96">
 </p>
 
-**Stable UI track.** Create and generate, Workflow builder, Model Families, Models, Data, Monitor, Logs, Settings, Video, Audio, Pipeline, and Project workspaces. The Create flow is the main release path; the larger workspace screens are being folded in without changing the core local generation route.
+**Current public UI.** Create and generate, Workflow builder, Model Families, Models, Data, Monitor, Logs, Settings, Video, Audio, Pipeline, and Project workspaces. The Create flow remains the main release path; workspace maturity varies by screen.
 
 ```bat
 AIWF Studio Pro.bat
@@ -65,20 +84,7 @@ python launch_pro.py
 
 Early testers should keep [`docs/TESTER_USER_GUIDE.md`](docs/TESTER_USER_GUIDE.md) open. It covers install options, hidden terminals, recovery buttons, and error reports.
 
-<p align="center">
-  <img src="docs/assets/aiwf-pro-video-workspace.png" alt="AIWF Studio Pro video workspace" width="100%">
-</p>
-
-<p align="center">
-  <img src="docs/assets/aiwf-pro-audio-studio.png" alt="AIWF Studio Pro audio workspace" width="49%">
-  <img src="docs/assets/aiwf-pro-pipeline-blocks.png" alt="AIWF Studio Pro pipeline blocks workspace" width="49%">
-</p>
-
-<p align="center">
-  <img src="docs/assets/aiwf-pro-startup-checks.png" alt="AIWF Studio Pro startup checks" width="75%">
-</p>
-
-### AIWF Studio Gradio Lab
+#### AIWF Studio Gradio Lab
 
 <p align="center">
   <img src="static/icons/aiwf-studio-gradio-lab.png" alt="AIWF Studio Gradio Lab icon" width="96">
