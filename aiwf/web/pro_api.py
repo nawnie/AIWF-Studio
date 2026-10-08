@@ -6346,6 +6346,18 @@ def _audio_service(ctx: Any):
     return service
 
 
+# Commercial-use policy for audio (aiwf/services/audio_licenses.py): a non-commercial model asked
+# for outside research mode is refused with 403 and a sentence naming its licence, instead of the
+# generic "choose an available model" that a filtered picker would otherwise produce.
+def _raise_if_audio_license_blocked(ctx: Any, model_id: str) -> None:
+    from aiwf.services import audio_licenses
+
+    # the person's setting is the source of truth, whichever audio service object is in use
+    research = bool(getattr(getattr(ctx, "settings", None), "allow_noncommercial_audio_models", False))
+    if model_id and not audio_licenses.allowed(model_id, research_mode=research):
+        raise HTTPException(status_code=403, detail=audio_licenses.blocked_message(model_id))
+
+
 class ProVideoLabRunPayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -6407,6 +6419,12 @@ class ProAudioGeneratePayload(BaseModel):
         if self.kind not in {"music", "sfx"}:
             raise ValueError("kind must be 'music' or 'sfx'; use Video Lab for video-conditioned audio.")
         return self
+
+
+class ProAudioResearchModePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    enabled: bool
 
 
 class ProAudioPreparePayload(BaseModel):
@@ -6819,9 +6837,17 @@ def _video_lab_run_audio(ctx: Any, src: Path, payload: ProVideoLabRunPayload) ->
     service = _audio_service(ctx)
     available_choices = getattr(service, "available_video_audio_model_choices", service.video_audio_model_choices)
     video_audio_choices = [model_id for _, model_id in (available_choices() or [])]
+    music_choices = [model_id for _, model_id in (service.music_model_choices() or [])]
     model_id = (payload.audio_model or "").strip() or (
-        video_audio_choices[0] if video_audio_choices else "facebook/musicgen-small"
+        video_audio_choices[0] if video_audio_choices else music_choices[0] if music_choices else ""
     )
+    if not model_id:
+        raise HTTPException(
+            status_code=409,
+            detail="No commercial-safe soundtrack model is installed yet. Install one in Audio setup, "
+                   "or turn on research mode in Audio settings for non-commercial work.",
+        )
+    _raise_if_audio_license_blocked(ctx, model_id)
     kind = "video_audio" if model_id.startswith("mmaudio:") else "music"
     route_id = (
         f"audio.video.audio.{model_id}"
@@ -7134,6 +7160,10 @@ def _audio_status_payload(ctx: Any, *, deep: bool = False) -> dict[str, Any]:
                 ),
             )
             choice["routeStatus"] = lifecycle.get("status")
+            # every offered model says what its licence allows (pickers label non-commercial ones)
+            from aiwf.services import audio_licenses
+
+            choice["license"] = audio_licenses.license_for(model_id)
             choice["resident"] = lifecycle.get("resident")
             setup_route_key = (
                 f"pro.audio.musicgen.{model_id.removeprefix('facebook/musicgen-')}"
@@ -7166,6 +7196,7 @@ def _generate_audio_response(ctx: Any, payload: ProAudioGeneratePayload) -> dict
     if payload.kind not in {"music", "sfx"}:
         raise HTTPException(status_code=422, detail="Audio kind must be 'music' or 'sfx'.")
     service = _audio_service(ctx)
+    _raise_if_audio_license_blocked(ctx, payload.model_id)
     model_choices = service.music_model_choices() if payload.kind == "music" else service.sfx_model_choices()
     allowed_model_ids = {str(model_id) for _, model_id in model_choices}
     if payload.model_id not in allowed_model_ids:
@@ -8932,6 +8963,24 @@ def build_router(ctx: Any) -> APIRouter:
             headers={"Cache-Control": "no-store"},
         )
 
+    # research mode for audio: off by default; on brings back non-commercial models (MusicGen,
+    # MMAudio), labeled. Only the person at this PC can change it, never a paired phone or agent.
+    @router.post("/audio/research-mode")
+    def audio_research_mode(payload: ProAudioResearchModePayload, request: Request):
+        _require_loopback(request)
+        settings = getattr(ctx, "settings", None)
+        save_settings = getattr(ctx, "save_settings", None)
+        if settings is None or not callable(save_settings):
+            raise HTTPException(status_code=500, detail="User settings are unavailable.")
+        previous = bool(getattr(settings, "allow_noncommercial_audio_models", False))
+        settings.allow_noncommercial_audio_models = bool(payload.enabled)
+        try:
+            save_settings()
+        except Exception as exc:
+            settings.allow_noncommercial_audio_models = previous
+            raise HTTPException(status_code=500, detail=f"Could not save the research-mode setting: {exc}") from exc
+        return _audio_status_payload(ctx, deep=False)
+
     @router.post("/audio/setup/minimum")
     def audio_setup_minimum():
         from aiwf.services.audio import AudioUnavailable
@@ -8990,6 +9039,7 @@ def build_router(ctx: Any) -> APIRouter:
         if _pro_video_job_running(ctx) or _image_generation_running(ctx) or _image_generation_pending(ctx) or _pro_workflow_runs_active(ctx):
             raise HTTPException(status_code=409, detail="Wait for active image, video, or workflow work to finish before preparing an audio model.")
         service = _audio_service(ctx)
+        _raise_if_audio_license_blocked(ctx, payload.model_id)
         choices = service.music_model_choices() if payload.kind == "music" else service.sfx_model_choices()
         if payload.model_id not in {str(model_id) for _, model_id in choices}:
             raise HTTPException(status_code=422, detail=f"Choose a supported {payload.kind} model.")

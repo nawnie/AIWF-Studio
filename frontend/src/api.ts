@@ -970,6 +970,16 @@ export interface ProAudioModelChoice {
   routeStatus?: string
   resident?: boolean | null
   setupRoute?: ProModelOption['setupRoute']
+  // what the model's licence allows (aiwf/services/audio_licenses.py)
+  license?: ProAudioLicense
+}
+
+export interface ProAudioLicense {
+  license: string
+  commercial: 'yes' | 'conditional' | 'no'
+  conditions: string
+  provenance: string
+  source: string
 }
 
 export interface ProAudioStatus {
@@ -985,6 +995,8 @@ export interface ProAudioStatus {
   message: string
   estimatedDownload: string
   licenseNotice: string
+  // false = commercial-safe mode: non-commercial models are hidden and refused
+  researchMode: boolean
   defaults: {
     music: string
     sfx: string
@@ -1172,10 +1184,12 @@ function normalizeAudioStatus(value: unknown): ProAudioStatus {
     message: readString(record, ['message'], 'Audio setup status is unavailable.'),
     estimatedDownload: readString(record, ['estimatedDownload', 'estimated_download'], ''),
     licenseNotice: readString(record, ['licenseNotice', 'license_notice'], ''),
+    researchMode: readBoolean(record, ['researchMode', 'research_mode'], false),
+    // no fallback model: in commercial-safe mode the server offers none until a commercial model is installed
     defaults: {
-      music: readString(defaults, ['music'], 'facebook/musicgen-small'),
-      sfx: readString(defaults, ['sfx'], 'mmaudio:small_16k'),
-      videoAudio: readString(defaults, ['videoAudio', 'video_audio'], 'mmaudio:small_16k'),
+      music: readString(defaults, ['music'], ''),
+      sfx: readString(defaults, ['sfx'], ''),
+      videoAudio: readString(defaults, ['videoAudio', 'video_audio'], ''),
     },
     models: {
       music: normalizeAudioModelChoices(record.models, 'music'),
@@ -1211,9 +1225,36 @@ function normalizeAudioModelChoices(value: unknown, key: 'music' | 'sfx' | 'vide
       ...(typeof choice.routeStatus === 'string' ? { routeStatus: choice.routeStatus } : {}),
       ...(typeof choice.resident === 'boolean' ? { resident: choice.resident } : ('resident' in choice && choice.resident === null ? { resident: null } : {})),
       ...(normalizeSetupRoute(choice.setupRoute) ? { setupRoute: normalizeSetupRoute(choice.setupRoute) } : {}),
+      ...(normalizeAudioLicense(choice.license) ? { license: normalizeAudioLicense(choice.license) } : {}),
     }
   }).filter((choice) => choice.label && choice.id)
   return choices
+}
+
+function normalizeAudioLicense(value: unknown): ProAudioLicense | undefined {
+  const record = asRecord(value)
+  const license = readString(record, ['license'], '')
+  if (!license) return undefined
+  const commercial = readString(record, ['commercial'], 'no')
+  return {
+    license,
+    commercial: commercial === 'yes' || commercial === 'conditional' ? commercial : 'no',
+    conditions: readString(record, ['conditions'], ''),
+    provenance: readString(record, ['provenance'], ''),
+    source: readString(record, ['source'], ''),
+  }
+}
+
+// Research mode lets non-commercial audio models (MusicGen, MMAudio) run, labeled. The server
+// accepts this only from the local machine.
+export async function setProAudioResearchMode(enabled: boolean, signal?: AbortSignal): Promise<ProAudioStatus> {
+  const payload = await requestJson('/api/pro/audio/research-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+    signal,
+  })
+  return normalizeAudioStatus(payload)
 }
 
 export async function fetchProAudioStatus(signal?: AbortSignal): Promise<ProAudioStatus> {

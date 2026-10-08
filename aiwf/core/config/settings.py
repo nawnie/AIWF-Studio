@@ -171,6 +171,9 @@ class UserSettings(BaseSettings):
     vsr_output_subdir: str = "vsr-videos"
     audio_output_subdir: str = "audio"
     audio_video_output_subdir: str = "audio-videos"
+    # Research mode for audio: when False (the default) only models whose licences allow
+    # commercial use are offered or run (see aiwf/services/audio_licenses.py).
+    allow_noncommercial_audio_models: bool = False
     workflow_output_subdir: str = "workflow-images"
     workflows_dir: str = "workflows"
     upscale_tile_size: int = Field(default=256, ge=0, le=2048)

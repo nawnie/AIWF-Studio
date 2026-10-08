@@ -17,6 +17,14 @@ _audio_headroom_issue = AudioGenerationService._audio_headroom_issue
 
 
 @pytest.fixture(autouse=True)
+def _research_mode_for_noncommercial_model_tests(monkeypatch):
+    # This module tests MusicGen and MMAudio internals. Both are CC-BY-NC 4.0, so Studio offers
+    # them only in research mode (aiwf/services/audio_licenses.py); UserSettings() reads this
+    # variable. The commercial-safe default has its own tests in test_audio_licenses.py.
+    monkeypatch.setenv("ALLOW_NONCOMMERCIAL_AUDIO_MODELS", "1")
+
+
+@pytest.fixture(autouse=True)
 def _keep_audio_route_tests_independent_of_workstation_vram(monkeypatch):
     monkeypatch.setattr(AudioGenerationService, "_audio_headroom_issue", lambda self, *args, **kwargs: None)
 

@@ -416,7 +416,7 @@ scripts/bootstrap_mmaudio.ps1
 
 MMAudio is optional and soft-fails when not installed so the visual video output is preserved.
 
-Important license note: MMAudio code is MIT licensed, but the released checkpoints are CC-BY-NC 4.0, so this route should be treated as non-commercial unless you have separate permission.
+Important license note: MMAudio code is MIT licensed, but the released checkpoints are CC-BY-NC 4.0, so Studio offers this route only in audio research mode (off by default) and labels it non-commercial.
 
 ## Remote Access
 
@@ -455,7 +455,8 @@ This is a practical release checklist, not legal advice.
 - Users are responsible for the licenses of checkpoints, LoRAs, VAEs, ControlNet models, SAM weights, Wan files, and audio models they install.
 - Stable Diffusion 3.5 model weights are released under Stability AI's Community License and may require Hugging Face gate acceptance before download.
 - NVIDIA Video Effects / VFX SDK support is optional. AIWF does not vendor or redistribute NVIDIA SDK binaries or models.
-- MMAudio checkpoints are CC-BY-NC 4.0. Do not present MMAudio-backed audio as commercial-safe without separate permission.
+- **Audio is commercial-safe by default.** Studio offers and runs only audio models whose licences allow commercial use, recorded with their source and check date in `aiwf/services/audio_licenses.py`, and every audio output carries its model's licence. MusicGen and MMAudio (CC-BY-NC 4.0) are hidden and refused unless you turn on **Allow non-commercial research models** in the Audio workspace; their output must not be used commercially. Commercial replacements are being added: ACE-Step 1.5 (MIT) for music, MOSS-SoundEffect v2.0 (Apache-2.0) for sound effects, and a two-step video soundtrack built on it.
+- The Audio Lab DSP chain currently uses Pedalboard (GPL-3.0), which the setup script installs on the user's PC rather than shipping it; it is being replaced with permissive SciPy/NumPy processing so the audio engine can be bundled.
 - InsightFace code is MIT, but InsightFace-trained models and the inswapper face-swap model require separate license care for non-local or commercial use. Face swapping must only be used with consent and applicable-law compliance.
 - Segment Anything is Apache-2.0; AIWF's segment/inpaint path is clean-room integration, with attribution kept in `docs/ATTRIBUTION.md`.
 

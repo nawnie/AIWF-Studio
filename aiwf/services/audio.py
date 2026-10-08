@@ -24,6 +24,7 @@ from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.audio import AudioGenerationOptions, AudioGenerationResult, AudioMuxResult
 from aiwf.core.domain.engine import EngineTenant
 from aiwf.infrastructure.video.processing import VideoProcessor, _resolve_ffmpeg
+from aiwf.services import audio_licenses
 from aiwf.services.model_files import configured_model_roots
 from aiwf.services.route_lifecycle import support_revision
 
@@ -203,6 +204,10 @@ class AudioUnavailable(RuntimeError):
     """Raised when optional audio generation dependencies or tools are missing."""
 
 
+class AudioLicenseBlocked(AudioUnavailable):
+    """Raised when a non-commercial model is requested while research mode is off."""
+
+
 class AudioGenerationService:
     """Optional local text-to-audio, video-conditioned audio, and video muxing."""
 
@@ -247,13 +252,34 @@ class AudioGenerationService:
             "pins an older PyTorch stack. Use the minimum setup button before the first audio run."
         )
 
+    # ---- commercial-use policy (aiwf/services/audio_licenses.py) ----------------------------------
+    # By default only models whose licences allow commercial use are offered or run. Research mode
+    # (UserSettings.allow_noncommercial_audio_models) brings back the non-commercial ones, labeled.
+    def research_mode(self) -> bool:
+        return bool(getattr(self.settings, "allow_noncommercial_audio_models", False))
+
+    def _require_licensed(self, model_id: str) -> None:
+        if not audio_licenses.allowed(model_id, research_mode=self.research_mode()):
+            raise AudioLicenseBlocked(audio_licenses.blocked_message(model_id))
+
+    def _offered(self, choices: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        # this loop drops models the policy does not allow and marks non-commercial ones in research mode
+        offered = []
+        for label, model_id in choices:
+            if not audio_licenses.allowed(model_id, research_mode=self.research_mode()):
+                continue
+            if not audio_licenses.commercial_ok(model_id):
+                label = f"{label} · non-commercial ({audio_licenses.license_for(model_id)['license']})"
+            offered.append((label, model_id))
+        return offered
+
     def music_model_choices(self) -> list[tuple[str, str]]:
-        return [
+        return self._offered([
             ("MusicGen small (minimum)", "facebook/musicgen-small"),
             ("MusicGen medium", "facebook/musicgen-medium"),
             ("MusicGen melody", "facebook/musicgen-melody"),
             ("MusicGen stereo small", "facebook/musicgen-stereo-small"),
-        ]
+        ])
 
     def sfx_model_choices(self) -> list[tuple[str, str]]:
         # AudioGen currently has no isolated in-app AudioCraft installer or
@@ -261,13 +287,13 @@ class AudioGenerationService:
         return self.video_audio_model_choices()
 
     def video_audio_model_choices(self) -> list[tuple[str, str]]:
-        return [
+        return self._offered([
             ("MMAudio small 16k (minimum)", "mmaudio:small_16k"),
             ("MMAudio large 44k v2 (install separately)", "mmaudio:large_44k_v2"),
             ("MMAudio large 44k (install separately)", "mmaudio:large_44k"),
             ("MMAudio medium 44k (install separately)", "mmaudio:medium_44k"),
             ("MMAudio small 44k (install separately)", "mmaudio:small_44k"),
-        ]
+        ])
 
     def available_video_audio_model_choices(self) -> list[tuple[str, str]]:
         return [
@@ -340,13 +366,23 @@ class AudioGenerationService:
             "muxReady": mux_ready,
             "message": message,
             "estimatedDownload": "Up to about 10 GB on a clean install; existing files are reused.",
+            # the commercial-use policy, so every surface can show it the same way
+            "researchMode": self.research_mode(),
             "licenseNotice": (
-                "MusicGen and MMAudio released model weights are CC-BY-NC 4.0 / non-commercial research assets."
+                "Research mode is on: non-commercial models (MusicGen, MMAudio; CC-BY-NC 4.0) are available and "
+                "labeled. Do not use their output commercially."
+                if self.research_mode() else
+                "Commercial-safe mode: only audio models whose licences allow commercial use are offered. "
+                "Non-commercial models (MusicGen, MMAudio) are hidden; Audio settings can enable them for research."
             ),
+            "licenses": {
+                model_id: audio_licenses.license_for(model_id)
+                for model_id in ("facebook/musicgen-small", "mmaudio:small_16k")
+            },
             "defaults": {
-                "music": "facebook/musicgen-small",
-                "sfx": "mmaudio:small_16k",
-                "videoAudio": "mmaudio:small_16k",
+                "music": "facebook/musicgen-small" if self.research_mode() else "",
+                "sfx": "mmaudio:small_16k" if self.research_mode() else "",
+                "videoAudio": "mmaudio:small_16k" if self.research_mode() else "",
             },
             "components": [
                 *[
@@ -407,6 +443,7 @@ class AudioGenerationService:
 
     def install_musicgen_variant(self, variant: str) -> dict[str, Any]:
         """Install one allowlisted MusicGen model into Studio's local model tree."""
+        self._require_licensed(_MUSICGEN_VARIANTS.get(str(variant or "").strip(), "facebook/musicgen-"))
         normalized = str(variant or "").strip()
         repo_id = _MUSICGEN_VARIANTS.get(normalized)
         if not repo_id:
@@ -446,6 +483,7 @@ class AudioGenerationService:
     def install_mmaudio_variant(self, variant: str) -> dict[str, Any]:
         """Download one allowlisted MMAudio checkpoint into the isolated engine."""
         normalized = str(variant or "").strip()
+        self._require_licensed(f"mmaudio:{normalized}")
         if normalized not in _MMAUDIO_INSTALLABLE_VARIANTS:
             raise AudioUnavailable(f"Unsupported MMAudio variant: {normalized or '(empty)'}")
         if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
@@ -507,6 +545,9 @@ class AudioGenerationService:
                 str(self.flags.resolved_models_dir()),
                 "--json",
             ]
+            # a commercial install never downloads the non-commercial MusicGen/MMAudio weights
+            if not self.research_mode():
+                command.append("--commercial-only")
             command.extend(
                 argument
                 for model_root in self.flags.resolved_extra_model_dirs()
@@ -543,6 +584,11 @@ class AudioGenerationService:
     def video_audio_status(self) -> str:
         status = self.setup_status(deep=False)
         root = self._mmaudio_root()
+        if not self.research_mode():
+            return (
+                "Commercial-safe mode: MMAudio (CC-BY-NC 4.0) is not used. Turn on research mode in Audio settings "
+                "to use it for non-commercial work."
+            )
         if status["videoAudioReady"]:
             return (
                 f"Video audio ready: MMAudio Small 16 kHz at {root}. "
@@ -618,6 +664,7 @@ class AudioGenerationService:
         normalized_model = str(model_id or "").strip()
         if normalized_kind not in {"music", "sfx"}:
             raise AudioUnavailable("Audio kind must be 'music' or 'sfx'.")
+        self._require_licensed(normalized_model)
         choices = self.music_model_choices() if normalized_kind == "music" else self.sfx_model_choices()
         if normalized_model not in {model for _, model in choices}:
             raise AudioUnavailable(f"Choose a supported {normalized_kind} model.")
@@ -670,6 +717,7 @@ class AudioGenerationService:
             raise AudioUnavailable("Enter an audio prompt first.")
         if str(options.kind or "").lower() == "video_audio":
             raise AudioUnavailable("Video-conditioned audio needs a target video.")
+        self._require_licensed(options.model_id)
         mmaudio_text = options.kind == "sfx" and str(options.model_id or "").startswith("mmaudio:")
         suffix = ".flac" if mmaudio_text else ".wav"
         dest = Path(output_path) if output_path else self.output_path(stem=self._safe_stem(prompt), suffix=suffix)
@@ -690,7 +738,10 @@ class AudioGenerationService:
                 finally:
                     self._park_cached_model_on_cpu()
 
-        infotext = f"Audio {options.kind}: {options.model_id}, {options.duration_seconds:.1f}s"
+        infotext = (
+            f"Audio {options.kind}: {options.model_id}, {options.duration_seconds:.1f}s, "
+            f"licence: {audio_licenses.short_label(options.model_id)}"
+        )
         return AudioGenerationResult(
             output_path=str(dest),
             prompt=prompt,
@@ -700,6 +751,7 @@ class AudioGenerationService:
             sample_rate=sample_rate,
             message=f"Saved {options.duration_seconds:.1f}s audio -> {dest}",
             infotext=infotext,
+            license=audio_licenses.license_for(options.model_id),
         )
 
     def generate_for_video(
@@ -745,6 +797,7 @@ class AudioGenerationService:
         src_video = Path(video_path)
         if not src_video.is_file():
             raise AudioUnavailable(f"Video not found: {src_video}")
+        self._require_licensed(options.model_id)
         stem = f"{src_video.stem}_{self._safe_stem(prompt)}"
         dest = Path(output_path) if output_path else self.output_path(stem=stem, suffix=".flac")
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -756,7 +809,8 @@ class AudioGenerationService:
 
         infotext = (
             f"Video audio {options.model_id}: {options.duration_seconds:.1f}s, "
-            f"steps {int(options.steps)}, CFG {float(options.cfg_coef):.2f}"
+            f"steps {int(options.steps)}, CFG {float(options.cfg_coef):.2f}, "
+            f"licence: {audio_licenses.short_label(options.model_id)}"
         )
         return AudioGenerationResult(
             output_path=str(dest),
@@ -767,6 +821,7 @@ class AudioGenerationService:
             sample_rate=sample_rate,
             message=f"Saved video-conditioned audio -> {dest}",
             infotext=infotext,
+            license=audio_licenses.license_for(options.model_id),
         )
 
     @staticmethod

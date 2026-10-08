@@ -25,6 +25,8 @@ function audioStatus(installed = false, musicInstalled = false, minimumReady = t
     message: 'Minimum Audio files and dependencies are detected; runtime checks have not run.',
     estimatedDownload: 'Existing files are reused.',
     licenseNotice: 'Test only.',
+    // MusicGen and MMAudio are offered only in research mode (they are CC-BY-NC 4.0)
+    researchMode: true,
     defaults: { music: 'facebook/musicgen-small', sfx: 'mmaudio:small_16k', videoAudio: 'mmaudio:small_16k' },
     models: {
       music: [

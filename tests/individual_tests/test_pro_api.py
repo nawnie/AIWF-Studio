@@ -358,7 +358,10 @@ class _Vsr:
 def _ctx(tmp_path: Path):
     output_dir = tmp_path / "outputs"
     flags = RuntimeFlags(data_dir=tmp_path, output_dir=output_dir)
-    settings = UserSettings(default_sampler="euler_a", default_width=640, default_height=768)
+    # research mode keeps the existing MusicGen/MMAudio route tests meaningful; those models are
+    # CC-BY-NC 4.0 and hidden by default (the default is tested in test_audio_licenses.py)
+    settings = UserSettings(default_sampler="euler_a", default_width=640, default_height=768,
+                            allow_noncommercial_audio_models=True)
     controlnet = SimpleNamespace(
         list_models=lambda: [SimpleNamespace(id="control-a")],
         list_modules=lambda: ["none", "canny"],

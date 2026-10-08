@@ -260,24 +260,28 @@ def main() -> int:
     parser.add_argument("--models-dir", default="")
     parser.add_argument("--extra-model-dir", action="append", default=[])
     parser.add_argument("--json", action="store_true")
+    # Studio passes this unless the person turned on research mode: MusicGen and MMAudio are
+    # CC-BY-NC 4.0, so a commercial install never downloads them (aiwf/services/audio_licenses.py).
+    parser.add_argument("--commercial-only", action="store_true",
+                        help="Skip non-commercial models (MusicGen, MMAudio); install only commercially licensed parts.")
     args = parser.parse_args()
 
     root = Path(args.repo).expanduser().resolve()
     sys.path.insert(0, str(root))
     models_dir = Path(args.models_dir).expanduser().resolve() if args.models_dir else root / "models"
     model_roots = _safe_model_roots(models_dir, [Path(value) for value in args.extra_model_dir])
-    _ensure_main_dependencies()
-    musicgen = _download_musicgen(root, models_dir, [Path(value) for value in args.extra_model_dir])
-    mmaudio, mmaudio_python = _install_mmaudio(root, model_roots)
-    audio_lab_python = _install_audio_lab(root)
-    payload = {
-        "ok": True,
-        "musicgen": str(musicgen),
-        "mmaudio": str(mmaudio),
-        "mmaudio_python": str(mmaudio_python),
-        "audio_lab_python": str(audio_lab_python),
-        "license": "MusicGen and MMAudio released model weights are CC-BY-NC 4.0 / non-commercial research assets.",
-    }
+    payload: dict[str, object] = {"ok": True, "commercial_only": bool(args.commercial_only)}
+    if not args.commercial_only:
+        _ensure_main_dependencies()
+        musicgen = _download_musicgen(root, models_dir, [Path(value) for value in args.extra_model_dir])
+        mmaudio, mmaudio_python = _install_mmaudio(root, model_roots)
+        payload.update({
+            "musicgen": str(musicgen),
+            "mmaudio": str(mmaudio),
+            "mmaudio_python": str(mmaudio_python),
+            "license": "MusicGen and MMAudio released model weights are CC-BY-NC 4.0 / non-commercial research assets.",
+        })
+    payload["audio_lab_python"] = str(_install_audio_lab(root))
     if args.json:
         print(json.dumps(payload))
     else:

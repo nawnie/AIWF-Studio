@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -29,6 +30,9 @@ class AudioGenerationResult(BaseModel):
     sample_rate: int = 0
     message: str = ""
     infotext: str = ""
+    # the model's licence record at render time (aiwf/services/audio_licenses.py), so every output
+    # can say whether it may be used commercially
+    license: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def path(self) -> str:

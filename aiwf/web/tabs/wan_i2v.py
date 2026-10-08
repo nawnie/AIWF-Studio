@@ -1150,7 +1150,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                                 audio_model = gr.Dropdown(
                                     label="Audio model",
                                     choices=audio_video_models,
-                                    value=audio_video_models[0][1] if audio_video_models else "mmaudio:large_44k_v2",
+                                    value=audio_video_models[0][1] if audio_video_models else None,  # none offered in commercial-safe mode until a commercial model is installed
                                     allow_custom_value=True,
                                 )
                             with gr.Row():
