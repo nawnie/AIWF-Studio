@@ -1,5 +1,13 @@
 <h1 align="center">AIWF Studio</h1>
 
+> **Public project note**  
+> AIWF Studio is a local-first creative AI workspace from [AI Without Fear](https://ai-wf.org/) and [AI Embedded Systems](https://aiembeddedsystems.com/). It is built for people running real Windows machines and NVIDIA GPUs—where paths, VRAM, model folders, and a reproducible workflow matter as much as the image on the screen.
+>
+> **What it demonstrates:** a practical local stack for image generation, video, inpainting, enhancement, post-production, and model management. The goal is not to hide the machinery; it is to make powerful tools understandable enough to use, inspect, and recover when something gets weird.
+>
+> **Status:** active public build. Feature notes below distinguish working routes from experiments and planned integrations.
+
+
 <p align="center">
   <strong>Local-first creative AI workspace with a modular frontend and optional local backends.</strong>
 </p>
