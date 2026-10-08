@@ -22,8 +22,9 @@ def _module_version(name: str) -> str:
 
 
 def self_test() -> int:
-    core = ["numpy", "soundfile", "pedalboard", "pyloudnorm", "mido", "pretty_midi"]
-    optional = ["librosa", "music21"]
+    # the signal chain is dsp.py on NumPy/SciPy (BSD); Pedalboard (GPL-3.0) is no longer used
+    core = ["numpy", "scipy", "soundfile", "pyloudnorm", "mido", "pretty_midi"]
+    optional = ["music21"]
     versions: dict[str, str] = {}
     missing: list[str] = []
     for name in core:
@@ -37,9 +38,24 @@ def self_test() -> int:
             optional_status[name] = _module_version(name)
         except Exception as exc:
             optional_status[name] = f"optional-missing: {exc}"
+    try:
+        _dsp()
+        versions["dsp"] = "AIWF Audio Lab DSP (NumPy/SciPy)"
+    except Exception as exc:
+        missing.append(f"dsp: {exc}")
     payload = {"ok": not missing, "versions": versions, "optional": optional_status, "missing": missing}
     _json_dump(payload)
     return 0 if not missing else 2
+
+
+def _dsp():
+    """The signal-chain module next to this runner (engines/audio_lab/dsp.py)."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import dsp
+
+    return dsp
 
 
 def inspect_audio(path: Path) -> dict[str, Any]:
@@ -109,30 +125,20 @@ def inspect_midi(path: Path) -> dict[str, Any]:
     }
 
 
-def _apply_board(audio, sample_rate: int, effects):
-    """Run one offline effect board while preserving the input frame count.
+def _apply_chain(audio, sample_rate: int, effects):
+    """Run effects in order on a complete region, keeping its exact frame count.
 
-    Pedalboard's ``reset=False`` streaming mode can legitimately return no
-    samples for latency-bearing effects such as PitchShift until a later
-    block arrives. Audio Lab processes complete regions, so each board call
-    must flush its internal latency and then normalize the result back to the
-    region's exact length. This keeps later automation times and project
-    metadata stable.
+    Each effect is a function from dsp.py that takes (audio, sample_rate) and returns audio of
+    the same shape, so later automation times and project metadata stay stable.
     """
     import numpy as np
-    from pedalboard import Pedalboard
 
-    if not effects:
-        return audio
     expected_frames = int(audio.shape[1])
-    rendered = np.asarray(Pedalboard(effects)(audio, sample_rate, reset=True), dtype=np.float32)
-    if rendered.ndim == 1:
-        rendered = rendered[None, :]
-    if rendered.shape[1] > expected_frames:
-        rendered = rendered[:, :expected_frames]
-    elif rendered.shape[1] < expected_frames:
-        rendered = np.pad(rendered, ((0, 0), (0, expected_frames - rendered.shape[1])))
-    return rendered
+    for effect in effects:
+        audio = np.asarray(effect(audio, sample_rate), dtype=np.float32)
+    if audio.shape[1] != expected_frames:
+        raise RuntimeError(f"An effect changed the region length ({audio.shape[1]} != {expected_frames} frames).")
+    return audio
 
 
 def _parse_envelope(text: str, duration: float) -> list[tuple[float, float]]:
@@ -212,19 +218,8 @@ def _normalize_loudness(audio, sample_rate: int, target_lufs: float):
 def process_job(job_path: Path) -> dict[str, Any]:
     import numpy as np
     import soundfile as sf
-    from pedalboard import (
-        Compressor,
-        Gain,
-        HighShelfFilter,
-        HighpassFilter,
-        Limiter,
-        LowShelfFilter,
-        LowpassFilter,
-        NoiseGate,
-        PeakFilter,
-        PitchShift,
-    )
 
+    dsp = _dsp()
     payload = json.loads(job_path.read_text(encoding="utf-8"))
     source = Path(payload["input_path"]).expanduser().resolve()
     output = Path(payload["output_path"]).expanduser().resolve()
@@ -243,57 +238,40 @@ def process_job(job_path: Path) -> dict[str, Any]:
         audio = audio[:, max(0, start) : min(audio.shape[1], end)]
         stage_log.append(f"Trim: {start / sample_rate:.3f}s to {end / sample_rate:.3f}s")
 
+    # this block builds the main chain in its fixed order: gate, filters, EQ, compressor
     effects = []
     if "gate" in stages:
-        effects.append(
-            NoiseGate(
-                threshold_db=float(settings["gate_threshold_db"]),
-                ratio=float(settings["gate_ratio"]),
-                attack_ms=float(settings["gate_attack_ms"]),
-                release_ms=float(settings["gate_release_ms"]),
-            )
-        )
+        effects.append(lambda a, sr: dsp.noise_gate(
+            a, sr,
+            threshold_db=float(settings["gate_threshold_db"]),
+            ratio=float(settings["gate_ratio"]),
+            attack_ms=float(settings["gate_attack_ms"]),
+            release_ms=float(settings["gate_release_ms"]),
+        ))
         stage_log.append("Noise gate")
     if "filters" in stages:
-        effects.extend(
-            [
-                HighpassFilter(cutoff_frequency_hz=float(settings["highpass_hz"])),
-                LowpassFilter(cutoff_frequency_hz=float(settings["lowpass_hz"])),
-            ]
-        )
+        effects.extend([
+            lambda a, sr: dsp.highpass(a, sr, float(settings["highpass_hz"])),
+            lambda a, sr: dsp.lowpass(a, sr, float(settings["lowpass_hz"])),
+        ])
         stage_log.append("High-pass / low-pass")
     if "eq" in stages:
-        effects.extend(
-            [
-                LowShelfFilter(
-                    cutoff_frequency_hz=float(settings["low_shelf_hz"]),
-                    gain_db=float(settings["low_shelf_gain_db"]),
-                    q=0.707,
-                ),
-                PeakFilter(
-                    cutoff_frequency_hz=float(settings["mid_hz"]),
-                    gain_db=float(settings["mid_gain_db"]),
-                    q=float(settings["mid_q"]),
-                ),
-                HighShelfFilter(
-                    cutoff_frequency_hz=float(settings["high_shelf_hz"]),
-                    gain_db=float(settings["high_shelf_gain_db"]),
-                    q=0.707,
-                ),
-            ]
-        )
+        effects.extend([
+            lambda a, sr: dsp.low_shelf(a, sr, float(settings["low_shelf_hz"]), float(settings["low_shelf_gain_db"]), q=0.707),
+            lambda a, sr: dsp.peak_eq(a, sr, float(settings["mid_hz"]), float(settings["mid_gain_db"]), float(settings["mid_q"])),
+            lambda a, sr: dsp.high_shelf(a, sr, float(settings["high_shelf_hz"]), float(settings["high_shelf_gain_db"]), q=0.707),
+        ])
         stage_log.append("Three-band parametric EQ")
     if "compressor" in stages:
-        effects.append(
-            Compressor(
-                threshold_db=float(settings["compressor_threshold_db"]),
-                ratio=float(settings["compressor_ratio"]),
-                attack_ms=float(settings["compressor_attack_ms"]),
-                release_ms=float(settings["compressor_release_ms"]),
-            )
-        )
+        effects.append(lambda a, sr: dsp.compressor(
+            a, sr,
+            threshold_db=float(settings["compressor_threshold_db"]),
+            ratio=float(settings["compressor_ratio"]),
+            attack_ms=float(settings["compressor_attack_ms"]),
+            release_ms=float(settings["compressor_release_ms"]),
+        ))
         stage_log.append("Compressor")
-    audio = _apply_board(audio, sample_rate, effects)
+    audio = _apply_chain(audio, sample_rate, effects)
 
     if "pitch" in stages and abs(float(settings.get("pitch_semitones", 0.0))) > 1e-6:
         start = int(round(float(settings.get("pitch_start_seconds", 0.0)) * sample_rate))
@@ -301,8 +279,9 @@ def process_job(job_path: Path) -> dict[str, Any]:
         end = int(round(float(end_value) * sample_rate)) if end_value else audio.shape[1]
         start = max(0, min(audio.shape[1], start))
         end = max(start, min(audio.shape[1], end))
-        shifted = _apply_board(
-            audio[:, start:end], sample_rate, [PitchShift(semitones=float(settings["pitch_semitones"]))]
+        shifted = _apply_chain(
+            audio[:, start:end], sample_rate,
+            [lambda a, sr: dsp.pitch_shift(a, sr, float(settings["pitch_semitones"]))],
         )
         audio = np.concatenate([audio[:, :start], shifted, audio[:, end:]], axis=1)
         stage_log.append(
@@ -310,7 +289,7 @@ def process_job(job_path: Path) -> dict[str, Any]:
             f"{start / sample_rate:.3f}s–{end / sample_rate:.3f}s"
         )
     if "gain" in stages and abs(float(settings.get("gain_db", 0.0))) > 1e-6:
-        audio = _apply_board(audio, sample_rate, [Gain(gain_db=float(settings["gain_db"]))])
+        audio = _apply_chain(audio, sample_rate, [lambda a, sr: dsp.gain(a, float(settings["gain_db"]))])
         stage_log.append(f"Gain: {float(settings['gain_db']):+g} dB")
     if "pan" in stages:
         audio = _apply_pan(audio, float(settings.get("pan", 0.0)))
@@ -332,26 +311,21 @@ def process_job(job_path: Path) -> dict[str, Any]:
             else "Loudness normalize: peak fallback"
         )
     if "limiter" in stages:
-        audio = _apply_board(
+        audio = _apply_chain(
             audio,
             sample_rate,
-            [
-                Limiter(
-                    threshold_db=float(settings["limiter_threshold_db"]),
-                    release_ms=float(settings["limiter_release_ms"]),
-                )
-            ],
+            [lambda a, sr: dsp.limiter(
+                a, sr,
+                threshold_db=float(settings["limiter_threshold_db"]),
+                release_ms=float(settings["limiter_release_ms"]),
+            )],
         )
         stage_log.append("Limiter")
 
     target_rate = int(settings.get("sample_rate") or 0)
     if target_rate > 0 and target_rate != sample_rate:
         try:
-            import librosa
-
-            audio = np.vstack(
-                [librosa.resample(channel, orig_sr=sample_rate, target_sr=target_rate) for channel in audio]
-            ).astype(np.float32)
+            audio = dsp.resample(audio, sample_rate, target_rate)
             stage_log.append(f"Sample-rate conversion: {sample_rate} → {target_rate} Hz")
             sample_rate = target_rate
         except Exception as exc:

@@ -13,7 +13,7 @@ RUNNER = Path(__file__).resolve().parents[2] / "engines" / "audio_lab" / "runner
 
 
 def _core_audio_deps_present() -> bool:
-    return all(importlib.util.find_spec(name) is not None for name in ("numpy", "soundfile", "pedalboard", "pyloudnorm"))
+    return all(importlib.util.find_spec(name) is not None for name in ("numpy", "scipy", "soundfile", "pyloudnorm"))
 
 
 @pytest.mark.skipif(not _core_audio_deps_present(), reason="Audio Lab optional dependencies are not installed in this environment")
@@ -22,7 +22,8 @@ def test_audio_runner_self_test_is_machine_readable() -> None:
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert result.returncode == 0
     assert payload["ok"] is True
-    assert "pedalboard" in payload["versions"]
+    # the signal chain is engines/audio_lab/dsp.py on NumPy/SciPy; Pedalboard (GPL-3.0) is gone
+    assert "dsp" in payload["versions"] and "pedalboard" not in payload["versions"]
 
 
 def test_audio_status_does_not_import_dsp_stack_during_studio_startup(tmp_path, monkeypatch) -> None:

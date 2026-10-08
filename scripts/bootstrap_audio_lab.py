@@ -41,6 +41,11 @@ def main() -> int:
     if args.upgrade:
         command.append("--upgrade")
     subprocess.run(command, check=True)
+    # Older installs carried Pedalboard (GPL-3.0) and librosa. The signal chain now lives in
+    # engines/audio_lab/dsp.py on NumPy/SciPy, so a repair removes them; the engine no longer
+    # imports either, and a commercial bundle must not ship the GPL component.
+    subprocess.run([str(python), "-m", "pip", "uninstall", "-y", "pedalboard", "librosa"],
+                   check=False, capture_output=True)
     check = subprocess.run(
         [str(python), str(runner), "self-test"], capture_output=True, text=True, check=False
     )

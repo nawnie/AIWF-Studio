@@ -8,10 +8,10 @@ The Audio tab's minimum setup button runs `scripts/bootstrap_audio_minimum.py`. 
 
 Core processing uses:
 
-- Pedalboard for gate, filters, EQ, compressor, pitch shift, gain, and limiter;
+- `engines/audio_lab/dsp.py` (NumPy/SciPy, BSD) for gate, filters, EQ, compressor, pitch shift, gain, and limiter. It replaced Pedalboard (GPL-3.0) on 2026-10-08; its filters and EQ measure identical to Pedalboard's, and the limiter is now a true ceiling (Pedalboard's added make-up gain to 0 dBFS);
 - SoundFile for PCM/FLAC I/O;
 - pyloudnorm for integrated-loudness normalization;
-- librosa for optional sample-rate conversion;
+- SciPy polyphase resampling for sample-rate conversion (librosa is no longer used);
 - pretty_midi and mido for MIDI metadata;
 - music21 as an optional foundation for later harmonic analysis.
 
