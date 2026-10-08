@@ -8,7 +8,7 @@ AIWF Studio turns an RTX PC into a private generative-AI workstation: chat with 
 
 ## Before the meeting (10 minutes)
 
-1. Open **AIWF Studio for Windows** from the desktop. The engine API starts by itself.
+1. Open **AIWF Studio for Windows** from the desktop. The engine API starts by itself. On a first run, Setup opens: check the folders, then Apply (or Skip for now).
 2. Home: press **Start all engines**. Wait until every engine row is Running (the image engine takes about a minute).
 3. Pick the demo project in the title bar (or create "NVIDIA demo" on Projects).
 4. Chat: send one short message so the model is in GPU memory (first token then arrives in about 2 s).
@@ -27,7 +27,7 @@ AIWF Studio turns an RTX PC into a private generative-AI workstation: chat with 
 | 6. Datasets | Select the new image, **Catalog** | "The image lands in the dataset engine with the project tag; its prompt becomes the caption." |
 | 7. Train | Base models: on this PC / download size / needs key | "Gated models ask for the user's Hugging Face key; downloads ask first and show size, progress and Cancel." |
 | 8. Train | Pick a published text package revision, Import, **Check plan** | "A dry run against this exact GPU: gates, dependencies and a VRAM estimate. Training starts in the training engine, never by surprise." |
-| 9. Settings | "This window uses ... MB" | "The whole native shell is one process using about 150 MB private memory. The same UI in a browser window costs about 720 MB private across 13 processes." |
+| 9. Configure Studio | "This window uses ... MB" | "The whole native shell is one process using about 150 MB private memory. The same UI in a browser window costs about 720 MB private across 13 processes." |
 
 ## Measured (2026-10-07, this PC)
 
@@ -51,17 +51,17 @@ Caveats: chat speed depends on the model and quantization; image time excludes t
 
 ## What is real today and what is next
 
-Real: native shell with seven pages; engine supervisor with Job Objects; NVML telemetry and per-engine VRAM; streaming chat with live speed; Qwen Image 2.1 generation through the shared engine API (also available to the CLI and MCP agents); dataset catalog; model weights with download/key flow; package import and dry-run plan UI. The demo workstation currently has no published Dataset Studio package, so the package import/plan path is verified with isolated synthetic fixtures only.
+Real: native shell with seven pages; engine supervisor with Job Objects; NVML telemetry and per-engine VRAM; streaming chat with live speed; Qwen Image 2.1 generation through the shared engine API (also available to the CLI and MCP agents); dataset catalog; model weights with download/key flow; package import and dry-run plan UI; guided first-run Setup for save and model locations. For the import/plan step the demo workstation has one clearly labeled demo package, `aiwf-demo-studio-help-20261008` (24 synthetic AIWF help conversations, 18 train / 6 validation rows), published through Dataset Studio's own export on 2026-10-08 with Shawn's approval. Its source files are in `F:\images\AIWF_Studio\outputs\_demo-datasets`.
 
 Next: starting and monitoring training runs in-app; MSIX packaging; automatic discovery of external engine executables; Markdown rendering in chat; image editing; video.
 
-The Train screen reads published text packages from Dataset Studio. When the demo PC has no package, use the synthetic-only Studio Flow fixture in `tests/individual_tests/test_unified_bridge.py` and the Playwright Studio Flow fixture; they mock Dataset Studio and ReTrain in memory and never write to the real catalog. Do not catalog a test image or publish a demo package into the user's Dataset Studio project.
+The Train screen reads published text packages from Dataset Studio; on the demo PC, pick the demo package above. On a PC without one, use the synthetic-only Studio Flow fixture in `tests/individual_tests/test_unified_bridge.py` and the Playwright Studio Flow fixture; they mock Dataset Studio and ReTrain in memory and never write to the real catalog. Do not publish further test packages into a user's Dataset Studio without their go-ahead.
 
 Install the native shell with `powershell -NoProfile -ExecutionPolicy Bypass -File native\install.ps1`. This installs per-user into `native\installed` under the selected AIWF Studio checkout and creates a Desktop shortcut. The shipped manifest has no machine-specific external executable paths; already-running loopback services can be detected, and startup paths for external apps are a per-user override in `%LOCALAPPDATA%\AIWF Studio\engines.json`.
 
 ## If something goes wrong
 
-- An engine row shows **Problem**: Settings > that engine > **Open log**. Start it again from Home.
+- An engine row shows **Problem**: Configure Studio > that engine > **Open log**. Start it again from Home.
 - Chat says the model returned no text: pick a model marked loaded, or wait for the first load.
 - The image takes much longer: it is loading weights after a restart; the second image is fast.
 - Everything stops when the app closes by design; reopen and Start all.
