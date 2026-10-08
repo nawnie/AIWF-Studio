@@ -3,9 +3,19 @@ export type PipelineBackend = 'aiwf' | 'dual' | 'sdcpp'
 
 export type ProMode = CreationMode | 'qwen-edit' | 'audio' | 'settings' | 'models' | 'data'
 
-export type EngineId = 'all' | 'flux' | 'flux_fill' | 'flux2' | 'sana_video' | 'wan' | 'sd15' | 'sdxl' | 'sd35' | 'zimage' | 'qwen' | 'sana' | 'unknown'
+export type EngineId = 'all' | 'flux' | 'flux_fill' | 'flux2' | 'flux2_generic' | 'krea2' | 'sana_video' | 'wan' | 'ltx' | 'sd15' | 'sdxl' | 'sd35' | 'zimage' | 'qwen' | 'sana' | 'unknown'
 
 export type ResourceTone = 'mint' | 'blue' | 'amber' | 'red' | 'neutral'
+
+export interface ModelSetupRouteDescriptor {
+  routeKey: string
+  modality: 'image' | 'video' | 'audio'
+  supportState: string
+  preflightKey: string
+  setupBundleKey?: string | null
+  setupAction?: string | null
+  limitation?: string | null
+}
 
 export interface AspectRatioOption {
   id: string
@@ -24,10 +34,18 @@ export interface ProModelOption {
   kind?: string
   engineId?: EngineId
   engineLabel?: string
+  setupBundleKey?: string
+  setupRoute?: ModelSetupRouteDescriptor | null
+  generationModes?: {
+    textToVideo?: boolean
+    imageToVideo?: boolean
+  }
   backend?: string
   status?: string
   reason?: string
   suggestedAction?: string
+  checkpointPathStatus?: 'present' | 'missing' | 'unknown'
+  routeStatus?: 'request-eligible' | 'blocked' | 'missing-assets' | 'blocked-runtime' | 'unknown'
   estVramGb?: number
   heavyFor12Gb?: boolean
   generationPreset?: Partial<GenerationSettings>
@@ -84,6 +102,10 @@ export interface GenerationSettings {
   fps: number
   sourceImageDataUrl: string
   sourceImageName: string
+  ltxImageStrength: number
+  ltxOffload: string
+  ltxQuantization: string
+  ltxEnhancePrompt: boolean
   sanaQuantization: string
   sanaVaeTiling: string
   offloadTextEncoderAfterEncode: boolean
@@ -168,6 +190,7 @@ export interface ResourceMetric {
 }
 
 export interface LoadedModelInfo {
+  id: string
   name: string
   type: string
   baseModel: string
@@ -202,7 +225,19 @@ export interface ProRuntimeStatus {
   queueCount: number
   resources: ResourceMetric[]
   loadedModel: LoadedModelInfo
+  modelLoad: { status: string; modelId: string; detail: string }
+  routeLifecycle: RouteLifecycleState[]
   gerror: boolean
+}
+
+export interface RouteLifecycleState {
+  route: string
+  modelId: string
+  supportRevision: string
+  status: string
+  operationId: string
+  resident: boolean | null
+  detail: string
 }
 
 export interface ProBootstrap {
@@ -230,6 +265,7 @@ export interface ProGenerateResult {
   jobId: string
   status: string
   message: string
+  verificationStatus?: 'verified' | 'unverified'
   output: RecentOutput | null
   recentOutputs: RecentOutput[]
   progress: GenerationProgressEvent[]
@@ -284,6 +320,15 @@ export interface ProDownloadCategory {
   destination: string
 }
 
+export interface ProSharedSnapshotImportPreview {
+  source: string
+  target: string
+  sizeBytes: number
+  requiredBytes: number
+  freeBytes: number
+  enoughSpace: boolean
+}
+
 export interface ProDownloadCatalogItem {
   key: string
   title: string
@@ -294,11 +339,15 @@ export interface ProDownloadCatalogItem {
   filename?: string
   url?: string
   notes?: string
+  platformBlocked?: boolean
+  platformBlockReason?: string
   snapshot: boolean
   installed: boolean
+  sharedSnapshotAvailable?: boolean
   destination: string
   engineId?: EngineId
   engineLabel?: string
+  catalogUrl?: string
   hfUrl?: string
   requiresAuth: boolean
   canDownload: boolean
@@ -322,6 +371,16 @@ export interface ProDownloadsStatus {
     catalog: number
     installed: number
   }
+  catalogAction?: { key: string; status: string; path?: string; source?: string }
+}
+
+export interface ProBundleInstallItem {
+  key: string
+  status: string
+  path?: string
+  source?: string
+  error?: string
+  sharedSnapshotPreview?: ProSharedSnapshotImportPreview
 }
 
 export interface ProLogFile {
@@ -412,6 +471,7 @@ export interface ProSettingsStatus {
     genlog: boolean
     backend: string
     onnxProvider: string
+    onnxModelDir: string
     attention: string
     xformers: boolean
     optSdpAttention: boolean
@@ -501,6 +561,7 @@ export interface ProReadinessStatus {
   metadataOnlyCount: number
   total: number
   error: string
+  sourceMessage?: string
 }
 
 export interface ProCapabilitiesStatus {

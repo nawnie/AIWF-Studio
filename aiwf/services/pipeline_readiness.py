@@ -122,7 +122,7 @@ def _preflight_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
         preflight_image_runtime_pipelines,
         preflight_krea2_pipeline,
         preflight_ltx_pipeline,
-        preflight_onnx_pipeline,
+        preflight_onnx_models_root,
         preflight_qwen_nunchaku_pipeline,
         preflight_sana_video_pipeline,
         preflight_wan_pipeline,
@@ -138,7 +138,7 @@ def _preflight_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
         preflight_sana_video_pipeline(flags, settings),
         preflight_wan_pipeline(flags, settings),
         preflight_ltx_pipeline(flags, settings),
-        preflight_onnx_pipeline(onnx_root, provider_preference=flags.onnx_provider),
+        preflight_onnx_models_root(onnx_root, provider_preference=flags.onnx_provider),
     ]
     return [_preflight_record(result, flags) for result in preflights]
 
@@ -204,7 +204,12 @@ def _ltx_route_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
         LTX_PIPELINE_ONE_STAGE,
         LtxVideoRequest,
     )
-    from aiwf.services.ltx import LtxService, ltx_checkpoint_openability_error, ltx_native_checkpoint_runtime_blocker
+    from aiwf.services.ltx import (
+        LtxService,
+        ltx_checkpoint_openability_error,
+        ltx_gemma_missing_local_files,
+        ltx_native_checkpoint_runtime_blocker,
+    )
 
     service = LtxService(flags, settings)
     records: list[PipelineReadinessRecord] = []
@@ -225,8 +230,11 @@ def _ltx_route_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
             engine_ready = False
         openability_error = ltx_checkpoint_openability_error(checkpoint) if checkpoint.is_file() else ""
         runtime_blocker = ltx_native_checkpoint_runtime_blocker(checkpoint) if checkpoint.is_file() else ""
-        route_ready = engine_ready and checkpoint.is_file() and not openability_error and gemma_root.exists()
-        receipt = _latest_receipt(flags, "ltx", route="ltx-2.3")
+        gemma_missing = ltx_gemma_missing_local_files(gemma_root, backend=backend)
+        route_ready = engine_ready and checkpoint.is_file() and not openability_error and not gemma_missing
+        # Output filenames do not identify the selected checkpoint or
+        # supporting assets. Require a model-bound receipt before promotion.
+        receipt = None
         if backend == LTX_GEMMA_BACKEND_GGUF:
             route_ready = route_ready and gguf_path.is_file()
             records.append(
@@ -281,7 +289,7 @@ def _ltx_route_records(flags: RuntimeFlags, settings: UserSettings) -> list[Pipe
                     "One-stage LTX HF Gemma route has a runtime smoke receipt."
                     if route_ready and not runtime_blocker and receipt
                     else
-                    "One-stage LTX HF Gemma route is wired and ready for bounded generation smoke."
+                    "One-stage LTX HF Gemma prerequisites are present; a route- and model-bound smoke receipt is still required."
                     if route_ready and not runtime_blocker
                     else openability_error
                     or runtime_blocker
@@ -318,7 +326,9 @@ def _ltx2b_diffusers_route_record(flags: RuntimeFlags) -> PipelineReadinessRecor
     service = LtxService(flags, UserSettings())
     checkpoint = service.default_checkpoint_path("diffusers_2b")
     t5_weights = service.default_t5_encoder_path()
-    receipt = _latest_file(flags.resolved_output_dir() / "ltx-videos", "ltx2b*.mp4")
+    # An output MP4 alone cannot identify which checkpoint and T5 assets
+    # produced it, so it cannot promote this route to runtime-verified.
+    receipt = None
     route_ready = checkpoint.is_file() and t5_weights.is_file()
     status = "working" if route_ready and receipt else "metadata-only" if route_ready else "blocked-cleanly"
     missing = []
@@ -329,7 +339,7 @@ def _ltx2b_diffusers_route_record(flags: RuntimeFlags) -> PipelineReadinessRecor
     reason = (
         "Local Diffusers LTX 2B route has a runtime smoke receipt."
         if status == "working"
-        else "Local Diffusers LTX 2B route is wired; run the bounded 1-step/9-frame smoke."
+        else "Local Diffusers LTX 2B prerequisites are present; run a bounded smoke and record its model-bound receipt."
         if route_ready
         else "Local Diffusers LTX 2B route is missing: " + ", ".join(missing)
     )
@@ -517,8 +527,6 @@ def _classify_ltx(
     required_text_encoder = "google/gemma-3-12b-it-qat-q4_0-unquantized"
     tokenizer = "Gemma tokenizer files in text_encoder repo folder"
     smoke_command = "scripts\\run_ltx_smoketest.bat"
-    ltx23_receipt = _latest_receipt(flags, "ltx", route="ltx-2.3") if flags is not None else None
-
     if suffix == ".gguf":
         status = "unsupported-no-route"
         reason = "LTX/Gemma GGUF is not wired into the current LTX worker route."
@@ -529,11 +537,12 @@ def _classify_ltx(
         suggested = "Keep metadata-only until native FP4/NVFP4 loading is implemented and smoked."
     elif "fp8" in lower and "gemma" not in lower:
         route = "ltx-one-stage-hf-gemma"
-        status = "working" if ltx23_receipt else "metadata-only"
+        # A route-level output does not prove which checkpoint produced it.
+        # Keep individual assets metadata-only until a model-bound receipt exists.
+        status = "metadata-only"
         reason = (
-            "LTX FP8 checkpoint has a one-stage runtime smoke receipt using offload=none and runtime fp8-cast."
-            if ltx23_receipt
-            else "LTX FP8 checkpoint is supported by the one-stage route with offload=none and runtime fp8-cast."
+            "LTX FP8 checkpoint is supported by the one-stage route with offload=none and runtime fp8-cast; "
+            "asset-specific runtime smoke has not been recorded."
         )
         suggested = (
             "Run the 1-step/9-frame smoke first, then a 5-second 4-step full-sane pass before marking new hardware stable."
@@ -541,12 +550,8 @@ def _classify_ltx(
     elif "gemma" in path.as_posix().lower() and suffix == ".safetensors":
         if _is_ltx_gemma_folder_safetensors(path):
             route = "ltx-one-stage-hf-gemma"
-            status = "working" if ltx23_receipt else "metadata-only"
-            reason = (
-                "Gemma safetensors is inside a complete LTX text-encoder folder; select the parent folder as gemma_root."
-                if not ltx23_receipt
-                else "Gemma safetensors is inside the text-encoder folder used by the latest LTX 2.3 smoke receipt."
-            )
+            status = "metadata-only"
+            reason = "Gemma safetensors is inside a complete LTX text-encoder folder; select the parent folder as gemma_root. Asset-specific runtime smoke has not been recorded."
             suggested = "Use the parent text_encoder folder in the LTX Gemma field; do not select this file directly."
             required_text_encoder = str(path.parent)
             tokenizer = "Tokenizer and processor files next to the converted Gemma safetensors"
@@ -660,6 +665,14 @@ def _classify_image(
         status = "unsupported-no-route"
         reason = "Anima split files are discovered, but AIWF does not yet have a native Anima loader."
         suggested = "Keep Anima assets out of selectable generation until a split-file runtime is implemented and smoked."
+    elif _normalized_image_arch(architecture) == "flux2":
+        status = "unsupported-no-route"
+        reason = "Generic Flux.2 is distinct from Flux.2 Klein and has no verified Pro runtime route."
+        suggested = "Keep generic Flux.2 assets out of selectable generation until a dedicated runtime is implemented and smoked."
+    elif _normalized_image_arch(architecture) in {"qwen_image_edit", "qwen_image_edit_plus"}:
+        status = "unsupported-no-route"
+        reason = "Qwen Image Edit assets do not have a dedicated AIWF generation route; they are not ordinary Qwen Image base models."
+        suggested = "Keep these assets out of Qwen Image readiness and selectable generation until the edit pipeline is implemented."
     elif _normalized_image_arch(architecture) == ARCH_KREA2 and path.suffix.lower() == ".safetensors":
         status = "blocked-cleanly"
         reason = "Krea 2 split transformer is discovered, but AIWF still needs a split-file Krea2 loader or a full Diffusers folder."
@@ -719,7 +732,7 @@ def _family_arch_from_download_path(path: Path) -> tuple[str, str]:
     if "ltx" in text:
         return "ltx", "ltx"
     if "gemma" in text:
-        return ("ltx", "ltx") if "ltx" in text or path.parent.name.lower() == "downloads" else ("llm", "llm")
+        return ("ltx", "ltx") if "ltx" in text else ("llm", "llm")
     if any(token in text for token in ("flux", "krea", "krea2", "anima", "qwen", "sana", "z-image", "zimage")):
         return "runtime_asset", _download_image_arch(path)
     return "unknown", "unknown"
@@ -727,8 +740,15 @@ def _family_arch_from_download_path(path: Path) -> tuple[str, str]:
 
 def _download_image_arch(path: Path) -> str:
     lower = path.as_posix().lower()
-    if "flux.2" in lower or "flux2" in lower:
+    family_path = " ".join(part.lower().replace("_", "-") for part in path.parts[-4:])
+    if "qwen" in family_path and "edit-plus" in family_path:
+        return "qwen_image_edit_plus"
+    if "qwen" in family_path and "edit" in family_path:
+        return "qwen_image_edit"
+    if "klein" in lower or "f2k" in lower:
         return "flux2-klein"
+    if "flux.2" in lower or "flux2" in lower:
+        return "flux2"
     if "krea-2" in lower or "krea2" in lower:
         return "krea2"
     if "anima" in lower and "animate" not in lower:
@@ -773,15 +793,14 @@ def _first_item_path(result) -> str:  # noqa: ANN001
 
 
 def _latest_receipt(flags: RuntimeFlags, family: str, *, route: str = "") -> Path | None:
-    output_root = flags.resolved_output_dir()
-    if family == "wan":
-        return _latest_file(output_root / "video" / "wan", "*.mp4")
-    if family == "ltx":
-        pattern = "ltx2b*.mp4" if route in {"ltx-2b", "ltx-2b-diffusers"} else "ltx23*.mp4"
-        return _latest_file(output_root / "ltx-videos", pattern)
+    if family in {"wan", "ltx"}:
+        # A route-shaped MP4 filename is an artifact, not a smoke receipt:
+        # it does not bind the current checkpoint and support assets.
+        return None
     if family == "image":
         if route not in {"diffusers"}:
             return None
+        output_root = flags.resolved_output_dir()
         candidates = [
             _latest_file(output_root / "txt2img-images", "*.png"),
             _latest_file(output_root / "img2img-images", "*.png"),
@@ -817,12 +836,16 @@ def _smoke_command_for_route(family: str, route: str) -> str:
 
 def _image_route_for_arch(architecture: str, path: Path) -> str:
     arch = _normalized_image_arch(architecture)
+    if arch in {"qwen_image_edit", "qwen_image_edit_plus"}:
+        return "unsupported"
     if arch in {ARCH_QWEN_IMAGE, ARCH_QWEN_IMAGE_NUNCHAKU}:
         return "qwen-nunchaku" if "nunchaku" in path.as_posix().lower() or arch.endswith("nunchaku") else "qwen-image"
     if arch == ARCH_SANA:
         return arch
     if arch == ARCH_FLUX2_KLEIN:
         return "flux2-klein"
+    if arch == "flux2":
+        return "unsupported"
     if arch == ARCH_Z_IMAGE:
         return "z-image"
     if arch == ARCH_KREA2:
@@ -862,22 +885,23 @@ def _looks_like_ltx_default_checkpoint(path: Path) -> bool:
 def _is_ltx_gemma_folder_safetensors(path: Path) -> bool:
     if path.name.lower() not in {"model.safetensors", "vision_projector.safetensors"}:
         return False
-    return all(
-        (path.parent / filename).is_file()
-        for filename in (
-            "model.safetensors",
-            "vision_projector.safetensors",
-            "tokenizer.model",
-            "preprocessor_config.json",
-        )
-    )
+    from aiwf.services.ltx import ltx_gemma_missing_local_files
+
+    return not ltx_gemma_missing_local_files(path.parent, backend="hf_safetensors")
 
 
 def _ltx_distilled_suggestion(path: Path, flags: RuntimeFlags | None) -> str:
     if flags is None:
         return "Move under models\\ltx\\checkpoints or select it explicitly in the LTX request."
     expected = flags.resolved_models_dir() / "ltx" / "checkpoints" / "ltx-2.3-22b-distilled-1.1.safetensors"
-    if path.resolve() == expected.resolve():
+    from aiwf.services.model_files import configured_model_roots
+
+    expected_paths = [
+        root / "ltx" / "checkpoints" / "ltx-2.3-22b-distilled-1.1.safetensors"
+        for root in configured_model_roots(flags)
+    ]
+    resolved_path = path.resolve()
+    if any(resolved_path == candidate.resolve() for candidate in expected_paths):
         return "Pair with repo-shaped Gemma and the 1.1 spatial upscaler for the next bounded smoke."
     return f"Move or copy to {expected}, or select this file explicitly as the LTX checkpoint."
 

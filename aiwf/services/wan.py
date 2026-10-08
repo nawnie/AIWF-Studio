@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from aiwf.infrastructure.video import VideoError, write_frames
 from aiwf.infrastructure.wan import WanI2VBackend, WanUnavailable
 from aiwf.services.failure_archive import FailureArchiveService
 from aiwf.services.genlog import GenerationLogService
+from aiwf.services.model_files import indexed_safetensors_shards_ready, nonempty_json_object
 from aiwf.services.wan_models import (
     WanModelPairCheck,
     wan_lora_matches,
@@ -243,6 +245,7 @@ class WanService:
         self.supervisor = supervisor
         self.failure_archive = failure_archive
         self.genlog = genlog
+        self._operation_lock = threading.Lock()
 
     def available(self) -> bool:
         return self._backend.available()
@@ -417,20 +420,25 @@ class WanService:
 
     def unload_models(self) -> None:
         """Release cached Wan models before another GPU video stage starts."""
+        if not self._operation_lock.acquire(blocking=False):
+            raise WanUnavailable("Wan is busy with an active prepare or generation operation.")
         _video_status("Unloading Wan video pipeline and clearing VRAM.")
         try:
             self._backend.unload()
         finally:
-            gc.collect()
             try:
-                import torch
+                gc.collect()
+                try:
+                    import torch
 
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    if hasattr(torch.cuda, "ipc_collect"):
-                        torch.cuda.ipc_collect()
-            except Exception:
-                logger.debug("Wan CUDA cache cleanup failed.", exc_info=True)
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        if hasattr(torch.cuda, "ipc_collect"):
+                            torch.cuda.ipc_collect()
+                except Exception:
+                    logger.debug("Wan CUDA cache cleanup failed.", exc_info=True)
+            finally:
+                self._operation_lock.release()
 
     def acceleration_capabilities(self) -> dict[str, dict[str, object]]:
         from aiwf.infrastructure.torch.wan_perf import describe_wan_acceleration_capabilities
@@ -495,14 +503,14 @@ class WanService:
         scheduler = path / "scheduler"
         return (
             path.is_dir()
-            and (path / "model_index.json").is_file()
-            and (text_encoder / "config.json").is_file()
+            and nonempty_json_object(path / "model_index.json")
+            and nonempty_json_object(text_encoder / "config.json")
             and (
-                (text_encoder / "model.safetensors").is_file()
-                or (text_encoder / "model.safetensors.index.json").is_file()
+                ((text_encoder / "model.safetensors").is_file() and (text_encoder / "model.safetensors").stat().st_size > 0)
+                or indexed_safetensors_shards_ready(text_encoder, text_encoder / "model.safetensors.index.json")
             )
-            and (tokenizer / "tokenizer.json").is_file()
-            and (scheduler / "scheduler_config.json").is_file()
+            and nonempty_json_object(tokenizer / "tokenizer.json")
+            and nonempty_json_object(scheduler / "scheduler_config.json")
         )
 
     def _is_full_fast_5b_diffusers_model(self, path: Path) -> bool:
@@ -549,18 +557,22 @@ class WanService:
         return str(preferred.resolve())
 
     def _component_base_missing(self, path: Path) -> list[str]:
+        text_encoder = path / "text_encoder"
+        monolithic = text_encoder / "model.safetensors"
+        indexed = text_encoder / "model.safetensors.index.json"
+        has_weights = (
+            (monolithic.is_file() and monolithic.stat().st_size > 0)
+            or indexed_safetensors_shards_ready(text_encoder, indexed)
+        )
         required = [
             path / "model_index.json",
-            path / "text_encoder" / "config.json",
-            path / "text_encoder" / "model.safetensors",
+            text_encoder / "config.json",
             path / "tokenizer" / "tokenizer.json",
             path / "scheduler" / "scheduler_config.json",
         ]
-        missing = [str(p) for p in required if not p.is_file()]
-        if not (path / "text_encoder" / "model.safetensors").is_file() and (
-            path / "text_encoder" / "model.safetensors.index.json"
-        ).is_file():
-            missing = [p for p in missing if not p.endswith("model.safetensors")]
+        missing = [str(p) for p in required if not nonempty_json_object(p)]
+        if not has_weights:
+            missing.append(str(monolithic if not monolithic.exists() else indexed))
         return missing
 
     def find_components_base(self) -> str | None:
@@ -707,10 +719,51 @@ class WanService:
             else True
         )
         if requires_dual:
-            if not request.high_noise_model_id:
+            high_id = request.high_noise_model_id
+            low_id = request.low_noise_model_id
+            # A Pro model selection can provide the transformer anchor while the
+            # stage-specific controls are unset. Auto-fill only a unique exact
+            # family/format/quantization match; never choose the first fuzzy hit.
+            anchor_id = high_id or low_id or request.model_id
+            anchor_role = wan_model_stage_role(anchor_id)
+            if anchor_role in {"high", "low"} and (not high_id or not low_id):
+                want_role = "low" if anchor_role == "high" else "high"
+                anchor_family = wan_model_pair_family_key(anchor_id)
+                anchor_storage = wan_model_storage_family(anchor_id)
+                anchor_quant = wan_model_quant_family(anchor_id)
+                matches: list[str] = []
+                for candidate in self.list_local_models():
+                    if wan_model_stage_role(candidate) != want_role:
+                        continue
+                    if wan_model_pair_family_key(candidate) != anchor_family:
+                        continue
+                    if wan_model_storage_family(candidate) != anchor_storage:
+                        continue
+                    candidate_quant = wan_model_quant_family(candidate)
+                    if anchor_quant != "unknown" and candidate_quant != anchor_quant:
+                        continue
+                    resolved_candidate = self.resolve_model(candidate)
+                    if not Path(resolved_candidate).is_file():
+                        continue
+                    pair_high = anchor_id if anchor_role == "high" else candidate
+                    pair_low = candidate if anchor_role == "high" else anchor_id
+                    if wan_model_pair_compatibility(pair_high, pair_low).ok:
+                        matches.append(candidate)
+                if len(matches) == 1:
+                    if anchor_role == "high":
+                        high_id, low_id = high_id or anchor_id, low_id or matches[0]
+                    else:
+                        low_id, high_id = low_id or anchor_id, high_id or matches[0]
+                elif len(matches) > 1:
+                    errors.append(
+                        f"Multiple compatible {want_role.title()} noise transformers match {Path(anchor_id).name}. "
+                        "Choose the companion transformer explicitly."
+                    )
+
+            if not high_id:
                 errors.append("Select a High noise transformer.")
             else:
-                high_res = self.resolve_model(request.high_noise_model_id)
+                high_res = self.resolve_model(high_id)
                 e, w = self._validate_transformer_file(Path(high_res), "High noise")
                 errors.extend(e)
                 warnings.extend(w)
@@ -718,10 +771,10 @@ class WanService:
                 if mismatch:
                     errors.append(mismatch)
 
-            if not request.low_noise_model_id:
+            if not low_id:
                 errors.append("Select a Low noise transformer.")
             else:
-                low_res = self.resolve_model(request.low_noise_model_id)
+                low_res = self.resolve_model(low_id)
                 e, w = self._validate_transformer_file(Path(low_res), "Low noise")
                 errors.extend(e)
                 warnings.extend(w)
@@ -811,11 +864,26 @@ class WanService:
 
         vae_id = request.vae_id or self.preferred_vae(request.runtime_mode)
         vae_res = self.resolve_vae(vae_id) if vae_id else None
+        # A complete TI2V 5B Diffusers snapshot already contains its matching
+        # Wan 2.2 VAE. Prefer that exact sibling when no separate VAE was chosen;
+        # requiring an external sidecar makes the advertised full snapshot unusable.
+        embedded_vae = Path(model_res) / "vae" if model_res and Path(model_res).is_dir() else None
+        if (
+            not request.vae_id
+            and request.runtime_mode == "fast_5b"
+            and model_res
+            and self._is_full_fast_5b_diffusers_model(Path(model_res))
+            and embedded_vae is not None
+            and (embedded_vae / "config.json").is_file()
+            and ((embedded_vae / "diffusion_pytorch_model.safetensors").is_file()
+                 or any(embedded_vae.glob("diffusion_pytorch_model-*.safetensors")))
+        ):
+            vae_res = str(embedded_vae.resolve())
         if not vae_res:
             errors.append("Missing Wan VAE. Place `wan2.1_vae.safetensors` in `models/VAE` or select a Wan VAE.")
         elif not Path(vae_res).exists():
             errors.append(f"Selected VAE is not local: {vae_res}")
-        elif "wan" not in Path(vae_res).name.lower():
+        elif (embedded_vae is None or Path(vae_res).resolve() != embedded_vae.resolve()) and "wan" not in Path(vae_res).name.lower():
             warnings.append(f"Selected VAE does not look Wan-specific: {Path(vae_res).name}")
         else:
             # VAE generation must match the runtime: the A14B high/low pair uses the
@@ -823,6 +891,7 @@ class WanService:
             # A wrong pick passes name validation but fails late in latent decode, so
             # warn here from the filename (cheap, no tensor read).
             _vae_name = Path(vae_res).name.lower()
+            _embedded_vae = embedded_vae is not None and Path(vae_res).resolve() == embedded_vae.resolve()
             _looks_22 = "2.2" in _vae_name or "wan22" in _vae_name or "_22" in _vae_name
             _looks_21 = "2.1" in _vae_name or "wan21" in _vae_name or "_21" in _vae_name
             if request.requires_dual_transformers() and _looks_22 and not _looks_21:
@@ -831,7 +900,7 @@ class WanService:
                     "high/low A14B runtime expects the Wan 2.1 (16-channel) VAE "
                     "(`wan2.1_vae.safetensors`). A channel mismatch fails late in latent decode."
                 )
-            elif not request.requires_dual_transformers() and _looks_21 and not _looks_22:
+            elif not _embedded_vae and not request.requires_dual_transformers() and _looks_21 and not _looks_22:
                 errors.append(
                     f"VAE '{Path(vae_res).name}' looks like a Wan 2.1 (16-channel) VAE, but the "
                     "5B TI2V runtime expects the Wan 2.2 (48-channel) VAE (`wan2.2_vae.safetensors`)."
@@ -924,6 +993,29 @@ class WanService:
                 return True
         return False
 
+    def _is_wan_transformer_weight(self, path: Path) -> bool:
+        """Use model-header roles to distinguish Wan transformers from support assets.
+
+        Header inspection reads metadata and tensor names only; it never loads model
+        weights. Preserve filename-based discovery when the header is unavailable,
+        while allowing a positively identified transformer to use any filename.
+        """
+        if not self._is_valid_wan_weight_path(path):
+            return False
+        try:
+            from aiwf.infrastructure.model_header import read_model_info
+
+            info = read_model_info(path)
+        except Exception:
+            info = None
+
+        if info is not None:
+            if info.is_wan_transformer():
+                return True
+            if info.arch != "unknown" or info.role in {"vae", "text-encoder", "lora"}:
+                return False
+        return self._looks_like_wan_weights(path.name)
+
     def _is_lora_path(self, path: Path) -> bool:
         return any(part.lower() in {"lora", "loras"} for part in path.parts)
 
@@ -994,7 +1086,7 @@ class WanService:
             if not root.exists():
                 continue
             for child in sorted(root.rglob("*")):
-                if child.is_file() and self._is_valid_wan_weight_path(child) and self._looks_like_wan_weights(child.name):
+                if child.is_file() and self._is_wan_transformer_weight(child):
                     if child.name in seen_file_names:
                         continue
                     try:
@@ -1044,8 +1136,7 @@ class WanService:
             if not root.exists():
                 continue
             for child in sorted(root.rglob("*")):
-                if not (child.is_file() and self._is_valid_wan_weight_path(child)
-                        and self._looks_like_wan_weights(child.name)):
+                if not (child.is_file() and self._is_wan_transformer_weight(child)):
                     continue
                 if child.name in seen_file_names:
                     continue
@@ -1167,6 +1258,7 @@ class WanService:
                 extra / "Textencoder",
                 extra / "textencoder",
                 extra / "TextEncoder",
+                extra / "text_encoder",
             ])
         deduped: list[Path] = []
         seen: set[Path] = set()
@@ -1455,7 +1547,211 @@ class WanService:
             counter += 1
         return candidate
 
+    def prepare(
+        self,
+        request: WanI2VRequest,
+        *,
+        image_present: bool = True,
+        preflight: WanPreflightResult | None = None,
+    ) -> dict[str, Any]:
+        """Load the selected Wan pipeline without encoding inputs or generating frames."""
+        if not self._operation_lock.acquire(blocking=False):
+            raise WanUnavailable("Wan is busy with another prepare or generation operation.")
+        tenant_job_id = f"wan_prepare_{uuid.uuid4().hex[:8]}"
+        tenant_acquired = False
+        try:
+            preflight = preflight or self.preflight(request, image_present=image_present)
+            if not preflight.ok:
+                raise WanUnavailable(preflight.message())
+            base_request = preflight.audited_request or request
+            request = base_request.model_copy(
+                update={
+                    "model_id": preflight.model_id or base_request.model_id,
+                    "high_noise_model_id": preflight.high_noise_model or base_request.high_noise_model_id,
+                    "low_noise_model_id": preflight.low_noise_model or base_request.low_noise_model_id,
+                    "vae_id": preflight.vae or base_request.vae_id,
+                    "text_encoder_path": preflight.text_encoder or base_request.text_encoder_path,
+                    "high_noise_lora_id": preflight.high_noise_lora or base_request.high_noise_lora_id,
+                    "low_noise_lora_id": preflight.low_noise_lora or base_request.low_noise_lora_id,
+                    "components_base": preflight.components_base or base_request.components_base,
+                }
+            )
+            if not self.available():
+                raise WanUnavailable("Wan video is unavailable in this runtime.")
+            if self.supervisor is not None:
+                switch = self.supervisor.request_switch(
+                    EngineSwitchRequest(
+                        target=EngineTenant.VIDEO,
+                        reason="Wan video model preparation",
+                        job_id=tenant_job_id,
+                    )
+                )
+                if not switch.ok:
+                    raise WanUnavailable(f"GPU busy: {switch.message}")
+                tenant_acquired = True
+            if self._unload_image_models is not None:
+                try:
+                    unloaded = self._unload_image_models()
+                except Exception as exc:
+                    raise WanUnavailable(f"Could not unload image models before Wan preparation: {exc}") from exc
+                if unloaded is False:
+                    raise WanUnavailable("Could not confirm image model release before Wan preparation.")
+            self._ensure_request_headroom(request)
+            hf_token = getattr(self.settings, "huggingface_token", "").strip() if self.settings else ""
+            if hf_token:
+                os.environ.setdefault("HF_TOKEN", hf_token)
+                os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
+            result = self._backend.prepare(request)
+            is_prepared = getattr(self._backend, "is_prepared", None)
+            confirmed = bool(callable(is_prepared) and is_prepared(request))
+            if not confirmed:
+                raise WanUnavailable("Wan backend did not confirm that the selected model configuration is cached.")
+            return {
+                "loaded": True,
+                "resident": True,
+                "modelId": request.model_id or request.runtime_mode,
+                "cacheMode": str((result or {}).get("cacheMode") or "none"),
+                "detail": "Wan pipeline is cached for the selected model configuration. No generation was run.",
+            }
+        finally:
+            try:
+                if self.supervisor is not None and tenant_acquired:
+                    released = self.supervisor.request_switch(
+                        EngineSwitchRequest(
+                            target=EngineTenant.IDLE,
+                            reason="Wan video model preparation complete",
+                            job_id=tenant_job_id,
+                        )
+                    )
+                    if not released.ok:
+                        raise WanUnavailable(
+                            f"Wan preparation completed, but VIDEO ownership could not be released safely: {released.message}"
+                        )
+            finally:
+                self._operation_lock.release()
+
+    @staticmethod
+    def _prepare_headroom_issue(request: WanI2VRequest) -> str | None:
+        """Conservatively defer a selection warm-load when GPU memory is tight."""
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return None
+            from aiwf.services.gpu_memory import measured_cuda_free_bytes
+
+            free_bytes = measured_cuda_free_bytes(torch)
+            if free_bytes is None:
+                return "Wan preparation deferred because available GPU memory could not be matched to the active CUDA device."
+        except Exception:
+            return "Wan preparation deferred because available GPU memory could not be checked."
+        free_gb = float(free_bytes) / 1024**3
+        offload = str(getattr(request, "offload", "balanced") or "balanced").strip().lower()
+        required_gb = 20.0 if offload == "resident" else 6.0
+        if free_gb < required_gb:
+            return (
+                f"Wan preparation deferred: {free_gb:.1f} GB VRAM is free; "
+                f"the {offload} route requires at least {required_gb:.0f} GB headroom. "
+                "Free GPU memory or select a lower-memory offload mode, then retry."
+            )
+        return None
+
+    def _ensure_request_headroom(self, request: WanI2VRequest) -> None:
+        """Free a different cached Wan pipeline before checking replacement headroom."""
+        is_prepared = getattr(self._backend, "is_prepared", None)
+        try:
+            if callable(is_prepared) and is_prepared(request):
+                return
+        except Exception as exc:
+            raise WanUnavailable(f"Wan could not verify the selected cached pipeline: {exc}") from exc
+
+        has_cached_pipeline = getattr(self._backend, "has_cached_pipeline", None)
+        if callable(has_cached_pipeline):
+            try:
+                cached = bool(has_cached_pipeline())
+            except Exception as exc:
+                raise WanUnavailable(f"Wan could not inspect its cached pipeline before switching: {exc}") from exc
+            if cached:
+                unload = getattr(self._backend, "unload", None)
+                if not callable(unload):
+                    raise WanUnavailable("Wan cannot safely release its previous pipeline before switching models.")
+                try:
+                    unload()
+                    if has_cached_pipeline():
+                        raise WanUnavailable("Wan could not confirm release of the previous pipeline before switching models.")
+                except WanUnavailable:
+                    raise
+                except Exception as exc:
+                    raise WanUnavailable(f"Wan could not release its previous pipeline before switching models: {exc}") from exc
+
+        headroom_issue = self._prepare_headroom_issue(request)
+        if headroom_issue:
+            raise WanUnavailable(headroom_issue)
+
     def generate(
+        self,
+        request: WanI2VRequest,
+        image: Image.Image,
+        *,
+        on_progress=None,
+        should_cancel=None,
+    ) -> WanI2VResult:
+        if not self._operation_lock.acquire(blocking=False):
+            raise WanUnavailable("Wan is busy with another prepare or generation operation.")
+        try:
+            return self._generate_locked(request, image, on_progress=on_progress, should_cancel=should_cancel)
+        finally:
+            self._operation_lock.release()
+
+    def release_cached_model_for_modality_switch(self) -> bool:
+        """Unload Wan only under its operation lock and VIDEO tenant ownership."""
+        has_cached = getattr(self._backend, "has_cached_pipeline", None)
+        if callable(has_cached) and not has_cached():
+            return True
+        if not callable(getattr(self.supervisor, "request_switch", None)):
+            return False
+        if not self._operation_lock.acquire(blocking=False):
+            return False
+        tenant_job_id = f"wan_release_{uuid.uuid4().hex[:8]}"
+        tenant_acquired = False
+        released = True
+        evicted = False
+        try:
+            switch = self.supervisor.request_switch(
+                EngineSwitchRequest(
+                    target=EngineTenant.VIDEO,
+                    reason="Release cached Wan pipeline before modality switch",
+                    job_id=tenant_job_id,
+                )
+            )
+            if not switch.ok:
+                return False
+            tenant_acquired = True
+            self._backend.unload()
+            evicted = bool(callable(has_cached) and not has_cached())
+        except Exception:
+            logger.info("Could not release cached Wan pipeline for modality switch", exc_info=True)
+            return False
+        finally:
+            try:
+                if tenant_acquired:
+                    result = self.supervisor.request_switch(
+                        EngineSwitchRequest(
+                            target=EngineTenant.IDLE,
+                            reason="Wan modality switch release complete",
+                            job_id=tenant_job_id,
+                        )
+                    )
+                    released = bool(result.ok)
+            except Exception:
+                released = False
+            finally:
+                self._operation_lock.release()
+            if not released:
+                logger.error("Could not release VIDEO ownership after Wan cache eviction")
+        return evicted and released
+
+    def _generate_locked(
         self,
         request: WanI2VRequest,
         image: Image.Image,
@@ -1519,9 +1815,15 @@ class WanService:
             if self._unload_image_models is not None:
                 _video_status("Unloading image models before loading video pipeline.")
                 try:
-                    self._unload_image_models()
-                except Exception:
-                    logger.exception("Failed to unload image models before Wan generation; continuing.")
+                    unloaded = self._unload_image_models()
+                except Exception as exc:
+                    raise WanUnavailable(
+                        f"Could not unload image models before Wan generation: {exc}"
+                    ) from exc
+                if unloaded is False:
+                    raise WanUnavailable("Could not confirm image model release before Wan generation.")
+
+            self._ensure_request_headroom(request)
 
             # Expose HF token so large/gated model
             hf_token = getattr(self.settings, "huggingface_token", "").strip() if self.settings else ""

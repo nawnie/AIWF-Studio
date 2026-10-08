@@ -6,18 +6,21 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.model_download import CatalogEntry, ModelCategory, ModelSource
 from aiwf.infrastructure.download.stream import stream_download
 from aiwf.api.security import is_private_url
 from aiwf.services.model_download_catalog import MODEL_DOWNLOAD_CATALOG
+from aiwf.services.model_files import indexed_safetensors_shards_ready, indexed_weight_shards_ready
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,7 @@ CIVITAI_HOSTS = ("civitai.com", "civitai.green")
 
 CATEGORY_LABELS: dict[ModelCategory, str] = {
     "checkpoint": "Checkpoint",
+    "sd_singlefile_config": "Stable Diffusion support config",
     "lora": "LoRA",
     "vae": "VAE",
     "controlnet": "ControlNet",
@@ -49,10 +53,12 @@ CATEGORY_LABELS: dict[ModelCategory, str] = {
     "flux_unet_gguf": "Flux UNet / transformer (.gguf)",
     "flux_text_encoder": "Flux text encoder",
     "flux_vae": "Flux VAE",
+    "flux_tokenizer": "Flux tokenizer files",
     "flux2_unet_safetensor": "Flux.2 Klein transformer (.safetensors)",
     "flux2_unet_gguf": "Flux.2 Klein transformer (.gguf)",
     "flux2_components": "Flux.2 Klein components",
     "flux2_diffusers": "Flux.2 Klein Diffusers pipeline",
+    "flux_kontext_diffusers": "Flux Kontext Diffusers pipeline",
     "z_image_unet_safetensor": "Z-Image transformer (.safetensors)",
     "z_image_unet_gguf": "Z-Image transformer (.gguf)",
     "z_image_components": "Z-Image components",
@@ -74,6 +80,7 @@ CATEGORY_LABELS: dict[ModelCategory, str] = {
     "ltx_vae": "LTX 2.3 video VAE",
     "ltx_audio_vae": "LTX 2.3 audio VAE",
     "ltx_text_encoder": "LTX 2.3 Gemma text encoder",
+    "ltx_tokenizer": "LTX 2B T5 tokenizer",
     "llm_gguf": "LLM GGUF",
     "llm_safetensor": "LLM safetensors",
     "rife": "RIFE (frame interpolation)",
@@ -81,8 +88,34 @@ CATEGORY_LABELS: dict[ModelCategory, str] = {
     "other": "Other (models root)",
 }
 
+# Header identities used only before an explicit auto-placement. Entries without
+# a strong model-header identity remain in place for the user to sort manually.
+_CATALOG_HEADER_IDENTITIES: dict[str, set[tuple[str, str]]] = {
+    "wan_safetensor": {(arch, role) for arch in ("wan-transformer", "wan-transformer-fp8") for role in ("high-noise", "low-noise", "unknown")},
+    "wan_gguf": {(arch, role) for arch in ("wan-transformer", "wan-transformer-fp8") for role in ("high-noise", "low-noise", "unknown")},
+    "wan_lora": {("wan-lora", "lora")},
+    "wan_vae": {("wan-vae", "vae")},
+    "wan_text_encoder": {("umt5-encoder", "text-encoder")},
+    "flux_unet_safetensor": {("flux-transformer", role) for role in ("high-noise", "low-noise", "unknown")},
+    "flux_unet_gguf": {("flux-transformer", role) for role in ("high-noise", "low-noise", "unknown")},
+    "flux_text_encoder": {(arch, "text-encoder") for arch in ("clip", "t5xxl-encoder")},
+    "flux_vae": {("flux-vae", "vae")},
+    "flux2_unet_safetensor": {("flux2-klein-transformer", role) for role in ("high-noise", "low-noise", "unknown")},
+    "flux2_unet_gguf": {("flux2-klein-transformer", role) for role in ("high-noise", "low-noise", "unknown")},
+    "z_image_unet_safetensor": {("z-image-transformer", "unknown")},
+    "z_image_unet_gguf": {("z-image-transformer", "unknown")},
+    "ltx_lora": {("ltx-lora", "lora")},
+    "ltx_checkpoint": {("ltx-transformer", "unknown")},
+    "ltx_vae": {("ltx-vae", "vae")},
+    "ltx_audio_vae": {("ltx-audio-vae", "vae")},
+    "ltx_text_encoder": {("gemma-llm", "text-encoder")},
+    "rife": {("rife", "upscaler")},
+    "sam": {("sam", "unknown")},
+}
+
 CATEGORY_FOLDERS: dict[ModelCategory, tuple[str, ...]] = {
     "checkpoint": ("Stable-diffusion",),
+    "sd_singlefile_config": ("Support", "DiffusersConfigs"),
     "lora": ("Loras",),
     "vae": ("VAE",),
     "controlnet": ("ControlNet",),
@@ -104,10 +137,15 @@ CATEGORY_FOLDERS: dict[ModelCategory, tuple[str, ...]] = {
     "flux_unet_gguf": ("flux", "GGUF"),
     "flux_text_encoder": ("flux", "Textencoder"),
     "flux_vae": ("flux", "VAE"),
+    "flux_tokenizer": ("flux", "tokenizer"),
     "flux2_unet_safetensor": ("flux2", "UNet"),
     "flux2_unet_gguf": ("flux2", "GGUF"),
     "flux2_components": ("flux2", "Components"),
     "flux2_diffusers": ("flux2", "Diffusers"),
+    # The Flux Kontext GGUF resolver looks for this canonical component path.
+    # Keep catalog installs aligned with sorter recommendations and resolver.
+    "flux_kontext_diffusers": ("flux", "Components"),
+    "flux_kontext_components": ("flux", "Components"),
     "z_image_unet_safetensor": ("z-image", "UNet"),
     "z_image_unet_gguf": ("z-image", "GGUF"),
     "z_image_components": ("z-image", "Components"),
@@ -129,6 +167,7 @@ CATEGORY_FOLDERS: dict[ModelCategory, tuple[str, ...]] = {
     "ltx_vae": ("ltx", "vae"),
     "ltx_audio_vae": ("ltx", "audio_vae"),
     "ltx_text_encoder": ("ltx", "text_encoder"),
+    "ltx_tokenizer": ("ltx", "tokenizer"),
     "llm_gguf": ("LLM", "GGUF"),
     "llm_safetensor": ("LLM",),
     "rife": ("rife",),
@@ -156,7 +195,7 @@ CATEGORY_EXTENSION_RULES: dict[ModelCategory, tuple[str, ...]] = {
     "wan_text_encoder": (".safetensors", ".gguf"),
     "flux_unet_safetensor": (".safetensors",),
     "flux_unet_gguf": (".gguf",),
-    "flux_text_encoder": (".safetensors", ".gguf"),
+    "flux_text_encoder": (".safetensors",),
     "flux_vae": (".safetensors",),
     "flux2_unet_safetensor": (".safetensors",),
     "flux2_unet_gguf": (".gguf",),
@@ -183,6 +222,7 @@ CATEGORY_EXTENSION_RULES: dict[ModelCategory, tuple[str, ...]] = {
     "ltx_vae": (".safetensors",),
     "ltx_audio_vae": (".safetensors",),
     "ltx_text_encoder": (".safetensors", ".json", ".model", ".txt"),
+    "ltx_tokenizer": (".json", ".model", ".txt"),
     "llm_gguf": (".gguf",),
     "llm_safetensor": (".safetensors",),
     "rife": (".pth",),
@@ -201,6 +241,7 @@ class ParsedRemote:
     civitai_model_id: int | None = None
     civitai_version_id: int | None = None
     snapshot: bool = False
+    snapshot_allow_patterns: tuple[str, ...] = ()
 
 
 def _civitai_token() -> str | None:
@@ -584,6 +625,69 @@ class ModelDownloadService:
             return self.destination_dir(category)
         return self.destination_dir(category) / name
 
+    def recover_interrupted_snapshot_replacements(self) -> list[Path]:
+        """Restore quarantined snapshots whose final path is absent after a crash.
+
+        Replacement uses two directory renames, so a process or machine stop
+        between them can leave the old folder in `.aiwf-recovery`. Restore only
+        when the expected destination is absent and the recovery directory is
+        confined beneath the configured models root.
+        """
+        models_root = self.models_root().resolve()
+        recovery_root = models_root / ".aiwf-recovery"
+        if recovery_root.is_symlink() or not recovery_root.is_dir():
+            return []
+        try:
+            resolved_recovery_root = recovery_root.resolve(strict=True)
+            resolved_recovery_root.relative_to(models_root)
+        except (OSError, RuntimeError, ValueError):
+            logger.warning("Ignoring model recovery directory outside the models root: %s", recovery_root)
+            return []
+
+        recovered: list[Path] = []
+        recovery_pattern = re.compile(r"^(?P<name>.+)-(?P<stamp>\d{8}T\d{6}Z)-(?P<nonce>[0-9a-f]{8})$")
+        for category in CATEGORY_FOLDERS:
+            category_root = resolved_recovery_root / category
+            if category_root.is_symlink() or not category_root.is_dir():
+                continue
+            candidates: dict[str, list[tuple[str, Path]]] = {}
+            try:
+                for item in category_root.iterdir():
+                    match = recovery_pattern.match(item.name)
+                    if not match or item.is_symlink() or not item.is_dir():
+                        continue
+                    resolved_item = item.resolve(strict=True)
+                    resolved_item.relative_to(resolved_recovery_root)
+                    candidates.setdefault(match.group("name"), []).append((match.group("stamp"), resolved_item))
+            except (OSError, RuntimeError, ValueError):
+                logger.warning("Could not safely inspect model recovery category: %s", category_root, exc_info=True)
+                continue
+
+            for name, snapshots in candidates.items():
+                category_destination = self.destination_dir(category)
+                destination = (
+                    category_destination
+                    if category == "preprocessor" and name == category_destination.name
+                    else category_destination / _safe_repo_dir_name(name)
+                )
+                if not name or destination.exists() or destination.is_symlink():
+                    continue
+                try:
+                    resolved_parent = destination.parent.resolve(strict=False)
+                    resolved_parent.relative_to(models_root)
+                    resolved_parent.mkdir(parents=True, exist_ok=True)
+                    resolved_destination = resolved_parent / destination.name
+                    _stamp, previous = max(snapshots, key=lambda item: item[0])
+                    previous.rename(resolved_destination)
+                    recovered.append(resolved_destination)
+                    logger.warning(
+                        "Restored model snapshot after an interrupted replacement: %s",
+                        resolved_destination,
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    logger.warning("Could not restore interrupted model snapshot: %s", destination, exc_info=True)
+        return recovered
+
     def _validate_destination_filename(self, category: ModelCategory, filename: str) -> None:
         safe_name = _safe_filename(filename) if filename else ""
         if category == "wan_diffusers" and safe_name:
@@ -613,14 +717,679 @@ class ModelDownloadService:
                 return item
         return None
 
-    def is_catalog_installed(self, entry: CatalogEntry) -> bool:
+    def is_catalog_installed(self, entry: CatalogEntry, *, search_misplaced: bool = False) -> bool:
         if entry.snapshot:
             target = self.snapshot_destination_for(entry.category, entry.repo_id)
-            return self._snapshot_target_ready(entry.category, target)
+            if self._catalog_snapshot_ready(entry, target):
+                return True
+            name = _safe_repo_dir_name(entry.repo_id)
+            roots = [self.flags.resolved_models_dir(), *self.flags.resolved_extra_model_dirs()]
+            seen_roots: set[str] = set()
+            for root in roots:
+                root_key = str(root.resolve()).casefold()
+                if root_key in seen_roots:
+                    continue
+                seen_roots.add(root_key)
+                folder_candidates = (
+                    root.joinpath(*CATEGORY_FOLDERS.get(entry.category, ()), name),
+                    root / "Diffusers" / name,
+                    root / "diffusers" / name,
+                    root / name,
+                    root / entry.repo_id.replace("/", "--"),
+                )
+                if entry.category == "flux2_components":
+                    folder_candidates += (
+                        root / "flux2" / "Diffusers" / name,
+                        root / "Flux2" / "Diffusers" / name,
+                    )
+                elif entry.category == "z_image_components":
+                    folder_candidates += (
+                        root / "z-image" / "Diffusers" / name,
+                        root / "Z-Image" / "Diffusers" / name,
+                    )
+                if any(self._catalog_snapshot_ready(entry, path) for path in folder_candidates):
+                    return True
+                if search_misplaced and root.is_dir():
+                    try:
+                        for candidate in root.rglob(name):
+                            if candidate.is_dir() and self._catalog_snapshot_ready(entry, candidate):
+                                return True
+                    except OSError:
+                        continue
+            if entry.category == "flux_tokenizer" and self._flux_tokenizer_in_hub_cache(entry):
+                return True
+            return False
         filename = self._catalog_local_filename_hint(entry)
         if not filename:
             return False
-        return self._catalog_file_ready(entry, self.destination_for(entry.category, filename))
+        if self._catalog_file_ready(entry, self.destination_for(entry.category, filename)):
+            return True
+        candidates = self._shared_catalog_candidates(entry, filename)
+        if search_misplaced:
+            misplaced = self._find_compatible_misplaced_catalog_file(entry, filename)
+            if misplaced is not None:
+                return True
+        return any(self._catalog_file_ready(entry, path) for path in candidates)
+
+    def _flux_tokenizer_in_hub_cache(self, entry: CatalogEntry) -> bool:
+        """Match the Flux runtime resolver's local-only Hugging Face cache search."""
+        roots: list[Path] = []
+        model_roots = [self.flags.resolved_models_dir(), *self.flags.resolved_extra_model_dirs()]
+        for model_root in model_roots:
+            roots.extend((model_root, model_root / "hub", model_root / ".cache" / "huggingface" / "hub"))
+        for variable in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE"):
+            value = os.environ.get(variable)
+            if value:
+                roots.append(Path(value).expanduser())
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+
+            roots.append(Path(HF_HUB_CACHE))
+        except Exception:
+            pass
+
+        cache_name = "models--" + entry.repo_id.replace("/", "--")
+        required: tuple[str, ...] = ()
+        if entry.repo_id == "openai/clip-vit-large-patch14":
+            required = ("vocab.json", "merges.txt", "tokenizer_config.json")
+        elif entry.repo_id == "google/t5-v1_1-xxl":
+            required = ("spiece.model", "tokenizer_config.json")
+        if not required:
+            return False
+
+        seen: set[str] = set()
+        for root in roots:
+            try:
+                cache_root = root.resolve(strict=True)
+                key = str(cache_root).casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                repo_root = cache_root / cache_name
+                snapshots_root = repo_root / "snapshots"
+                resolved_snapshots = snapshots_root.resolve(strict=True)
+                resolved_snapshots.relative_to(cache_root)
+                revisions = [path for path in snapshots_root.iterdir() if path.is_dir()]
+                ref_main = repo_root / "refs" / "main"
+                preferred: list[Path] = []
+                if ref_main.is_file():
+                    revision = ref_main.read_text(encoding="utf-8").strip()
+                    if revision:
+                        preferred.append(snapshots_root / revision)
+                ordered = preferred + sorted(
+                    (path for path in revisions if path not in preferred),
+                    key=lambda path: path.name.casefold(),
+                    reverse=True,
+                )
+                for snapshot in ordered:
+                    resolved_snapshot = snapshot.resolve(strict=True)
+                    resolved_snapshot.relative_to(cache_root)
+                    if all(
+                        (resolved_file := (snapshot / name).resolve(strict=True)).is_file()
+                        and resolved_file.stat().st_size > 0
+                        and resolved_file.is_relative_to(cache_root)
+                        for name in required
+                    ):
+                        return True
+            except (OSError, RuntimeError, ValueError):
+                continue
+        return False
+
+    def _catalog_snapshot_ready(self, entry: CatalogEntry, target: Path) -> bool:
+        if entry.category == "sd_singlefile_config":
+            from aiwf.infrastructure.diffusers.single_file_config import missing_single_file_config_files
+
+            family = {
+                "hf-sd15-singlefile-config": "sd15",
+                "hf-sd15-inpaint-singlefile-config": "sd15_inpaint",
+                "hf-sdxl-singlefile-config": "sdxl",
+                "hf-sdxl-inpaint-singlefile-config": "sdxl_inpaint",
+                "hf-sdxl-refiner-singlefile-config": "sdxl_refiner",
+                "hf-sd35-singlefile-config": "sd35",
+            }.get(entry.key)
+            return family is not None and not missing_single_file_config_files(target, family)
+        if entry.category == "flux2_diffusers":
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import flux2_klein_missing_local_files
+
+                return not flux2_klein_missing_local_files(target)
+            except Exception:
+                logger.debug("Could not inspect full Flux.2 Klein pipeline snapshot completeness", exc_info=True)
+                return False
+        if entry.category == "z_image_components":
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import z_image_components_missing_local_files
+
+                return not z_image_components_missing_local_files(target)
+            except Exception:
+                logger.debug("Could not inspect Z-Image component snapshot completeness", exc_info=True)
+                return False
+        if entry.category == "flux2_components":
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import flux2_klein_components_missing_local_files
+
+                return not flux2_klein_components_missing_local_files(target)
+            except Exception:
+                logger.debug("Could not inspect Flux.2 Klein component snapshot completeness", exc_info=True)
+                return False
+        if entry.category == "ltx_text_encoder":
+            try:
+                from aiwf.services.ltx import ltx_gemma_hf_assets_ready
+
+                return ltx_gemma_hf_assets_ready(target)
+            except Exception:
+                logger.debug("Could not inspect LTX Gemma snapshot completeness", exc_info=True)
+                return False
+        if entry.category == "ltx_tokenizer":
+            try:
+                from aiwf.services.ltx import ltx_t5_tokenizer_ready
+
+                return ltx_t5_tokenizer_ready(target)
+            except Exception:
+                logger.debug("Could not inspect LTX T5 tokenizer snapshot completeness", exc_info=True)
+                return False
+        if entry.category == "wan_diffusers":
+            required = (
+                target / "model_index.json",
+                target / "text_encoder" / "config.json",
+                target / "text_encoder" / "model.safetensors.index.json",
+                target / "tokenizer" / "tokenizer.json",
+                target / "scheduler" / "scheduler_config.json",
+            )
+            try:
+                if any(not path.is_file() or path.stat().st_size <= 0 for path in required):
+                    return False
+                return indexed_safetensors_shards_ready(target / "text_encoder", required[2])
+            except OSError:
+                return False
+        if entry.category == "sana_video_diffusers":
+            # Generic Diffusers completeness is not enough for Sana Video: the
+            # route requires specific component classes, configs and weights.
+            # Keep install/catalog status aligned with the same validator used
+            # by Sana's picker and generation preflight.
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import sana_video_dir_has_required_local_files
+
+                return sana_video_dir_has_required_local_files(target)
+            except Exception:
+                logger.debug("Could not inspect Sana Video snapshot completeness", exc_info=True)
+                return False
+        if entry.category == "flux_kontext_diffusers":
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import flux_kontext_missing_local_files
+
+                return not flux_kontext_missing_local_files(target, limit=8)
+            except Exception:
+                logger.debug("Could not inspect Flux Kontext snapshot completeness", exc_info=True)
+                return False
+        if entry.category == "flux_kontext_components":
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import flux_kontext_missing_local_files
+
+                return not flux_kontext_missing_local_files(
+                    target, limit=8, require_transformer_weights=False
+                )
+            except Exception:
+                logger.debug("Could not inspect Flux Kontext component snapshot completeness", exc_info=True)
+                return False
+        return self._snapshot_target_ready(entry.category, target, repo_id=entry.repo_id)
+
+    def place_misplaced_catalog_asset(self, entry: CatalogEntry) -> bool:
+        """Place one confidently identified catalog asset during explicit setup.
+
+        This is intended for an explicit catalog/bundle install action. Ordinary
+        status reads stay read-only and bounded. Only header-identified assets
+        under the primary models root may be moved; extra/shared roots are never
+        modified here.
+        """
+        if self.is_catalog_installed(entry):
+            return False
+        root = self.models_root().resolve()
+        if entry.snapshot:
+            source = self._find_misplaced_catalog_snapshot(entry)
+            if source is None:
+                return False
+            destination = self.snapshot_destination_for(entry.category, entry.repo_id)
+        else:
+            filename = self._catalog_local_filename_hint(entry)
+            if not filename:
+                return False
+            source = self._find_compatible_misplaced_catalog_file(entry, filename)
+            if source is None:
+                return False
+            destination = self.destination_for(entry.category, filename)
+        try:
+            source_resolved = source.resolve(strict=True)
+            destination_resolved = destination.resolve(strict=False)
+            source_resolved.relative_to(root)
+            destination_resolved.relative_to(root)
+            if destination.exists():
+                return False
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            # Path.rename fails rather than replacing an existing destination,
+            # keeping a concurrent install or user file intact.
+            source_resolved.rename(destination)
+        except (OSError, ValueError):
+            logger.info("Could not safely place catalog asset %s from %s", entry.key, source)
+            return False
+        self._invalidate_model_inventory()
+        if entry.snapshot:
+            return self._catalog_snapshot_ready(entry, destination)
+        return self._catalog_file_ready(entry, destination)
+
+    def copy_shared_catalog_asset_to_primary(self, entry: CatalogEntry) -> dict[str, str] | None:
+        """Copy one verified catalog file from an extra model root into AIWF's root.
+
+        This is an explicit setup action. Shared roots are treated as user-owned:
+        the source is never moved or modified. Snapshot directories are excluded
+        because copying multi-gigabyte pipelines needs a separately confirmed UI
+        action with a disk-space estimate.
+        """
+        if entry.snapshot:
+            return None
+        filename = self._catalog_local_filename_hint(entry)
+        if not filename:
+            return None
+        destination = self.destination_for(entry.category, filename)
+        if self._catalog_file_ready(entry, destination):
+            return None
+        source = self._find_compatible_misplaced_catalog_file(
+            entry,
+            filename,
+            roots=self.flags.resolved_extra_model_dirs(),
+        )
+        if source is None:
+            return None
+
+        try:
+            source_resolved = source.resolve(strict=True)
+            destination_resolved = self._confined_primary_destination(destination)
+            if destination_resolved is None or destination_resolved.exists() or not source_resolved.is_file():
+                return None
+            extra_roots = [root.resolve() for root in self.flags.resolved_extra_model_dirs()]
+            if not any(source_resolved.is_relative_to(root) for root in extra_roots):
+                return None
+            source_size = source_resolved.stat().st_size
+            if source_size <= 0:
+                return None
+            destination_resolved.parent.mkdir(parents=True, exist_ok=True)
+            # Re-resolve after creating the parent: a linked parent must not
+            # redirect an import outside AIWF's canonical models directory.
+            destination_resolved = self._confined_primary_destination(destination)
+            if destination_resolved is None or destination_resolved.exists():
+                return None
+            volume_path = self._nearest_existing_parent(destination_resolved.parent)
+            free_bytes = shutil.disk_usage(volume_path).free
+            required_bytes = source_size + max(64 * 1024 * 1024, (source_size + 49) // 50)
+            if free_bytes < required_bytes:
+                raise ValueError(
+                    f"Insufficient disk space to copy verified shared asset `{entry.key}`: "
+                    f"{required_bytes} bytes required, {free_bytes} bytes available. "
+                    "Free space in the AIWF model volume and retry; no network download was started."
+                )
+            with tempfile.TemporaryDirectory(prefix=".aiwf-import-", dir=destination_resolved.parent) as staging_dir:
+                staged = Path(staging_dir) / destination.name
+                shutil.copy2(source_resolved, staged)
+                if staged.stat().st_size != source_size or not self._catalog_file_ready(entry, staged):
+                    return None
+                # Check again after staging to guard against a changed or
+                # redirected destination hierarchy while the copy was active.
+                checked_destination = self._confined_primary_destination(destination)
+                if checked_destination is None or checked_destination.exists():
+                    return None
+                # On Windows os.rename fails if a concurrent setup created the
+                # destination, so this does not overwrite a user's model.
+                os.rename(staged, checked_destination)
+                destination_resolved = checked_destination
+        except (OSError, ValueError):
+            logger.info("Could not safely copy shared catalog asset %s from %s", entry.key, source)
+            return None
+        self._invalidate_model_inventory()
+        return {"source": str(source_resolved), "target": str(destination_resolved)}
+
+    def _confined_primary_destination(self, destination: Path) -> Path | None:
+        """Resolve a destination without entering a configured read-only root."""
+        try:
+            root = self.models_root().resolve(strict=False)
+            resolved = Path(destination).resolve(strict=False)
+            resolved.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        # Settings can point a shared root at the primary root or one of its
+        # ancestors. In that ambiguous overlap, the shared-root read-only
+        # contract wins for imports: do not write into it.
+        try:
+            for shared_root in self.flags.resolved_extra_model_dirs():
+                try:
+                    resolved.relative_to(Path(shared_root).resolve(strict=False))
+                except ValueError:
+                    continue
+                return None
+        except (OSError, RuntimeError):
+            return None
+        return resolved
+
+    @staticmethod
+    def _nearest_existing_parent(path: Path) -> Path:
+        current = Path(path)
+        while not current.exists() and current != current.parent:
+            current = current.parent
+        return current
+
+    def preview_shared_catalog_snapshot_import(self, entry: CatalogEntry) -> dict[str, Any] | None:
+        """Describe one verified shared snapshot and its copy-space requirement."""
+        if not entry.snapshot or self._catalog_snapshot_ready(
+            entry, self.snapshot_destination_for(entry.category, entry.repo_id)
+        ):
+            return None
+        source = self._find_shared_catalog_snapshot(entry)
+        if source is None:
+            return None
+        try:
+            size_bytes = self._tree_size_without_links(source)
+            target = self._confined_primary_destination(
+                self.snapshot_destination_for(entry.category, entry.repo_id)
+            )
+            if target is None:
+                return None
+            volume_path = self._nearest_existing_parent(target.parent)
+            free_bytes = shutil.disk_usage(volume_path).free
+        except OSError:
+            return None
+        required_bytes = size_bytes + max(64 * 1024 * 1024, (size_bytes + 49) // 50)
+        return {
+            "source": str(source),
+            "target": str(target),
+            "sizeBytes": size_bytes,
+            "requiredBytes": required_bytes,
+            "freeBytes": free_bytes,
+            "enoughSpace": free_bytes >= required_bytes,
+        }
+
+    @staticmethod
+    def _tree_size_without_links(root: Path) -> int:
+        def is_link_or_junction(path: Path) -> bool:
+            is_junction = getattr(path, "is_junction", None)
+            return path.is_symlink() or (callable(is_junction) and is_junction())
+
+        total = 0
+        for current, directories, files in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            for name in directories:
+                if is_link_or_junction(current_path / name):
+                    raise OSError("Snapshot contains a linked directory")
+            for name in files:
+                path = current_path / name
+                if is_link_or_junction(path) or not path.is_file():
+                    raise OSError("Snapshot contains a linked or non-regular file")
+                total += path.stat().st_size
+        return total
+
+    def _find_shared_catalog_snapshot(self, entry: CatalogEntry) -> Path | None:
+        name = _safe_repo_dir_name(entry.repo_id)
+        if not name:
+            return None
+        matches: list[Path] = []
+        for root in self.flags.resolved_extra_model_dirs():
+            if not root.is_dir():
+                continue
+            candidates = (
+                root.joinpath(*CATEGORY_FOLDERS.get(entry.category, ()), name),
+                root / "Diffusers" / name,
+                root / "diffusers" / name,
+                root / name,
+                root / entry.repo_id.replace("/", "--"),
+            )
+            for candidate in candidates:
+                try:
+                    if candidate.is_symlink() or not candidate.is_dir():
+                        continue
+                    resolved = candidate.resolve(strict=True)
+                    if not any(resolved.is_relative_to(extra.resolve()) for extra in self.flags.resolved_extra_model_dirs()):
+                        continue
+                    if self._catalog_snapshot_ready(entry, resolved) and resolved not in matches:
+                        matches.append(resolved)
+                except (OSError, ValueError):
+                    continue
+        return matches[0] if len(matches) == 1 else None
+
+    def copy_shared_catalog_snapshot_to_primary(
+        self, entry: CatalogEntry, *, expected_source: str, expected_size_bytes: int
+    ) -> dict[str, str] | None:
+        """Copy a user-confirmed shared snapshot after rechecking source and disk space."""
+        preview = self.preview_shared_catalog_snapshot_import(entry)
+        if (
+            preview is None
+            or preview["source"] != expected_source
+            or preview["sizeBytes"] != expected_size_bytes
+            or not preview["enoughSpace"]
+        ):
+            return None
+        source = Path(preview["source"])
+        target = self._confined_primary_destination(Path(preview["target"]))
+        if target is None or target.exists():
+            return None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target = self._confined_primary_destination(self.snapshot_destination_for(entry.category, entry.repo_id))
+        if target is None or target.exists():
+            return None
+        try:
+            with tempfile.TemporaryDirectory(prefix=".aiwf-snapshot-import-", dir=target.parent) as staging:
+                staged = Path(staging) / target.name
+                # Preserve links during the copy so the staged-tree validator
+                # rejects them instead of dereferencing a link introduced after
+                # the preflight size check.
+                shutil.copytree(source, staged, symlinks=True)
+                if self._tree_size_without_links(staged) != expected_size_bytes:
+                    return None
+                if not self._catalog_snapshot_ready(entry, staged):
+                    return None
+                os.rename(staged, target)
+            if (
+                self._tree_size_without_links(target) != expected_size_bytes
+                or not self._catalog_snapshot_ready(entry, target)
+            ):
+                logger.error("Copied snapshot failed destination verification: %s", target)
+                return None
+        except (OSError, ValueError):
+            logger.info("Could not safely copy shared snapshot %s from %s", entry.key, source)
+            return None
+        self._invalidate_model_inventory()
+        return {"source": str(source), "target": str(target)}
+
+    def _find_misplaced_catalog_snapshot(self, entry: CatalogEntry) -> Path | None:
+        name = _safe_repo_dir_name(entry.repo_id)
+        root = self.models_root().resolve()
+        if not name or not root.is_dir():
+            return None
+        matches: list[Path] = []
+        try:
+            for candidate in root.rglob(name):
+                try:
+                    if candidate.is_symlink() or not candidate.is_dir():
+                        continue
+                    resolved = candidate.resolve(strict=True)
+                    resolved.relative_to(root)
+                    if resolved == self.snapshot_destination_for(entry.category, entry.repo_id).resolve(strict=False):
+                        continue
+                    if self._catalog_snapshot_ready(entry, resolved):
+                        matches.append(resolved)
+                        if len(matches) > 1:
+                            return None
+                except (OSError, ValueError):
+                    continue
+        except OSError:
+            return None
+        return matches[0] if len(matches) == 1 else None
+
+    def _find_compatible_misplaced_catalog_file(
+        self,
+        entry: CatalogEntry,
+        filename: str,
+        *,
+        roots: list[Path] | None = None,
+    ) -> Path | None:
+        """Return one unambiguous, header-compatible misplaced asset in models/.
+
+        A filename and size match alone are not sufficient: common names such as
+        ``ae.safetensors`` can refer to unrelated files. When the local header
+        reader cannot prove the catalog category, leave the file untouched and
+        allow the normal download path to continue.
+        """
+        expected = _CATALOG_HEADER_IDENTITIES.get(entry.category)
+        if not expected:
+            return None
+        search_roots = [root.resolve() for root in (roots if roots is not None else [self.models_root()])]
+        search_roots = [root for root in search_roots if root.is_dir()]
+        if not search_roots:
+            return None
+        matches: list[Path] = []
+        # Only use filename-independent identity when that identity uniquely
+        # proves the catalog asset, not merely its broad model family.
+        renamed_flux_identity: tuple[str, str] | None = None
+        flux_clip_l_requires_typed_directory = False
+        # CLIP headers do not distinguish CLIP-L from CLIP-G, and a T5 header
+        # does not prove fp8 versus fp16. Only the Flux VAE is specific enough
+        # to permit filename-independent placement without risking mislabeling.
+        if entry.key == "flux-ae-vae":
+            renamed_flux_identity = ("flux-vae", "vae")
+        elif entry.key == "flux-clip-l":
+            # CLIP headers do not distinguish CLIP-L from CLIP-G. Permit
+            # auto-placement only when the shared root also identifies the
+            # variant through ComfyUI's canonical text_encoders/CLIP-L layout.
+            # Generic/unsorted CLIP files remain manual because their identity
+            # cannot be inferred safely from the tensor header alone.
+            renamed_flux_identity = ("clip", "text-encoder")
+            flux_clip_l_requires_typed_directory = True
+        try:
+            candidates: list[tuple[Path, Path]] = []
+            visited_entries = 0
+            target_name = filename.casefold()
+            for root in search_roots:
+                stack = [root]
+                while stack:
+                    directory = stack.pop()
+                    with os.scandir(directory) as entries:
+                        for item in entries:
+                            visited_entries += 1
+                            # Bound the full walk across all roots and fail
+                            # closed rather than choosing from a partial scan.
+                            if visited_entries > 20000:
+                                return None
+                            if item.is_dir(follow_symlinks=False):
+                                stack.append(Path(item.path))
+                                continue
+                            if not item.is_file(follow_symlinks=False):
+                                continue
+                            exact_name = item.name.casefold() == target_name
+                            renamed_candidate = (
+                                renamed_flux_identity is not None
+                                and Path(item.name).suffix.casefold() in {".safetensors", ".ckpt", ".pt"}
+                            )
+                            if exact_name or renamed_candidate:
+                                candidates.append((Path(item.path), root))
+        except (OSError, PermissionError):
+            return None
+        for path, root in candidates:
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(root)
+                if resolved == self.destination_for(entry.category, filename).resolve(strict=False):
+                    continue
+                if not self._catalog_file_ready(entry, resolved):
+                    continue
+                from aiwf.infrastructure.model_header import read_model_info
+
+                info = read_model_info(resolved)
+                # Filename-only fallback classification has no tensor evidence
+                # (for example, any empty file named ae.safetensors is called
+                # a Flux VAE). Require a non-empty parsed model header.
+                identity = (str(info.arch), str(info.role))
+                identity_matches = identity == renamed_flux_identity if renamed_flux_identity else identity in expected
+                if flux_clip_l_requires_typed_directory:
+                    relative_parts = tuple(part.casefold() for part in resolved.relative_to(root).parts[:-1])
+                    comfy_clip_l = "text_encoders" in relative_parts and "clip-l" in relative_parts
+                    aiwf_flux_textencoder = (
+                        "flux" in relative_parts
+                        and any(part in {"textencoder", "text_encoders"} for part in relative_parts)
+                    )
+                    identity_matches = (
+                        identity_matches
+                        and (comfy_clip_l or aiwf_flux_textencoder)
+                        and path.name.casefold() == filename.casefold()
+                    )
+                if entry.key == "flux-t5-fp8" and "fp8" not in str(getattr(info, "precision", "")).lower():
+                    identity_matches = False
+                if int(getattr(info, "tensor_count", 0) or 0) > 0 and identity_matches:
+                    matches.append(resolved)
+                    if len(matches) > 1:
+                        return None
+            except (OSError, ValueError):
+                continue
+        return matches[0] if len(matches) == 1 else None
+
+    def _shared_catalog_candidates(self, entry: CatalogEntry, filename: str) -> list[Path]:
+        """Find matching files in common shared-model layouts without scanning whole drives."""
+        category_roots: dict[str, tuple[str, ...]] = {
+            "checkpoint": ("checkpoints", "Stable-diffusion"),
+            "lora": ("loras", "Loras"),
+            "vae": ("vae", "VAE"),
+            "wan_safetensor": ("diffusion_models", "checkpoints", "wan"),
+            "wan_gguf": ("diffusion_models", "unet", "wan"),
+            "wan_diffusers": ("diffusers",),
+            "wan_lora": ("loras", "wan"),
+            "wan_vae": ("vae",),
+            "wan_text_encoder": ("text_encoders", "clip"),
+            "flux_unet_safetensor": ("diffusion_models", "unet", "flux"),
+            "flux_unet_gguf": ("diffusion_models", "unet", "flux"),
+            "flux_text_encoder": ("text_encoders", "clip", "flux"),
+            "flux_vae": ("vae", "flux"),
+            "flux2_unet_safetensor": ("diffusion_models", "unet", "flux2"),
+            "flux2_unet_gguf": ("diffusion_models", "unet", "flux2"),
+            "flux2_components": ("text_encoders", "vae", "clip"),
+            "z_image_unet_safetensor": ("diffusion_models", "unet", "z-image"),
+            "z_image_unet_gguf": ("diffusion_models", "unet", "z-image"),
+            "z_image_components": ("text_encoders", "vae", "clip"),
+            "krea2_unet_safetensor": ("diffusion_models", "unet", "krea2"),
+            "krea2_text_encoder": ("text_encoders", "clip"),
+            "krea2_vae": ("vae",),
+            "anima_unet_safetensor": ("diffusion_models", "unet", "anima"),
+            "anima_text_encoder": ("text_encoders", "clip"),
+            "anima_vae": ("vae",),
+            "ltx_gguf": ("diffusion_models", "unet", "ltx"),
+            "ltx_checkpoint": ("ltx/checkpoints", "checkpoints/ltx", "checkpoints", "diffusion_models/unet/ltx"),
+            "ltx_vae": ("vae",),
+            "ltx_audio_vae": ("vae",),
+            "ltx_text_encoder": ("text_encoders", "clip"),
+            "rife": ("rife",),
+            "sam": ("sam",),
+        }
+        folders = category_roots.get(entry.category, ())
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        roots = [self.flags.resolved_models_dir(), *self.flags.resolved_extra_model_dirs()]
+        seen_roots: set[str] = set()
+        for root in roots:
+            root_key = str(root.resolve()).casefold()
+            if root_key in seen_roots:
+                continue
+            seen_roots.add(root_key)
+            for folder in folders:
+                search_root = root / folder
+                if not search_root.is_dir():
+                    continue
+                try:
+                    matches = search_root.rglob(filename)
+                    for path in matches:
+                        key = str(path.resolve()).casefold()
+                        if key not in seen:
+                            seen.add(key)
+                            candidates.append(path)
+                except OSError:
+                    continue
+        return candidates
 
     def _catalog_min_bytes(self, entry: CatalogEntry) -> int:
         if not entry.size_mb:
@@ -630,9 +1399,48 @@ class ModelDownloadService:
         # HTML/XML error bodies, and tiny pointer stubs.
         return max(1024 * 1024, int(entry.size_mb * 1024 * 1024 * 0.35))
 
+    @staticmethod
+    def _gguf_file_is_structurally_valid(path: Path) -> bool:
+        try:
+            import gguf
+
+            reader = gguf.GGUFReader(str(path), mode="r")
+            tensors = reader.tensors
+            if not tensors:
+                return False
+            file_size = path.stat().st_size
+            return all(
+                int(tensor.n_bytes) > 0
+                and int(tensor.data_offset) >= int(reader.data_offset)
+                and int(tensor.data_offset) + int(tensor.n_bytes) <= file_size
+                and int(tensor.data.nbytes) == int(tensor.n_bytes)
+                for tensor in tensors
+            )
+        except Exception:
+            return False
+
     def _catalog_file_ready(self, entry: CatalogEntry, path: Path) -> bool:
         if not path.is_file():
             return False
+        try:
+            # Catalog entries without an upstream size still must have payload
+            # bytes. Treating an empty placeholder as installed prevents the
+            # explicit setup flow from repairing interrupted downloads.
+            if path.stat().st_size <= 0:
+                return False
+        except OSError:
+            return False
+        if path.suffix.lower() == ".safetensors":
+            # Size alone can mark a truncated or HTML/error payload as
+            # installed. Validate the lightweight safetensors framing and
+            # tensor byte ranges before trusting catalog readiness or copies.
+            from aiwf.infrastructure.safetensors_metadata import safetensors_file_is_structurally_valid
+
+            if not safetensors_file_is_structurally_valid(path):
+                return False
+        elif path.suffix.lower() == ".gguf":
+            if not self._gguf_file_is_structurally_valid(path):
+                return False
         min_bytes = self._catalog_min_bytes(entry)
         if not min_bytes:
             return True
@@ -673,9 +1481,41 @@ class ModelDownloadService:
         ]
         return len(matches) > 1
 
-    def _snapshot_target_ready(self, category: ModelCategory, target: Path) -> bool:
+    def _snapshot_target_ready(self, category: ModelCategory, target: Path, *, repo_id: str = "") -> bool:
         if not target.is_dir():
             return False
+        if category == "flux_tokenizer":
+            # These are local-only runtime prerequisites; don't report a
+            # partially downloaded tokenizer snapshot as installed.
+            resolved_repo_id = repo_id or {
+                "clip-vit-large-patch14": "openai/clip-vit-large-patch14",
+                "t5-v1_1-xxl": "google/t5-v1_1-xxl",
+                "t5-v1_1-base": "google/t5-v1_1-base",
+            }.get(target.name)
+            required = {
+                "openai/clip-vit-large-patch14": ("vocab.json", "merges.txt", "tokenizer_config.json"),
+                "google/t5-v1_1-xxl": ("spiece.model", "tokenizer_config.json"),
+                "google/t5-v1_1-base": ("spiece.model", "tokenizer_config.json"),
+            }.get(resolved_repo_id)
+            return bool(required) and all(
+                (target / name).is_file() and (target / name).stat().st_size > 0
+                for name in required
+            )
+        if category == "flux_text_encoder" and repo_id == "LifuWang/DistillT5":
+            return all(
+                (target / name).is_file() and (target / name).stat().st_size > 0
+                for name in ("config.json", "model.safetensors")
+            )
+        if category == "sana_video_diffusers":
+            # Catalog installation status must use the same full component
+            # contract as Sana Video preflight and generation. A generic
+            # Diffusers transformer-only folder is not a ready video route.
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import sana_video_dir_has_required_local_files
+
+                return sana_video_dir_has_required_local_files(target)
+            except Exception:
+                return False
         if category in {
             "checkpoint",
             "wan_diffusers",
@@ -683,16 +1523,47 @@ class ModelDownloadService:
             "krea2_diffusers",
             "qwen_image_diffusers",
             "sana_diffusers",
-            "sana_video_diffusers",
         }:
-            if category == "krea2_diffusers":
-                try:
-                    from aiwf.infrastructure.diffusers.checkpoints import diffusers_dir_has_required_local_files
+            try:
+                model_index = json.loads((target / "model_index.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            if not isinstance(model_index, dict):
+                return False
 
-                    return diffusers_dir_has_required_local_files(target)
-                except Exception:
-                    logger.debug("Could not inspect Krea 2 Diffusers snapshot completeness", exc_info=True)
-            return (target / "model_index.json").is_file()
+            weighted_components = {
+                "transformer", "unet", "text_encoder", "text_encoder_2", "vae",
+                "image_encoder", "controlnet", "prior",
+            }
+            found_weighted_component = False
+            for component, reference in model_index.items():
+                if component not in weighted_components or not isinstance(reference, list) or len(reference) < 2 or not reference[1]:
+                    continue
+                found_weighted_component = True
+                component_dir = target / component
+                if not (component_dir / "config.json").is_file():
+                    return False
+                weight_files = [
+                    path for path in component_dir.iterdir()
+                    if path.is_file()
+                    and path.stat().st_size > 0
+                    and path.suffix.casefold() in {".safetensors", ".bin", ".pt", ".onnx"}
+                ]
+                indexes = list(component_dir.glob("*.index.json"))
+                if not weight_files and not indexes:
+                    return False
+                for index in indexes:
+                    if not indexed_weight_shards_ready(component_dir, index):
+                        return False
+            if not found_weighted_component:
+                return False
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import diffusers_dir_has_required_local_files
+
+                return diffusers_dir_has_required_local_files(target)
+            except Exception:
+                logger.debug("Could not inspect Diffusers snapshot completeness", exc_info=True)
+                return False
         allowed = CATEGORY_EXTENSION_RULES.get(category, ())
         if allowed:
             try:
@@ -734,8 +1605,12 @@ class ModelDownloadService:
                     "preprocessor",
                     "wan_diffusers",
                     "ltx_text_encoder",
+                    "ltx_tokenizer",
+                    "flux_text_encoder",
+                    "flux_tokenizer",
                     "flux2_components",
                     "flux2_diffusers",
+                    "flux_kontext_diffusers",
                     "z_image_components",
                     "krea2_diffusers",
                     "qwen_image_diffusers",
@@ -750,6 +1625,8 @@ class ModelDownloadService:
     def _catalog_to_remote(self, entry: CatalogEntry) -> ParsedRemote:
         if entry.source == "huggingface":
             remote = _parse_hf_reference(entry.repo_id, entry.filename, allow_snapshot=entry.snapshot)
+            if entry.snapshot_allow_patterns:
+                remote = replace(remote, snapshot_allow_patterns=entry.snapshot_allow_patterns)
         elif entry.source == "civitai":
             remote = _resolve_civitai_download(
                 model_id=entry.civitai_model_id,
@@ -783,6 +1660,7 @@ class ModelDownloadService:
         *,
         category: ModelCategory,
         on_progress: ProgressCallback | None = None,
+        snapshot_validator: Callable[[Path], bool] | None = None,
     ) -> Path:
         self.ensure_dirs()
         # Direct URLs are the riskiest source because they can target local
@@ -792,10 +1670,14 @@ class ModelDownloadService:
         if remote.snapshot:
             if category not in {
                 "checkpoint",
+                "sd_singlefile_config",
                 "controlnet",
                 "preprocessor",
                 "wan_diffusers",
                 "ltx_text_encoder",
+                "ltx_tokenizer",
+                "flux_text_encoder",
+                "flux_tokenizer",
                 "flux2_components",
                 "flux2_diffusers",
                 "z_image_components",
@@ -805,11 +1687,14 @@ class ModelDownloadService:
                 "sana_video_diffusers",
             }:
                 raise ValueError(
-                    "Full repository downloads are only supported for checkpoint Diffusers folders, "
-                    "Wan Diffusers folders, LTX/Flux2/Z-Image/Krea2/Qwen/Sana Diffusers/component folders, "
-                    "ControlNet, and preprocessor categories."
+                    "Repository downloads are only supported for checkpoint/Diffusers support folders, "
+                    "Wan Diffusers folders, LTX text/tokenizer assets, Flux tokenizer assets, "
+                    "Flux2/Z-Image/Krea2/Qwen/Sana Diffusers/component folders, ControlNet, "
+                    "and preprocessor categories."
                 )
-            path = self._download_hf_snapshot(remote, category, on_progress=on_progress)
+            path = self._download_hf_snapshot(
+                remote, category, on_progress=on_progress, validator=snapshot_validator
+            )
             self._invalidate_model_inventory()
             return path
         target_filename = remote.local_filename or remote.filename
@@ -869,6 +1754,7 @@ class ModelDownloadService:
         category: ModelCategory,
         *,
         on_progress: ProgressCallback | None = None,
+        validator: Callable[[Path], bool] | None = None,
     ) -> Path:
         from huggingface_hub import snapshot_download
 
@@ -876,8 +1762,99 @@ class ModelDownloadService:
             raise ValueError("Hugging Face repository is required for a Diffusers folder download.")
         token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
         target = self.snapshot_destination_for(category, remote.repo_id)
-        target.mkdir(parents=True, exist_ok=True)
-        snapshot_download(repo_id=remote.repo_id, local_dir=str(target), token=token)
+        models_root = self.models_root().resolve()
+        if target.is_symlink():
+            raise ValueError(f"Snapshot destination is a link and cannot be replaced safely: {target}")
+        target = target.resolve(strict=False)
+        try:
+            target.relative_to(models_root)
+        except ValueError as exc:
+            raise ValueError(f"Snapshot destination escapes the configured models folder: {target}") from exc
+        target.parent.mkdir(parents=True, exist_ok=True)
+        empty_destination = False
+        replace_incomplete_destination = False
+        if target.exists():
+            if not target.is_dir():
+                raise ValueError(f"Snapshot destination exists and is not a folder: {target}")
+            if validator is not None and validator(target):
+                return target
+            try:
+                empty_destination = not any(target.iterdir())
+            except OSError:
+                empty_destination = False
+            if not empty_destination:
+                if validator is None:
+                    raise ValueError(
+                        f"Snapshot destination already exists: {target}. Review or move the existing folder before installing again."
+                    )
+                replace_incomplete_destination = True
+        staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.install-", dir=target.parent))
+        snapshot_options: dict[str, Any] = {
+            "repo_id": remote.repo_id,
+            "local_dir": str(staging),
+            "token": token,
+        }
+        if remote.snapshot_allow_patterns:
+            snapshot_options["allow_patterns"] = list(remote.snapshot_allow_patterns)
+        try:
+            snapshot_download(**snapshot_options)
+            if not any(staging.iterdir()):
+                raise ValueError(f"Downloaded repository for `{remote.repo_id}` contains no files.")
+            if validator is not None and not validator(staging):
+                raise ValueError(
+                    f"Downloaded repository for `{remote.repo_id}` is incomplete. "
+                    "Required component files or indexed weight shards are missing."
+                )
+            # A complete snapshot becomes visible at its final location in one
+            # rename; failed or interrupted downloads remain isolated in staging.
+            published = False
+            if target.exists():
+                try:
+                    if empty_destination and target.is_dir() and not any(target.iterdir()):
+                        target.rmdir()
+                    elif (
+                        replace_incomplete_destination
+                        and target.is_dir()
+                        and validator is not None
+                        and not validator(target)
+                    ):
+                        recovery_root = models_root / ".aiwf-recovery" / category
+                        recovery_root.mkdir(parents=True, exist_ok=True)
+                        if recovery_root.is_symlink():
+                            raise ValueError(f"Snapshot recovery destination is a link: {recovery_root}")
+                        resolved_recovery_root = recovery_root.resolve(strict=True)
+                        try:
+                            resolved_recovery_root.relative_to(models_root)
+                        except ValueError as exc:
+                            raise ValueError(
+                                f"Snapshot recovery destination escapes the configured models folder: {recovery_root}"
+                            ) from exc
+                        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                        recovery = resolved_recovery_root / f"{target.name}-{stamp}-{uuid4().hex[:8]}"
+                        try:
+                            target.rename(recovery)
+                            os.rename(staging, target)
+                            published = True
+                        except BaseException:
+                            if recovery.exists() and not target.exists():
+                                recovery.rename(target)
+                            raise
+                        logger.warning(
+                            "Replaced incomplete model snapshot %s; previous folder preserved at %s",
+                            target,
+                            recovery,
+                        )
+                    else:
+                        raise ValueError(f"Snapshot destination appeared or changed during download: {target}")
+                except OSError as exc:
+                    raise ValueError(f"Snapshot destination changed during download: {target}") from exc
+            if not published:
+                os.rename(staging, target)
+        finally:
+            # KeyboardInterrupt and other BaseException exits must not leave
+            # partial snapshots visible to inventory scans.
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
         if on_progress:
             on_progress(1, 1)
         return target
@@ -907,7 +1884,17 @@ class ModelDownloadService:
         if not remote.snapshot:
             target = self.destination_for(entry.category, remote.local_filename or remote.filename)
             self._quarantine_incomplete_catalog_file(entry, target)
-        path = self.download_parsed(remote, category=entry.category, on_progress=on_progress)
+        path = self.download_parsed(
+            remote,
+            category=entry.category,
+            on_progress=on_progress,
+            snapshot_validator=lambda candidate: self._catalog_snapshot_ready(entry, candidate),
+        )
+        if remote.snapshot and not self._catalog_snapshot_ready(entry, path):
+            raise ValueError(
+                f"Downloaded repository for `{entry.key}` is incomplete. "
+                "Required component files or indexed weight shards are missing."
+            )
         if not remote.snapshot and not self._catalog_file_ready(entry, path):
             self._quarantine_incomplete_catalog_file(entry, path)
             raise ValueError(

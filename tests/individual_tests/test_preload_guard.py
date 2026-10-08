@@ -16,9 +16,14 @@ from __future__ import annotations
 import sys
 import types
 import importlib
+import json
 from unittest.mock import patch
 
 import pytest
+from aiwf.infrastructure.diffusers.checkpoints import (
+    flux2_klein_components_missing_local_files,
+    z_image_components_missing_local_files,
+)
 
 _MISSING = object()
 _ORIGINAL_MODULES: dict[str, object] = {}
@@ -113,7 +118,10 @@ def _inject_stubs():
         ),
         "aiwf.core.infotext": dict(format_infotext=lambda *a, **k: ""),
         "aiwf.infrastructure.diffusers.checkpoints": dict(
-            scan_from_flags=lambda *a: []),
+            scan_from_flags=lambda *a: [],
+            flux2_klein_components_missing_local_files=flux2_klein_components_missing_local_files,
+            z_image_components_missing_local_files=z_image_components_missing_local_files,
+        ),
         "aiwf.infrastructure.diffusers.embeddings": dict(
             find_referenced_embeddings=lambda *a: [],
             scan_embeddings=lambda *a: []),
@@ -123,6 +131,7 @@ def _inject_stubs():
         "aiwf.infrastructure.diffusers.loras": dict(
             scan_loras=lambda *a: []),
         "aiwf.infrastructure.diffusers.mask": dict(
+            align_to_multiple_of_32=lambda x, *a: x,
             align_to_multiple_of_8=lambda x, *a: x,
             align_to_multiple_of_16=lambda x, *a: x,
             apply_masked_content=lambda *a, **k: None,
@@ -162,7 +171,7 @@ def _inject_stubs():
             ARCH_SANA="sana",
             ARCH_SANA_VIDEO="sana_video",
             ARCH_SD15="sd15",
-            ARCH_SDXL="sdxl", ARCH_SDXL_INPAINT="sdxl_inpaint",
+            ARCH_SDXL="sdxl", ARCH_SDXL_INPAINT="sdxl_inpaint", ARCH_SDXL_REFINER="sdxl_refiner",
             ARCH_SD35="sd35",
             ARCH_Z_IMAGE="z_image",
             UNET_INPUT_KEY="model.diffusion_model.input_blocks.0.0.weight",
@@ -189,6 +198,15 @@ def _inject_stubs():
             build_prompt_kwargs=lambda *a, **k: {}),
         "aiwf.infrastructure.diffusers.flux_bnb_loader": dict(
             load_flux_original_bnb_transformer=lambda *a, **k: None),
+        "aiwf.infrastructure.diffusers.flux_prompt_conditioning": dict(
+            FLUX_CONDITIONING_DISTILLT5_CONTROL="distillt5-control",
+            FLUX_CONDITIONING_TEACHER="teacher",
+            FLUX_CONDITIONING_UNIVERSAL="universal",
+            FluxPromptConditioningConfig=type("FluxPromptConditioningConfig", (), {}),
+            load_distillt5_control=lambda *a, **k: None,
+            load_universal_conditioner=lambda *a, **k: None,
+            validate_flux_conditioning=lambda *a, **k: None,
+        ),
         "aiwf.infrastructure.quant.bnb_nf4_format": dict(
             build_bnb_4bit_quantization_config=lambda *a, **k: None,
             inspect_bnb_4bit_safetensors=lambda *a, **k: None,
@@ -221,6 +239,27 @@ def _restore_modules() -> None:
     _ORIGINAL_MODULES.clear()
 
 
+def _seed_single_file_config(path: Path, family: str) -> None:
+    import json
+    from aiwf.infrastructure.diffusers.single_file_config import (
+        SINGLE_FILE_CONFIG_REQUIRED_FILES,
+        _EXPECTED_PIPELINE_PREFIX,
+        _REQUIRED_COMPONENTS,
+    )
+
+    model_index = {"_class_name": _EXPECTED_PIPELINE_PREFIX[family]}
+    model_index.update({name: ["diffusers", f"{name.title()}Class"] for name in _REQUIRED_COMPONENTS[family]})
+    for relative in SINGLE_FILE_CONFIG_REQUIRED_FILES[family]:
+        target = path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if relative == "model_index.json":
+            target.write_text(json.dumps(model_index), encoding="utf-8")
+        elif relative.endswith(".json"):
+            target.write_text("{}", encoding="utf-8")
+        else:
+            target.write_bytes(b"asset")
+
+
 @pytest.fixture()
 def preload_backend():
     _ORIGINAL_MODULES.clear()
@@ -228,12 +267,12 @@ def preload_backend():
         "aiwf.infrastructure.diffusers.backend",
         _MISSING,
     )
-    sys.modules.pop("aiwf.infrastructure.diffusers.backend", None)
-    _inject_stubs()
-    backend = importlib.import_module("aiwf.infrastructure.diffusers.backend")
-    sd15_cls = sys.modules["diffusers"].StableDiffusionPipeline
-    sdxl_cls = sys.modules["diffusers"].StableDiffusionXLPipeline
     try:
+        sys.modules.pop("aiwf.infrastructure.diffusers.backend", None)
+        _inject_stubs()
+        backend = importlib.import_module("aiwf.infrastructure.diffusers.backend")
+        sd15_cls = sys.modules["diffusers"].StableDiffusionPipeline
+        sdxl_cls = sys.modules["diffusers"].StableDiffusionXLPipeline
         yield backend, sd15_cls, sdxl_cls
     finally:
         _restore_modules()
@@ -260,13 +299,20 @@ class TestCachedSingleFileConfigDir:
                    return_value=object()):
             assert backend._cached_single_file_config_dir(sd15_cls) is None
 
-    def test_returns_parent_dir_when_model_index_cached(self, tmp_path, preload_backend):
+    def test_returns_parent_dir_only_when_full_family_config_is_cached(self, tmp_path, preload_backend):
         backend, sd15_cls, _ = preload_backend
+        _seed_single_file_config(tmp_path, "sd15")
         f = tmp_path / "model_index.json"
-        f.write_text("{}")
         with patch("aiwf.infrastructure.diffusers.backend._try_to_load_from_cache",
                    return_value=str(f)):
             assert backend._cached_single_file_config_dir(sd15_cls) == str(tmp_path)
+
+    def test_rejects_index_only_hub_cache_entry(self, tmp_path, preload_backend):
+        backend, sd15_cls, _ = preload_backend
+        (tmp_path / "model_index.json").write_text("{}", encoding="utf-8")
+        with patch("aiwf.infrastructure.diffusers.backend._try_to_load_from_cache",
+                   return_value=str(tmp_path / "model_index.json")):
+            assert backend._cached_single_file_config_dir(sd15_cls) is None
 
     def test_returns_none_when_cached_path_does_not_exist(self, preload_backend):
         backend, sd15_cls, _ = preload_backend
@@ -282,13 +328,26 @@ class TestCachedSingleFileConfigDir:
 
     def test_sdxl_uses_sdxl_repo(self, tmp_path, preload_backend):
         backend, _, sdxl_cls = preload_backend
+        _seed_single_file_config(tmp_path, "sdxl")
         f = tmp_path / "model_index.json"
-        f.write_text("{}")
         expected = backend._SINGLE_FILE_CONFIG_REPOS[sdxl_cls]
         with patch("aiwf.infrastructure.diffusers.backend._try_to_load_from_cache",
                    return_value=str(f)) as m:
             backend._cached_single_file_config_dir(sdxl_cls)
             m.assert_called_once_with(expected, "model_index.json")
+
+    def test_sdxl_refiner_uses_refiner_repo_and_config(self, tmp_path, preload_backend):
+        backend, _, _ = preload_backend
+        refiner_cls = sys.modules["diffusers"].StableDiffusionXLImg2ImgPipeline
+        _seed_single_file_config(tmp_path, "sdxl_refiner")
+        expected = backend._SINGLE_FILE_CONFIG_REPOS[refiner_cls]
+        with patch("aiwf.infrastructure.diffusers.backend._try_to_load_from_cache",
+                   return_value=str(tmp_path / "model_index.json")) as lookup:
+            kwargs = {}
+            backend._add_cached_single_file_config(kwargs, refiner_cls)
+        lookup.assert_called_once_with(expected, "model_index.json")
+        assert kwargs["config"] == str(tmp_path)
+        assert kwargs["local_files_only"] is True
 
     def test_all_registered_repos_are_valid(self, preload_backend):
         backend, _, _ = preload_backend
@@ -306,8 +365,8 @@ class TestAddCachedSingleFileConfig:
         # Core regression: a local config MUST set local_files_only=True.
         # Without it Diffusers calls tqdm.contrib.concurrent.ensure_lock
         # which crashes with AttributeError: _lock in background threads.
+        _seed_single_file_config(tmp_path, "sd15")
         f = tmp_path / "model_index.json"
-        f.write_text("{}")
         kw = {}
         with patch("aiwf.infrastructure.diffusers.backend._try_to_load_from_cache",
                    return_value=str(f)):
@@ -315,14 +374,41 @@ class TestAddCachedSingleFileConfig:
         assert kw.get("config") == str(tmp_path)
         assert kw.get("local_files_only") is True
 
-    def test_adds_nothing_when_cache_absent(self, preload_backend):
+    def test_forces_local_only_when_cache_absent(self, preload_backend):
         backend, sd15_cls, _ = preload_backend
         kw = {"torch_dtype": "float16"}
         with patch("aiwf.infrastructure.diffusers.backend._try_to_load_from_cache",
                    return_value=None):
             backend._add_cached_single_file_config(kw, sd15_cls)
         assert "config" not in kw
-        assert "local_files_only" not in kw
+        assert kw["local_files_only"] is True
+
+    def test_finds_installed_config_bundle_under_model_root(self, tmp_path, preload_backend):
+        backend, sd15_cls, _ = preload_backend
+        config_dir = tmp_path / "Support" / "DiffusersConfigs" / "stable-diffusion-v1-5"
+        _seed_single_file_config(config_dir, "sd15")
+        kw = {}
+        with patch("aiwf.infrastructure.diffusers.backend._try_to_load_from_cache", return_value=None):
+            backend._add_cached_single_file_config(kw, sd15_cls, (tmp_path,))
+        assert kw["config"] == str(config_dir)
+        assert kw["local_files_only"] is True
+
+    def test_preload_readiness_requires_complete_installed_config_snapshot(self, tmp_path, preload_backend):
+        backend, _, _ = preload_backend
+        checkpoint_path = tmp_path / "Stable-diffusion" / "custom.safetensors"
+        checkpoint_path.parent.mkdir(parents=True)
+        checkpoint_path.write_bytes(b"checkpoint")
+        checkpoint = types.SimpleNamespace(id="custom", path=str(checkpoint_path), architecture="sd15")
+        service = object.__new__(backend.DiffusersBackend)
+        service._resolve_checkpoint = lambda _checkpoint_id=None: checkpoint
+        service.flags = types.SimpleNamespace(resolved_models_dir=lambda: tmp_path)
+        service.ckpt_dir = checkpoint_path.parent
+        config_dir = tmp_path / "Support" / "DiffusersConfigs" / "stable-diffusion-v1-5"
+        config_dir.mkdir(parents=True)
+        (config_dir / "model_index.json").write_text("{}", encoding="utf-8")
+        assert service.can_preload_checkpoint_locally("custom") is False
+        _seed_single_file_config(config_dir, "sd15")
+        assert service.can_preload_checkpoint_locally("custom") is True
 
     def test_preserves_existing_kwargs(self, tmp_path, preload_backend):
         backend, sd15_cls, _ = preload_backend
@@ -345,13 +431,13 @@ class TestAddCachedSingleFileConfig:
             backend._add_cached_single_file_config(kw, sdxl_cls)
         assert kw.get("local_files_only") is True
 
-    def test_no_local_files_only_when_cache_raises(self, preload_backend):
+    def test_forces_local_files_only_when_cache_lookup_raises(self, preload_backend):
         backend, sd15_cls, _ = preload_backend
         kw = {}
         with patch("aiwf.infrastructure.diffusers.backend._try_to_load_from_cache",
                    side_effect=Exception("hub error")):
             backend._add_cached_single_file_config(kw, sd15_cls)
-        assert "local_files_only" not in kw
+        assert kw["local_files_only"] is True
 
 
 def test_load_inpaint_checkpoint_uses_inpaint_cache(preload_backend, monkeypatch, tmp_path):
@@ -398,16 +484,70 @@ def test_load_inpaint_checkpoint_uses_inpaint_cache(preload_backend, monkeypatch
     assert service._inpaint_active is checkpoint
 
 
-def _make_component_dir(path):
-    (path / "scheduler").mkdir(parents=True)
-    (path / "text_encoder").mkdir()
-    (path / "tokenizer").mkdir()
-    (path / "vae").mkdir()
-    (path / "model_index.json").write_text("{}", encoding="utf-8")
-    (path / "scheduler" / "scheduler_config.json").write_text("{}", encoding="utf-8")
-    (path / "tokenizer" / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (path / "text_encoder" / "model.safetensors").write_bytes(b"x")
-    (path / "vae" / "diffusion_pytorch_model.safetensors").write_bytes(b"x")
+@pytest.mark.parametrize("architecture", ["inpaint", "flux_fill"])
+def test_dedicated_inpaint_checkpoint_is_not_preloaded_through_txt2img(preload_backend, monkeypatch, tmp_path, architecture):
+    backend, _, _ = preload_backend
+    service = object.__new__(backend.DiffusersBackend)
+    checkpoint = types.SimpleNamespace(
+        title="Inpaint",
+        architecture=architecture,
+        path=str(tmp_path / "inpaint.safetensors"),
+    )
+    monkeypatch.setattr(service, "_resolve_checkpoint", lambda _checkpoint_id: checkpoint)
+
+    assert service.can_preload_checkpoint_locally("inpaint") is False
+
+
+def _make_component_dir(path, architecture, *, complete=True):
+    for name in ("scheduler", "text_encoder", "tokenizer", "vae"):
+        (path / name).mkdir(parents=True, exist_ok=True)
+    if architecture == "flux2_klein":
+        model_index = {
+            "_class_name": "Flux2KleinPipeline",
+            "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+            "text_encoder": ["transformers", "Qwen3ForCausalLM"],
+            "tokenizer": ["transformers", "Qwen2TokenizerFast"],
+            "transformer": ["diffusers", "Flux2Transformer2DModel"],
+            "vae": ["diffusers", "AutoencoderKLFlux2"],
+        }
+        metadata = {
+            "scheduler/scheduler_config.json": {"_class_name": "FlowMatchEulerDiscreteScheduler", "num_train_timesteps": 1000},
+            "text_encoder/config.json": {"model_type": "qwen3", "hidden_size": 1, "num_hidden_layers": 1, "vocab_size": 1},
+            "tokenizer/tokenizer_config.json": {"tokenizer_class": "Qwen2TokenizerFast"},
+            "vae/config.json": {"_class_name": "AutoencoderKLFlux2", "in_channels": 1, "out_channels": 1, "latent_channels": 1},
+        }
+    elif architecture == "z_image":
+        model_index = {
+            "_class_name": "ZImagePipeline",
+            "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+            "text_encoder": ["transformers", "Qwen3Model"],
+            "tokenizer": ["transformers", "Qwen2Tokenizer"],
+            "transformer": ["diffusers", "ZImageTransformer2DModel"],
+            "vae": ["diffusers", "AutoencoderKL"],
+        }
+        metadata = {
+            "scheduler/scheduler_config.json": {"_class_name": "FlowMatchEulerDiscreteScheduler", "num_train_timesteps": 1000},
+            "text_encoder/config.json": {"model_type": "qwen3", "hidden_size": 1, "num_hidden_layers": 1, "vocab_size": 1},
+            "tokenizer/tokenizer_config.json": {"tokenizer_class": "Qwen2Tokenizer"},
+            "vae/config.json": {"_class_name": "AutoencoderKL", "in_channels": 1, "out_channels": 1, "latent_channels": 1},
+        }
+    else:
+        raise AssertionError(f"Unsupported fixture architecture: {architecture}")
+    (path / "model_index.json").write_text(json.dumps(model_index if complete else {}), encoding="utf-8")
+    if not complete:
+        return
+    for relative, value in metadata.items():
+        target = path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(value), encoding="utf-8")
+    (path / "tokenizer" / "tokenizer.json").write_text(
+        json.dumps({"model": {"type": "BPE", "vocab": {}}}), encoding="utf-8"
+    )
+    for relative in (
+        "text_encoder/pytorch_model.bin",
+        "vae/diffusion_pytorch_model.bin",
+    ):
+        (path / relative).write_bytes(b"weights")
 
 
 @pytest.mark.parametrize(
@@ -456,8 +596,10 @@ def test_transformer_image_preload_requires_component_folder(
     )
     service._resolve_checkpoint = lambda checkpoint_id=None: checkpoint
 
+    component_dir = root.joinpath(*component_rel)
+    _make_component_dir(component_dir, architecture, complete=False)
     assert service.can_preload_checkpoint_locally() is False
-    _make_component_dir(root.joinpath(*component_rel))
+    _make_component_dir(component_dir, architecture)
     assert service.can_preload_checkpoint_locally() is True
 
 
@@ -471,7 +613,7 @@ def test_flux2_klein_9b_preload_rejects_public_4b_components(
     model_path = root / "flux2" / "GGUF" / "fluxtraitFLUX2KleinFLUXZ_klein9bV2Q4KM.gguf"
     model_path.parent.mkdir(parents=True)
     model_path.write_bytes(b"GGUF")
-    _make_component_dir(root / "flux2" / "Components" / "FLUX.2-klein-4B")
+    _make_component_dir(root / "flux2" / "Components" / "FLUX.2-klein-4B", "flux2_klein")
 
     monkeypatch.setattr(backend, "is_flux2_klein_architecture", lambda arch: arch == "flux2_klein")
     monkeypatch.setattr(backend, "is_z_image_architecture", lambda arch: arch == "z_image")

@@ -65,6 +65,12 @@ _VSR_SERVICES: dict[int, VsrService] = {}
 _AUDIO_SERVICES: dict[int, AudioGenerationService] = {}
 _LTX_SERVICES: dict[int, LtxService] = {}
 _wan_cancel_flag: list[bool] = [False]
+
+
+def _ltx_quantization_default(pipeline: str) -> str:
+    return "" if pipeline == LTX_PIPELINE_DIFFUSERS_2B else "fp8-cast"
+
+
 VIDEO_SIZE_PRESETS: tuple[int, ...] = (480, 512, 568, 640, 768, 896, 1024)
 _WAN_FAST_OFFLOAD_CHOICES = [
     ("Balanced: model offload", "balanced"),
@@ -1232,7 +1238,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             ltx_quantization = gr.Radio(
                                 label="Quantization",
                                 choices=[("FP8 cast", "fp8-cast"), ("None", ""), ("FP8 scaled MM", "fp8-scaled-mm")],
-                                value="fp8-cast",
+                                value=_ltx_quantization_default(default_ltx_pipeline),
                             )
                             ltx_enhance_prompt = gr.Checkbox(label="Enhance prompt", value=False)
                         ltx_checkpoint = gr.Textbox(
@@ -1281,7 +1287,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
                             elem_classes=["aiwf-btn-ghost", "aiwf-btn-sm"],
                         )
                         ltx_status = gr.Markdown(
-                            "**LTX ready** - Local 2B Diffusers uses the app venv; LTX-2.3 uses the optional engine.",
+                            "**LTX route not checked** - Readiness is checked for the selected pipeline when you generate.",
                             elem_classes=["aiwf-status-bar"],
                         )
 
@@ -1306,7 +1312,7 @@ def register_wan_i2v(registry: WebRegistry) -> None:
         def _ltx_route_defaults(route_value):
             route = str(route_value or default_ltx_pipeline)
             checkpoint = ltx_service.default_checkpoint_path(route)
-            quantization = "" if route == LTX_PIPELINE_DIFFUSERS_2B else "fp8-cast"
+            quantization = _ltx_quantization_default(route)
             offload = "none" if ltx_checkpoint_requires_no_offload(checkpoint) else "disk"
             return (
                 gr.update(value=str(checkpoint)),

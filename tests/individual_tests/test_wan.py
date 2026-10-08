@@ -40,6 +40,7 @@ from aiwf.infrastructure.wan.pipeline import (
     _cuda_supports_tensorcore_fp8,
     _resolve_dual_stage_offload_for_hardware,
     _wan_output_type_for_pipe,
+    _wan_asset_revision,
     _wan_lora_load_prefix,
     _wan_cache_mode,
     estimate_gguf_expanded_gb,
@@ -59,6 +60,28 @@ def _svc(tmp_path: Path) -> WanService:
 
 def _force_wan_available(service: WanService) -> None:
     service._backend.available = lambda: True
+    # These unit tests replace the backend with lightweight fakes. Keep the
+    # host GPU's current free memory from changing their generation outcomes;
+    # admission behavior is covered separately by route/headroom tests.
+    service._prepare_headroom_issue = lambda _request: None
+
+
+def test_wan_discovers_umt5_from_canonical_shared_text_encoder_folder(tmp_path: Path):
+    shared_root = tmp_path / "shared-models"
+    encoder = shared_root / "text_encoder" / "umt5_xxl_fp8.safetensors"
+    encoder.parent.mkdir(parents=True)
+    encoder.write_bytes(b"fixture")
+    service = WanService(
+        RuntimeFlags(
+            data_dir=tmp_path / "app",
+            models_dir=tmp_path / "primary-models",
+            extra_model_dirs=[shared_root],
+            output_dir=tmp_path / "out",
+        ),
+        UserSettings(),
+    )
+
+    assert service.resolve_text_encoder(encoder.name) == str(encoder.resolve())
 
 
 def _write_component_base(service: WanService) -> Path:
@@ -66,11 +89,20 @@ def _write_component_base(service: WanService) -> Path:
     (base / "text_encoder").mkdir(parents=True)
     (base / "tokenizer").mkdir()
     (base / "scheduler").mkdir()
-    (base / "model_index.json").write_text("{}", encoding="utf-8")
-    (base / "text_encoder" / "config.json").write_text("{}", encoding="utf-8")
-    (base / "text_encoder" / "model.safetensors").write_bytes(b"fake")
-    (base / "tokenizer" / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (base / "scheduler" / "scheduler_config.json").write_text("{}", encoding="utf-8")
+    (base / "model_index.json").write_text(
+        '{"_class_name":"WanPipeline","text_encoder":["transformers","T5EncoderModel"],'
+        '"tokenizer":["transformers","T5Tokenizer"],'
+        '"scheduler":["diffusers","FlowMatchEulerDiscreteScheduler"]}',
+        encoding="utf-8",
+    )
+    (base / "text_encoder" / "config.json").write_text(
+        '{"model_type":"umt5","d_model":8,"num_layers":1}', encoding="utf-8"
+    )
+    _write_fake_safetensors(base / "text_encoder" / "model.safetensors")
+    (base / "tokenizer" / "tokenizer.json").write_text('{"version":"1.0"}', encoding="utf-8")
+    (base / "scheduler" / "scheduler_config.json").write_text(
+        '{"_class_name":"FlowMatchEulerDiscreteScheduler"}', encoding="utf-8"
+    )
     return base
 
 
@@ -79,6 +111,14 @@ def _write_fake_safetensors(path: Path) -> None:
     safetensors = pytest.importorskip("safetensors.torch")
     path.parent.mkdir(parents=True, exist_ok=True)
     safetensors.save_file({"blocks.0.weight": torch.ones(1)}, path)
+
+
+def _write_fake_safetensors_header(path: Path, tensor_key: str) -> None:
+    header = json.dumps({
+        tensor_key: {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]},
+    }).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(len(header).to_bytes(8, "little") + header + b"\0\0")
 
 
 def _write_fake_gguf(path: Path) -> None:
@@ -92,6 +132,36 @@ def _write_fake_video_frames(frames, output_path, *, fps: float) -> int:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(b"fake mp4")
     return len(usable)
+
+
+def test_wan_asset_revision_detects_in_place_support_replacement(tmp_path: Path):
+    model = tmp_path / "wan-high.safetensors"
+    vae = tmp_path / "vae.safetensors"
+    model.write_bytes(b"old weights")
+    vae.write_bytes(b"vae")
+    before = _wan_asset_revision(str(model), str(vae))
+    original_stat = model.stat()
+    model.write_bytes(b"replacement weights")
+    import os
+    os.utime(model, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000))
+
+    after = _wan_asset_revision(str(model), str(vae))
+
+    assert before != after
+
+
+def test_wan_asset_revision_ignores_empty_optional_paths(monkeypatch):
+    from aiwf.infrastructure.wan import pipeline as wan_pipeline
+
+    observed: list[list[str]] = []
+    monkeypatch.setattr(
+        wan_pipeline,
+        "support_revision",
+        lambda paths: observed.append(list(paths)) or "empty-assets",
+    )
+
+    assert wan_pipeline._wan_asset_revision(None, "", "   ") == "empty-assets"
+    assert observed == [[]]
 
 
 def test_snap_num_frames():
@@ -511,6 +581,37 @@ def test_new_wan_folder_layout(tmp_path: Path):
     assert s.resolve_lora("wan2.2_i2v_high_lora_test.safetensors") == str(lora.resolve())
 
 
+def test_wan_base_choices_use_header_roles_and_find_renamed_transformers(tmp_path: Path):
+    s = _svc(tmp_path)
+    wan_root = s.models_dir()
+    transformer = wan_root / "Safetensor" / "renamed.safetensors"
+    vae = wan_root / "VAE" / "wan2.1_vae.safetensors"
+    text_encoder = wan_root / "Textencoder" / "renamed_encoder.safetensors"
+    lora = wan_root / "Safetensor" / "renamed_adapter.safetensors"
+    _write_fake_safetensors_header(
+        transformer, "diffusion_model.blocks.0.cross_attn.k.weight"
+    )
+    _write_fake_safetensors_header(vae, "encoder.conv_in.weight")
+    _write_fake_safetensors_header(
+        text_encoder, "encoder.block.0.layer.0.SelfAttention.q.weight"
+    )
+    _write_fake_safetensors_header(
+        lora, "diffusion_model.blocks.0.cross_attn.k.lora_A.weight"
+    )
+
+    listed = s.list_local_models()
+    labeled_ids = {identifier for _, identifier in s.list_local_models_labeled()}
+
+    assert "Safetensor/renamed.safetensors" in listed
+    assert "Safetensor/renamed.safetensors" in labeled_ids
+    assert "VAE/wan2.1_vae.safetensors" not in listed
+    assert "Textencoder/renamed_encoder.safetensors" not in listed
+    assert "Safetensor/renamed_adapter.safetensors" not in listed
+    assert "VAE/wan2.1_vae.safetensors" not in labeled_ids
+    assert "Textencoder/renamed_encoder.safetensors" not in labeled_ids
+    assert "Safetensor/renamed_adapter.safetensors" not in labeled_ids
+
+
 def test_find_components_base_uses_diffusers_folder(tmp_path: Path):
     s = _svc(tmp_path)
     base = _write_component_base(s)
@@ -553,6 +654,51 @@ def test_wan_preflight_passes_with_local_hybrid_components(tmp_path: Path):
     assert result.high_noise_model == str(high.resolve())
     assert result.low_noise_model == str(low.resolve())
     assert result.vae == str(vae.resolve())
+
+
+def test_wan_preflight_autopairs_unique_selected_transformer(tmp_path: Path):
+    s = _svc(tmp_path)
+    _force_wan_available(s)
+    _write_component_base(s)
+    high = s.models_dir() / "GGUF" / "wan2.2_i2v_high_noise_q4.gguf"
+    low = s.models_dir() / "GGUF" / "wan2.2_i2v_low_noise_q4.gguf"
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan2.1_vae.safetensors"
+    _write_fake_gguf(high)
+    _write_fake_gguf(low)
+    _write_fake_safetensors(vae)
+
+    result = s.preflight(WanI2VRequest(
+        runtime_mode=WAN_RUNTIME_HIGH_LOW,
+        model_id=f"GGUF/{high.name}",
+    ))
+
+    assert result.ok, result.message()
+    assert result.high_noise_model == str(high.resolve())
+    assert result.low_noise_model == str(low.resolve())
+
+
+def test_wan_preflight_keeps_ambiguous_autopair_unready(tmp_path: Path):
+    s = _svc(tmp_path)
+    _force_wan_available(s)
+    _write_component_base(s)
+    high = s.models_dir() / "GGUF" / "wan2.2_i2v_high_noise_q4.gguf"
+    lows = [
+        s.models_dir() / "GGUF" / "wan2.2_i2v_low_noise_q4.gguf",
+        s.models_dir() / "GGUF" / "wan2-2-i2v-low-noise-q4.gguf",
+    ]
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan2.1_vae.safetensors"
+    _write_fake_gguf(high)
+    for low in lows:
+        _write_fake_gguf(low)
+    _write_fake_safetensors(vae)
+
+    result = s.preflight(WanI2VRequest(
+        runtime_mode=WAN_RUNTIME_HIGH_LOW,
+        model_id=f"GGUF/{high.name}",
+    ))
+
+    assert not result.ok
+    assert "Multiple compatible Low noise transformers" in result.message()
 
 
 def test_wan_preflight_blocks_mismatched_quant_pair(tmp_path: Path):
@@ -621,6 +767,28 @@ def test_wan_generation_unloads_image_models_before_video_load(tmp_path: Path):
     )
 
     assert calls[:2] == ["unload", "video"]
+
+
+def test_wan_generation_fails_closed_when_image_model_cannot_be_unloaded(tmp_path: Path):
+    from PIL import Image
+
+    s = _svc(tmp_path)
+    s._unload_image_models = lambda: (_ for _ in ()).throw(RuntimeError("image backend busy"))
+    _force_wan_available(s)
+    _write_component_base(s)
+    high = s.models_dir() / "GGUF" / "wan-high-q4.gguf"
+    low = s.models_dir() / "GGUF" / "wan-low-q4.gguf"
+    vae = s.flags.resolved_models_dir() / "VAE" / "wan2.1_vae.safetensors"
+    _write_fake_gguf(high)
+    _write_fake_gguf(low)
+    _write_fake_safetensors(vae)
+    s._backend.generate = lambda *_args, **_kwargs: pytest.fail("Wan loaded while image unload failed")
+
+    with pytest.raises(WanUnavailable, match="Could not unload image models"):
+        s.generate(
+            WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high.name, low_noise_model_id=low.name),
+            Image.new("RGB", (8, 8)),
+        )
 
 
 def test_wan_generation_unloads_video_backend_after_failure(tmp_path: Path):

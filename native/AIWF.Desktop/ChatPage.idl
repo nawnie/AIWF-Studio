@@ -1,0 +1,9 @@
+namespace AiwfDesktop
+{
+    // Chat: streaming conversations with local models on the chat engine
+    [default_interface]
+    runtimeclass ChatPage : Microsoft.UI.Xaml.Controls.Page
+    {
+        ChatPage();
+    }
+}

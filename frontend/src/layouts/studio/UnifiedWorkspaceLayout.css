@@ -1,0 +1,67 @@
+/* Studio Flow layout. Uses the Pro shell tokens (--accent, --border, --surface). */
+
+/* --- page frame and headings --- */
+/* index.css styles h1/h2/code with the Vite starter tokens (--text-h, --code-bg),
+   which are dark-on-dark in the Pro shell, so this surface sets its own. */
+.unified-workspace { display: grid; gap: 18px; }
+.unified-workspace h1, .unified-workspace h2 { color: var(--text-strong, inherit); font-family: inherit; letter-spacing: normal; }
+.unified-workspace code { display: inline; padding: 1px 6px; border-radius: 5px; font-size: 12px; line-height: inherit; color: inherit; background: color-mix(in srgb, var(--accent, #6aa0ff) 14%, transparent); }
+.unified-workspace__header, .unified-workspace__section-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.unified-workspace__header h1 { margin: 5px 0 6px; font-size: clamp(20px, 2.4vw, 30px); }
+.unified-workspace__header p, .unified-workspace__section-head p { margin: 0; opacity: .72; }
+.unified-workspace__eyebrow { font-size: 11px; letter-spacing: .11em; text-transform: uppercase; opacity: .7; }
+.unified-workspace__refresh { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 8px 12px; border-radius: 9px; }
+.unified-workspace__section-head h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 16px; }
+.unified-workspace__section-head > span { font-size: 12px; opacity: .72; }
+.unified-workspace__step-no { display: inline-grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%; font-size: 12px; font-weight: 700; color: var(--text-strong, inherit); background: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+/* --- app connection cards: green ready, amber partial, muted down --- */
+.unified-workspace__apps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.unified-workspace__app { min-width: 0; padding: 12px 14px; border: 1px solid var(--border, rgba(255,255,255,.14)); border-left-width: 4px; border-radius: 10px; background: color-mix(in srgb, var(--surface, #181a20) 80%, transparent); }
+.unified-workspace__app--ready { border-left-color: #3fa66b; }
+.unified-workspace__app--partial { border-left-color: #c9962c; }
+.unified-workspace__app--down { border-left-color: color-mix(in srgb, var(--border, #555) 100%, transparent); opacity: .9; }
+.unified-workspace__app strong { display: block; margin-top: 6px; font-size: 14px; }
+.unified-workspace__app p { margin: 6px 0 0; font-size: 12px; line-height: 1.45; opacity: .74; }
+.unified-workspace__stage-label { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; opacity: .7; }
+
+/* --- project bar and step panels --- */
+.unified-workspace__project, .unified-workspace__step { display: grid; gap: 12px; padding: 14px 16px; border: 1px solid var(--border, rgba(255,255,255,.14)); border-radius: 12px; }
+.unified-workspace__project-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.unified-workspace__project-row label { display: grid; gap: 4px; min-width: 200px; font-size: 12px; }
+.unified-workspace__project-row label > span { opacity: .7; }
+.unified-workspace__project-row select, .unified-workspace__project-row input { min-height: 34px; }
+.unified-workspace__grow { flex: 1 1 320px; }
+.unified-workspace__identity { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.unified-workspace__identity svg { flex: 0 0 auto; }
+.unified-workspace__identity code { overflow-wrap: anywhere; }
+
+/* --- selectable lists (outputs, packages) --- */
+.unified-workspace__output-list, .unified-workspace__package-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; padding: 0; margin: 0; list-style: none; }
+.unified-workspace__output-list label, .unified-workspace__package-list label { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 9px; align-items: center; padding: 10px; border: 1px solid var(--border, rgba(255,255,255,.14)); border-radius: 9px; cursor: pointer; }
+.unified-workspace__output-list input, .unified-workspace__package-list input { grid-row: span 2; }
+.unified-workspace__package-list .is-invalid label { cursor: not-allowed; opacity: .6; }
+.unified-workspace__output-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.unified-workspace__output-list small, .unified-workspace__package-list small { opacity: .68; }
+
+/* --- actions, results and errors --- */
+.unified-workspace__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.unified-workspace__actions small { opacity: .68; }
+.unified-workspace__result { display: flex; gap: 10px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, #3fa66b 12%, transparent); }
+.unified-workspace__result svg { flex: 0 0 auto; margin-top: 2px; }
+.unified-workspace__result p { margin: 4px 0 0; font-size: 12px; }
+.unified-workspace__note { opacity: .75; }
+.unified-workspace__answer { white-space: pre-wrap; font-size: 13px !important; line-height: 1.5; }
+.unified-workspace__error { margin: 0; padding: 8px 12px; border-radius: 9px; font-size: 13px; background: color-mix(in srgb, #d0503c 16%, transparent); }
+.unified-workspace__issues { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+.unified-workspace__issues--warn { opacity: .8; }
+.unified-workspace__context { margin: 0; padding: 10px 12px; max-height: 220px; overflow: auto; border-radius: 9px; font-size: 12px; white-space: pre-wrap; background: color-mix(in srgb, var(--surface, #181a20) 70%, black 10%); }
+.unified-workspace__status, .unified-workspace__empty { margin: 0; font-size: 12px; opacity: .7; }
+
+/* --- model family table and activity --- */
+.unified-workspace__families { width: 100%; border-collapse: collapse; font-size: 12px; }
+.unified-workspace__families th, .unified-workspace__families td { padding: 8px; text-align: left; vertical-align: top; border-top: 1px solid var(--border, rgba(255,255,255,.14)); }
+.unified-workspace__families td small { display: block; opacity: .65; }
+.unified-workspace__events { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0; padding: 0; list-style: none; font-size: 12px; }
+
+@media (max-width: 1050px) { .unified-workspace__apps { grid-template-columns: 1fr; } }

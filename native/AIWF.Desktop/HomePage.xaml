@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Home: the workstation at a glance.
+  - GPU card: live NVML telemetry and a video-memory bar split by engine (Windows GPU counters).
+  - Engines: one row per engine with its state and a Start/Stop button; Start all at the top.
+  - Current project: what the focused project has recorded so far.
+  Dynamic rows (engines, VRAM bar segments, legend) are built in HomePage.xaml.cpp.
+-->
+<Page
+    x:Class="AiwfDesktop.HomePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AiwfDesktop"
+    NavigationCacheMode="Required">
+    <ScrollViewer>
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="16" MaxWidth="1240" HorizontalAlignment="Stretch">
+
+            <!-- header: page title, then the engine-wide actions on their own row so the title never
+                 has to share its width with buttons -->
+            <StackPanel Spacing="12">
+                <StackPanel Spacing="2">
+                    <TextBlock Text="Home" Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock Text="Your RTX workstation at a glance. Every engine below runs on this PC; nothing goes to the cloud."
+                               Style="{StaticResource BodyTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="StartAllButton" Style="{StaticResource AccentButtonStyle}" Click="StartAll_Click"
+                            AutomationProperties.Name="Start all engines">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="&#xE768;" FontSize="14" />
+                            <TextBlock Text="Start all engines" />
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="StopAllButton" Click="StopAll_Click" AutomationProperties.Name="Stop the engines AIWF Studio started">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="&#xE71A;" FontSize="14" />
+                            <TextBlock Text="Stop my engines" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- the engine API serves every data page, so a problem with it is shown here, at the top -->
+            <InfoBar x:Name="ApiBar" IsOpen="False" IsClosable="False">
+                <InfoBar.ActionButton>
+                    <Button Content="Start engine API" Click="StartApi_Click" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <!-- GPU card -->
+            <Border Style="{StaticResource CardStyle}" Padding="20">
+                <StackPanel Spacing="14">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <FontIcon Glyph="&#xE7F4;" FontSize="28" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="1" Spacing="2">
+                            <TextBlock x:Name="GpuName" Text="Reading the GPU..." Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBlock x:Name="GpuDriver" Text="" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- four live numbers: one row of four when wide, two rows of two when narrow
+                         (HomePage::ArrangeTiles places them) -->
+                    <Grid x:Name="TelemetryGrid" ColumnSpacing="12" RowSpacing="12">
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Video memory" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+                            <TextBlock x:Name="VramValue" Text="-" Style="{StaticResource TitleTextBlockStyle}" />
+                            <TextBlock x:Name="VramFree" Text="" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="2">
+                            <TextBlock Text="GPU load" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+                            <TextBlock x:Name="UtilValue" Text="-" Style="{StaticResource TitleTextBlockStyle}" />
+                            <TextBlock x:Name="ClockValue" Text="" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Spacing="2">
+                            <TextBlock Text="Temperature" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+                            <TextBlock x:Name="TempValue" Text="-" Style="{StaticResource TitleTextBlockStyle}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="3" Spacing="2">
+                            <TextBlock Text="Power" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+                            <TextBlock x:Name="PowerValue" Text="-" Style="{StaticResource TitleTextBlockStyle}" />
+                            <TextBlock x:Name="PowerLimit" Text="" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- video memory split by engine; segments are star-sized columns built in code -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Who is using video memory" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Border CornerRadius="4" Height="20" Background="{ThemeResource ControlFillColorSecondaryBrush}"
+                                BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                            <Grid x:Name="VramBar" AutomationProperties.Name="Video memory by engine" />
+                        </Border>
+                        <!-- legend entries wrap into as many columns as fit (HomePage::ArrangeLegend) -->
+                        <Grid x:Name="VramLegend" ColumnSpacing="18" RowSpacing="4" />
+                    </StackPanel>
+                    <TextBlock x:Name="GpuNote" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.6" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <!-- engines -->
+            <TextBlock Text="Engines" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,8,0,0" />
+            <InfoBar x:Name="EngineMessage" IsOpen="False" IsClosable="True" />
+            <StackPanel x:Name="EngineList" Spacing="8" />
+
+            <!-- the project in focus -->
+            <TextBlock Text="Current project" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,8,0,0" />
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel x:Name="ProjectSummary" Spacing="6" />
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

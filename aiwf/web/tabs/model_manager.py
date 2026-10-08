@@ -11,7 +11,7 @@ from aiwf.bootstrap import AppContext
 from aiwf.core.domain.engine import EngineTenant
 from aiwf.infrastructure.safetensors_metadata import read_safetensors_metadata
 from aiwf.services.model_download import CATEGORY_LABELS, browse_links_html, inspect_custom_input, is_unsafe_download_format
-from aiwf.services.model_download_catalog import QUICK_START_BUNDLES
+from aiwf.services.model_download_catalog import quick_start_bundles_for_platform
 from aiwf.services.model_info_lookup import get_model_info_lookup
 from aiwf.services.model_ops import ModelOpsService, PreflightResult, inspect_model_asset
 from aiwf.services.process_supervisor import get_process_supervisor
@@ -63,6 +63,15 @@ def _run_download(worker, progress_q: queue.Queue, result: dict) -> None:
             progress_q.put(None)
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+def _run_model_setup_operation(ctx: AppContext, operation):
+    """Serialize Model Manager file mutations against Pro generation and model switches."""
+    # Import lazily because the Gradio tab module is loaded while Pro routes are
+    # being assembled. At callback time both modules are fully initialized.
+    from aiwf.web.pro_api import _run_exclusive_pro_gpu_operation
+
+    return _run_exclusive_pro_gpu_operation(ctx, operation)
 
 
 CONTROLNET_CATALOG_CATEGORIES = ["controlnet", "preprocessor"]
@@ -152,11 +161,11 @@ def register_model_manager(registry: WebRegistry) -> None:
                     with gr.Column(elem_classes=["aiwf-panel"]):
                         gr.Markdown("Quick start", elem_classes=["aiwf-section-label"])
                         gr.Markdown(
-                            "Download the smallest usable model set for a feature.",
+                            "Install the available files in a setup bundle. A completed bundle does not guarantee a generation route is ready; missing components and runtime requirements must also be present.",
                             elem_classes=["aiwf-settings-paths"],
                         )
                         with gr.Row():
-                            qs_video_btn  = gr.Button("Video (Wan 2.2 I2V)",  variant="secondary")
+                            qs_video_btn  = gr.Button("Wan 2.2 transformer pair + VAE",  variant="secondary")
                             qs_rife_btn   = gr.Button(
                                 "Frame interpolation",
                                 variant="secondary",
@@ -590,9 +599,17 @@ def register_model_manager(registry: WebRegistry) -> None:
                                             ("Checkpoint", "Checkpoint"),
                                             ("LoRA", "LORA"),
                                             ("Embedding", "TextualInversion"),
+                                            ("Hypernetwork", "Hypernetwork"),
+                                            ("Aesthetic Gradient", "AestheticGradient"),
                                             ("ControlNet", "Controlnet"),
+                                            ("Motion Module", "MotionModule"),
                                             ("VAE", "VAE"),
                                             ("Upscaler", "Upscaler"),
+                                            ("Poses", "Poses"),
+                                            ("Wildcards", "Wildcards"),
+                                            ("Workflows", "Workflows"),
+                                            ("Detection", "Detection"),
+                                            ("Other", "Other"),
                                         ],
                                         value="",
                                         scale=2,
@@ -675,7 +692,7 @@ def register_model_manager(registry: WebRegistry) -> None:
 
 
         def _download_bundle(bundle_key: str):
-            keys = QUICK_START_BUNDLES.get(bundle_key, [])
+            keys = quick_start_bundles_for_platform().get(bundle_key, [])
             if not keys:
                 yield f"Unknown bundle: {bundle_key}"
                 return
@@ -688,8 +705,16 @@ def register_model_manager(registry: WebRegistry) -> None:
                     yield "\n\n".join(lines)
                     continue
                 prefix = f"[{i + 1}/{total}] **{item.title}**"
+                if bool(getattr(item, "coming_soon", False)):
+                    lines.append(f"⚠ {prefix} — not available yet")
+                    yield "\n\n".join(lines)
+                    continue
                 if ctx.model_download.is_catalog_installed(item):
                     lines.append(f"✓ {prefix} — already installed")
+                    yield "\n\n".join(lines)
+                    continue
+                if _run_model_setup_operation(ctx, lambda: ctx.model_download.place_misplaced_catalog_asset(item)):
+                    lines.append(f"✓ {prefix} — found and sorted into the expected model folder")
                     yield "\n\n".join(lines)
                     continue
                 lines.append(f"⬇ {prefix} — downloading…")
@@ -698,7 +723,10 @@ def register_model_manager(registry: WebRegistry) -> None:
                 result: dict = {}
 
                 def _work(on_progress, _key=key):
-                    ctx.model_download.download_catalog(_key, on_progress=on_progress)
+                    _run_model_setup_operation(
+                        ctx,
+                        lambda: ctx.model_download.download_catalog(_key, on_progress=on_progress),
+                    )
 
                 _run_download(_work, progress_q, result)
                 while True:
@@ -717,7 +745,12 @@ def register_model_manager(registry: WebRegistry) -> None:
                     folder = ctx.model_download.destination_dir(item.category)
                     lines[-1] = f"✓ {prefix} → `{folder}`"
                 yield "\n\n".join(lines)
-            yield "\n\n".join(lines) + "\n\n**Done.**"
+            completion_note = (
+                "\n\nWan 2.2 also requires a local Diffusers component base with tokenizer, text encoder, and scheduler; this bundle does not install that base."
+                if bundle_key == "video"
+                else ""
+            )
+            yield "\n\n".join(lines) + "\n\n**Bundle file checks complete.**" + completion_note
 
         for _btn, _key in [
             (qs_video_btn,  "video"),
@@ -804,11 +837,34 @@ def register_model_manager(registry: WebRegistry) -> None:
                 yield f"**{item.title}** is already installed.", gr.update()
                 return
 
+            copy_shared = getattr(ctx.model_download, "copy_shared_catalog_asset_to_primary", None)
+            if callable(copy_shared):
+                copied = _run_model_setup_operation(ctx, lambda: copy_shared(item))
+                if copied:
+                    yield (
+                        f"**{item.title}** found in a configured shared model root and copied into `{copied.get('target')}`.",
+                        gr.update(choices=_catalog_choices(ctx, categories or all_categories)),
+                    )
+                    return
+            placed = _run_model_setup_operation(
+                ctx,
+                lambda: ctx.model_download.place_misplaced_catalog_asset(item),
+            )
+            if placed:
+                yield (
+                    f"**{item.title}** found locally and placed in `{ctx.model_download.destination_dir(item.category)}`.",
+                    gr.update(choices=_catalog_choices(ctx, categories or all_categories)),
+                )
+                return
+
             progress_q: queue.Queue = queue.Queue()
             result: dict = {}
 
             def work(on_progress):
-                ctx.model_download.download_catalog(key, on_progress=on_progress)
+                _run_model_setup_operation(
+                    ctx,
+                    lambda: ctx.model_download.download_catalog(key, on_progress=on_progress),
+                )
 
             _run_download(work, progress_q, result)
             yield f"**Downloading {item.title}…**", gr.update()
@@ -852,12 +908,15 @@ def register_model_manager(registry: WebRegistry) -> None:
             dest_path: dict[str, str] = {}
 
             def work(on_progress):
-                path = ctx.model_download.download_custom(
-                    source=source,
-                    url_or_repo=url,
-                    category=category,
-                    filename=filename,
-                    on_progress=on_progress,
+                path = _run_model_setup_operation(
+                    ctx,
+                    lambda: ctx.model_download.download_custom(
+                        source=source,
+                        url_or_repo=url,
+                        category=category,
+                        filename=filename,
+                        on_progress=on_progress,
+                    ),
                 )
                 dest_path["path"] = str(path)
 
@@ -909,9 +968,12 @@ def register_model_manager(registry: WebRegistry) -> None:
 
             def worker():
                 try:
-                    ctx.model_download.download_catalog(
-                        key,
-                        on_progress=lambda done, total: progress_q.put((done, total)),
+                    _run_model_setup_operation(
+                        ctx,
+                        lambda: ctx.model_download.download_catalog(
+                            key,
+                            on_progress=lambda done, total: progress_q.put((done, total)),
+                        ),
                     )
                     result["ok"] = True
                 except Exception as exc:  # surfaced to the UI below

@@ -45,7 +45,19 @@ _REQUIRED_SUBDIRS = ("text_encoder", "unet", "vae_decoder")
 
 
 def _is_valid_onnx_model_dir(path: Path) -> bool:
-    return all((path / sub / "model.onnx").is_file() for sub in _REQUIRED_SUBDIRS)
+    def nonempty(file_path: Path) -> bool:
+        try:
+            return file_path.is_file() and file_path.stat().st_size > 0
+        except OSError:
+            return False
+
+    model_files_ready = all(nonempty(path / sub / "model.onnx") for sub in _REQUIRED_SUBDIRS)
+    tokenizer_dir = path / "tokenizer"
+    tokenizer_ready = tokenizer_dir.is_dir() and any(
+        nonempty(tokenizer_dir / name)
+        for name in ("tokenizer.json", "vocab.json", "merges.txt", "special_tokens_map.json", "tokenizer_config.json")
+    )
+    return model_files_ready and tokenizer_ready
 
 
 class ONNXBackend:

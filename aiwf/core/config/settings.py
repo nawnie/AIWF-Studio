@@ -126,7 +126,27 @@ class RuntimeFlags(BaseSettings):
         return (self.output_dir or self.data_dir / "outputs").resolve()
 
     def resolved_extra_model_dirs(self) -> list[Path]:
-        return [path.resolve() for path in self.extra_model_dirs if path]
+        roots = [path.resolve() for path in self.extra_model_dirs if path]
+
+        # AIWF's model folder is commonly a compatibility junction into the
+        # shared F:\Ai_Models tree. Discover the sibling ComfyUI library in
+        # that layout so users do not have to add the same shared root by hand.
+        # Keep this as an additional root: never replace the configured model
+        # directory or move files out of the shared library.
+        models_root = self.resolved_models_dir()
+        if models_root.name.casefold() == "aiwf":
+            shared_comfy_root = models_root.parent / "ComfyUI Models"
+            if shared_comfy_root.is_dir():
+                roots.append(shared_comfy_root.resolve())
+
+        resolved: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            key = str(root).casefold()
+            if key not in seen:
+                seen.add(key)
+                resolved.append(root)
+        return resolved
 
     def resolved_extra_ckpt_dirs(self) -> list[Path]:
         return [path.resolve() for path in self.extra_ckpt_dirs if path]
@@ -205,6 +225,16 @@ class UserSettings(BaseSettings):
 
     # Last checkpoint the user loaded in Studio — restored on next launch.
     last_checkpoint_id: str | None = None
+
+    # Last successfully prepared audio routes. The dedicated audio workspace
+    # remembers music and SFX independently; the Video Lab has its own choice.
+    last_audio_music_model_id: str = ""
+    last_audio_sfx_model_id: str = ""
+    last_video_audio_model_id: str = ""
+    # Sana's in-generation audio conditioning requires MMAudio; Video Lab can
+    # also select prompt-only MusicGen, so its general soundtrack default is
+    # kept separately.
+    last_sana_audio_model_id: str = ""
 
     # Per-checkpoint remembered generation settings (steps/cfg/sampler/etc.),
     # keyed by checkpoint id. Applied as UI defaults when a model is selected,
@@ -296,7 +326,7 @@ class UserSettings(BaseSettings):
     huggingface_token: str = ""
     civitai_token: str = ""
 
-    # ONNX model root — directory containing one or more ONNX model subdirs.
+    # ONNX model root — directory containing one or more complete ONNX model subdirs.
     # Only used when inference_backend == "onnx".
     onnx_model_dir: str = ""
 

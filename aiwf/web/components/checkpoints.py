@@ -9,6 +9,7 @@ from aiwf.infrastructure.diffusers.model_arch import is_inpaint_architecture
 
 ENGINE_MAPPING = {
     "Flux": {"flux"},
+    "Flux.2 Klein": {"flux2_klein"},
     "Flux 2": {"flux2_klein"},
     "Stable Diffusion 1.5": {"sd15", "inpaint"},
     "Stable Diffusion XL": {"sdxl", "sdxl_inpaint"},

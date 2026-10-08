@@ -34,12 +34,23 @@ class TestONNXBackend:
             d = tmp_path / "my_sd_model" / sub
             d.mkdir(parents=True)
             (d / "model.onnx").write_bytes(b"fake")
+        tokenizer = tmp_path / "my_sd_model" / "tokenizer"
+        tokenizer.mkdir()
+        (tokenizer / "tokenizer.json").write_text("{}", encoding="utf-8")
         from aiwf.infrastructure.onnx.backend import ONNXBackend
         backend = ONNXBackend(tmp_path)
         checkpoints = backend.list_checkpoints()
         assert len(checkpoints) == 1
         assert checkpoints[0].id == "my_sd_model"
         assert checkpoints[0].kind == "onnx"
+
+    def test_does_not_discover_model_without_tokenizer(self, tmp_path: Path) -> None:
+        for sub in ("text_encoder", "unet", "vae_decoder"):
+            d = tmp_path / "missing_tokenizer" / sub
+            d.mkdir(parents=True)
+            (d / "model.onnx").write_bytes(b"fake")
+        from aiwf.infrastructure.onnx.backend import ONNXBackend
+        assert ONNXBackend(tmp_path).list_checkpoints() == []
 
     def test_invalid_dir_not_listed(self, tmp_path: Path) -> None:
         # Missing vae_decoder

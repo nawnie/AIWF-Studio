@@ -15,28 +15,53 @@ _OPENAI = "https://openaipublic.azureedge.net/clip/models"
 # Quick-start bundle keys (used by Download tab bundle buttons)
 # ---------------------------------------------------------------------------
 QUICK_START_BUNDLES: dict[str, list[str]] = {
+    "qwen-nunchaku": ["qwen-image-diffusers", "qwen-nunchaku-image-lightning-int4-r32"],
     "video": [
         "wan-gguf-high-q4km",
         "wan-gguf-low-q4km",
         "wan-vae-21",
+        "wan-ti2v-components",
     ],
+    "wan-ti2v-diffusers": ["wan-ti2v-diffusers-5b"],
+    "wan-ti2v-support": ["wan-vae-22", "wan-ti2v-components"],
+    "wan-14b-components": ["wan-vae-21", "wan-ti2v-components"],
     "rife": ["rife-47"],
     "seg": ["sam-vit-b", "gdino-swinb"],
     "faceswap": ["fs-inswapper-fp16"],
-    "sd": ["hf-sd15-pruned", "hf-vae-mse"],
-    "sdxl": ["hf-sdxl-base", "hf-vae-sdxl", "hf-sdxl-refiner"],
-    "sd35": ["hf-sd35-medium"],
-    "flux": ["flux-dev-q4km", "flux-t5-fp8", "flux-clip-l", "flux-ae-vae"],
+    "sd": ["hf-sd15-pruned", "hf-vae-mse", "hf-sd15-singlefile-config", "hf-sd15-inpaint-singlefile-config"],
+    "sd-components": ["hf-vae-mse", "hf-sd15-singlefile-config", "hf-sd15-inpaint-singlefile-config"],
+    "sdxl": ["hf-sdxl-base", "hf-vae-sdxl", "hf-sdxl-refiner", "hf-sdxl-singlefile-config", "hf-sdxl-inpaint-singlefile-config", "hf-sdxl-refiner-singlefile-config"],
+    "sdxl-components": ["hf-vae-sdxl", "hf-sdxl-singlefile-config", "hf-sdxl-inpaint-singlefile-config", "hf-sdxl-refiner-singlefile-config"],
+    "sd35": ["hf-sd35-medium", "hf-sd35-singlefile-config"],
+    "sd35-components": ["hf-sd35-singlefile-config"],
+    "flux": ["flux-dev-q4km", "flux-t5-fp8", "flux-clip-l", "flux-ae-vae", "flux-clip-tokenizer", "flux-t5-tokenizer"],
+    "flux-components": ["flux-t5-fp8", "flux-clip-l", "flux-ae-vae", "flux-clip-tokenizer", "flux-t5-tokenizer"],
+    "flux-distillt5-control-components": [
+        "flux-distillt5-control", "flux-distillt5-tokenizer", "flux-clip-l", "flux-ae-vae", "flux-clip-tokenizer",
+    ],
+    "flux-kontext": ["flux-kontext-diffusers"],
+    "flux-kontext-gguf-components": ["flux-kontext-gguf-components"],
     "flux2": ["flux2-klein-4b-diffusers"],
+    "flux2-4b-base": ["flux2-klein-base-4b-diffusers"],
+    "flux2-4b-components": ["flux2-klein-4b-components"],
+    "flux2-9b-components": ["flux2-klein-9b-components"],
     "zimage": ["fluxtrait-zimage-v2-q4", "z-image-turbo-components"],
     "krea2": ["krea2-turbo-diffusers"],
+    "krea2-raw": ["krea2-raw-diffusers"],
     "krea2-low": ["krea2-turbo-nvfp4-comfy", "krea2-qwen3vl-fp8-comfy", "krea2-qwen-image-vae"],
     "krea2-mid": ["krea2-turbo-fp8-comfy", "krea2-qwen3vl-fp8-comfy", "krea2-qwen-image-vae"],
     "krea2-high": ["krea2-turbo-bf16-comfy", "krea2-qwen3vl-bf16-comfy", "krea2-qwen-image-vae"],
     "qwen-image": ["qwen-image-2512-diffusers"],
+    "qwen-image-original": ["qwen-image-diffusers"],
     "sana": ["sana-sprint-06b-diffusers"],
+    "sana-sprint-16b": ["sana-sprint-16b-diffusers"],
+    "sana-16b": ["sana-16b-bf16-diffusers"],
     "sana-video": ["sana-video-2b-480p-diffusers"],
+    "sana-video-720p": ["sana-video-2b-720p-diffusers"],
     "ltx23": ["ltx23-distilled", "ltx23-upscaler-x2", "ltx23-gemma-q4"],
+    "ltx23-one-stage": ["ltx23-full-dev", "ltx23-gemma-q4"],
+    "ltx23-one-stage-fp8": ["ltx23-full-dev-fp8", "ltx23-gemma-q4"],
+    "ltx-2b": ["ltx-2b-v095", "flux-t5-fp16", "ltx-t5-tokenizer"],
     "controlnet-sd15": [
         "cn15-canny", "cn15-depth", "cn15-openpose",
         "cn15-tile", "cn15-lineart", "cn15-softedge",
@@ -48,6 +73,41 @@ QUICK_START_BUNDLES: dict[str, list[str]] = {
         "emb-easynegative", "emb-badprompt", "emb-negxl",
     ],
 }
+
+DIFFUSERS_SUPPORT_COMPONENTS_ALLOW_PATTERNS = (
+    "model_index.json",
+    "scheduler/**",
+    "text_encoder/**",
+    "tokenizer/**",
+    "vae/**",
+    "transformer/config.json",
+)
+
+DIFFUSERS_FLUX2_PIPELINE_ALLOW_PATTERNS = (
+    "model_index.json",
+    "scheduler/**",
+    "text_encoder/**",
+    "tokenizer/**",
+    "transformer/**",
+    "vae/**",
+)
+
+SD_SINGLE_FILE_CONFIG_ALLOW_PATTERNS = (
+    "model_index.json", "scheduler/**", "text_encoder/config.json", "text_encoder_2/config.json",
+    "text_encoder_3/config.json", "tokenizer/**", "tokenizer_2/**", "tokenizer_3/**",
+    "unet/config.json", "vae/config.json",
+)
+
+
+def quick_start_bundles_for_platform(*, windows: bool | None = None) -> dict[str, list[str]]:
+    """Return installable route bundles without advertising blocked Windows weights."""
+    import os
+
+    use_windows = os.name == "nt" if windows is None else windows
+    bundles = {key: list(value) for key, value in QUICK_START_BUNDLES.items()}
+    if use_windows:
+        bundles["zimage"] = ["fluxtrait-zimage-v2-bf16", "z-image-turbo-components"]
+    return bundles
 
 # ---------------------------------------------------------------------------
 # CivitAI browse links — pre-filtered to base models AIWF's routes support, so
@@ -121,6 +181,47 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         notes="Works with Wan 2.1 and 2.2 I2V. Saves to models/VAE/.",
     ),
     CatalogEntry(
+        key="wan-vae-22",
+        title="Wan 2.2 TI2V 5B VAE (48-channel)",
+        category="wan_vae",
+        source="huggingface",
+        repo_id="Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+        filename="split_files/vae/wan2.2_vae.safetensors",
+        size_mb=1410,
+        notes="Required by the standalone Wan 2.2 TI2V 5B transformer. Saves to models/VAE/wan2.2_vae.safetensors.",
+    ),
+    CatalogEntry(
+        key="wan-ti2v-components",
+        title="Wan 2.2 shared UMT5, tokenizer, and scheduler (no transformer)",
+        category="wan_diffusers",
+        source="huggingface",
+        repo_id="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        size_mb=11400,
+        notes=(
+            "Filtered install of model_index, tokenizer, scheduler, and the 11.4 GB UMT5 text encoder only. "
+            "The 14B high/low route uses this same shared text stack; it excludes both the 5B transformer "
+            "and VAE. Pair the 14B route with the Wan 2.1 VAE."
+        ),
+        snapshot=True,
+        snapshot_allow_patterns=(
+            "model_index.json",
+            "scheduler/**",
+            "tokenizer/**",
+            "text_encoder/config.json",
+            "text_encoder/model.safetensors.index.json",
+            "text_encoder/model-*.safetensors",
+        ),
+    ),
+    CatalogEntry(
+        key="wan-ti2v-diffusers-5b",
+        title="Wan 2.2 TI2V 5B Diffusers snapshot",
+        category="wan_diffusers",
+        source="huggingface",
+        repo_id="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        notes="Complete Wan 2.2 TI2V 5B Diffusers route, including transformer, text encoder, VAE and scheduler. Large download; use the GGUF bundle on memory-limited GPUs.",
+        snapshot=True,
+    ),
+    CatalogEntry(
         key="wan-gguf-high-q4km",
         title="Wan 2.2 I2V High Noise transformer Q4_K_M",
         category="wan_gguf",
@@ -152,13 +253,51 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         notes="Fast LTX 2.3 checkpoint used by AIWF's default LTX worker route.",
     ),
     CatalogEntry(
+        key="ltx-2b-v095",
+        title="LTX Video 0.9.5 2B checkpoint",
+        category="ltx_checkpoint",
+        source="huggingface",
+        repo_id="Lightricks/LTX-Video",
+        filename="ltx-video-2b-v0.9.5.safetensors",
+        size_mb=6800,
+        notes="Single-file checkpoint for the local Diffusers 2B route. Install with T5-XXL fp16 support weights.",
+    ),
+    CatalogEntry(
+        key="ltx-t5-tokenizer",
+        title="LTX 2B T5-XXL tokenizer files",
+        category="ltx_tokenizer",
+        source="huggingface",
+        repo_id="google/t5-v1_1-xxl",
+        snapshot=True,
+        snapshot_allow_patterns=(
+            "config.json",
+            "special_tokens_map.json",
+            "spiece.model",
+            "tokenizer_config.json",
+        ),
+        notes="Small tokenizer-only snapshot required by the offline LTX 2B Diffusers loader; excludes the 89 GB T5 model weights.",
+    ),
+    CatalogEntry(
         key="ltx23-full-dev",
         title="LTX 2.3 22B dev checkpoint",
         category="ltx_checkpoint",
         source="huggingface",
         repo_id="Lightricks/LTX-2.3",
-        filename="ltx-2.3-22b-dev.safetensors",
+        filename="ltx-2.3-22b-dev-bf16.safetensors",
         notes="Full checkpoint for one-stage/prototyping LTX routes. Higher VRAM and slower than distilled.",
+    ),
+    CatalogEntry(
+        key="ltx23-full-dev-fp8",
+        title="LTX 2.3 22B dev FP8 checkpoint",
+        category="ltx_checkpoint",
+        source="huggingface",
+        repo_id="Lightricks/LTX-2.3-fp8",
+        filename="ltx-2.3-22b-dev-fp8.safetensors",
+        size_mb=29100,
+        notes=(
+            "Official full FP8 one-stage checkpoint. License: ltx-2-community-license-agreement; "
+            "review and comply with the upstream license terms before use."
+        ),
     ),
     CatalogEntry(
         key="ltx23-upscaler-x2",
@@ -206,10 +345,9 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         category="sana_video_diffusers",
         source="huggingface",
         repo_id="Efficient-Large-Model/SANA-Video_2B_720p_diffusers",
-        notes="Higher-resolution SANA-Video full-folder route. Heavier than 480p; start with 480p on consumer GPUs.",
+        notes="Full-folder SANA-Video 720p text/image-to-video route. Selected explicitly in Pro; video only, with optional MMAudio post-process.",
         snapshot=True,
     ),
-
     CatalogEntry(
         key="hf-sd15-pruned",
         title="Stable Diffusion 1.5 (fp16 pruned)",
@@ -221,6 +359,26 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         notes="Classic SD1.5 base — fp16 pruned single file.",
     ),
     CatalogEntry(
+        key="hf-sd15-singlefile-config",
+        title="Stable Diffusion 1.5 single-file support config",
+        category="sd_singlefile_config",
+        source="huggingface",
+        repo_id="stable-diffusion-v1-5/stable-diffusion-v1-5",
+        notes="Small config/tokenizer snapshot required to load local SD 1.5 single-file checkpoints without hidden Hub fetches.",
+        snapshot=True,
+        snapshot_allow_patterns=SD_SINGLE_FILE_CONFIG_ALLOW_PATTERNS,
+    ),
+    CatalogEntry(
+        key="hf-sd15-inpaint-singlefile-config",
+        title="Stable Diffusion 1.5 inpaint single-file support config",
+        category="sd_singlefile_config",
+        source="huggingface",
+        repo_id="stable-diffusion-v1-5/stable-diffusion-inpainting",
+        notes="Small config/tokenizer snapshot required to load local SD 1.5 inpaint checkpoints without hidden Hub fetches.",
+        snapshot=True,
+        snapshot_allow_patterns=SD_SINGLE_FILE_CONFIG_ALLOW_PATTERNS,
+    ),
+    CatalogEntry(
         key="hf-sdxl-base",
         title="Stable Diffusion XL Base 1.0",
         category="checkpoint",
@@ -229,6 +387,36 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         filename="sd_xl_base_1.0.safetensors",
         size_mb=6617,
         notes="SDXL base — pair with the refiner for best quality.",
+    ),
+    CatalogEntry(
+        key="hf-sdxl-singlefile-config",
+        title="SDXL single-file support config",
+        category="sd_singlefile_config",
+        source="huggingface",
+        repo_id="stabilityai/stable-diffusion-xl-base-1.0",
+        notes="Small config/tokenizer snapshot required to load local SDXL single-file checkpoints without hidden Hub fetches.",
+        snapshot=True,
+        snapshot_allow_patterns=SD_SINGLE_FILE_CONFIG_ALLOW_PATTERNS,
+    ),
+    CatalogEntry(
+        key="hf-sdxl-inpaint-singlefile-config",
+        title="SDXL inpaint single-file support config",
+        category="sd_singlefile_config",
+        source="huggingface",
+        repo_id="diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+        notes="Small config/tokenizer snapshot required to load local SDXL inpaint checkpoints without hidden Hub fetches.",
+        snapshot=True,
+        snapshot_allow_patterns=SD_SINGLE_FILE_CONFIG_ALLOW_PATTERNS,
+    ),
+    CatalogEntry(
+        key="hf-sdxl-refiner-singlefile-config",
+        title="SDXL refiner single-file support config",
+        category="sd_singlefile_config",
+        source="huggingface",
+        repo_id="stabilityai/stable-diffusion-xl-refiner-1.0",
+        notes="Small refiner-specific config/tokenizer snapshot required to load local SDXL refiner checkpoints without hidden Hub fetches.",
+        snapshot=True,
+        snapshot_allow_patterns=SD_SINGLE_FILE_CONFIG_ALLOW_PATTERNS,
     ),
     CatalogEntry(
         key="hf-sdxl-refiner",
@@ -251,6 +439,16 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
             "accept the Hugging Face gate and set HF_TOKEN/HUGGINGFACE_TOKEN before downloading."
         ),
         snapshot=True,
+    ),
+    CatalogEntry(
+        key="hf-sd35-singlefile-config",
+        title="Stable Diffusion 3.5 single-file support config",
+        category="sd_singlefile_config",
+        source="huggingface",
+        repo_id="stabilityai/stable-diffusion-3.5-medium",
+        notes="Small config/tokenizer snapshot required to load local SD 3.5 single-file checkpoints without hidden Hub fetches. Hugging Face access terms may apply.",
+        snapshot=True,
+        snapshot_allow_patterns=SD_SINGLE_FILE_CONFIG_ALLOW_PATTERNS,
     ),
     CatalogEntry(
         key="hf-sd35-large-turbo",
@@ -318,19 +516,6 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         ),
     ),
     CatalogEntry(
-        key="flux-t5-q4km",
-        title="Flux T5-XXL text encoder GGUF Q4_K_M",
-        category="flux_text_encoder",
-        source="huggingface",
-        repo_id="city96/t5-v1_1-xxl-encoder-gguf",
-        filename="t5-v1_1-xxl-encoder-Q4_K_M.gguf",
-        size_mb=4760,
-        notes=(
-            "Quantized T5 route for Flux. This matters as much as the UNet quant for "
-            "staying near a 12-14 GB inference budget."
-        ),
-    ),
-    CatalogEntry(
         key="flux-t5-fp8",
         title="Flux T5-XXL text encoder fp8 (recommended)",
         category="flux_text_encoder",
@@ -345,15 +530,15 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
     ),
     CatalogEntry(
         key="flux-t5-fp16",
-        title="Flux T5-XXL text encoder safetensors fp16",
+        title="T5-XXL text encoder safetensors FP16 (Flux / LTX)",
         category="flux_text_encoder",
         source="huggingface",
         repo_id="comfyanonymous/flux_text_encoders",
         filename="t5xxl_fp16.safetensors",
         size_mb=9334,
         notes=(
-            "Fallback T5-XXL encoder for the Diffusers Flux route. Use fp8 instead on 16 GB GPUs "
-            "unless you have spare VRAM."
+            "FP16 T5-XXL encoder used by both the Diffusers Flux route and LTX 2B. Use fp8 instead for "
+            "Flux on 16 GB GPUs unless you have spare VRAM; LTX 2B requires this FP16 file."
         ),
     ),
     CatalogEntry(
@@ -375,6 +560,53 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         filename="split_files/vae/ae.safetensors",
         size_mb=320,
         notes="Flux autoencoder/VAE used by split Flux workflows.",
+    ),
+    CatalogEntry(
+        key="flux-clip-tokenizer",
+        title="Flux CLIP-L tokenizer files",
+        category="flux_tokenizer",
+        source="huggingface",
+        repo_id="openai/clip-vit-large-patch14",
+        snapshot=True,
+        snapshot_allow_patterns=("vocab.json", "merges.txt", "tokenizer_config.json"),
+        notes="Small local-only tokenizer snapshot required alongside Flux CLIP-L weights.",
+    ),
+    CatalogEntry(
+        key="flux-t5-tokenizer",
+        title="Flux T5-XXL tokenizer files",
+        category="flux_tokenizer",
+        source="huggingface",
+        repo_id="google/t5-v1_1-xxl",
+        snapshot=True,
+        snapshot_allow_patterns=("spiece.model", "tokenizer_config.json"),
+        notes="Small local-only tokenizer snapshot required alongside Flux T5-XXL weights.",
+    ),
+    CatalogEntry(
+        key="flux-distillt5-control",
+        title="Flux DistillT5 control encoder",
+        category="flux_text_encoder",
+        source="huggingface",
+        repo_id="LifuWang/DistillT5",
+        snapshot=True,
+        snapshot_allow_patterns=("config.json", "model.safetensors"),
+        size_mb=518,
+        notes=(
+            "Official DistillT5 T5-Base checkpoint for the opt-in Flux distillt5-control route. "
+            "Installs under models/flux/Textencoder/DistillT5."
+        ),
+    ),
+    CatalogEntry(
+        key="flux-distillt5-tokenizer",
+        title="Flux DistillT5 T5-Base tokenizer",
+        category="flux_tokenizer",
+        source="huggingface",
+        repo_id="google/t5-v1_1-base",
+        snapshot=True,
+        snapshot_allow_patterns=("spiece.model", "tokenizer_config.json"),
+        notes=(
+            "Local T5-Base tokenizer required by Flux distillt5-control. "
+            "Installs under models/flux/tokenizer/t5-v1_1-base."
+        ),
     ),
     CatalogEntry(
         key="fluxtrait-v10-fp8",
@@ -480,6 +712,34 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
     ),
     # Flux.2 Klein and Z-Image runtime assets.
     CatalogEntry(
+        key="flux-kontext-diffusers",
+        title="Flux.1 Kontext dev Diffusers snapshot",
+        category="flux_kontext_diffusers",
+        source="huggingface",
+        repo_id="black-forest-labs/FLUX.1-Kontext-dev",
+        notes=(
+            "Official Black Forest Labs Diffusers snapshot. Requires accepting the Hugging Face access terms, "
+            "a token with access configured in Studio Settings, and compliance with the non-commercial license."
+        ),
+        snapshot=True,
+    ),
+    CatalogEntry(
+        key="flux-kontext-gguf-components",
+        title="Flux.1 Kontext GGUF supporting components",
+        category="flux_kontext_components",
+        source="huggingface",
+        repo_id="black-forest-labs/FLUX.1-Kontext-dev",
+        notes=(
+            "Text encoders, tokenizers, scheduler, VAE, model index, and transformer config for the selected GGUF. "
+            "Transformer weight files are excluded; accept the Hugging Face access terms and configure a token."
+        ),
+        snapshot=True,
+        snapshot_allow_patterns=(
+            "model_index.json", "scheduler/**", "text_encoder/**", "text_encoder_2/**",
+            "tokenizer/**", "tokenizer_2/**", "vae/**", "transformer/config.json",
+        ),
+    ),
+    CatalogEntry(
         key="flux2-klein-4b-diffusers",
         title="Flux.2 Klein 4B distilled Diffusers pipeline",
         category="flux2_diffusers",
@@ -491,6 +751,7 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
             "Diffusers folder with transformer, Qwen text encoder, tokenizer, scheduler, and VAE."
         ),
         snapshot=True,
+        snapshot_allow_patterns=DIFFUSERS_FLUX2_PIPELINE_ALLOW_PATTERNS,
     ),
     CatalogEntry(
         key="flux2-klein-base-4b-diffusers",
@@ -511,12 +772,13 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         category="flux2_components",
         source="huggingface",
         repo_id="black-forest-labs/FLUX.2-klein-4B",
-        size_mb=13000,
+        size_mb=8500,
         notes=(
             "Public Apache-2.0 component folder for Flux.2 Klein 4B. Contains the matching "
             "Qwen text encoder, tokenizer, scheduler, VAE, and transformer config."
         ),
         snapshot=True,
+        snapshot_allow_patterns=DIFFUSERS_SUPPORT_COMPONENTS_ALLOW_PATTERNS,
     ),
     CatalogEntry(
         key="flux2-klein-9b-components",
@@ -524,12 +786,13 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         category="flux2_components",
         source="huggingface",
         repo_id="black-forest-labs/FLUX.2-klein-9B",
-        size_mb=29000,
+        size_mb=17000,
         notes=(
             "Gated non-commercial 9B component folder required for Fluxtrait Klein 9B GGUF/safetensors. "
             "Accept the Hugging Face gate and set HF_TOKEN/HUGGINGFACE_TOKEN before downloading."
         ),
         snapshot=True,
+        snapshot_allow_patterns=DIFFUSERS_SUPPORT_COMPONENTS_ALLOW_PATTERNS,
     ),
     CatalogEntry(
         key="fluxtrait-klein9b-v2-q4km",
@@ -767,7 +1030,6 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
             "Recommended first Qwen Nunchaku image route for RTX 30/40 cards. "
             "Requires Qwen Image base components and the isolated engines/qwen_nunchaku runtime."
         ),
-        coming_soon=True,
     ),
     CatalogEntry(
         key="sana-sprint-06b-diffusers",
@@ -805,9 +1067,10 @@ MODEL_DOWNLOAD_CATALOG: list[CatalogEntry] = [
         category="z_image_components",
         source="huggingface",
         repo_id="Tongyi-MAI/Z-Image-Turbo",
-        size_mb=16000,
+        size_mb=8500,
         notes="Public Apache-2.0 Z-Image Turbo component folder: text encoder, tokenizer, scheduler, VAE, config.",
         snapshot=True,
+        snapshot_allow_patterns=DIFFUSERS_SUPPORT_COMPONENTS_ALLOW_PATTERNS,
     ),
     CatalogEntry(
         key="fluxtrait-zimage-v2-q4",

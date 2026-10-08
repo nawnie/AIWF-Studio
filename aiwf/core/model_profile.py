@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ModelProfile:
-    family: str            # lightning | hyper | turbo | lcm | tcd | sdxl_refiner | flux_fusion | flux_fill | flux_kontext | flux2_klein | z_image | krea2_turbo | krea2_raw | anima | qwen_image | qwen_image_nunchaku | sana | sana_video | standard
+    family: str            # lightning | hyper | turbo | lcm | tcd | sdxl_refiner | flux_fusion | flux_fill | flux_kontext | flux2_klein | z_image | krea2_turbo | krea2_raw | anima | qwen_image_21 | qwen_image | qwen_image_nunchaku | sana | sana_video | standard
     is_distilled: bool
     recommended_cfg: float
     cfg_max: float         # above this, a distilled model overexposes
@@ -41,6 +41,7 @@ class ModelProfile:
             "krea2_turbo": "Krea 2 Turbo model",
             "krea2_raw": "Krea 2 Raw model",
             "anima": "Anima model",
+            "qwen_image_21": "Qwen Image 2.1 model",
             "qwen_image": "Qwen Image model",
             "qwen_image_nunchaku": "Qwen Image Nunchaku model",
             "sana": "Sana model",
@@ -81,6 +82,8 @@ _PROFILES = {
                   "Use Euler, guidance/CFG 3.5, and about 52 steps for Krea 2 Raw."),
     "anima": (4.5, 7.0, 36, "euler_a", "automatic",
               "Use CFG 4-5 and 30-50 steps for Anima anime and non-photorealistic image generation."),
+    "qwen_image_21": (1.0, 1.5, 40, "euler", "automatic",
+                       "Qwen Image 2.1 defaults: 40 steps with true CFG 1 (no guidance). Add a negative prompt and raise true CFG only when needed."),
     "qwen_image": (4.0, 6.0, 30, "euler", "automatic",
                    "Use true CFG 4 and about 30 steps for Qwen Image first-run quality."),
     "qwen_image_nunchaku": (1.0, 1.5, 4, "euler", "automatic",
@@ -99,6 +102,7 @@ _MARKERS = [
     ("krea2_raw", [r"krea[\s_-]?2.*(?:raw|base)", r"krea2.*(?:raw|base)"]),
     ("anima", [r"(?:^|[\s_./-])anima(?:$|[\s_./-])", r"anima[\s_-]?(?:base|preview)", r"circlestone.*anima"]),
     ("qwen_image_nunchaku", [r"qwen.*(?:nunchaku|svdq-int4|lightningv|4steps)", r"(?:nunchaku|svdq-int4).*qwen"]),
+    ("qwen_image_21", [r"qwen[\s_-]?image[\s_-]?2[._-]?1", r"qwenimage21pipeline"]),
     ("sdxl_refiner", [r"sd[\s_./-]?xl.*refiner", r"sd_xl_refiner", r"stable[\s_./-]?diffusion[\s_./-]?xl.*refiner"]),
     ("lightning", [r"lightning"]),
     ("turbo", [r"turbo"]),
@@ -112,7 +116,7 @@ _MARKERS = [
     ("flux_fill", [r"flux.*fill", r"fill.*flux"]),
     ("flux_kontext", [r"flux[\s_-]?kontext", r"kontext"]),
     ("flux_fusion", [r"flux[\s_-]?fusion", r"fusion[\s_-]?v\d"]),
-    ("flux2_klein", [r"flux[\s._-]?2", r"klein"]),
+    ("flux2_klein", [r"(?=.*flux[\s._-]?2)(?=.*klein)", r"(?<![a-z0-9])f2k(?![a-z0-9])"]),
     # Hyper-SD only -- must NOT match a baked "HyperVAE" on a normal checkpoint.
     ("hyper", [r"hyper[\s_-]?sd", r"hyper[\s_-]?sdxl"]),
 ]
@@ -141,7 +145,7 @@ def detect_model_profile(*names: str | None) -> ModelProfile:
         )
 
     cfg, cfg_max, steps, sampler, scheduler, blurb = _PROFILES[family]
-    non_distilled = {"sdxl_refiner", "flux_fill", "flux_kontext", "krea2_raw", "anima", "qwen_image", "sana", "sana_video"}
+    non_distilled = {"sdxl_refiner", "flux_fill", "flux_kontext", "krea2_raw", "anima", "qwen_image_21", "qwen_image", "sana", "sana_video"}
     note = "" if family in non_distilled else "Distilled few-step model: high CFG causes overexposure."
     return ModelProfile(
         family=family,

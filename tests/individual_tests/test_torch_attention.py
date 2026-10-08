@@ -9,6 +9,7 @@ from aiwf.infrastructure.torch.attention import (
     apply_attention_optimizations,
     apply_image_pipeline_optimizations,
     attention_call_context,
+    resolve_best_diffusers_attention_backend,
 )
 
 
@@ -144,6 +145,16 @@ def test_attention_backend_default_is_sdpa():
 
     assert result == "sdp"
     assert pipe.unet.processor is not None
+
+
+def test_diffusers_attention_fallback_allows_torch_to_select_kernel(monkeypatch):
+    import aiwf.infrastructure.torch.attention as attention
+
+    monkeypatch.setattr(attention, "_flashattention_usable_in_diffusers", lambda: False)
+    monkeypatch.setattr(attention, "_xformers_usable_in_diffusers", lambda: False)
+    monkeypatch.setattr(attention, "_sageattention_usable_in_diffusers", lambda: False)
+
+    assert resolve_best_diffusers_attention_backend(_flags()) == "native"
 
 
 def test_attention_call_context_keeps_unet_pipelines_on_torch_sdpa():

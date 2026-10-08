@@ -2,9 +2,64 @@ from __future__ import annotations
 
 import json
 import logging
+import struct
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def safetensors_file_is_structurally_valid(path: Path | str) -> bool:
+    """Check header framing, tensor byte ranges, and total payload size only."""
+    resolved = Path(path)
+    try:
+        size = resolved.stat().st_size
+        with resolved.open("rb") as stream:
+            prefix = stream.read(8)
+            if len(prefix) != 8:
+                return False
+            header_size = struct.unpack("<Q", prefix)[0]
+            if header_size < 2 or header_size > min(size - 8, 100 * 1024 * 1024):
+                return False
+            header = json.loads(stream.read(header_size).decode("utf-8"))
+        if not isinstance(header, dict):
+            return False
+        dtype_sizes = {
+            "BOOL": 1, "U8": 1, "I8": 1, "F8_E4M3": 1, "F8_E5M2": 1,
+            "F8_E4M3FN": 1, "F8_E4M3FNUZ": 1, "F8_E5M2FNUZ": 1,
+            "U16": 2, "I16": 2, "F16": 2, "BF16": 2,
+            "U32": 4, "I32": 4, "F32": 4,
+            "U64": 8, "I64": 8, "F64": 8,
+        }
+        data_size = size - 8 - header_size
+        tensor_ranges = []
+        for key, tensor in header.items():
+            if key == "__metadata__":
+                continue
+            dtype = tensor.get("dtype") if isinstance(tensor, dict) else None
+            if not isinstance(dtype, str) or dtype not in dtype_sizes:
+                return False
+            shape, offsets = tensor.get("shape"), tensor.get("data_offsets")
+            if not isinstance(shape, list) or not all(isinstance(dim, int) and dim >= 0 for dim in shape):
+                return False
+            if not isinstance(offsets, list) or len(offsets) != 2 or not all(isinstance(pos, int) for pos in offsets):
+                return False
+            numel = 1
+            for dim in shape:
+                numel *= dim
+            if offsets[0] < 0 or offsets[1] < offsets[0] or offsets[1] > data_size:
+                return False
+            if offsets[1] - offsets[0] != numel * dtype_sizes[dtype]:
+                return False
+            tensor_ranges.append((offsets[0], offsets[1]))
+        tensor_ranges.sort()
+        cursor = 0
+        for start, end in tensor_ranges:
+            if start != cursor:
+                return False
+            cursor = end
+        return cursor == data_size
+    except (OSError, UnicodeDecodeError, ValueError, struct.error):
+        return False
 
 CHECKPOINT_HEADER_KEYS = (
     "ss_sd_model_name",

@@ -1,0 +1,24 @@
+{
+  "schema": "aiwf-ram-receipt-v1",
+  "measured_at": "2026-10-07T01:27-01:33 local",
+  "machine": "NVIDIA GeForce RTX 4070 Ti SUPER 16 GB, driver 616.92, Windows 11 Pro 10.0.26300",
+  "method": "Win32_Process WorkingSetSize and PrivatePageCount; settle 25-30 s; engines excluded on both sides",
+  "native": {
+    "build": "F:/AIWF_Studio/native/bin/Release/AIWFStudio.exe (C++/WinRT, WinUI 3, Windows App SDK 1.7, MSVC v143)",
+    "idle_home": { "processes": 1, "working_set_mb": 148.1, "private_mb": 125.8 },
+    "after_visiting_all_7_pages": { "processes": 1, "working_set_mb": 179.5, "private_mb": 149.7 }
+  },
+  "web_same_product": {
+    "ui": "AIWF Studio Pro React UI at http://127.0.0.1:7860/ in Microsoft Edge --app mode",
+    "warm_profile": {
+      "instance": { "processes": 13, "working_set_mb": 1069.7, "private_mb": 718.0 },
+      "renderer_processes_only": { "processes": 6, "working_set_mb": 612.7, "private_mb": 431.2 }
+    },
+    "fresh_profile_first_run": {
+      "react_ui": { "processes": 21, "working_set_mb": 2404.9, "private_mb": 1843.9 },
+      "about_blank_control": { "processes": 21, "working_set_mb": 2333.2, "private_mb": 1813.7 },
+      "note": "Fresh-profile numbers are dominated by Edge's own first-run work (the blank page costs almost the same), so they are not used as the UI comparison."
+    }
+  },
+  "summary": "Same product, same PC: the native shell uses about 126-150 MB private in one process; the React UI in a dedicated Edge window uses about 718 MB private across 13 processes (431 MB private in its renderers alone)."
+}

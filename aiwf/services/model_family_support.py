@@ -332,18 +332,21 @@ def static_model_family_support() -> list[dict[str, Any]]:
             id="krea2",
             label="Krea 2",
             category="image",
-            status="blocked-until-runtime",
-            summary="Krea 2 Turbo/Raw assets are cataloged with low/mid/high VRAM profiles; generation is blocked until Krea2Pipeline or a split-file loader is available.",
-            storage=["Comfy split .safetensors transformer", "future Diffusers folder"],
+            status="partial-supported",
+            summary="The complete Diffusers-folder route is implemented when Krea2Pipeline is available; Comfy split-file profiles are cataloged for placement but remain blocked from AIWF generation.",
+            storage=["Complete Krea2Pipeline Diffusers folder", "Comfy split .safetensors transformer"],
             precisions=[
                 _precision("NVFP4", "cataloged", "Comfy split asset", "lowest-memory Turbo candidate"),
                 _precision("FP8", "cataloged", "Comfy split asset", "recommended low/mid VRAM Turbo target"),
                 _precision("BF16", "high-vram", "Comfy split asset or future Diffusers folder"),
             ],
-            routes=[_route("krea2", "blocked-cleanly", "txt2img", "DiffusersBackend._load_krea2_checkpoint")],
+            routes=[
+                _route("krea2", "supported-when-folder-installed", "txt2img", "DiffusersBackend._load_krea2_checkpoint"),
+                _route("krea2-split", "blocked-cleanly", "txt2img", "pending split-file loader"),
+            ],
             sidecars=["Qwen3-VL text encoder", "Qwen Image VAE"],
             lora="Krea 2 LoRAs are catalog candidates, but runtime adapter application is not wired in AIWF yet.",
-            blockers=["Installed Diffusers must expose Krea2Pipeline or AIWF needs a split-file Krea2 loader."],
+            blockers=["Comfy split-file assets cannot generate in AIWF; folder loading requires Diffusers Krea2Pipeline, and no real Krea 2 generation smoke is recorded."],
             modules=["aiwf.infrastructure.diffusers.backend", "aiwf.services.pipeline_preflight", "aiwf.services.model_download_catalog"],
         ),
         _family(
@@ -367,21 +370,23 @@ def static_model_family_support() -> list[dict[str, Any]]:
             label="Qwen Image / Nunchaku",
             category="image",
             status="partial",
-            summary="Full Qwen Image Diffusers folder route plus isolated Qwen Nunchaku Lightning sidecar runtime for SVDQ-int4 single transformer.",
+            summary="Qwen Image 1.x Diffusers folder route, Qwen Image 2.1 family-specific route (gated by the installed Diffusers class), and isolated Qwen Nunchaku Lightning sidecar runtime.",
             storage=["Diffusers folder", "Nunchaku .safetensors transformer"],
             precisions=[
                 _precision("BF16", "preferred", "QwenImagePipeline"),
+                _precision("BF16", "experimental-unverified", "QwenImage21Pipeline", "requires a Diffusers build exposing the 2.1 pipeline; no local generation smoke"),
                 _precision("FP16", "fallback", "dtype fallback"),
-                _precision("INT4", "supported-sidecar", "QwenNunchakuService", "svdq-int4 transformer plus base components"),
+                _precision("INT4", "experimental-unverified", "QwenNunchakuService", "sidecar code exists; no real load-and-generation smoke is verified"),
                 _precision("GGUF", "missing", "no native LLM/VL GGUF worker yet"),
             ],
             routes=[
                 _route("qwen-image", "supported-when-folder-installed", "txt2img", "DiffusersBackend._load_qwen_image_checkpoint"),
-                _route("qwen-nunchaku", "sidecar", "txt2img", "QwenNunchakuService.generate"),
+                _route("qwen-image-2.1", "blocked-runtime", "txt2img + image-conditioned edit", "DiffusersBackend._load_qwen_image_checkpoint", "QwenImage21Pipeline is absent from the installed Diffusers 0.39.0 runtime; route has not been smoke-tested on this PC."),
+                _route("qwen-nunchaku", "blocked-runtime", "txt2img", "QwenNunchakuService.generate", "Setup is available, but generation stays blocked until a real route smoke passes."),
             ],
             sidecars=["Qwen Image base Diffusers folder", "Nunchaku engine venv", "runner script", "single transformer"],
-            lora="Runtime LoRA disabled until Qwen adapter route is implemented.",
-            blockers=["LLM/VL GGUF rows remain metadata-only until a local worker/API route exists."],
+            lora="Runtime LoRA stays blocked for Qwen Image and 2.1 until adapter key compatibility is validated. Qwen Image 2.1 LoRA training is not wired.",
+            blockers=["Qwen Image 2.1 requires an installed Diffusers build exposing QwenImage21Pipeline; current local runtime is 0.39.0 and has no generation smoke.", "LLM/VL GGUF rows remain metadata-only until a local worker/API route exists."],
             modules=["aiwf.services.qwen_nunchaku", "aiwf.infrastructure.diffusers.backend", "aiwf.services.pipeline_preflight"],
         ),
         _family(
@@ -407,7 +412,7 @@ def static_model_family_support() -> list[dict[str, Any]]:
             label="Sana Video",
             category="video",
             status="supported-smoked-silent",
-            summary="SANA-Video 2B 480p Diffusers route with quantization/tiling settings and silent MP4 smoke evidence; audio is a post-process lane.",
+            summary="SANA-Video 2B 480p and 720p Diffusers routes with quantization/tiling settings and silent MP4 smoke evidence; audio is a post-process lane.",
             storage=["Diffusers folder"],
             precisions=[
                 _precision("BF16", "preferred", "SanaVideoService"),
@@ -425,7 +430,7 @@ def static_model_family_support() -> list[dict[str, Any]]:
             label="Wan Video",
             category="video",
             status="supported-plus-sidecars",
-            summary="Wan fast 5B I2V plus experimental high/low FP8 and GGUF model-pair routes with explicit VAE, text encoder, LoRA, offload, sampler, and sigma controls.",
+            summary="Wan fast TI2V 5B supports text-to-video and image-to-video; experimental high/low FP8 and GGUF model-pair routes are image-to-video with explicit VAE, text encoder, LoRA, offload, sampler, and sigma controls.",
             storage=["Diffusers folder", ".safetensors transformer", ".gguf high/low transformers"],
             precisions=[
                 _precision("BF16", "preferred", "WanImageToVideoPipeline / native runner"),
@@ -435,13 +440,13 @@ def static_model_family_support() -> list[dict[str, Any]]:
                 _precision("GGUF Q3/Q6", "metadata-only", "readiness classifier", "smoke separately before marketing"),
             ],
             routes=[
-                _route("wan-fast-5b", "supported", "image-to-video", "WanService.generate / WanI2VBackend"),
+                _route("wan-fast-5b", "supported", "text/image-to-video (TI2V)", "WanService.generate / WanI2VBackend"),
                 _route("wan-high-low-fp8", "experimental", "image-to-video", "WAN_RUNTIME_HIGH_LOW_FP8"),
                 _route("wan-gguf", "experimental", "image-to-video", "WAN_RUNTIME_HIGH_LOW"),
             ],
             sidecars=["high-noise transformer", "low-noise transformer", "Wan VAE", "UMT5/Wan text encoder", "Wan LoRA high/low", "offload plan"],
             lora="Single high/low LoRA fields exist; multi-LoRA stack UI/runtime is the next family patch item.",
-            blockers=["T2V 1.3B, Animate, and Fun-Control/control are explicitly unsupported by the current I2V route."],
+            blockers=["T2V 1.3B, Animate, and Fun-Control/control are explicitly unsupported by the current routes; A14B pairs require a source image."],
             modules=["aiwf.core.domain.wan", "aiwf.services.wan", "aiwf.infrastructure.wan.pipeline", "aiwf.services.wan_models"],
         ),
         _family(
@@ -460,7 +465,7 @@ def static_model_family_support() -> list[dict[str, Any]]:
                 _precision("Gemma Q3_K_M GGUF", "blocked-probe-only", "probe_ltx_runtime", "needs hidden-state tuple + attention mask backend"),
             ],
             routes=[
-                _route("ltx-2b-diffusers", "supported-smoked", "text/image-to-video", "run_ltx2b_diffusers"),
+                _route("ltx-2b-diffusers", "supported-smoked", "text-to-video", "run_ltx2b_diffusers"),
                 _route("ltx-one-stage-hf-gemma", "supported-smoked", "video", "LtxService.generate"),
                 _route("ltx-one-stage-heretic-gguf", "blocked-probe-only", "metadata probe", "LtxService.probe_native_gemma_gguf"),
             ],
@@ -513,7 +518,7 @@ def _family_id_for_readiness_family(value: str) -> str:
     if key == "flux_fill":
         return "flux"
     if key == "flux2":
-        return "flux2_klein"
+        return "flux2_generic"
     if key == "zimage":
         return "z_image"
     if key == "qwen":
@@ -521,6 +526,20 @@ def _family_id_for_readiness_family(value: str) -> str:
     if key == "sana_video":
         return "sana_video"
     return key
+
+
+def _family_id_for_readiness_record(record: Any) -> str:
+    """Attribute broad readiness records to their model architecture/route."""
+    route = str(getattr(record, "route", "") or "").lower().replace("-", "_")
+    if "sana_video" in route:
+        return "sana_video"
+
+    metadata = getattr(record, "metadata", {})
+    architecture = metadata.get("architecture", "") if isinstance(metadata, dict) else ""
+    family_id = _family_id_for_readiness_family(str(architecture or ""))
+    if family_id not in {"", "unknown", "runtime_asset"}:
+        return family_id
+    return _family_id_for_readiness_family(getattr(record, "family", ""))
 
 
 def _record_precision(record: Any) -> str:
@@ -543,7 +562,7 @@ def _readiness_overlay(flags: RuntimeFlags, settings: UserSettings) -> tuple[dic
     precision_by_family: dict[str, Counter] = defaultdict(Counter)
     blocked: list[dict[str, Any]] = []
     for record in records:
-        family_id = _family_id_for_readiness_family(getattr(record, "family", ""))
+        family_id = _family_id_for_readiness_record(record)
         status = str(getattr(record, "status", "") or "unknown")
         counts_by_family[family_id][status] += 1
         precision = _record_precision(record)
@@ -560,11 +579,24 @@ def _readiness_overlay(flags: RuntimeFlags, settings: UserSettings) -> tuple[dic
                     "suggestedAction": str(getattr(record, "suggested_action", "") or ""),
                 }
             )
+    # Keep the payload bounded without letting early records from one family
+    # hide every blocker for a later family in the UI's family-filtered view.
+    first_by_family: dict[str, int] = {}
+    for index, item in enumerate(blocked):
+        first_by_family.setdefault(item["family"], index)
+    selected_indices = set(first_by_family.values())
+    limit = max(80, len(selected_indices))
+    for index in range(len(blocked)):
+        if len(selected_indices) >= limit:
+            break
+        selected_indices.add(index)
+    limited_blocked = [blocked[index] for index in sorted(selected_indices)]
+
     return {
         "recordCount": len(records),
         "countsByFamily": {key: dict(value) for key, value in sorted(counts_by_family.items())},
         "precisionByFamily": {key: dict(value) for key, value in sorted(precision_by_family.items())},
-    }, blocked[:80]
+    }, limited_blocked
 
 
 def build_model_family_matrix(flags: RuntimeFlags, settings: UserSettings | None = None) -> dict[str, Any]:

@@ -94,6 +94,77 @@ def test_generation_service_enriches_saved_infotext(tmp_path: Path):
     assert "AIWF Studio:" in enriched
 
 
+def test_image_generation_defers_unresident_model_before_backend_load_on_low_vram(tmp_path: Path, monkeypatch):
+    checkpoint = Checkpoint(
+        id="large-model",
+        title="Large Model",
+        filename="large-model.safetensors",
+        path=str(tmp_path / "large-model.safetensors"),
+        size_bytes=12 * 1024**3,
+    )
+    backend = MagicMock()
+    backend.resolve_checkpoint.return_value = checkpoint
+    backend.is_checkpoint_loaded.return_value = False
+    backend.devices.device.return_value = type("Device", (), {"type": "cuda"})()
+    backend.generate.side_effect = AssertionError("backend inference must not start")
+    events = EventBus()
+    service = GenerationService(
+        backend=backend,
+        store=MagicMock(),
+        metadata=MagicMock(),
+        queue=JobQueue(events),
+        events=events,
+        settings=UserSettings(save_images=False),
+    )
+    monkeypatch.setattr(
+        "aiwf.services.model_startup._gpu_headroom_status",
+        lambda _ctx, _model: "Startup loading skipped: 2.4 GB VRAM is free; this model needs an estimated 10.5 GB headroom.",
+    )
+
+    with pytest.raises(RuntimeError, match="Generation deferred: 2.4 GB VRAM is free"):
+        service.submit(GenerationRequest(prompt="test", checkpoint_id="large-model", steps=1))
+
+    backend.generate.assert_not_called()
+    with pytest.raises(RuntimeError, match="Generation deferred: 2.4 GB VRAM is free"):
+        service.load_checkpoint("large-model")
+    backend.load_checkpoint.assert_not_called()
+
+
+def test_streaming_generation_returns_low_vram_failure_before_backend_inference(tmp_path: Path, monkeypatch):
+    checkpoint = Checkpoint(
+        id="large-model",
+        title="Large Model",
+        filename="large-model.safetensors",
+        path=str(tmp_path / "large-model.safetensors"),
+        size_bytes=12 * 1024**3,
+    )
+    backend = MagicMock()
+    backend.resolve_checkpoint.return_value = checkpoint
+    backend.is_checkpoint_loaded.return_value = False
+    backend.devices.device.return_value = type("Device", (), {"type": "cuda"})()
+    backend.generate.side_effect = AssertionError("backend inference must not start")
+    events = EventBus()
+    service = GenerationService(
+        backend=backend,
+        store=MagicMock(),
+        metadata=MagicMock(),
+        queue=JobQueue(events),
+        events=events,
+        settings=UserSettings(save_images=False),
+    )
+    monkeypatch.setattr(
+        "aiwf.services.model_startup._gpu_headroom_status",
+        lambda _ctx, _model: "Startup loading skipped: 2.4 GB VRAM is free; this model needs an estimated 10.5 GB headroom.",
+    )
+
+    output = list(service.submit_streaming(GenerationRequest(prompt="test", checkpoint_id="large-model", steps=1)))
+    done = next(item for item in output if item[0] == "done")
+
+    assert done[1].result is None
+    assert "Generation deferred: 2.4 GB VRAM is free" in done[1].error
+    backend.generate.assert_not_called()
+
+
 def test_ai_training_metadata_mode_writes_caption_payload_and_filename(tmp_path: Path):
     backend = MagicMock()
     backend.list_vaes.return_value = []

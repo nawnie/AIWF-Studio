@@ -54,8 +54,7 @@ function Enable-LtxEngine {
                 $config = $loaded
             }
         } catch {
-            Write-Warning "Could not parse engines.json; rewriting a minimal engine config."
-            $config = @{}
+            throw "Could not parse engines.json; it was left unchanged. Fix the file before enabling LTX. $($_.Exception.Message)"
         }
     }
 

@@ -29,8 +29,24 @@ from pathlib import Path
 from typing import Any
 
 from aiwf.infrastructure.torch.vram_budget import apply_cuda_vram_reserve
+from aiwf.services.route_lifecycle import support_revision
 
 logger = logging.getLogger(__name__)
+
+
+def _wan_asset_revision(*values: str | None) -> str:
+    paths: set[str] = set()
+    for value in values:
+        raw_value = str(value or "").strip()
+        # Path("") is "." on Windows and POSIX. Treating absent optional
+        # assets as the current working directory recursively fingerprints
+        # the entire repository every time a Wan route is prepared.
+        if not raw_value:
+            continue
+        candidate = Path(raw_value).expanduser()
+        if candidate.exists():
+            paths.add(str(candidate.resolve()))
+    return support_revision(sorted(paths))
 
 _COMFY_FP8_METADATA_SUFFIXES = (
     ".comfy_quant",
@@ -2511,6 +2527,7 @@ class WanI2VBackend:
     def __init__(self, *, async_offload: bool = True, pinned_memory: bool = True) -> None:
         self._pipe = None
         self._key = None
+        self._prepared_identity = None
         self._cache_mode = "none"
         self._async_offload = bool(async_offload)
         self._pinned_memory = bool(pinned_memory)
@@ -2705,6 +2722,7 @@ class WanI2VBackend:
             pass
         self._pipe = None
         self._key = None
+        self._prepared_identity = None
         self._cache_mode = "none"
         self._preloaded_low = None
         self.cache.cpu_cache.clear()
@@ -2717,6 +2735,140 @@ class WanI2VBackend:
         except Exception:
             logger.debug("Wan attention cleanup failed.", exc_info=True)
         _free_cuda_memory()
+
+    @staticmethod
+    def _request_cache_identity(request):
+        dual = (
+            request.requires_dual_transformers()
+            if callable(getattr(request, "requires_dual_transformers", None))
+            else True
+        )
+        if dual:
+            return (
+                "dual", request.high_noise_model_id, request.low_noise_model_id,
+                getattr(request, "boundary_ratio", None), getattr(request, "vae_id", None) or "default",
+                getattr(request, "high_noise_lora_id", None),
+                round(float(getattr(request, "high_noise_lora_scale", 1.0) or 1.0), 3),
+                getattr(request, "low_noise_lora_id", None),
+                round(float(getattr(request, "low_noise_lora_scale", 1.0) or 1.0), 3),
+                getattr(request, "components_base", None) or "auto",
+                str(getattr(request, "offload", "model") or "model"),
+                str(getattr(request, "text_encoder_path", "") or ""),
+                bool(getattr(request, "temporal_chunks", False)),
+                int(getattr(request, "chunk_size", 24) or 24),
+                int(getattr(request, "chunk_overlap", 0) or 0),
+                _wan_asset_revision(
+                    request.high_noise_model_id, request.low_noise_model_id,
+                    getattr(request, "vae_id", None), getattr(request, "high_noise_lora_id", None),
+                    getattr(request, "low_noise_lora_id", None), getattr(request, "components_base", None),
+                    getattr(request, "text_encoder_path", None),
+                ),
+            )
+        return (
+            "single_5b", str(getattr(request, "model_id", "") or ""),
+            getattr(request, "vae_id", None) or "default",
+            getattr(request, "components_base", None) or "auto",
+            str(getattr(request, "text_encoder_path", "") or "base"),
+            str(getattr(request, "offload", "model") or "model"),
+            str(getattr(request, "sampler", "unipc") or "unipc"),
+            str(getattr(request, "sigma_type", "beta") or "beta"),
+            round(float(getattr(request, "flow_shift", 5.0) or 5.0), 3),
+            getattr(request, "high_noise_lora_id", None) or "",
+            round(float(getattr(request, "high_noise_lora_scale", 1.0) or 1.0), 3),
+            int(getattr(request, "chunk_size", 24) or 24),
+            int(getattr(request, "chunk_overlap", 0) or 0),
+            bool(getattr(request, "temporal_chunks", False)),
+            _wan_asset_revision(
+                getattr(request, "model_id", None), getattr(request, "vae_id", None),
+                getattr(request, "components_base", None), getattr(request, "text_encoder_path", None),
+                getattr(request, "high_noise_lora_id", None),
+            ),
+        )
+
+    def is_prepared(self, request) -> bool:
+        return bool(
+            self._pipe is not None
+            and self._key is not None
+            and self._prepared_identity == (self._request_cache_identity(request), self._key)
+        )
+
+    def has_cached_pipeline(self) -> bool:
+        return self._pipe is not None and self._key is not None
+
+    def _ensure_for_request(self, request, *, flow_shift, sigma_type, sampler, text_encoder_path,
+                            chunk_size, chunk_overlap, temporal_chunks):
+        dual = (
+            request.requires_dual_transformers()
+            if callable(getattr(request, "requires_dual_transformers", None))
+            else True
+        )
+        if dual:
+            return self._ensure(
+                high_noise_model_id=request.high_noise_model_id,
+                low_noise_model_id=request.low_noise_model_id,
+                boundary_ratio=getattr(request, "boundary_ratio", None), vae_id=getattr(request, "vae_id", None),
+                high_noise_lora_id=getattr(request, "high_noise_lora_id", None),
+                high_noise_lora_scale=float(getattr(request, "high_noise_lora_scale", 1.0) or 1.0),
+                low_noise_lora_id=getattr(request, "low_noise_lora_id", None),
+                low_noise_lora_scale=float(getattr(request, "low_noise_lora_scale", 1.0) or 1.0),
+                components_base=getattr(request, "components_base", None),
+                offload=str(getattr(request, "offload", "model") or "model"),
+                flow_shift=flow_shift, sigma_type=sigma_type, sampler=sampler,
+                text_encoder_path=text_encoder_path, chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap, temporal_chunks=temporal_chunks,
+            )
+        return self._ensure_single_5b(
+            model_id=str(getattr(request, "model_id", "") or ""),
+            vae_id=getattr(request, "vae_id", None), components_base=getattr(request, "components_base", None),
+            text_encoder_path=text_encoder_path, offload=str(getattr(request, "offload", "model") or "model"),
+            flow_shift=flow_shift, sigma_type=sigma_type, sampler=sampler,
+            chunk_size=chunk_size, chunk_overlap=chunk_overlap, temporal_chunks=temporal_chunks,
+            high_noise_lora_id=getattr(request, "high_noise_lora_id", None),
+            high_noise_lora_scale=float(getattr(request, "high_noise_lora_scale", 1.0) or 1.0),
+        )
+
+    def prepare(self, request):
+        """Build/cache the selected pipeline without encoding inputs or denoising."""
+        _require_wan()
+        import torch
+
+        self.cache.reset_transition_metrics()
+        dual = (
+            request.requires_dual_transformers()
+            if callable(getattr(request, "requires_dual_transformers", None))
+            else True
+        )
+        if dual and not (getattr(request, "uses_dual_transformers", None) and request.uses_dual_transformers()):
+            raise WanUnavailable("Wan 2.2 image-to-video needs both high-noise and low-noise models.")
+        sigma_type = str(getattr(request, "sigma_type", "beta") or "beta")
+        sampler = str(getattr(request, "sampler", "unipc") or "unipc")
+        flow_shift = float(getattr(request, "flow_shift", 5.0) or 5.0)
+        text_encoder_path = str(getattr(request, "text_encoder_path", "") or "")
+        chunk_size = int(getattr(request, "chunk_size", 24) or 24)
+        chunk_overlap = int(getattr(request, "chunk_overlap", 0) or 0)
+        temporal_chunks = bool(getattr(request, "temporal_chunks", False))
+        if os.environ.get("AIWF_WAN_TEMPORAL_CHUNKS", "").strip():
+            temporal_chunks = _env_flag("AIWF_WAN_TEMPORAL_CHUNKS", default=temporal_chunks)
+        try:
+            reserve_device = torch.cuda.current_device() if torch.cuda.is_available() else 0
+        except Exception:
+            reserve_device = 0
+        budget = apply_cuda_vram_reserve(
+            enabled=bool(getattr(request, "vram_reserve_enabled", False)),
+            reserve_mb=int(getattr(request, "vram_reserve_mb", 0) or 0),
+            device=reserve_device, torch_module=torch,
+        )
+        if budget.enabled and not budget.applied:
+            raise WanUnavailable(f"VRAM reserve could not be applied: {budget.message}")
+        self._ensure_for_request(
+            request, flow_shift=flow_shift, sigma_type=sigma_type, sampler=sampler,
+            text_encoder_path=text_encoder_path, chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap, temporal_chunks=temporal_chunks,
+        )
+        self._prepared_identity = (self._request_cache_identity(request), self._key)
+        if not self.is_prepared(request):
+            raise WanUnavailable("Wan pipeline cache did not confirm the selected model configuration.")
+        return {"loaded": True, "cacheMode": str(self._cache_mode or "none")}
 
     def _aspect_resize(self, pipe, image, max_area: int, *, request_width: int = 0, request_height: int = 0):
         """Resize the image to a Wan-valid size near ``max_area`` (model-aware).
@@ -2804,6 +2956,10 @@ class WanI2VBackend:
             _cache_temporal_chunks,
             _cache_chunk_size,
             _cache_chunk_overlap,
+            _wan_asset_revision(
+                high_noise_model_id, low_noise_model_id, vae_id, high_noise_lora_id,
+                low_noise_lora_id, components_base, text_encoder_path,
+            ),
         )
 
         if self._pipe is not None and self._key == key:
@@ -3040,6 +3196,7 @@ class WanI2VBackend:
             int(chunk_size or 24),
             int(chunk_overlap or 0),
             bool(temporal_chunks),
+            _wan_asset_revision(model_id, vae_id, components_base, text_encoder_path, high_noise_lora_id),
         )
         if self._pipe is not None and self._key == key:
             return self._pipe
@@ -3584,42 +3741,12 @@ class WanI2VBackend:
             _video_status(vram_budget.message)
 
         load_started = time.perf_counter()
-        if requires_dual:
-            pipe = self._ensure(
-                high_noise_model_id=request.high_noise_model_id,
-                low_noise_model_id=request.low_noise_model_id,
-                boundary_ratio=getattr(request, "boundary_ratio", None),
-                vae_id=getattr(request, "vae_id", None),
-                high_noise_lora_id=getattr(request, "high_noise_lora_id", None),
-                high_noise_lora_scale=float(getattr(request, "high_noise_lora_scale", 1.0) or 1.0),
-                low_noise_lora_id=getattr(request, "low_noise_lora_id", None),
-                low_noise_lora_scale=float(getattr(request, "low_noise_lora_scale", 1.0) or 1.0),
-                components_base=getattr(request, "components_base", None),
-                offload=str(getattr(request, "offload", "model") or "model"),
-                flow_shift=_flow_shift,
-                sigma_type=_sigma_type,
-                sampler=_sampler,
-                text_encoder_path=_te_path,
-                chunk_size=_chunk_size,
-                chunk_overlap=_chunk_overlap,
-                temporal_chunks=_temporal_chunks,
-            )
-        else:
-            pipe = self._ensure_single_5b(
-                model_id=str(getattr(request, "model_id", "") or ""),
-                vae_id=getattr(request, "vae_id", None),
-                components_base=getattr(request, "components_base", None),
-                text_encoder_path=_te_path,
-                offload=str(getattr(request, "offload", "model") or "model"),
-                flow_shift=_flow_shift,
-                sigma_type=_sigma_type,
-                sampler=_sampler,
-                chunk_size=_chunk_size,
-                chunk_overlap=_chunk_overlap,
-                temporal_chunks=_temporal_chunks,
-                high_noise_lora_id=getattr(request, "high_noise_lora_id", None),
-                high_noise_lora_scale=float(getattr(request, "high_noise_lora_scale", 1.0) or 1.0),
-            )
+        pipe = self._ensure_for_request(
+            request, flow_shift=_flow_shift, sigma_type=_sigma_type, sampler=_sampler,
+            text_encoder_path=_te_path, chunk_size=_chunk_size, chunk_overlap=_chunk_overlap,
+            temporal_chunks=_temporal_chunks,
+        )
+        self._prepared_identity = (self._request_cache_identity(request), self._key)
         load_seconds = max(0.0, time.perf_counter() - load_started)
 
         preprocess_started = time.perf_counter()

@@ -22,7 +22,9 @@
 <p align="center">
   <a href="#quick-start"><img src="https://img.shields.io/badge/Windows-local--first-0078D4?logo=windows11&logoColor=white" alt="Windows local-first"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+"></a>
-  <a href="frontend/"><img src="https://img.shields.io/badge/React-Pro%20UI-61DAFB?logo=react&logoColor=black" alt="React Pro UI"></a>
+  <a href="native/"><img src="https://img.shields.io/badge/WinUI%203-native%20app%20(MVP)-0078D4?logo=windows11&logoColor=white" alt="WinUI 3 native app (MVP)"></a>
+  <a href="native/"><img src="https://img.shields.io/badge/C%2B%2B%2FWinRT-MSVC-00599C?logo=cplusplus&logoColor=white" alt="C++/WinRT built with MSVC"></a>
+  <a href="frontend/"><img src="https://img.shields.io/badge/React-Pro%20UI%20(minor%20support)-61DAFB?logo=react&logoColor=black" alt="React Pro UI, minor support"></a>
   <a href="frontend/"><img src="https://img.shields.io/badge/TypeScript-Pro%20frontend-3178C6?logo=typescript&logoColor=white" alt="TypeScript Pro frontend"></a>
   <a href="frontend/"><img src="https://img.shields.io/badge/Vite-build-646CFF?logo=vite&logoColor=white" alt="Vite build"></a>
   <a href="#what-works-on-main"><img src="https://img.shields.io/badge/FastAPI-Pro%20API-009688?logo=fastapi&logoColor=white" alt="FastAPI Pro API"></a>
@@ -32,28 +34,88 @@
   <a href="https://www.aiembeddedsystems.com"><img src="https://img.shields.io/badge/Website-aiembeddedsystems.com-111111?logo=googlechrome&logoColor=white" alt="AI Embedded Systems website"></a>
 </p>
 
-AIWF Studio is focused on a usable local creative workspace first: model folders, prompt and workflow state, logs, receipts, typed API calls, and a React UI that can route to more than one backend. It is engineered by [AI Embedded Systems](https://www.aiembeddedsystems.com).
+AIWF Studio is an all-in-one local AI workstation: one project workspace for creating media, chatting with local models, organizing datasets, and preparing training runs across separately managed engines. It is engineered by [AI Embedded Systems](https://www.aiembeddedsystems.com).
 
-Diffusers is the current reference image backend because it gives the project a working local path today. It is not meant to be the whole product. The project direction is a stable frontend plus optional backend lanes such as stable-diffusion.cpp, ONNX, isolated video workers, and external local services.
+**AIWF Studio for Windows**, a native C++/WinRT app, is now the primary interface. It brings GPU and engine status, local-model chat, image creation, dataset curation, project history and training-plan preparation into one window, over modular local engines that each keep their own environment. The React web app (AIWF Studio Pro) stays available and **continues to receive minor support** (fixes, compatibility with the shared engine API and security updates). New features land in the native app first.
+
+The native app is at **MVP** stage: it builds from source and installs locally, and it is not yet part of the public one-click installer. Its current status is in [`native/MVP_STATUS.md`](native/MVP_STATUS.md).
 
 This `main` branch is the stable sharing branch. It only advertises features intended for normal local use. Experimental work lives on `dev`.
 
 - Full feature inventory: [`docs/FEATURES.md`](docs/FEATURES.md)
 - LoRA pipeline direction: [`docs/LORA_PIPELINE_STRATEGY.md`](docs/LORA_PIPELINE_STRATEGY.md)
 
-## Start Here
+## One Workspace, Two Interfaces
 
-New users should start with **AIWF Studio Pro**. It is the cleaner React app and the steadier path for normal local use. Use **AIWF Studio Gradio Lab** for the broader beta workspace where pipeline experiments land first.
+### AIWF Studio for Windows (native) — primary interface, MVP
 
-Both app tracks read and write the same model folders, output history, and settings. Switching between them is safe.
+The native app is written in C++/WinRT with WinUI 3 on the Windows App SDK 1.7 (self-contained and unpackaged) and is built with MSVC from Visual Studio 2022 Build Tools. It has no embedded browser engine. Its home screen brings GPU telemetry and engine status into the same workspace as chat, image creation, datasets, projects and training-plan preparation. These screenshots were captured on October 7, 2026; the project selector has been generalized for privacy.
 
-### AIWF Studio Pro
+<p align="center">
+  <img src="docs/assets/aiwf-native-home-redacted.png" alt="AIWF Studio native Windows home with GPU telemetry and local engine status; project name generalized" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/aiwf-native-create-redacted.png" alt="AIWF Studio native Windows image creation workspace; project name generalized" width="49%">
+  <img src="docs/assets/aiwf-native-train-redacted.png" alt="AIWF Studio native Windows training plan workspace; project name generalized" width="49%">
+</p>
+
+**What it does**
+
+| Page | What it does |
+|---|---|
+| Home | Live GPU telemetry (NVML plus Windows GPU memory counters), video memory by engine, and one status light per engine with Start/Stop |
+| Create | Qwen Image 2.1 on the local ComfyUI, with job progress, cancel and recent images |
+| Chat | Streaming chat with local llama.cpp models, with optional project context that is previewed before it is sent |
+| Datasets | Dataset Studio's published text packages and cataloging of generated images, tagged with the project |
+| Train | ReTrain base models (on this PC or downloadable), the optional Hugging Face key, package import and a dry-run training plan. Training itself never starts from the app |
+| Projects | One project in focus at a time, with a ledger of everything recorded against it |
+| Setup | Guided first run: checks this PC, then asks where images, datasets and packages are saved, where image and training models are found, and how each engine starts |
+| Configure Studio | Engine list, logs, memory use, privacy promises, and Run setup again |
+
+**How it is built**
+
+- **Engines, not one runtime.** Chat (llama.cpp), images (ComfyUI), datasets (Dataset Studio), training (ReTrain) and the AIWF engine API are separate local services. An engine list (`engines.json`, with a per-user override in `%LOCALAPPDATA%\AIWF Studio`) says how each one starts. Engines the app starts run inside a Windows Job Object and stop when it closes; engines started elsewhere are shown but never stopped.
+- **One engine API.** `python -m aiwf.engine_api` serves the shared `/api/pro/unified` contract on `127.0.0.1:7870` without loading the diffusion runtime. The same contract also generates an agent CLI and an MCP server (see [`docs/agent-workflows/STUDIO_FLOW_AGENT_ACCESS.md`](docs/agent-workflows/STUDIO_FLOW_AGENT_ACCESS.md)). Agents can read the setup folders but cannot change them; that stays in the setup wizard.
+- **Local only.** Every engine listens on a loopback address. Folder choices from setup are written to `launch.json` (the same file Pro uses) or kept with the app's settings; model files are never moved.
+
+**Build and install**
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File native\build.ps1 -Configuration Release
+powershell -NoProfile -ExecutionPolicy Bypass -File native\install.ps1
+```
+
+The build needs Visual Studio 2022 (or its Build Tools) with the "Desktop development with C++" workload and a Windows 10/11 SDK. The app needs this repository's Python environment for the engine API; on first launch it opens Setup. Details: [`native/INSTALL.md`](native/INSTALL.md).
+
+**Status.** Verified on the development workstation:
+- Release build.
+- Setup flow (apply, settings written, engine API restart).
+- Clean close (no crash on exit).
+- Window scaling from 560×460 to 1294×686 layout units at 125% display scaling.
+- Agent-contract and bridge tests.
+
+Still open before a wider release:
+- Keyboard and Narrator pass.
+- 150% and 200% scaling.
+- Install on a clean second PC.
+- Signed installer.
+
+See [`native/MVP_STATUS.md`](native/MVP_STATUS.md) and [`docs/NATIVE_WINDOWS_PROTOTYPE.md`](docs/NATIVE_WINDOWS_PROTOTYPE.md).
+
+### React web app (AIWF Studio Pro) — minor support
+
+**AIWF Studio Pro** is the React, TypeScript and FastAPI app. It remains installable and continues to receive minor support: bug fixes, compatibility with the shared engine API, and security updates. New workstation features are built in the native app first. Use **AIWF Studio Gradio Lab** for the broader experimental workspace.
+
+Pro and Gradio remain separate interfaces over shared model folders, output history, and settings.
+
+#### AIWF Studio Pro
 
 <p align="center">
   <img src="static/icons/aiwf-studio-pro.png" alt="AIWF Studio Pro icon" width="96">
 </p>
 
-**Stable UI track.** Create and generate, Workflow builder, Model Families, Models, Data, Monitor, Logs, Settings, Video, Audio, Pipeline, and Project workspaces. The Create flow is the main release path; the larger workspace screens are being folded in without changing the core local generation route.
+**Web UI, minor support.** Create and generate, Workflow builder, Model Families, Models, Data, Monitor, Logs, Settings, Video, Audio, Pipeline, and Project workspaces. The Create flow remains its main path; workspace maturity varies by screen.
 
 ```bat
 AIWF Studio Pro.bat
@@ -65,20 +127,7 @@ python launch_pro.py
 
 Early testers should keep [`docs/TESTER_USER_GUIDE.md`](docs/TESTER_USER_GUIDE.md) open. It covers install options, hidden terminals, recovery buttons, and error reports.
 
-<p align="center">
-  <img src="docs/assets/aiwf-pro-video-workspace.png" alt="AIWF Studio Pro video workspace" width="100%">
-</p>
-
-<p align="center">
-  <img src="docs/assets/aiwf-pro-audio-studio.png" alt="AIWF Studio Pro audio workspace" width="49%">
-  <img src="docs/assets/aiwf-pro-pipeline-blocks.png" alt="AIWF Studio Pro pipeline blocks workspace" width="49%">
-</p>
-
-<p align="center">
-  <img src="docs/assets/aiwf-pro-startup-checks.png" alt="AIWF Studio Pro startup checks" width="75%">
-</p>
-
-### AIWF Studio Gradio Lab
+#### AIWF Studio Gradio Lab
 
 <p align="center">
   <img src="static/icons/aiwf-studio-gradio-lab.png" alt="AIWF Studio Gradio Lab icon" width="96">
@@ -128,7 +177,7 @@ Near-term cleanup target:
 
 ## Release State
 
-`main` is a Pro-first local install: FastAPI + React/Vite starts from a clean install, serves the built frontend, and drives image/video generation plus the Pro bootstrap, runtime, capabilities, settings, logs, and data APIs.
+On `main`, the public one-click installer still sets up the Pro web app: FastAPI + React/Vite starts from a clean install, serves the built frontend, and drives image/video generation plus the Pro bootstrap, runtime, capabilities, settings, logs, and data APIs. The native Windows app (MVP) builds and installs separately from `native/`; see [One Workspace, Two Interfaces](#one-workspace-two-interfaces).
 
 Recent additions on `main`:
 
@@ -377,7 +426,9 @@ Use Tailscale when possible. If you launch with network listening enabled, add a
 
 - `main` is the stable runtime branch for users.
 - `dev` keeps broader experiments and active research work.
-- `frontend/` is the React/TypeScript/Vite source for the Pro UI; build it with `npm install && npm run build` to populate `frontend/dist`, which `webui_pro.py` serves.
+- `native/` is AIWF Studio for Windows: the C++/WinRT WinUI 3 app (`native/AIWF.Desktop`), its build and install scripts, and its status report. Build output (`native/bin`, `native/obj`, `native/packages`) is not committed.
+- `aiwf/engine_api.py` and `aiwf/web/unified_api.py` are the local engine API the native app, the CLI and the MCP server share; `aiwf/services/unified_contract.py` is its single source of truth.
+- `frontend/` is the React/TypeScript/Vite source for the Pro UI (minor support); build it with `npm install && npm run build` to populate `frontend/dist`, which `webui_pro.py` serves.
 - `docs/`, `tests/`, and `scripts/` are part of the public maintainability story.
 - runtime data such as models, outputs, local configs, and agent notes are ignored.
 

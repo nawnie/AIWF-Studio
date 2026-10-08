@@ -104,6 +104,10 @@ class GenerationService:
         self.optimization_planner = optimization_planner
         self.failure_archive = failure_archive
         self.genlog = genlog
+        # Model switches and first-use loads must not mutate a pipeline while an
+        # image request is using it. EngineSupervisor coordinates GPU tenants;
+        # this lock also protects contexts without a configured supervisor.
+        self._model_lock = threading.RLock()
 
     def _apply_default_negative(self, request):
         """When the user leaves the negative prompt blank, fall back to a generic
@@ -1101,7 +1105,7 @@ class GenerationService:
         self._persist_last_checkpoint(checkpoint.id)
         return checkpoint
 
-    def load_checkpoint(self, checkpoint_id: str | None = None):
+    def load_checkpoint(self, checkpoint_id: str | None = None, *, persist_selection: bool = True):
         tenant_job_id = f"image_load_{threading.get_ident()}"
         if self.supervisor is not None:
             switch = self.supervisor.request_switch(
@@ -1114,9 +1118,18 @@ class GenerationService:
             if not switch.ok:
                 raise RuntimeError(f"GPU busy: {switch.message}")
         try:
-            checkpoint = self.backend.load_checkpoint(checkpoint_id)
-            self._persist_last_checkpoint(checkpoint.id)
-            return checkpoint
+            # Match generation's tenant-then-model-lock order so a switch never
+            # holds the model lock while waiting for the GPU tenant.
+            with self._model_lock:
+                selected = self.backend.resolve_checkpoint(checkpoint_id)
+                if not self._backend_reports_checkpoint_loaded(selected):
+                    issue = self._generation_headroom_issue(selected)
+                    if issue:
+                        raise RuntimeError(issue)
+                checkpoint = self.backend.load_checkpoint(checkpoint_id)
+                if persist_selection:
+                    self._persist_last_checkpoint(checkpoint.id)
+                return checkpoint
         finally:
             if self.supervisor is not None:
                 self.supervisor.request_switch(
@@ -1186,6 +1199,46 @@ class GenerationService:
             return f"Using warm model: {title}"
         return f"Loading image model: {title}"
 
+    def _backend_reports_checkpoint_loaded(self, checkpoint) -> bool:
+        is_loaded = getattr(self.backend, "is_checkpoint_loaded", None)
+        if not callable(is_loaded):
+            return False
+        try:
+            return bool(is_loaded(getattr(checkpoint, "id", None)))
+        except Exception:
+            logger.debug("Could not verify image checkpoint residency", exc_info=True)
+            return False
+
+    def _generation_headroom_issue(self, checkpoint) -> str | None:
+        """Use startup's measured device-wide check before any uncached image load."""
+        from types import SimpleNamespace
+
+        from aiwf.services.model_startup import _gpu_headroom_status
+
+        context = SimpleNamespace(generation=self, flags=getattr(self.backend, "flags", None))
+        size_bytes = max(0, int(getattr(checkpoint, "size_bytes", 0) or 0))
+        if size_bytes <= 0:
+            size_estimator = getattr(self.backend, "_checkpoint_size_gb", None)
+            if callable(size_estimator):
+                try:
+                    size_bytes = max(0, int(float(size_estimator(checkpoint)) * (1024**3)))
+                except Exception:
+                    logger.debug("Could not estimate selected checkpoint size", exc_info=True)
+        issue = _gpu_headroom_status(
+            context,
+            {"sizeBytes": size_bytes},
+        )
+        if issue and issue.startswith("Startup loading skipped"):
+            return issue.replace("Startup loading skipped", "Generation deferred", 1)
+        return issue
+
+    def _ensure_generation_headroom(self, checkpoint) -> None:
+        if self._backend_reports_checkpoint_loaded(checkpoint):
+            return
+        issue = self._generation_headroom_issue(checkpoint)
+        if issue:
+            raise RuntimeError(issue)
+
     def submit(
         self,
         request: GenerationRequest,
@@ -1223,6 +1276,7 @@ class GenerationService:
                 job.request = self._apply_generation_settings(job.request)
                 self.events.publish(BeforeGenerate(job.id, job.request))
                 active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
+                self._ensure_generation_headroom(active)
                 self._persist_last_checkpoint(active.id)
                 job.request = self._guard_distilled_cfg(job.request, active)
                 nonlocal init_images, mask_images
@@ -1259,15 +1313,16 @@ class GenerationService:
                 if job.request.save_interrupted and preview_every == 0:
                     preview_every = 1
                 try:
-                    result = self.backend.generate(
-                        job.request,
-                        init_images=init_images,
-                        mask_images=mask_images,
-                        control_images=control_images,
-                        on_progress=on_progress,
-                        should_cancel=lambda: self.queue.should_cancel(job.id),
-                        preview_every_n_steps=preview_every,
-                    )
+                    with self._model_lock:
+                        result = self.backend.generate(
+                            job.request,
+                            init_images=init_images,
+                            mask_images=mask_images,
+                            control_images=control_images,
+                            on_progress=on_progress,
+                            should_cancel=lambda: self.queue.should_cancel(job.id),
+                            preview_every_n_steps=preview_every,
+                        )
                 except GenerationCancelledError:
                     self._save_cancelled_preview(job, job.request, active, optimization_plan, latest_preview)
                     raise
@@ -1398,6 +1453,7 @@ class GenerationService:
                 job.request = self._apply_generation_settings(job.request)
                 self.events.publish(BeforeGenerate(job.id, job.request))
                 active = self.backend.resolve_checkpoint(job.request.checkpoint_id)
+                self._ensure_generation_headroom(active)
                 self._persist_last_checkpoint(active.id)
                 job.request = self._guard_distilled_cfg(job.request, active)
                 nonlocal init_images, mask_images
@@ -1438,15 +1494,16 @@ class GenerationService:
                 on_progress(0, max(1, int(job.request.steps)), self._loading_model_message(active))
                 _gen_t0 = time.perf_counter()
                 try:
-                    result = self.backend.generate(
-                        job.request,
-                        init_images=init_images,
-                        mask_images=mask_images,
-                        control_images=control_images,
-                        on_progress=on_progress,
-                        should_cancel=lambda: self.queue.should_cancel(job.id),
-                        preview_every_n_steps=preview_every,
-                    )
+                    with self._model_lock:
+                        result = self.backend.generate(
+                            job.request,
+                            init_images=init_images,
+                            mask_images=mask_images,
+                            control_images=control_images,
+                            on_progress=on_progress,
+                            should_cancel=lambda: self.queue.should_cancel(job.id),
+                            preview_every_n_steps=preview_every,
+                        )
                 except GenerationCancelledError:
                     self._save_cancelled_preview(job, job.request, active, optimization_plan, latest_preview)
                     raise

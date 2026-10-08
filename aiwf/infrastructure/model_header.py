@@ -19,6 +19,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
 import re
 import struct
 from collections import Counter
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
-MODEL_HEADER_CACHE_VERSION = 4
+MODEL_HEADER_CACHE_VERSION = 6
 
 # ---------------------------------------------------------------------------
 # Architecture / role constants
@@ -41,9 +42,15 @@ ARCH_UMT5_ENCODER        = "umt5-encoder"
 ARCH_T5XXL_ENCODER       = "t5xxl-encoder"
 ARCH_CLIP                = "clip"
 ARCH_FLUX_TRANSFORMER    = "flux-transformer"
+ARCH_FLUX_KONTEXT_TRANSFORMER = "flux-kontext-transformer"
+ARCH_FLUX2_TRANSFORMER = "flux2-transformer"
 ARCH_FLUX2_KLEIN_TRANSFORMER = "flux2-klein-transformer"
+ARCH_LONGCAT_IMAGE       = "longcat_image"
 ARCH_Z_IMAGE_TRANSFORMER = "z-image-transformer"
 ARCH_FLUX_LORA           = "flux-lora"
+ARCH_FLUX_KONTEXT_LORA   = "flux-kontext-lora"
+ARCH_FLUX2_LORA          = "flux2-lora"
+ARCH_FLUX2_KLEIN_LORA    = "flux2-klein-lora"
 ARCH_FLUX_VAE            = "flux-vae"
 ARCH_LTX_TRANSFORMER     = "ltx-transformer"
 ARCH_LTX_LORA            = "ltx-lora"
@@ -100,6 +107,7 @@ _GGUF_ARCH_MAP: dict[str, str] = {
     "t5encoder": ARCH_T5XXL_ENCODER,
     "clip":      ARCH_CLIP,
     "flux":      ARCH_FLUX_TRANSFORMER,
+    "longcat":   ARCH_LONGCAT_IMAGE,
     "lumina2":   ARCH_Z_IMAGE_TRANSFORMER,
     "ltxv":      ARCH_LTX_TRANSFORMER,
     "gemma3":    ARCH_GEMMA_LLM,
@@ -118,9 +126,9 @@ _FOLDER_CLUES: list[tuple[str, str, str]] = [
     ("flux/textencoder", ARCH_T5XXL_ENCODER,   ROLE_TEXT_ENCODER),
     ("flux/VAE",        ARCH_FLUX_VAE,         ROLE_VAE),
     ("flux/vae",        ARCH_FLUX_VAE,         ROLE_VAE),
-    ("flux2/GGUF",      ARCH_FLUX2_KLEIN_TRANSFORMER, ""),
-    ("flux2/UNet",      ARCH_FLUX2_KLEIN_TRANSFORMER, ""),
-    ("flux2/Components", ARCH_FLUX2_KLEIN_TRANSFORMER, ""),
+    ("flux2/GGUF",      ARCH_FLUX2_TRANSFORMER, ""),
+    ("flux2/UNet",      ARCH_FLUX2_TRANSFORMER, ""),
+    ("flux2/Components", ARCH_FLUX2_TRANSFORMER, ""),
     ("z-image/GGUF",    ARCH_Z_IMAGE_TRANSFORMER, ""),
     ("z-image/UNet",    ARCH_Z_IMAGE_TRANSFORMER, ""),
     ("z-image/Components", ARCH_Z_IMAGE_TRANSFORMER, ""),
@@ -176,9 +184,15 @@ _ARCH_PREFIX: dict[str, str] = {
     ARCH_T5XXL_ENCODER:       "T5-XXL",
     ARCH_CLIP:                "CLIP",
     ARCH_FLUX_TRANSFORMER:    "Flux",
+    ARCH_FLUX_KONTEXT_TRANSFORMER: "Flux Kontext",
+    ARCH_FLUX2_TRANSFORMER: "Flux.2",
     ARCH_FLUX2_KLEIN_TRANSFORMER: "Flux.2 Klein",
+    ARCH_LONGCAT_IMAGE:       "LongCat Image Edit",
     ARCH_Z_IMAGE_TRANSFORMER: "Z-Image",
     ARCH_FLUX_LORA:           "Flux LoRA",
+    ARCH_FLUX_KONTEXT_LORA:  "Flux Kontext LoRA",
+    ARCH_FLUX2_LORA:         "Flux.2 LoRA",
+    ARCH_FLUX2_KLEIN_LORA:   "Flux.2 Klein LoRA",
     ARCH_FLUX_VAE:            "Flux VAE",
     ARCH_LTX_TRANSFORMER:     "LTX",
     ARCH_LTX_LORA:            "LTX LoRA",
@@ -258,7 +272,12 @@ class ModelInfo:
 
 class ModelHeaderCache:
     def __init__(self):
-        self.cache_file = Path(__file__).resolve().parents[2] / "cache" / "model_header_cache.json"
+        cache_override = os.environ.get("AIWF_MODEL_HEADER_CACHE_FILE")
+        self.cache_file = (
+            Path(cache_override).expanduser()
+            if cache_override
+            else Path(__file__).resolve().parents[2] / "cache" / "model_header_cache.json"
+        )
         self.data = {}
         self.loaded = False
         self.dirty = False
@@ -407,6 +426,8 @@ def _read_gguf(p: Path, size_mb: float) -> ModelInfo:
         arch_str = meta.get("general.architecture", "")
         arch = _GGUF_ARCH_MAP.get(arch_str.lower(), "")
         title = meta.get("general.name", "").strip()
+        if _is_placeholder_model_title(title):
+            title = ""
         size_label_str = meta.get("general.size_label", "").strip()
         quant = _gguf_dominant_quant(reader, filename=p.name)
         family_arch = _transformer_family_arch_from_name(p, title)
@@ -529,6 +550,8 @@ def _read_safetensors(p: Path, size_mb: float) -> ModelInfo:
         or meta.get("ss_output_name", "")
         or _clean_stem(p.stem)
     ).strip()
+    if _is_placeholder_model_title(title):
+        title = _clean_stem(p.stem)
     if len(title) > 52:
         title = title[:49].rstrip() + "..."
 
@@ -582,13 +605,33 @@ def _st_dominant_precision(hdr: dict, tensor_keys: list) -> str:
 
 
 def _looks_like_lora_keys(keys: Iterable[str]) -> bool:
-    return any("lora_down" in key or "lora_up" in key or ".lora_A." in key or ".lora_B." in key for key in keys)
+    return any(_is_adapter_tensor_key(key) for key in keys)
+
+
+def _is_adapter_tensor_key(key: str) -> bool:
+    lowered = key.lower()
+    return (
+        "lora_down" in lowered
+        or "lora_up" in lowered
+        or ".lora_a." in lowered
+        or ".lora_b." in lowered
+        or re.search(r"lora\d*\.(?:down|up)\.", lowered) is not None
+        or "lokr_" in lowered
+        or "loha_" in lowered
+        or "hada_" in lowered
+        or ".oft_blocks." in lowered
+    )
+
+
+def _is_placeholder_model_title(title: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(title or "")).strip().casefold()
+    return bool(re.match(r"^your\b.*\b(?:model|lora|checkpoint)\s+name\s+here$", normalized))
 
 
 def _looks_like_flux_lora_keys(keys: Iterable[str]) -> bool:
     for key in keys:
         lowered = key.lower()
-        if not ("lora_down" in lowered or "lora_up" in lowered or ".lora_a." in lowered or ".lora_b." in lowered):
+        if not _is_adapter_tensor_key(lowered):
             continue
         if (
             "lora_transformer" in lowered
@@ -688,6 +731,32 @@ def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple
     # 1. modelspec.architecture
     spec_arch = meta.get("modelspec.architecture", "").lower()
     combined_meta = _semantic_metadata_text(meta)
+    name_arch = _transformer_family_arch_from_name(p, meta.get("modelspec.title", ""))
+    if (
+        name_arch == ARCH_FLUX2_KLEIN_TRANSFORMER
+        and spec_arch
+        and "flux2" not in spec_arch.replace("-", "")
+        and "klein" not in spec_arch
+    ):
+        # A specific filename alias must not override a conflicting structured
+        # architecture field.
+        name_arch = None
+    if name_arch in {
+        ARCH_LONGCAT_IMAGE,
+        ARCH_FLUX_KONTEXT_TRANSFORMER,
+        ARCH_FLUX2_TRANSFORMER,
+        ARCH_FLUX2_KLEIN_TRANSFORMER,
+        ARCH_Z_IMAGE_TRANSFORMER,
+    }:
+        if _looks_like_lora_keys(tensor_keys):
+            if name_arch == ARCH_FLUX_KONTEXT_TRANSFORMER:
+                return ARCH_FLUX_KONTEXT_LORA, ROLE_LORA
+            if name_arch == ARCH_FLUX2_KLEIN_TRANSFORMER:
+                return ARCH_FLUX2_KLEIN_LORA, ROLE_LORA
+            if name_arch == ARCH_FLUX2_TRANSFORMER:
+                return ARCH_FLUX2_LORA, ROLE_LORA
+            return ARCH_FLUX_LORA, ROLE_LORA
+        return name_arch, _role_from_meta_and_filename(meta, p.name)
     if "wan" in spec_arch:
         return ARCH_WAN_TRANSFORMER_FP8, _role_from_meta_and_filename(meta, p.name)
     if "ltx" in spec_arch or "ltx" in combined_meta or "lightricks" in combined_meta or "ltx" in p.name.lower():
@@ -700,10 +769,14 @@ def _arch_from_st_meta_and_keys(meta: dict, tensor_keys: list, p: Path) -> tuple
         if _looks_like_ltx_video_vae_file(p, tensor_keys, combined_meta):
             return ARCH_LTX_VAE, ROLE_VAE
         return ARCH_LTX_TRANSFORMER, _role_from_meta_and_filename(meta, p.name)
-    if "flux2" in spec_arch.replace("-", "") or "flux2klein" in combined_meta.replace("-", "").replace(" ", ""):
+    if "flux2klein" in spec_arch.replace("-", "") or "klein" in combined_meta.replace("-", "").replace(" ", ""):
         if _looks_like_lora_keys(tensor_keys):
-            return ARCH_FLUX_LORA, ROLE_LORA
+            return ARCH_FLUX2_KLEIN_LORA, ROLE_LORA
         return ARCH_FLUX2_KLEIN_TRANSFORMER, _role_from_meta_and_filename(meta, p.name)
+    if "flux2" in spec_arch.replace("-", "") or "flux.2" in combined_meta:
+        if _looks_like_lora_keys(tensor_keys):
+            return ARCH_FLUX2_LORA, ROLE_LORA
+        return ARCH_FLUX2_TRANSFORMER, _role_from_meta_and_filename(meta, p.name)
     if "flux" in spec_arch or "flux" in combined_meta:
         if _looks_like_lora_keys(tensor_keys):
             return ARCH_FLUX_LORA, ROLE_LORA
@@ -786,13 +859,29 @@ def _arch_from_folder_and_filename(p: Path) -> tuple:
 
 
 def _transformer_family_arch_from_name(p: Path, title: str = "") -> str | None:
-    text = f"{p.as_posix()} {title}".lower().replace("_", "-")
+    raw_text = f"{p.as_posix()} {title}"
+    text = raw_text.lower().replace("_", "-")
     compact = text.replace("-", "").replace(" ", "")
+    if "longcat" in text:
+        return ARCH_LONGCAT_IMAGE
     if "z-image" in text or "zimage" in compact or "lumina2" in compact:
         return ARCH_Z_IMAGE_TRANSFORMER
-    if "flux.2" in text or "flux2" in compact or "klein" in text:
+    if "kontext" in text:
+        return ARCH_FLUX_KONTEXT_TRANSFORMER
+    if "klein" in text or _has_flux2_klein_marker(f"{p.name} {title}"):
         return ARCH_FLUX2_KLEIN_TRANSFORMER
+    if "flux.2" in text or "flux2" in compact:
+        return ARCH_FLUX2_TRANSFORMER
     return None
+
+
+def _has_flux2_klein_marker(text: str) -> bool:
+    """Recognize F2K as a standalone or deliberate camel-case model token."""
+    tokens = [Path(token.replace("\\", "/")).name for token in re.split(r"\s+", text) if token]
+    return bool(
+        any(re.search(r"(?i)(?:^|[^a-z0-9])F2K(?:$|[^a-z0-9])", token) for token in tokens)
+        or any(re.search(r"(?i)(?:^|[^a-z0-9])(?:unstable)?revolutionF2K(?=$|[_-])", token) for token in tokens)
+    )
 
 
 def _role_from_filename(filename: str) -> str:
@@ -865,6 +954,10 @@ def _clean_stem(stem: str) -> str:
 def _make_display_name(title: str, arch: str, role: str, precision: str, size_mb: float) -> str:
     """Build: '<Title> [<Prec> . <Size>]'"""
     use_title = title.strip()
+    if arch in {ARCH_FLUX_KONTEXT_LORA, ARCH_FLUX2_LORA, ARCH_FLUX2_KLEIN_LORA} and use_title:
+        family_prefix = _ARCH_PREFIX.get(arch, "")
+        if family_prefix.casefold() not in use_title.casefold():
+            use_title = f"{family_prefix} · {use_title}"
     if arch == ARCH_SD35_CHECKPOINT and "sd3.5" not in use_title.lower():
         use_title = f"SD3.5 {use_title}".strip()
 
@@ -872,7 +965,11 @@ def _make_display_name(title: str, arch: str, role: str, precision: str, size_mb
     if not use_title or " " not in use_title:
         prefix = _ARCH_PREFIX.get(arch, "")
         role_sfx = _ROLE_SUFFIX.get(role, "")
-        parts = [x for x in (prefix, role_sfx) if x]
+        parts = [prefix] if prefix else []
+        if role_sfx and role_sfx.casefold() not in prefix.casefold().split():
+            parts.append(role_sfx)
+        if use_title:
+            parts.append(re.sub(r"[_-]+", " ", use_title).strip())
         use_title = " ".join(parts) or use_title or "Model"
 
     size_str = f"{size_mb / 1000:.1f} GB" if size_mb >= 1000 else f"{size_mb:.0f} MB"

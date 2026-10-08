@@ -28,6 +28,63 @@ def test_catalog_lists_builtin_models(catalog):
     assert any(model.id == "codeformer-v0.1.0" for model in upscalers)
 
 
+def test_pro_model_setup_downloads_to_staging_file_and_reports_installed(tmp_path, monkeypatch):
+    flags = RuntimeFlags(data_dir=tmp_path)
+    service = EnhanceService(
+        flags,
+        UserSettings(save_images=False),
+        MagicMock(),
+        FilesystemImageStore(tmp_path / "outputs"),
+    )
+
+    restorer = next(model for model in service.list_restorers() if model.id == "gfpgan-v1.4")
+    initial = next(model for model in service.list_model_status() if model["id"] == restorer.id)
+    assert initial["installed"] is False
+    assert initial["installAvailable"] is True
+
+    def fake_urlretrieve(_url, destination):
+        Path(destination).write_bytes(b"fixture weights")
+        return str(destination), None
+
+    monkeypatch.setattr("aiwf.infrastructure.enhance.catalog.urlretrieve", fake_urlretrieve)
+    installed_path = service.prepare_model(restorer.id)
+
+    assert installed_path.is_file()
+    assert installed_path.read_bytes() == b"fixture weights"
+    assert next(model for model in service.list_model_status() if model["id"] == restorer.id)["installed"] is True
+    assert list(installed_path.parent.glob("*.download")) == []
+
+
+def test_warmed_enhance_catalog_rediscovers_model_in_new_shared_root_without_downloading(tmp_path, monkeypatch):
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models")
+    service = EnhanceService(
+        flags,
+        UserSettings(save_images=False),
+        MagicMock(),
+        FilesystemImageStore(tmp_path / "outputs"),
+    )
+    assert next(model for model in service.list_model_status() if model["id"] == "realesrgan-x4plus")["installed"] is False
+
+    shared_root = tmp_path / "shared-models"
+    shared_file = shared_root / "upscale_models" / "RealESRGAN_x4plus.pth"
+    shared_file.parent.mkdir(parents=True)
+    shared_file.write_bytes(b"shared fixture weights")
+    flags.extra_model_dirs.append(shared_root)
+    service.invalidate_model_catalog()
+    monkeypatch.setattr(
+        "aiwf.infrastructure.enhance.catalog.urlretrieve",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must reuse the discovered shared model")),
+    )
+
+    model = next(item for item in service.list_model_status() if item["id"] == "realesrgan-x4plus")
+    installed_path = service.prepare_model("realesrgan-x4plus")
+
+    assert model["installed"] is True
+    assert installed_path.resolve() == shared_file.resolve()
+
+
+
+
 def test_tile_split_and_combine_roundtrip():
     image = Image.new("RGB", (300, 200), color=(120, 80, 40))
     grid = split_grid(image, tile_w=128, tile_h=128, overlap=16)

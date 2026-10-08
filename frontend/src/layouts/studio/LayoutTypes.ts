@@ -41,16 +41,19 @@ export interface LayoutProps {
   recentOutputs: RecentOutput[]
   preview: RecentOutput | null
   selectedModel: ProModelOption | undefined
+  selectableModels?: ProModelOption[]
   selectedModelName: string
   statusMessage: string
   isGenerating: boolean
   onSettingsChange: Dispatch<SetStateAction<GenerationSettings>>
+  onModelSelect?: (modelId: string) => void | Promise<void>
   onGenerate: () => void
   onSendToWorkflow?: (source?: string) => void
   workflowBlocks?: WorkflowCodeBlock[]
   onWorkflowBlocksChange?: Dispatch<SetStateAction<WorkflowCodeBlock[]>>
   onPreviewSelect: (output: RecentOutput) => void
   onOpenModels: () => void
+  onOpenModelSorter?: () => void
   onOpenSettings: () => void
 }
 

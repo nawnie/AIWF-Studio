@@ -6,6 +6,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from aiwf.services.route_lifecycle import support_revision
+
 def _ltx_dtype():
     """Resolve the LTX compute dtype from settings env (AIWF_LTX_DTYPE).
 
@@ -66,6 +68,7 @@ class _Ltx2BCacheKey:
     checkpoint: str
     t5_weights: str
     tokenizer_id: str
+    asset_revision: str = ""
     dtype: str = ""
     offload: str = ""
 
@@ -76,8 +79,52 @@ class _Ltx2BCacheEntry:
     pipe: Any
 
 
+def ltx2b_diffusers_runtime_error() -> str | None:
+    """Check LTX 2B's in-process imports without loading weights or using CUDA."""
+    try:
+        import torch  # noqa: F401
+        from diffusers import LTXPipeline
+        from diffusers.utils import export_to_video  # noqa: F401
+        from transformers import AutoTokenizer, T5Config, T5EncoderModel  # noqa: F401
+    except Exception as exc:
+        return f"LTX 2B Diffusers runtime imports are unavailable: {exc}"
+    if not callable(getattr(LTXPipeline, "from_single_file", None)):
+        return "The installed diffusers runtime does not expose LTXPipeline.from_single_file."
+    return None
+
+
 _CACHE_LOCK = RLock()
 _PIPE_CACHE: _Ltx2BCacheEntry | None = None
+
+
+def _ltx2b_cache_key(*, checkpoint: Path, t5_weights: Path, tokenizer_id: str) -> _Ltx2BCacheKey:
+    import torch
+
+    dtype = _ltx_dtype()
+    offload = _ltx_should_offload(Path(checkpoint))
+    revision_paths = [str(Path(checkpoint)), str(Path(t5_weights))]
+    tokenizer_path = Path(str(tokenizer_id)).expanduser()
+    if tokenizer_path.exists():
+        revision_paths.append(str(tokenizer_path))
+    return _Ltx2BCacheKey(
+        checkpoint=str(Path(checkpoint).resolve()),
+        t5_weights=str(Path(t5_weights).resolve()),
+        tokenizer_id=str(tokenizer_id),
+        asset_revision=support_revision(revision_paths),
+        dtype=str(dtype).replace("torch.", ""),
+        offload="model" if offload else "none",
+    )
+
+
+def is_ltx2b_pipeline_cached(*, checkpoint: Path, t5_weights: Path, tokenizer_id: str) -> bool:
+    """Return whether the currently retained pipeline uses these local model assets."""
+    with _CACHE_LOCK:
+        entry = _PIPE_CACHE
+        return bool(entry is not None and entry.key == _ltx2b_cache_key(
+            checkpoint=checkpoint,
+            t5_weights=t5_weights,
+            tokenizer_id=tokenizer_id,
+        ))
 
 
 def run_ltx2b_diffusers(
@@ -97,6 +144,8 @@ def run_ltx2b_diffusers(
     max_sequence_length: int = 128,
     guidance_scale: float = 1.0,
     use_cache: bool = True,
+    on_progress=None,
+    should_cancel=None,
 ) -> Ltx2BDiffusersResult:
     import torch
     from diffusers.utils import export_to_video
@@ -115,6 +164,24 @@ def run_ltx2b_diffusers(
         tokenizer_id=tokenizer_id,
         use_cache=use_cache,
     )
+    if callable(should_cancel) and should_cancel():
+        from aiwf.core.domain.errors import GenerationCancelledError
+        raise GenerationCancelledError("LTX video generation cancelled.")
+
+    def _step_callback(pipe, step_index: int, timestep, callback_kwargs):  # noqa: ANN001
+        if callable(should_cancel) and should_cancel():
+            from aiwf.core.domain.errors import GenerationCancelledError
+            raise GenerationCancelledError("LTX video generation cancelled.")
+        if callable(on_progress):
+            total = max(1, int(steps))
+            on_progress({
+                "kind": "progress",
+                "step": int(step_index) + 1,
+                "total": total,
+                "progress": min(1.0, (int(step_index) + 1) / total),
+                "message": f"LTX denoising step {int(step_index) + 1} of {total}.",
+            })
+        return callback_kwargs
 
     generator = torch.Generator(device="cpu").manual_seed(seed)
     with torch.inference_mode():
@@ -129,6 +196,7 @@ def run_ltx2b_diffusers(
             guidance_scale=guidance_scale,
             max_sequence_length=max_sequence_length,
             generator=generator,
+            callback_on_step_end=_step_callback,
         ).frames[0]
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -156,13 +224,7 @@ def load_ltx2b_pipeline(*, checkpoint: Path, t5_weights: Path, tokenizer_id: str
 
     dtype = _ltx_dtype()
     offload = _ltx_should_offload(checkpoint)
-    key = _Ltx2BCacheKey(
-        checkpoint=str(checkpoint.resolve()),
-        t5_weights=str(t5_weights.resolve()),
-        tokenizer_id=str(tokenizer_id),
-        dtype=str(dtype).replace("torch.", ""),
-        offload="model" if offload else "none",
-    )
+    key = _ltx2b_cache_key(checkpoint=checkpoint, t5_weights=t5_weights, tokenizer_id=tokenizer_id)
     with _CACHE_LOCK:
         if use_cache and _PIPE_CACHE is not None and _PIPE_CACHE.key == key:
             return _PIPE_CACHE.pipe, True

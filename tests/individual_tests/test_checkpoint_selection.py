@@ -3,9 +3,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+from aiwf.core.domain.errors import ModelNotFoundError
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.models import Checkpoint
 from aiwf.infrastructure.diffusers import backend as diffusers_backend
+from aiwf.infrastructure.diffusers import checkpoints as checkpoint_catalog
 from aiwf.infrastructure.model_inventory import ModelInventoryRecord
 from aiwf.services.generation import GenerationService
 from aiwf.infrastructure.diffusers.backend import DiffusersBackend
@@ -51,6 +55,54 @@ def test_resolve_default_checkpoint_falls_back_when_saved_missing():
 
     assert selected is not None
     assert selected.id == "alpha"
+
+
+def test_diffusers_backend_rejects_unknown_explicit_checkpoint_instead_of_loading_first(tmp_path):
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend.ckpt_dir = tmp_path / "models"
+    backend.flags = SimpleNamespace(default_checkpoint=None)
+    backend.list_checkpoints = lambda: [_checkpoint("installed-model")]
+
+    with pytest.raises(ModelNotFoundError, match="removed-model.*not present"):
+        backend.resolve_checkpoint("removed-model")
+
+
+def test_duplicate_checkpoint_stems_across_roots_have_distinct_selectable_ids(monkeypatch, tmp_path):
+    primary = tmp_path / "primary" / "Stable-diffusion"
+    shared = tmp_path / "shared" / "Stable-diffusion"
+    primary.mkdir(parents=True)
+    shared.mkdir(parents=True)
+    primary_path = primary / "same-model.safetensors"
+    shared_path = shared / "same-model.safetensors"
+    primary_path.write_bytes(b"same-size fixture")
+    shared_path.write_bytes(b"same-size fixture")
+    records = [
+        ModelInventoryRecord(
+            path=str(path), filename=path.name, family="checkpoint", architecture="sd15",
+            current_subdir="Stable-diffusion", recommended_subdir="Stable-diffusion", should_move=False,
+        )
+        for path in (primary_path, shared_path)
+    ]
+    roots = [primary, shared]
+    monkeypatch.setattr(checkpoint_catalog, "resolve_search_roots", lambda _flags: roots)
+    monkeypatch.setattr(checkpoint_catalog, "get_model_inventory", lambda _flags: records)
+    flags = SimpleNamespace(resolved_ckpt_dir=lambda: primary)
+
+    checkpoints = checkpoint_catalog.scan_from_flags(flags)
+    backend = DiffusersBackend.__new__(DiffusersBackend)
+    backend.ckpt_dir = primary
+    backend.flags = SimpleNamespace(default_checkpoint=None)
+    backend.list_checkpoints = lambda: checkpoints
+
+    assert len(checkpoints) == 2
+    assert len({item.id for item in checkpoints}) == 2
+    assert all(item.id != "same-model" for item in checkpoints)
+    assert len({item.title for item in checkpoints}) == 2
+    resolved_by_id = {item.id: backend.resolve_checkpoint(item.id).path for item in checkpoints}
+    assert set(resolved_by_id.values()) == {str(primary_path.resolve()), str(shared_path.resolve())}
+    roots.reverse()
+    reranked = checkpoint_catalog.scan_from_flags(flags)
+    assert {item.id: item.path for item in reranked} == {item.id: item.path for item in checkpoints}
 
 
 def test_default_checkpoint_title_returns_display_title():
@@ -233,10 +285,25 @@ def test_remember_checkpoint_selection_persists_without_loading(tmp_path: Path):
 
 
 def test_cached_single_file_config_is_added_to_load_kwargs(tmp_path: Path, monkeypatch):
+    from aiwf.infrastructure.diffusers.single_file_config import (
+        SINGLE_FILE_CONFIG_REQUIRED_FILES,
+        _REQUIRED_COMPONENTS,
+    )
+
     snapshot = tmp_path / "snap"
     snapshot.mkdir()
     model_index = snapshot / "model_index.json"
-    model_index.write_text("{}", encoding="utf-8")
+    index = {"_class_name": "StableDiffusionXLPipeline"}
+    index.update({name: ["diffusers", f"{name.title()}Class"] for name in _REQUIRED_COMPONENTS["sdxl"]})
+    for relative in SINGLE_FILE_CONFIG_REQUIRED_FILES["sdxl"]:
+        path = snapshot / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if relative == "model_index.json":
+            path.write_text(json.dumps(index), encoding="utf-8")
+        elif relative.endswith(".json"):
+            path.write_text("{}", encoding="utf-8")
+        else:
+            path.write_bytes(b"asset")
 
     monkeypatch.setattr(
         diffusers_backend,

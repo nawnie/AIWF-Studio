@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Build hooks that let a WinUI 3 C++ app build with Visual Studio Build Tools alone.
+
+  Why this file exists:
+    Visual Studio normally ships Microsoft.Windows.UI.Xaml.Cpp.targets with its
+    "C++ Universal Windows Platform tools" component. That file is what runs the XAML
+    compiler from a C++ project and compiles/links the code it generates. A Build
+    Tools-only machine (like the dev box this was written on) does not have it, so the
+    XAML compiler never runs and every *.xaml.g.h (InitializeComponent, x:Name members)
+    is missing at compile time.
+
+  The XAML compiler itself ships in the Windows App SDK NuGet package
+  (MarkupCompilePass1 / MarkupCompilePass2 in Microsoft.UI.Xaml.Markup.Compiler.interop.targets),
+  and the compile step for its output ships with MSBuild (CompileXamlGeneratedFiles in
+  Microsoft.CppCommon.targets). This file only schedules them:
+
+    1. XAML pass 1 (before MIDL):      *.xaml -> *.xaml.g.h
+    2. MIDL + mdmerge + cppwinrt:      *.idl  -> AiwfDesktop.winmd -> projection headers
+    3. XAML pass 2 (before cl.exe):    *.xaml + AiwfDesktop.winmd -> *.xaml.g.hpp,
+                                       XamlTypeInfo.g.cpp, XamlMetaDataProvider.h, *.xbf
+    4. cl.exe: our sources, then the XAML-generated .cpp files (incl. wWinMain)
+    5. link.exe: both sets of objects
+
+  If Visual Studio with the UWP C++ tools is installed later this file stays harmless:
+  MSBuild runs each target at most once per build, and the link-input step skips objects
+  that are already listed.
+
+  Also here: a fix for a duplicate WindowsAppRuntimeAutoInitializer.cpp (see the last section).
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- ===== section 1: what kind of XAML project this is ===== -->
+  <PropertyGroup>
+    <!-- native C++: the XAML compiler must not look for a managed intermediate assembly -->
+    <ManagedAssembly>false</ManagedAssembly>
+    <!-- generated XAML sources go next to the CppWinRT-generated ones; CppWinRT already puts
+         that folder on the compiler include path -->
+    <XamlGeneratedOutputPath>$(GeneratedFilesDir)</XamlGeneratedOutputPath>
+  </PropertyGroup>
+
+  <!-- ===== section 2: where each step runs inside the C++ build ===== -->
+  <PropertyGroup>
+    <!-- pass 1 goes first so the XAML-generated headers exist before anything compiles -->
+    <BeforeMidlCompileTargets>AiwfXamlPass1;$(BeforeMidlCompileTargets)</BeforeMidlCompileTargets>
+    <!-- pass 2 needs the merged project winmd (exists only after MIDL + mdmerge);
+         the auto-initializer fix must run after the SDK target that adds the file -->
+    <BeforeClCompileTargets>$(BeforeClCompileTargets);AiwfXamlPass2;AiwfDedupeAutoInitializer</BeforeClCompileTargets>
+    <!-- XAML-generated .cpp files compile after ours, reusing our precompiled header -->
+    <AfterClCompileTargets>$(AfterClCompileTargets);CompileXamlGeneratedFiles</AfterClCompileTargets>
+    <!-- and their objects join the link -->
+    <ComputeLinkInputsTargets>$(ComputeLinkInputsTargets);AiwfXamlGeneratedLinkInputs</ComputeLinkInputsTargets>
+  </PropertyGroup>
+
+  <!-- ===== section 3: the XAML compiler passes ===== -->
+
+  <!-- this target lists the WinMD files (Windows SDK + Windows App SDK) the XAML compiler
+       may resolve types from; CppWinRT has already worked these lists out for MIDL -->
+  <Target Name="AiwfXamlReferences"
+          DependsOnTargets="ResolveReferences;GetCppWinRTPlatformWinMDReferences;GetCppWinRTDirectWinMDReferences">
+    <ItemGroup>
+      <WinMDReferenceToCompile Remove="@(WinMDReferenceToCompile)" />
+      <WinMDReferenceToCompile Include="@(CppWinRTPlatformWinMDReferences->'%(FullPath)'->Distinct())" />
+      <WinMDReferenceToCompile Include="@(CppWinRTDirectWinMDReferences->'%(FullPath)'->Distinct())" />
+    </ItemGroup>
+    <Message Importance="normal" Text="AIWF XAML references: @(WinMDReferenceToCompile->Count()) winmd files" />
+  </Target>
+
+  <!-- this target runs XAML pass 1 (headers only, no type information needed yet) -->
+  <Target Name="AiwfXamlPass1" DependsOnTargets="AiwfXamlReferences;MarkupCompilePass1" />
+
+  <!-- this target runs XAML pass 2 (full type information from the merged project winmd)
+       and makes sure its .cpp output is compiled. Pass 2 only reports the files it wrote on
+       this run, so an incremental build where the XAML did not change would otherwise drop
+       XamlTypeInfo.g.cpp (InitializeComponent, Connect, wWinMain) from the build entirely. -->
+  <Target Name="AiwfXamlPass2" DependsOnTargets="AiwfXamlReferences;MarkupCompilePass2">
+    <ItemGroup>
+      <_AiwfXamlCpp Include="$(XamlGeneratedOutputPath)XamlTypeInfo.g.cpp" />
+      <_AiwfXamlCpp Include="$(XamlGeneratedOutputPath)XamlTypeInfo.Impl.g.cpp" />
+      <_AiwfXamlCpp Include="$(XamlGeneratedOutputPath)XamlLibMetadataProvider.g.cpp" />
+      <!-- a page-less build (or a future XAML compiler) may not write all three -->
+      <_AiwfXamlCpp Remove="@(_AiwfXamlCpp)" Condition="!Exists('%(FullPath)')" />
+      <!-- replace whatever pass 2 itself added for the same files, so nothing compiles twice -->
+      <ClCompile Remove="@(_AiwfXamlCpp)" MatchOnMetadata="Filename;Extension" />
+      <ClCompile Include="@(_AiwfXamlCpp)">
+        <CompilerIteration>XamlGenerated</CompilerIteration>
+      </ClCompile>
+    </ItemGroup>
+  </Target>
+
+  <!-- ===== section 4: link the XAML-generated objects ===== -->
+
+  <!-- the stock C++ targets only link objects whose CompilerIteration is empty, so the objects
+       built by CompileXamlGeneratedFiles (type info, metadata provider, wWinMain) are added here -->
+  <Target Name="AiwfXamlGeneratedLinkInputs" DependsOnTargets="ComputeCLOutputs">
+    <ItemGroup>
+      <_AiwfXamlObj Condition="'%(ClCompile.CompilerIteration)' == 'XamlGenerated' and '%(ClCompile.ExcludedFromBuild)' != 'true' and HasTrailingSlash('%(ClCompile.ObjectFileName)')"
+                    Include="@(ClCompile->'%(ObjectFileName)%(Filename).obj')" />
+      <_AiwfXamlObj Condition="'%(ClCompile.CompilerIteration)' == 'XamlGenerated' and '%(ClCompile.ExcludedFromBuild)' != 'true' and '%(ClCompile.ObjectFileName)' == ''"
+                    Include="@(ClCompile->'$(IntDir)%(Filename).obj')" />
+      <!-- skip anything another targets file already put on the link line -->
+      <_AiwfXamlObj Remove="@(Link)" />
+      <!-- ClearMetadata matters: the Link task runs once per distinct metadata set, so objects
+           still carrying ClCompile metadata would land in a second link.exe call that never
+           runs when the first one fails (the stock targets clear it the same way) -->
+      <Link Include="@(_AiwfXamlObj->Distinct()->ClearMetadata())" />
+    </ItemGroup>
+    <Message Importance="normal" Text="AIWF XAML link inputs: @(_AiwfXamlObj->'%(Filename)')" />
+  </Target>
+
+  <!-- ===== section 5: hand the compiled XAML (.xbf) to the resource (PRI) step ===== -->
+
+  <!-- The Windows App SDK PRI targets call AddProcessedXamlFilesToCopyLocal for every WinUI
+       project. The SDK ships it only for .NET (Microsoft.WinUI.NET.Markup.Compiler.targets says
+       C++ uses the copy inside Visual Studio), so this is the same logic for C++.
+       When MRT Core can embed .xbf into the .pri (the normal case) nothing is copied; otherwise
+       the .xbf files go next to the exe with CopyToOutputDirectory. -->
+  <Target Name="AddProcessedXamlFilesToCopyLocal"
+          Condition="'$(AppxPackage)' != 'true'"
+          DependsOnTargets="Prep_ComputeProcessXamlFiles;_CalculateXbfSupport">
+    <ItemGroup>
+      <_AiwfProcessedXaml Include="@(GeneratedXamlSrc->'%(FullPath)')" />
+    </ItemGroup>
+    <AssignTargetPath Files="@(_AiwfProcessedXaml)" RootFolder="$(XamlGeneratedOutputPath)">
+      <Output TaskParameter="AssignedFiles" ItemName="_AiwfProcessedXamlWithTargetPath" />
+    </AssignTargetPath>
+    <ItemGroup>
+      <_AllChildProjectItemsWithTargetPath Include="@(_AiwfProcessedXamlWithTargetPath)"
+          Condition="'%(Extension)' != '.xbf' OR '$(_SupportXbfAsEmbedFileResources)' != 'true'">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </_AllChildProjectItemsWithTargetPath>
+    </ItemGroup>
+    <Message Importance="normal" Text="AIWF XAML resources: embed xbf in pri = '$(_SupportXbfAsEmbedFileResources)'; files: @(_AiwfProcessedXaml->'%(Filename)%(Extension)')" />
+  </Target>
+
+  <!-- ===== section 6: duplicate auto-initializer fix ===== -->
+
+  <!-- The Windows App SDK target "WindowsAppRuntimeAutoInitializer" adds
+       WindowsAppRuntimeAutoInitializer.cpp with an unqualified %(PreprocessorDefinitions)
+       reference inside a target. MSBuild batches that over every distinct define set already
+       in ClCompile, so the file is added once per batch (MSB8027 + LNK4042, compiled twice).
+       This keeps exactly one copy; every copy carries the same MICROSOFT_WINDOWSAPPSDK_* defines. -->
+  <Target Name="AiwfDedupeAutoInitializer">
+    <ItemGroup>
+      <_AiwfAutoInit Include="@(ClCompile)" Condition="'%(Filename)%(Extension)' == 'WindowsAppRuntimeAutoInitializer.cpp'" />
+      <ClCompile Remove="@(_AiwfAutoInit)" />
+      <ClCompile Include="@(_AiwfAutoInit->Distinct())" />
+    </ItemGroup>
+  </Target>
+
+</Project>

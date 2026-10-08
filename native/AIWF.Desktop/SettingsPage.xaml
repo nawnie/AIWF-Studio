@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Settings: where the engines come from, their logs, what this app itself costs in memory,
+  and the privacy promises the product keeps. Engine rows are built in code.
+-->
+<Page
+    x:Class="AiwfDesktop.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AiwfDesktop">
+    <ScrollViewer>
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="16" MaxWidth="1000" HorizontalAlignment="Stretch">
+            <TextBlock Text="Configure Studio" Style="{StaticResource TitleLargeTextBlockStyle}" />
+
+            <!-- guided setup: folders for images, models, datasets and training, and the engines -->
+            <Border Style="{StaticResource CardStyle}" Padding="20">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Setup" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock Style="{StaticResource BodyTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap"
+                                   Text="Where images, datasets and training packages are saved, where models are found, and how each engine starts." />
+                    </StackPanel>
+                    <Button Grid.Column="1" Content="Run setup" Click="RunSetup_Click" VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <!-- engines -->
+            <Border Style="{StaticResource CardStyle}" Padding="20">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Engines" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="ManifestText" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Open engine list" Click="OpenManifest_Click" />
+                        <Button Content="Open logs folder" Click="OpenLogs_Click" />
+                    </StackPanel>
+                    <StackPanel x:Name="EngineRows" Spacing="10" />
+                </StackPanel>
+            </Border>
+
+            <!-- this app -->
+            <Border Style="{StaticResource CardStyle}" Padding="20">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="This app" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="MemoryText" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap" />
+                    <TextBlock x:Name="VersionText" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap" />
+                    <TextBlock x:Name="DataText" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                </StackPanel>
+            </Border>
+
+            <!-- privacy -->
+            <Border Style="{StaticResource CardStyle}" Padding="20">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Privacy" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                               Text="Every engine listens on this PC's loopback address only. Prompts, images, datasets, chats and models stay here." />
+                    <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                               Text="The network is used only when you confirm a model download from Hugging Face. A Hugging Face key is checked with Hugging Face and kept in its standard token file; AIWF Studio never shows or logs it." />
+                    <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                               Text="Engines this app starts stop when it closes. Engines started by other tools are shown but never stopped from here." />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

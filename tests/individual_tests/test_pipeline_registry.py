@@ -2,9 +2,23 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.services.pipeline_registry import PipelineRegistry
+
+
+def _onnx_dir(root: Path) -> Path:
+    model = root / "sdxl_onnx"
+    for sub in ("text_encoder", "unet", "vae_decoder"):
+        path = model / sub
+        path.mkdir(parents=True)
+        (path / "model.onnx").write_bytes(b"fake")
+    tokenizer = model / "tokenizer"
+    tokenizer.mkdir()
+    (tokenizer / "tokenizer.json").write_text("{}", encoding="utf-8")
+    return model
 
 
 def test_pipeline_registry_lists_image_launch_choices(tmp_path: Path):
@@ -24,6 +38,15 @@ def test_pipeline_registry_lists_v1_image_pipelines(tmp_path: Path):
     assert {"diffusers", "krea2", "qwen-image", "sana", "onnx"}.issubset(ids)
     assert "anima" not in ids
     assert "qwen-nunchaku" not in ids
+
+
+def test_pipeline_registry_status_does_not_treat_preflight_as_verified_generation(tmp_path: Path):
+    registry = PipelineRegistry(RuntimeFlags(data_dir=tmp_path), UserSettings())
+
+    text = registry.status_markdown()
+
+    assert "Available · generation not verified" in text
+    assert "**Diffusers pipeline (default):** Ready -" not in text
 
 
 def test_pipeline_registry_marks_qwen_and_sana_missing_until_snapshots_exist(tmp_path: Path):
@@ -65,13 +88,35 @@ def test_pipeline_registry_marks_incomplete_qwen_snapshot_not_ready(tmp_path: Pa
     assert "incomplete Diffusers snapshot" in qwen.message
 
 
-def test_pipeline_registry_marks_sana_ready_when_snapshot_is_complete(tmp_path: Path):
+def test_pipeline_registry_treats_non_object_model_index_as_incomplete(tmp_path: Path):
     models = tmp_path / "models"
+    root = models / "sana" / "Diffusers" / "malformed-index"
+    root.mkdir(parents=True)
+    (root / "model_index.json").write_text("[]", encoding="utf-8")
+    registry = PipelineRegistry(RuntimeFlags(data_dir=tmp_path, models_dir=models), UserSettings())
+
+    sana = [pipeline for pipeline in registry.image_pipelines() if pipeline.id == "sana"][0]
+
+    assert not sana.ready
+    assert "model_index.json is unreadable" in sana.message
+
+
+def test_pipeline_registry_discovers_complete_snapshot_in_shared_root(tmp_path: Path):
+    models = tmp_path / "shared-models"
     root = models / "sana" / "Diffusers" / "Sana_Sprint_0.6B_1024px_diffusers"
     root.mkdir(parents=True)
-    (root / "model_index.json").write_text(json.dumps({"_class_name": "SanaSprintPipeline"}), encoding="utf-8")
-    (root / "transformer.safetensors").write_bytes(b"fake")
-    registry = PipelineRegistry(RuntimeFlags(data_dir=tmp_path, models_dir=models), UserSettings())
+    (root / "model_index.json").write_text(json.dumps({
+        "_class_name": "SanaSprintPipeline",
+        "transformer": ["diffusers", "SanaTransformer2DModel"],
+    }), encoding="utf-8")
+    transformer = root / "transformer"
+    transformer.mkdir()
+    (transformer / "config.json").write_text("{}", encoding="utf-8")
+    (transformer / "diffusion_pytorch_model.safetensors").write_bytes(b"fake")
+    registry = PipelineRegistry(
+        RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "primary", extra_model_dirs=[models]),
+        UserSettings(),
+    )
 
     sana = [pipeline for pipeline in registry.image_pipelines() if pipeline.id == "sana"][0]
 
@@ -86,11 +131,47 @@ def test_pipeline_registry_reports_missing_default_onnx_folder(tmp_path: Path):
     text = registry.status_markdown()
 
     assert "ONNX Runtime pipeline" in text
-    assert "Needs setup" in text
+    assert "Unavailable · inspect setup/runtime details" in text
     assert str((tmp_path / "models" / "onnx").resolve()) in text
 
 
 def test_pipeline_registry_accepts_configured_onnx_folder(tmp_path: Path):
+    onnx_root = tmp_path / "onnx-models"
+    _onnx_dir(onnx_root)
+    from aiwf.services import pipeline_preflight
+
+    with patch.object(pipeline_preflight, "_load_available_onnx_providers", return_value=["CPUExecutionProvider"]):
+        registry = PipelineRegistry(
+            RuntimeFlags(data_dir=tmp_path),
+            UserSettings(onnx_model_dir=str(onnx_root)),
+        )
+
+        onnx = [pipeline for pipeline in registry.image_pipelines() if pipeline.id == "onnx"][0]
+
+    assert onnx.ready
+    assert str((onnx_root / "sdxl_onnx").resolve()) in onnx.message
+
+
+def test_pipeline_registry_blocks_onnx_root_when_children_lack_complete_assets(tmp_path: Path):
+    onnx_root = tmp_path / "onnx-models"
+    child = onnx_root / "partial"
+    for sub in ("text_encoder", "unet", "vae_decoder"):
+        path = child / sub
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "model.onnx").write_bytes(b"fake")
+    from aiwf.services import pipeline_preflight
+
+    with patch.object(pipeline_preflight, "_load_available_onnx_providers", return_value=["CPUExecutionProvider"]):
+        registry = PipelineRegistry(
+            RuntimeFlags(data_dir=tmp_path), UserSettings(onnx_model_dir=str(onnx_root)),
+        )
+        onnx = next(item for item in registry.image_pipelines() if item.id == "onnx")
+
+    assert not onnx.ready
+    assert "tokenizer" in onnx.message
+
+
+def test_pipeline_registry_does_not_call_empty_onnx_folder_ready(tmp_path: Path):
     onnx_root = tmp_path / "onnx-models"
     onnx_root.mkdir()
     registry = PipelineRegistry(
@@ -100,8 +181,33 @@ def test_pipeline_registry_accepts_configured_onnx_folder(tmp_path: Path):
 
     onnx = [pipeline for pipeline in registry.image_pipelines() if pipeline.id == "onnx"][0]
 
-    assert onnx.ready
+    assert not onnx.ready
+    assert "text_encoder" in onnx.message
     assert str(onnx_root.resolve()) in onnx.message
+
+
+def test_pipeline_registry_recognizes_sana_video_720p_snapshot(tmp_path: Path, monkeypatch):
+    from aiwf.core.domain.sana_video import SANA_VIDEO_MODEL_VARIANT_720P
+    from aiwf.services import pipeline_preflight
+    from aiwf.services.pipeline_preflight import PipelineCheckItem, PipelinePreflightResult
+
+    def preflight(_flags, _settings, request=None):
+        variant = request.model_variant
+        installed = variant == SANA_VIDEO_MODEL_VARIANT_720P
+        return PipelinePreflightResult(
+            pipeline="Sana Video",
+            ok=True,
+            items=(PipelineCheckItem("model", installed, "complete" if installed else "missing"),),
+            metadata={"model_installed": str(installed).lower(), "model_variant": variant, "model_path": f"/models/{variant}"},
+        )
+
+    monkeypatch.setattr(pipeline_preflight, "preflight_sana_video_pipeline", preflight)
+    registry = PipelineRegistry(RuntimeFlags(data_dir=tmp_path), UserSettings())
+
+    sana = next(pipeline for pipeline in registry.video_pipelines() if pipeline.id == "sana-video")
+
+    assert sana.ready
+    assert "720p" in sana.message
 
 
 def test_pipeline_registry_lists_wan_diffusers_and_gguf_methods(tmp_path: Path):
@@ -160,6 +266,28 @@ def test_pipeline_registry_marks_ltx_missing_until_worker_ready(tmp_path: Path):
     assert "enabled=true" in ltx.message or "missing" in ltx.message
 
 
+def test_ltx23_registry_does_not_report_ready_when_launch_falls_back_to_2b(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+    from aiwf.services import pipeline_preflight
+
+    monkeypatch.setattr(
+        pipeline_preflight,
+        "preflight_ltx_pipeline",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            metadata={"selected_pipeline": "diffusers_2b"},
+            warnings=(),
+            items=(),
+        ),
+    )
+    registry = PipelineRegistry(RuntimeFlags(data_dir=tmp_path), UserSettings())
+
+    ltx = registry._ltx_pipeline()
+
+    assert not ltx.ready
+    assert "LTX 2B Diffusers is selected" in ltx.message
+
+
 def test_pipeline_registry_marks_ltx2b_ready_when_assets_exist(tmp_path: Path):
     flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models")
     checkpoint = flags.resolved_models_dir() / "ltx" / "checkpoints" / "ltx-video-2b-v0.9.5.safetensors"
@@ -168,6 +296,12 @@ def test_pipeline_registry_marks_ltx2b_ready_when_assets_exist(tmp_path: Path):
     t5 = flags.resolved_models_dir() / "flux" / "Textencoder" / "t5xxl_fp16.safetensors"
     t5.parent.mkdir(parents=True)
     t5.write_bytes(b"fake")
+    tokenizer = flags.resolved_models_dir() / "ltx" / "tokenizer" / "t5-v1_1-xxl"
+    tokenizer.mkdir(parents=True)
+    (tokenizer / "config.json").write_text('{"model_type":"t5","vocab_size":32128}', encoding="utf-8")
+    (tokenizer / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (tokenizer / "special_tokens_map.json").write_text("{}", encoding="utf-8")
+    (tokenizer / "spiece.model").write_bytes(b"tokenizer")
     registry = PipelineRegistry(flags, UserSettings())
 
     ltx = [pipeline for pipeline in registry.video_pipelines() if pipeline.id == "ltx-2b-diffusers"][0]
@@ -192,3 +326,19 @@ def test_pipeline_registry_hides_qwen_nunchaku_until_v1_ready(tmp_path: Path):
     ids = {pipeline.id for pipeline in registry.image_pipelines()}
 
     assert "qwen-nunchaku" not in ids
+
+
+def test_pipeline_registry_never_claims_qwen_nunchaku_generation_ready_before_smoke(tmp_path: Path, monkeypatch):
+    from aiwf.services.qwen_nunchaku import QwenNunchakuService
+
+    monkeypatch.setattr(
+        QwenNunchakuService,
+        "status",
+        lambda self, *_args: SimpleNamespace(ready=True, messages=()),
+    )
+    registry = PipelineRegistry(RuntimeFlags(data_dir=tmp_path), UserSettings())
+
+    pipeline = registry._qwen_nunchaku_pipeline()
+
+    assert pipeline.ready is False
+    assert "generation remains blocked" in pipeline.message

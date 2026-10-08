@@ -67,7 +67,7 @@ export function CommandPalette({
         tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <label className="studio-command-input"><Command size={18} /><input data-dialog-autofocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search actions, workspaces, tools..." /></label>
+        <label className="studio-command-input"><Command size={18} /><input aria-label="Search commands" data-dialog-autofocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search actions, workspaces, tools..." /></label>
         <div className="studio-command-list">
           {filtered.map((item) => {
             const Icon = item.icon

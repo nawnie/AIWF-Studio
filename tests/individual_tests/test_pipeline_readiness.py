@@ -4,6 +4,8 @@ import json
 import struct
 from pathlib import Path
 
+import pytest
+
 from aiwf.core.config.settings import RuntimeFlags
 from aiwf.core.domain.ltx import (
     LTX_FULL_CHECKPOINT,
@@ -16,7 +18,9 @@ from aiwf.services.pipeline_readiness import (
     PipelineReadinessRecord,
     classify_pipeline_asset,
     collect_pipeline_readiness,
+    _latest_receipt,
     readiness_summary,
+    _ltx_distilled_suggestion,
 )
 from aiwf.services.worker_tenant import python_exe_for_venv
 
@@ -25,6 +29,13 @@ def _write_safetensors_header(path: Path, header: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(header).encode("utf-8")
     path.write_bytes(struct.pack("<Q", len(payload)) + payload)
+
+
+def _write_ltx_gemma_sidecars(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "tokenizer.json").write_text('{"version":"1.0"}', encoding="utf-8")
+    (root / "tokenizer_config.json").write_text('{"tokenizer_class":"GemmaTokenizer"}', encoding="utf-8")
+    (root / "preprocessor_config.json").write_text('{"image_processor_type":"Gemma3ImageProcessor"}', encoding="utf-8")
 
 
 def test_wan_fun_control_header_is_unsupported_no_route(tmp_path: Path):
@@ -83,7 +94,21 @@ def test_ltx_fp8_checkpoint_uses_one_stage_route(tmp_path: Path):
     assert "offload=none" in record.reason
 
 
-def test_ltx_fp8_checkpoint_is_working_when_receipt_exists(tmp_path: Path):
+def test_ltx_distilled_readiness_accepts_checkpoint_at_configured_shared_root(tmp_path: Path):
+    primary = tmp_path / "models"
+    shared = tmp_path / "shared-models"
+    checkpoint = shared / "ltx" / "checkpoints" / "ltx-2.3-22b-distilled-1.1.safetensors"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    flags = RuntimeFlags(data_dir=tmp_path / "studio", models_dir=primary, extra_model_dirs=[shared])
+
+    suggestion = _ltx_distilled_suggestion(checkpoint, flags)
+
+    assert suggestion.startswith("Pair with repo-shaped Gemma")
+    assert "Move or copy" not in suggestion
+
+
+def test_ltx_fp8_checkpoint_stays_metadata_only_without_model_bound_receipt(tmp_path: Path):
     models = tmp_path / "models"
     outputs = tmp_path / "outputs"
     path = models / "ltx" / "checkpoints" / LTX_FULL_CHECKPOINT_FP8
@@ -95,9 +120,9 @@ def test_ltx_fp8_checkpoint_is_working_when_receipt_exists(tmp_path: Path):
 
     record = classify_pipeline_asset("ltx", "ltx", path, flags=flags)
 
-    assert record.status == "working"
+    assert record.status == "metadata-only"
     assert record.route == "ltx-one-stage-hf-gemma"
-    assert "runtime smoke receipt" in record.reason
+    assert "asset-specific runtime smoke has not been recorded" in record.reason
 
 
 def test_gemma_heretic_download_stays_out_of_ltx_runtime(tmp_path: Path):
@@ -136,6 +161,7 @@ def test_converted_heretic_gemma_folder_is_ltx_text_encoder_asset(tmp_path: Path
         "model.safetensors",
         "vision_projector.safetensors",
         "tokenizer.model",
+        "tokenizer_config.json",
         "preprocessor_config.json",
     ):
         (root / filename).write_bytes(b"fake")
@@ -163,7 +189,7 @@ def test_ltx_route_records_include_heretic_gguf_blocker(tmp_path: Path):
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"fake")
     gemma = models / "ltx" / "text_encoder" / LTX_GEMMA_REPO.split("/", 1)[1]
-    gemma.mkdir(parents=True)
+    _write_ltx_gemma_sidecars(gemma)
     gguf = models / "LLM" / "GGUF" / LTX_HERETIC_Q3_GGUF
     gguf.parent.mkdir(parents=True)
     gguf.write_bytes(b"GGUF")
@@ -180,6 +206,32 @@ def test_ltx_route_records_include_heretic_gguf_blocker(tmp_path: Path):
     assert "--allow-blocked" in record.smoke_command
 
 
+def test_ltx_readiness_does_not_accept_empty_hf_gemma_root(tmp_path: Path):
+    worker = tmp_path / "engines" / "ltx" / "worker.py"
+    repo = tmp_path / "engines" / "ltx" / "LTX-2"
+    python = python_exe_for_venv(tmp_path / "engines" / "ltx" / ".venv")
+    worker.parent.mkdir(parents=True)
+    repo.mkdir(parents=True)
+    python.parent.mkdir(parents=True)
+    worker.write_text("print('worker')", encoding="utf-8")
+    python.write_text("", encoding="utf-8")
+    (tmp_path / "engines.json").write_text(json.dumps({"ltx": {"enabled": True}}), encoding="utf-8")
+    models = tmp_path / "models"
+    checkpoint = models / "ltx" / "checkpoints" / LTX_FULL_CHECKPOINT
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"fake")
+    (models / "ltx" / "text_encoder" / LTX_GEMMA_REPO.split("/", 1)[1]).mkdir(parents=True)
+
+    records = collect_pipeline_readiness(
+        RuntimeFlags(data_dir=tmp_path, models_dir=models, output_dir=tmp_path / "outputs"),
+        include_downloads=False,
+    )
+    record = next(item for item in records if item.id == "route:ltx-one-stage-hf-gemma")
+
+    assert record.status != "working"
+    assert "Gemma sidecar files" in record.reason
+
+
 def test_ltx2b_diffusers_route_is_wired_when_assets_exist(tmp_path: Path):
     models = tmp_path / "models"
     checkpoint = models / "ltx" / "checkpoints" / "ltx-video-2b-v0.9.5.safetensors"
@@ -188,6 +240,9 @@ def test_ltx2b_diffusers_route_is_wired_when_assets_exist(tmp_path: Path):
     t5 = models / "flux" / "Textencoder" / "t5xxl_fp16.safetensors"
     t5.parent.mkdir(parents=True)
     t5.write_bytes(b"fake")
+    historical_output = tmp_path / "outputs" / "ltx-videos" / "ltx2b-old-output.mp4"
+    historical_output.parent.mkdir(parents=True)
+    historical_output.write_bytes(b"old output")
 
     records = collect_pipeline_readiness(
         RuntimeFlags(data_dir=tmp_path, models_dir=models, output_dir=tmp_path / "outputs"),
@@ -198,6 +253,21 @@ def test_ltx2b_diffusers_route_is_wired_when_assets_exist(tmp_path: Path):
     assert record.status == "metadata-only"
     assert record.route == "ltx-0.9.5-diffusers-local-t5xxl"
     assert record.required_text_encoder.endswith("t5xxl_fp16.safetensors")
+    assert record.receipt_path == ""
+
+
+def test_video_output_files_are_not_treated_as_model_bound_smoke_receipts(tmp_path: Path):
+    outputs = tmp_path / "outputs"
+    for directory, filename in (
+        (outputs / "ltx-videos", "ltx23-old-output.mp4"),
+        (outputs / "video" / "wan", "wan-old-output.mp4"),
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / filename).write_bytes(b"old output")
+    flags = RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", output_dir=outputs)
+
+    assert _latest_receipt(flags, "ltx", route="ltx-2.3") is None
+    assert _latest_receipt(flags, "wan", route="wan-diffusers") is None
 
 
 def test_known_bad_image_checkpoint_is_broken_runtime(tmp_path: Path):
@@ -280,6 +350,60 @@ def test_supported_image_gguf_runtime_assets_are_not_unsupported_no_route(tmp_pa
         else:
             assert record.status == "metadata-only"
             assert "runtime path" in record.reason
+
+
+def test_generic_flux2_download_is_not_mislabeled_or_routed_as_klein(tmp_path: Path):
+    from aiwf.services.pipeline_readiness import _classify_image, _download_image_arch
+
+    path = tmp_path / "Downloads" / "flux2-9b.safetensors"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"fixture")
+
+    architecture = _download_image_arch(path)
+    record = _classify_image(path, family="runtime_asset", architecture=architecture, source="downloads")
+
+    assert architecture == "flux2"
+    assert record.route == "unsupported"
+    assert record.status == "unsupported-no-route"
+
+
+def test_explicit_flux2_klein_download_still_uses_klein_route(tmp_path: Path):
+    from aiwf.services.pipeline_readiness import _download_image_arch
+
+    assert _download_image_arch(tmp_path / "Downloads" / "Flux2Klein9B.safetensors") == "flux2-klein"
+
+
+@pytest.mark.parametrize(
+    ("filename", "architecture"),
+    [
+        ("Qwen-Image-Edit.safetensors", "qwen_image_edit"),
+        ("Qwen-Image-Edit-Plus.safetensors", "qwen_image_edit_plus"),
+    ],
+)
+def test_qwen_edit_assets_do_not_inflate_qwen_image_readiness(tmp_path: Path, filename: str, architecture: str):
+    from aiwf.services.pipeline_readiness import _classify_image, _download_image_arch
+
+    path = tmp_path / "Downloads" / filename
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"fixture")
+
+    detected_architecture = _download_image_arch(path)
+    record = _classify_image(path, family="runtime_asset", architecture=detected_architecture, source="downloads")
+
+    assert detected_architecture == architecture
+    assert record.route == "unsupported"
+    assert record.status == "unsupported-no-route"
+    assert "not ordinary Qwen Image base models" in record.reason
+
+
+def test_download_root_does_not_turn_general_gemma_weights_into_ltx_assets(tmp_path: Path):
+    from aiwf.services.pipeline_readiness import _family_arch_from_download_path
+
+    general = tmp_path / "Downloads" / "gemma-3-12b-it.safetensors"
+    ltx_gemma = tmp_path / "Downloads" / "LTX-2.3" / "Gemma" / "model.safetensors"
+
+    assert _family_arch_from_download_path(general) == ("llm", "llm")
+    assert _family_arch_from_download_path(ltx_gemma) == ("ltx", "ltx")
 
 
 def test_krea2_and_anima_split_assets_are_blocked_until_native_loader(tmp_path: Path):

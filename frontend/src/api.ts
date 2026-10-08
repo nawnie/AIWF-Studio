@@ -11,6 +11,8 @@ import type {
   ProCapabilityItem,
   ProDataStatus,
   ProDownloadsStatus,
+  ProSharedSnapshotImportPreview,
+  ProBundleInstallItem,
   ProGenerateRequest,
   ProGenerateResult,
   ProLogEvent,
@@ -22,6 +24,7 @@ import type {
   ProReadinessItem,
   ProReadinessStatus,
   ProRuntimeStatus,
+  RouteLifecycleState,
   ProSettingsStatus,
   ProStopResult,
   RecentOutput,
@@ -139,6 +142,20 @@ export interface ProStartupStatus {
   readyHoldMs: number
 }
 
+export interface ProControlNetModel {
+  id: string
+  title: string
+  path: string
+}
+
+export interface ProControlNetSetupOption {
+  key: string
+  family: 'sd15' | 'sdxl'
+  label: string
+  modelId: string
+  sizeMb: number | null
+}
+
 const apiLatencySamples: ProApiLatencySample[] = []
 
 function recordApiLatency(sample: ProApiLatencySample): void {
@@ -164,15 +181,75 @@ export interface ProModelSortAction {
 
 export interface ProModelSortResult {
   status: string
+  planId: string
   uploadedPath: string
   uploadedBytes: number
   actions: ProModelSortAction[]
   counts: {
     total: number
     moved: number
+    planned: number
     left: number
     inventoryCount: number
   }
+}
+
+export interface ProModelRootScanEntry {
+  label: string
+  path: string
+  status: string
+  assetCount: number
+  familyCounts: Record<string, number>
+  errorCount: number
+  errors: string[]
+}
+
+export interface ProModelAssetScanProposal {
+  path: string
+  filename: string
+  family: string
+  architecture: string
+  currentSubdir: string
+  recommendedSubdir: string
+  placement: 'candidate' | 'reorganize-candidate' | 'reorganize-check' | 'manual-review' | 'in-place' | string
+  placementReason?: string
+  signals: Record<string, string>
+}
+
+export interface ProModelRootsScanResult {
+  inventoryCount: number
+  roots: ProModelRootScanEntry[]
+  assets: ProModelAssetScanProposal[]
+  assetsTruncated: number
+  scanId: string
+  offset: number
+  limit: number
+  matchedCount: number
+  hasMore: boolean
+  nextOffset: number | null
+  query: string
+}
+
+export interface ProModelRootPlacementPreview {
+  planId: string
+  scanId: string
+  source: string
+  destination: string
+  sizeBytes: number
+  requiredFreeBytes: number
+  availableFreeBytes: number
+  collision: boolean
+  canApply: boolean
+  status: 'ready' | 'collision' | 'insufficient_space' | string
+  expiresInSeconds: number
+}
+
+export interface ProModelRootPlacementResult {
+  status: string
+  source: string
+  destination: string
+  sourcePreserved: boolean
+  inventoryRefresh: string
 }
 
 const DEFAULT_ASPECT_RATIOS: AspectRatioOption[] = [
@@ -250,6 +327,10 @@ const DEFAULT_SETTINGS: GenerationSettings = {
   fps: 16,
   sourceImageDataUrl: '',
   sourceImageName: '',
+  ltxImageStrength: 0.8,
+  ltxOffload: 'disk',
+  ltxQuantization: 'fp8-cast',
+  ltxEnhancePrompt: false,
   sanaQuantization: 'auto',
   sanaVaeTiling: 'auto',
   offloadTextEncoderAfterEncode: true,
@@ -324,6 +405,7 @@ const FALLBACK_RUNTIME: ProRuntimeStatus = {
     { label: 'CPU', value: 'Unavailable', percent: 0, tone: 'neutral' },
   ],
   loadedModel: {
+    id: '',
     name: 'No model loaded',
     type: 'Text-to-Image',
     baseModel: 'None',
@@ -334,6 +416,8 @@ const FALLBACK_RUNTIME: ProRuntimeStatus = {
     unet: '',
     loaded: false,
   },
+  modelLoad: { status: 'not-started', modelId: '', detail: '' },
+  routeLifecycle: [],
 }
 
 const FALLBACK_READINESS: ProReadinessStatus = {
@@ -349,7 +433,7 @@ const FALLBACK_READINESS: ProReadinessStatus = {
 const FALLBACK_CAPABILITIES: ProCapabilitiesStatus = {
   gradioTabs: [
     { id: 'studio', label: 'Studio', group: 'Create', status: 'ready', count: 0, route: 'create', tab: 'Image', summary: 'Image generation and inpaint.', details: ['Existing image surface is available.'] },
-    { id: 'video', label: 'Sana / Wan / LTX Video', group: 'Video', status: 'available', count: 0, route: 'create', tab: 'Video', summary: 'Video tool coverage is tracked.', details: ['React Pro can submit Sana Video.'] },
+    { id: 'video', label: 'Sana / Wan / LTX Video', group: 'Video', status: 'available', count: 0, route: 'create', tab: 'Video', summary: 'Video tool coverage is tracked.', details: ['React Pro can submit Sana, Wan, and LTX when their routes report ready.'] },
     { id: 'enhance', label: 'Enhance', group: 'Image', status: 'available', count: 0, route: 'tools', tab: 'Enhance', summary: 'Quick restore, upscale, and VSR image tools.', details: ['Full old-photo and batch workflows remain in Gradio.'] },
     { id: 'segment', label: 'Segment', group: 'Image', status: 'available', count: 0, route: 'modal:segmentation', tab: 'Segment', summary: 'SAM tool coverage is tracked.', details: ['React Pro has a quick popup.'] },
     { id: 'reactor', label: 'ReActor', group: 'Image', status: 'available', count: 0, route: 'modal:reactor', tab: 'ReActor', summary: 'Face swap coverage is tracked.', details: ['React Pro has a quick popup.'] },
@@ -425,6 +509,8 @@ export function getFallbackRuntime(): ProRuntimeStatus {
     job: { ...FALLBACK_RUNTIME.job },
     resources: FALLBACK_RUNTIME.resources.map((metric) => ({ ...metric })),
     loadedModel: { ...FALLBACK_RUNTIME.loadedModel },
+    modelLoad: { ...FALLBACK_RUNTIME.modelLoad },
+    routeLifecycle: [],
   }
 }
 
@@ -436,6 +522,31 @@ export async function fetchProBootstrap(signal?: AbortSignal): Promise<ProBootst
 export async function fetchProRuntime(signal?: AbortSignal): Promise<ProRuntimeStatus> {
   const payload = await requestJson('/api/pro/runtime', { signal })
   return normalizeRuntime(payload)
+}
+
+export async function fetchProControlNetModels(signal?: AbortSignal): Promise<{ models: ProControlNetModel[]; setupOptions: ProControlNetSetupOption[] }> {
+  const payload = asRecord(await requestJson('/api/pro/controlnet/models', { signal }))
+  const models = readArray(payload, ['models']).map((value) => {
+    const model = asRecord(value)
+    return {
+      id: readString(model, ['id'], ''),
+      title: readString(model, ['title'], ''),
+      path: readString(model, ['path'], ''),
+    }
+  }).filter((model) => model.id)
+  const setupOptions: ProControlNetSetupOption[] = readArray(payload, ['setupOptions', 'setup_options']).flatMap((value): ProControlNetSetupOption[] => {
+    const option = asRecord(value)
+    const family = readString(option, ['family'], '')
+    if (family !== 'sd15' && family !== 'sdxl') return []
+    return [{
+      key: readString(option, ['key'], ''),
+      family: family as ProControlNetSetupOption['family'],
+      label: readString(option, ['label'], ''),
+      modelId: readString(option, ['modelId', 'model_id'], ''),
+      sizeMb: readNumber(option, ['sizeMb', 'size_mb'], 0) || null,
+    }]
+  }).filter((option) => option.key && option.label && option.modelId)
+  return { models, setupOptions }
 }
 
 export function streamProRuntime(
@@ -532,6 +643,137 @@ export async function downloadCatalogModel(key: string): Promise<ProDownloadsSta
   return normalizeDownloadsStatus(payload)
 }
 
+export async function importSharedCatalogSnapshot(
+  key: string,
+  preview: ProSharedSnapshotImportPreview,
+): Promise<ProDownloadsStatus> {
+  const query = new URLSearchParams({
+    confirm: 'true', source: preview.source, size_bytes: String(preview.sizeBytes),
+  })
+  const payload = await requestJson(
+    `/api/pro/downloads/catalog/${encodeURIComponent(key)}/import-shared?${query}`,
+    { method: 'POST' },
+  )
+  return normalizeDownloadsStatus(payload)
+}
+
+export async function previewSharedCatalogSnapshot(key: string): Promise<ProSharedSnapshotImportPreview | null> {
+  const payload = asRecord(await requestJson(
+    `/api/pro/downloads/catalog/${encodeURIComponent(key)}/shared-import-preview`,
+  ))
+  const preview = readRecord(payload, ['preview'])
+  if (!preview.source) return null
+  return {
+    source: readString(preview, ['source'], ''),
+    target: readString(preview, ['target'], ''),
+    sizeBytes: readNumber(preview, ['sizeBytes', 'size_bytes'], 0),
+    requiredBytes: readNumber(preview, ['requiredBytes', 'required_bytes'], 0),
+    freeBytes: readNumber(preview, ['freeBytes', 'free_bytes'], 0),
+    enoughSpace: readBoolean(preview, ['enoughSpace', 'enough_space'], false),
+  }
+}
+
+export async function installCatalogBundle(
+  bundleKey: string,
+): Promise<{ status: ProDownloadsStatus; items: ProBundleInstallItem[] }> {
+  const payload = await requestJson(`/api/pro/downloads/bundles/${encodeURIComponent(bundleKey)}`, {
+    method: 'POST',
+  })
+  const record = asRecord(payload)
+  const bundleInstall = readRecord(record, ['bundleInstall'])
+  const items = readArray(bundleInstall, ['items']).map((value) => {
+    const item = asRecord(value)
+    return {
+      key: readString(item, ['key'], ''),
+      status: readString(item, ['status'], 'unknown'),
+      path: readString(item, ['path'], '') || undefined,
+      source: readString(item, ['source'], '') || undefined,
+      error: readString(item, ['error'], '') || undefined,
+      sharedSnapshotPreview: (() => {
+        const preview = readRecord(item, ['sharedSnapshotPreview', 'shared_snapshot_preview'])
+        if (!preview.source) return undefined
+        return {
+          source: readString(preview, ['source'], ''),
+          target: readString(preview, ['target'], ''),
+          sizeBytes: readNumber(preview, ['sizeBytes', 'size_bytes'], 0),
+          requiredBytes: readNumber(preview, ['requiredBytes', 'required_bytes'], 0),
+          freeBytes: readNumber(preview, ['freeBytes', 'free_bytes'], 0),
+          enoughSpace: readBoolean(preview, ['enoughSpace', 'enough_space'], false),
+        }
+      })(),
+    }
+  }).filter((item) => item.key)
+  return { status: normalizeDownloadsStatus(payload), items }
+}
+
+export interface ProLtxEngineInstall {
+  status: 'started' | 'already_running'
+  pid: number
+  logPath: string
+  message: string
+}
+
+export interface ProLtxEngineInstallStatus {
+  status: 'idle' | 'running' | 'finished'
+  running: boolean
+  exitCode?: number
+  pid?: number
+  logPath: string
+}
+
+export interface ProQwenNunchakuEngineInstall extends ProLtxEngineInstall {}
+
+export interface ProQwenNunchakuEngineInstallStatus extends ProLtxEngineInstallStatus {
+  runtimeReady: boolean
+  runtimeMessages: string[]
+}
+
+export async function installProQwenNunchakuEngine(): Promise<ProQwenNunchakuEngineInstall> {
+  const record = asRecord(await requestJson('/api/pro/engines/qwen_nunchaku/install', { method: 'POST' }))
+  return {
+    status: readString(record, ['status'], 'started') as ProQwenNunchakuEngineInstall['status'],
+    pid: readNumber(record, ['pid'], 0),
+    logPath: readString(record, ['logPath'], ''),
+    message: readString(record, ['message'], ''),
+  }
+}
+
+export async function fetchProQwenNunchakuEngineInstallStatus(signal?: AbortSignal): Promise<ProQwenNunchakuEngineInstallStatus> {
+  const record = asRecord(await requestJson('/api/pro/engines/qwen_nunchaku/install-status', { cache: 'no-store', signal }))
+  return {
+    status: readString(record, ['status'], 'idle') as ProQwenNunchakuEngineInstallStatus['status'],
+    running: Boolean(record.running),
+    exitCode: readNumber(record, ['exitCode'], -1),
+    pid: readNumber(record, ['pid'], 0),
+    logPath: readString(record, ['logPath'], ''),
+    runtimeReady: Boolean(record.runtimeReady),
+    runtimeMessages: Array.isArray(record.runtimeMessages) ? record.runtimeMessages.map(String) : [],
+  }
+}
+
+export async function installProLtxEngine(): Promise<ProLtxEngineInstall> {
+  const record = asRecord(await requestJson('/api/pro/engines/ltx/install', { method: 'POST' }))
+  return {
+    status: readString(record, ['status'], 'started') as ProLtxEngineInstall['status'],
+    pid: readNumber(record, ['pid'], 0),
+    logPath: readString(record, ['logPath', 'log_path'], ''),
+    message: readString(record, ['message'], 'LTX engine setup started.'),
+  }
+}
+
+export async function fetchProLtxEngineInstallStatus(signal?: AbortSignal): Promise<ProLtxEngineInstallStatus> {
+  const record = asRecord(await requestJson('/api/pro/engines/ltx/install-status', { signal }))
+  const exitCode = readNumber(record, ['exitCode', 'exit_code'], Number.NaN)
+  const pid = readNumber(record, ['pid'], Number.NaN)
+  return {
+    status: readString(record, ['status'], 'idle') as ProLtxEngineInstallStatus['status'],
+    running: readBoolean(record, ['running'], false),
+    ...(Number.isFinite(exitCode) ? { exitCode } : {}),
+    ...(Number.isFinite(pid) ? { pid } : {}),
+    logPath: readString(record, ['logPath', 'log_path'], ''),
+  }
+}
+
 export async function fetchProLogs(signal?: AbortSignal): Promise<ProLogStatus> {
   const payload = await requestJson('/api/pro/logs', { signal })
   return normalizeLogStatus(payload)
@@ -562,6 +804,10 @@ export async function saveProSettings(
         height: settings.height,
         clipSkip: settings.clipSkip,
         saveImages: settings.saveImages,
+        ltxImageStrength: settings.ltxImageStrength,
+        ltxOffload: settings.ltxOffload,
+        ltxQuantization: settings.ltxQuantization,
+        ltxEnhancePrompt: settings.ltxEnhancePrompt,
       },
       ui: ui
         ? {
@@ -628,6 +874,7 @@ export async function saveProSettings(
             genlog: runtime.genlog,
             backend: runtime.backend,
             onnxProvider: runtime.onnxProvider,
+            onnxModelDir: runtime.onnxModelDir,
             attention: runtime.attention,
             xformers: runtime.xformers,
             optSdpAttention: runtime.optSdpAttention,
@@ -705,13 +952,30 @@ export interface AudioSetupComponent {
   id: string
   label: string
   ready: boolean
+  sharedReady?: boolean
   path: string
   missing: string[]
   error: string
 }
 
+export interface ProAudioModelChoice {
+  label: string
+  id: string
+  conditioningMode?: 'video-conditioned' | 'prompt-only'
+  available: boolean
+  unavailableReason: string
+  installed?: boolean
+  installable?: boolean
+  ready?: boolean
+  routeStatus?: string
+  resident?: boolean | null
+  setupRoute?: ProModelOption['setupRoute']
+}
+
 export interface ProAudioStatus {
   minimumReady: boolean
+  musicDependenciesReady: boolean
+  runtimeChecksPerformed: boolean
   installing: boolean
   musicReady: boolean
   sfxReady: boolean
@@ -725,6 +989,11 @@ export interface ProAudioStatus {
     music: string
     sfx: string
     videoAudio: string
+  }
+  models: {
+    music: ProAudioModelChoice[]
+    sfx: ProAudioModelChoice[]
+    videoAudio: ProAudioModelChoice[]
   }
   components: AudioSetupComponent[]
 }
@@ -755,11 +1024,145 @@ export interface ProAudioGenerateResult {
   infotext: string
 }
 
+export interface ProAudioProjectSummary {
+  project_id: string
+  name: string
+  updated_at: string
+  has_audio: boolean
+  audio_missing: boolean
+}
+
+export interface ProAudioProjectOptions {
+  prompt: string
+  kind: 'music' | 'sfx' | 'video_audio'
+  model_id: string
+  negative_prompt: string
+  duration_seconds: number
+  temperature: number
+  cfg_coef: number
+  top_k: number
+  steps: number
+  seed: number
+}
+
+export interface ProAudioProjectManifest {
+  schema_version: number
+  project_id: string
+  name: string
+  created_at: string
+  updated_at: string
+  options: ProAudioProjectOptions
+  track: {
+    track_id: string
+    asset_ref: string
+    source_name: string
+    prompt: string
+    model_id: string
+    kind: string
+    duration_seconds: number
+    sample_rate: number
+    license_notice: string | null
+    consent_status: string | null
+  } | null
+  audio_url: string
+}
+
+export interface ProAudioProjectSaveRequest {
+  name: string
+  project_id?: string | null
+  audio_path?: string | null
+  options: ProAudioProjectOptions
+  sample_rate: number
+  license_notice?: string | null
+  consent_status?: string | null
+}
+
+function normalizeAudioProject(value: unknown): ProAudioProjectManifest {
+  const record = asRecord(value)
+  const options = readRecord(record, ['options'])
+  const trackValue = record.track
+  const track = trackValue === null || trackValue === undefined ? null : (() => {
+    const item = asRecord(trackValue)
+    return {
+      track_id: readString(item, ['track_id'], ''),
+      asset_ref: readString(item, ['asset_ref'], ''),
+      source_name: readString(item, ['source_name'], ''),
+      prompt: readString(item, ['prompt'], ''),
+      model_id: readString(item, ['model_id'], ''),
+      kind: readString(item, ['kind'], 'music'),
+      duration_seconds: readNumber(item, ['duration_seconds'], 0),
+      sample_rate: readNumber(item, ['sample_rate'], 0),
+      license_notice: readProjectNullableString(item, 'license_notice'),
+      consent_status: readProjectNullableString(item, 'consent_status'),
+    }
+  })()
+  const kind = readString(options, ['kind'], 'music')
+  return {
+    schema_version: readNumber(record, ['schema_version'], 1),
+    project_id: readString(record, ['project_id'], ''),
+    name: readString(record, ['name'], ''),
+    created_at: readString(record, ['created_at'], ''),
+    updated_at: readString(record, ['updated_at'], ''),
+    options: {
+      prompt: readString(options, ['prompt'], ''),
+      kind: kind === 'sfx' || kind === 'video_audio' ? kind : 'music',
+      model_id: readString(options, ['model_id'], 'facebook/musicgen-small'),
+      negative_prompt: readString(options, ['negative_prompt'], ''),
+      duration_seconds: readNumber(options, ['duration_seconds'], 8),
+      temperature: readNumber(options, ['temperature'], 1),
+      cfg_coef: readNumber(options, ['cfg_coef'], 3),
+      top_k: readNumber(options, ['top_k'], 250),
+      steps: readNumber(options, ['steps'], 25),
+      seed: readNumber(options, ['seed'], -1),
+    },
+    track,
+    audio_url: audioOutputUrl(readString(record, ['audio_url'], '')),
+  }
+}
+
+function audioOutputUrl(value: string): string {
+  return value.startsWith('/api/pro/outputs/') ? `${API_BASE}${value}` : value
+}
+
+function readProjectNullableString(record: JsonRecord, key: string): string | null {
+  return typeof record[key] === 'string' ? record[key] as string : null
+}
+
+export async function fetchProAudioProjects(signal?: AbortSignal): Promise<ProAudioProjectSummary[]> {
+  const payload = asRecord(await requestJson('/api/pro/audio/projects', { signal }))
+  return readArray(payload, ['projects']).map((value) => {
+    const project = asRecord(value)
+    return {
+      project_id: readString(project, ['project_id'], ''),
+      name: readString(project, ['name'], ''),
+      updated_at: readString(project, ['updated_at'], ''),
+      has_audio: readBoolean(project, ['has_audio'], false),
+      audio_missing: readBoolean(project, ['audio_missing'], false),
+    }
+  }).filter((project) => /^[0-9a-f]{32}$/i.test(project.project_id))
+}
+
+export async function saveProAudioProject(request: ProAudioProjectSaveRequest, signal?: AbortSignal): Promise<ProAudioProjectManifest> {
+  const value = await requestJson('/api/pro/audio/projects', {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  return normalizeAudioProject(value)
+}
+
+export async function loadProAudioProject(projectId: string, signal?: AbortSignal): Promise<ProAudioProjectManifest> {
+  if (!/^[0-9a-f]{32}$/i.test(projectId)) throw new Error('Invalid audio project ID.')
+  return normalizeAudioProject(await requestJson(`/api/pro/audio/projects/${encodeURIComponent(projectId)}`, { signal }))
+}
+
 function normalizeAudioStatus(value: unknown): ProAudioStatus {
   const record = asRecord(value)
   const defaults = readRecord(record, ['defaults'])
   return {
     minimumReady: readBoolean(record, ['minimumReady', 'minimum_ready'], false),
+    musicDependenciesReady: readBoolean(record, ['musicDependenciesReady', 'music_dependencies_ready'], false),
+    runtimeChecksPerformed: readBoolean(record, ['runtimeChecksPerformed', 'runtime_checks_performed'], false),
     installing: readBoolean(record, ['installing'], false),
     musicReady: readBoolean(record, ['musicReady', 'music_ready'], false),
     sfxReady: readBoolean(record, ['sfxReady', 'sfx_ready'], false),
@@ -774,18 +1177,43 @@ function normalizeAudioStatus(value: unknown): ProAudioStatus {
       sfx: readString(defaults, ['sfx'], 'mmaudio:small_16k'),
       videoAudio: readString(defaults, ['videoAudio', 'video_audio'], 'mmaudio:small_16k'),
     },
+    models: {
+      music: normalizeAudioModelChoices(record.models, 'music'),
+      sfx: normalizeAudioModelChoices(record.models, 'sfx'),
+      videoAudio: normalizeAudioModelChoices(record.models, 'videoAudio'),
+    },
     components: readArray(record, ['components']).map((item) => {
       const component = asRecord(item)
       return {
         id: readString(component, ['id'], ''),
         label: readString(component, ['label'], 'Audio component'),
         ready: readBoolean(component, ['ready'], false),
+        ...(typeof component.sharedReady === 'boolean' ? { sharedReady: component.sharedReady } : {}),
         path: readString(component, ['path'], ''),
         missing: readArray(component, ['missing']).map((entry) => `${entry}`),
         error: readString(component, ['error'], ''),
       }
     }),
   }
+}
+
+function normalizeAudioModelChoices(value: unknown, key: 'music' | 'sfx' | 'videoAudio'): ProAudioModelChoice[] {
+  const choices = readArray(asRecord(value), [key]).map((item) => {
+    const choice = asRecord(item)
+    return {
+      label: readString(choice, ['label'], ''),
+      id: readString(choice, ['id', 'modelId', 'model_id'], ''),
+      available: readBoolean(choice, ['available'], true),
+      unavailableReason: readString(choice, ['unavailableReason', 'unavailable_reason'], ''),
+      ...(typeof choice.installed === 'boolean' ? { installed: choice.installed } : {}),
+      ...(typeof choice.installable === 'boolean' ? { installable: choice.installable } : {}),
+      ...(typeof choice.ready === 'boolean' ? { ready: choice.ready } : {}),
+      ...(typeof choice.routeStatus === 'string' ? { routeStatus: choice.routeStatus } : {}),
+      ...(typeof choice.resident === 'boolean' ? { resident: choice.resident } : ('resident' in choice && choice.resident === null ? { resident: null } : {})),
+      ...(normalizeSetupRoute(choice.setupRoute) ? { setupRoute: normalizeSetupRoute(choice.setupRoute) } : {}),
+    }
+  }).filter((choice) => choice.label && choice.id)
+  return choices
 }
 
 export async function fetchProAudioStatus(signal?: AbortSignal): Promise<ProAudioStatus> {
@@ -796,6 +1224,101 @@ export async function fetchProAudioStatus(signal?: AbortSignal): Promise<ProAudi
 export async function installMinimumProAudio(signal?: AbortSignal): Promise<ProAudioStatus> {
   const payload = await requestJson('/api/pro/audio/setup/minimum', { method: 'POST', signal })
   return normalizeAudioStatus(payload)
+}
+
+export async function installProMMAudioVariant(variant: string, signal?: AbortSignal): Promise<ProAudioStatus> {
+  const allowed = new Set(['small_16k', 'large_44k_v2', 'large_44k', 'medium_44k', 'small_44k'])
+  if (!allowed.has(variant)) throw new Error(`Unsupported MMAudio variant: ${variant}`)
+  const payload = await requestJson(`/api/pro/audio/setup/mmaudio/${encodeURIComponent(variant)}`, { method: 'POST', signal })
+  return normalizeAudioStatus(payload)
+}
+
+export async function installProMusicGenVariant(variant: string, signal?: AbortSignal): Promise<ProAudioStatus> {
+  const allowed = new Set(['small', 'medium', 'melody', 'stereo-small'])
+  if (!allowed.has(variant)) throw new Error(`Unsupported MusicGen variant: ${variant}`)
+  const payload = await requestJson(`/api/pro/audio/setup/musicgen/${encodeURIComponent(variant)}`, { method: 'POST', signal })
+  return normalizeAudioStatus(payload)
+}
+
+export type ProSetupActionResult = ProAudioStatus | ProLtxEngineInstall | ProQwenNunchakuEngineInstall
+
+/** Execute only setup actions declared by the route manifest. */
+export async function runProSetupAction(action: string, selectedModelId = ''): Promise<ProSetupActionResult> {
+  if (action === 'POST /api/pro/engines/ltx/install') {
+    return installProLtxEngine()
+  }
+  if (action === 'POST /api/pro/engines/qwen_nunchaku/install') {
+    return installProQwenNunchakuEngine()
+  }
+  if (action === 'POST /api/pro/audio/setup/minimum') {
+    return installMinimumProAudio()
+  }
+  const variantAction = action.match(/^POST \/api\/pro\/audio\/setup\/(mmaudio|musicgen)\/([a-z0-9_-]+)$/i)
+  if (variantAction) {
+    const [, family, variant] = variantAction
+    return family.toLowerCase() === 'mmaudio'
+      ? installProMMAudioVariant(variant)
+      : installProMusicGenVariant(variant)
+  }
+  const templateAction = action.match(/^POST \/api\/pro\/audio\/setup\/(mmaudio)\/\{variant\}$/i)
+  if (templateAction) {
+    const [, family] = templateAction
+    const modelPrefix = family.toLowerCase() === 'mmaudio' ? 'mmaudio:' : ''
+    if (!modelPrefix || !selectedModelId.startsWith(modelPrefix)) {
+      throw new Error(`The selected model does not match setup action ${action}.`)
+    }
+    return installProMMAudioVariant(selectedModelId.slice(modelPrefix.length))
+  }
+  throw new Error(`Unsupported model setup action: ${action || '(missing)'}`)
+}
+
+export interface ProAudioPrepareResult {
+  kind: 'music' | 'sfx'
+  modelId: string
+  ready: boolean
+  resident: boolean | null
+  routeStatus?: string
+  detail?: string
+}
+
+export async function prepareProAudioModel(
+  kind: 'music' | 'sfx',
+  modelId: string,
+  signal?: AbortSignal,
+): Promise<ProAudioPrepareResult> {
+  const payload = await requestJson('/api/pro/audio/prepare', {
+    method: 'POST',
+    signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, modelId }),
+  })
+  const record = asRecord(payload)
+  return {
+    kind,
+    modelId: readString(record, ['modelId', 'model_id'], modelId),
+    ready: readBoolean(record, ['ready'], false),
+    resident: typeof record.resident === 'boolean' ? record.resident : null,
+    routeStatus: readString(record, ['routeStatus', 'route_status'], ''),
+    detail: readString(record, ['detail'], ''),
+  }
+}
+
+export async function prepareVideoLabAudioModel(modelId: string): Promise<ProAudioPrepareResult> {
+  const kind = modelId.startsWith('mmaudio:') ? 'sfx' : 'music'
+  const payload = await requestJson('/api/pro/video-lab/prepare-audio', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, modelId }),
+  })
+  const record = asRecord(payload)
+  return {
+    kind,
+    modelId: readString(record, ['modelId', 'model_id'], modelId),
+    ready: readBoolean(record, ['ready'], false),
+    resident: typeof record.resident === 'boolean' ? record.resident : null,
+    routeStatus: readString(record, ['routeStatus', 'route_status'], ''),
+    detail: readString(record, ['detail'], ''),
+  }
 }
 
 export async function generateProAudio(
@@ -813,7 +1336,7 @@ export async function generateProAudio(
     status: readString(record, ['status'], ''),
     message: readString(record, ['message'], ''),
     outputPath: readString(record, ['outputPath', 'output_path'], ''),
-    url: readString(record, ['url'], ''),
+    url: audioOutputUrl(readString(record, ['url'], '')),
     prompt: readString(record, ['prompt'], ''),
     kind: readString(record, ['kind'], ''),
     modelId: readString(record, ['modelId', 'model_id'], ''),
@@ -844,7 +1367,7 @@ export interface VideoLabStatus {
     help: string
   }
   rife: { available: boolean; checkpoints: string[] }
-  audio: { videoAudioModels: string[] }
+  audio: { videoAudioModels: string[]; modelChoices: ProAudioModelChoice[]; defaultModelId: string; ready: boolean; musicGenReady: boolean }
   extend: { available: boolean; note: string }
 }
 
@@ -879,6 +1402,25 @@ export async function fetchVideoLabStatus(signal?: AbortSignal): Promise<VideoLa
     },
     audio: {
       videoAudioModels: readArray(audio, ['videoAudioModels']).map((item) => `${item}`),
+      defaultModelId: readString(audio, ['defaultModelId'], 'mmaudio:small_16k'),
+      modelChoices: readArray(audio, ['modelChoices']).map((item) => {
+        const choice = asRecord(item)
+      return {
+          label: readString(choice, ['label'], readString(choice, ['id'], 'Audio model')),
+          id: readString(choice, ['id'], ''),
+          ...(choice.conditioningMode === 'video-conditioned' || choice.conditioningMode === 'prompt-only'
+            ? { conditioningMode: choice.conditioningMode as ProAudioModelChoice['conditioningMode'] }
+            : {}),
+          available: readBoolean(choice, ['available'], false),
+          unavailableReason: readString(choice, ['unavailableReason', 'unavailable_reason'], ''),
+          installed: readBoolean(choice, ['installed'], false),
+          installable: readBoolean(choice, ['installable'], false),
+          ready: readBoolean(choice, ['ready'], false),
+          setupRoute: normalizeSetupRoute(choice.setupRoute ?? choice.setup_route),
+        }
+      }).filter((choice) => choice.id),
+      ready: readBoolean(audio, ['ready'], false),
+      musicGenReady: readBoolean(audio, ['musicGenReady', 'music_gen_ready'], false),
     },
     extend: {
       available: readBoolean(extend, ['available'], false),
@@ -918,12 +1460,14 @@ function normalizeModelSortResult(value: unknown): ProModelSortResult {
   const counts = readRecord(record, ['counts'])
   return {
     status: readString(record, ['status'], 'completed'),
+    planId: readString(record, ['planId', 'plan_id'], ''),
     uploadedPath: readString(record, ['uploadedPath', 'uploaded_path'], ''),
     uploadedBytes: readNumber(record, ['uploadedBytes', 'uploaded_bytes'], 0),
     actions: readArray(record, ['actions']).map(normalizeModelSortAction),
     counts: {
       total: readNumber(counts, ['total'], 0),
       moved: readNumber(counts, ['moved'], 0),
+      planned: readNumber(counts, ['planned'], 0),
       left: readNumber(counts, ['left'], 0),
       inventoryCount: readNumber(counts, ['inventoryCount', 'inventory_count'], 0),
     },
@@ -962,9 +1506,117 @@ export async function uploadModelFile(file: File): Promise<ProModelSortResult> {
   return normalizeModelSortResult(text ? JSON.parse(text) : {})
 }
 
-export async function reorganizeModels(): Promise<ProModelSortResult> {
-  const response = await requestJson('/api/pro/models/reorganize', { method: 'POST' })
+export async function reorganizeModels(planId: string): Promise<ProModelSortResult> {
+  const response = await requestJson('/api/pro/models/reorganize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ planId }),
+  })
   return normalizeModelSortResult(response)
+}
+
+export async function planModelReorganize(): Promise<ProModelSortResult> {
+  const response = await requestJson('/api/pro/models/reorganize/plan')
+  return normalizeModelSortResult(response)
+}
+
+function normalizeModelRootsScanResult(value: unknown): ProModelRootsScanResult {
+  const response = asRecord(value)
+  return {
+    inventoryCount: readNumber(response, ['inventoryCount', 'inventory_count'], 0),
+    roots: readArray(response, ['roots']).map((value) => {
+      const root = asRecord(value)
+      const familyCounts = readRecord(root, ['familyCounts', 'family_counts'])
+      return {
+        label: readString(root, ['label'], 'Model root'),
+        path: readString(root, ['path'], ''),
+        status: readString(root, ['status'], 'unknown'),
+        assetCount: readNumber(root, ['assetCount', 'asset_count'], 0),
+        familyCounts: Object.fromEntries(Object.entries(familyCounts).map(([key, count]) => [key, Number(count) || 0])),
+        errorCount: readNumber(root, ['errorCount', 'error_count'], 0),
+        errors: readArray(root, ['errors']).map((error) => String(error)),
+      }
+    }),
+    assets: readArray(response, ['assets']).map((value) => {
+      const asset = asRecord(value)
+      const signals = readRecord(asset, ['signals'])
+      return {
+        path: readString(asset, ['path'], ''),
+        filename: readString(asset, ['filename'], ''),
+        family: readString(asset, ['family'], 'unknown'),
+        architecture: readString(asset, ['architecture'], 'unknown'),
+        currentSubdir: readString(asset, ['currentSubdir', 'current_subdir'], ''),
+        recommendedSubdir: readString(asset, ['recommendedSubdir', 'recommended_subdir'], ''),
+        placement: readString(asset, ['placement'], 'review'),
+        signals: Object.fromEntries(Object.entries(signals).map(([key, signal]) => [key, String(signal)])),
+      }
+    }),
+    assetsTruncated: readNumber(response, ['assetsTruncated', 'assets_truncated'], 0),
+    scanId: readString(response, ['scanId', 'scan_id'], ''),
+    offset: readNumber(response, ['offset'], 0),
+    limit: readNumber(response, ['limit'], 50),
+    matchedCount: readNumber(response, ['matchedCount', 'matched_count'], 0),
+    hasMore: readBoolean(response, ['hasMore', 'has_more'], false),
+    nextOffset: response.nextOffset == null && response.next_offset == null
+      ? null
+      : readNumber(response, ['nextOffset', 'next_offset'], 0),
+    query: readString(response, ['query'], ''),
+  }
+}
+
+export async function scanModelRoots(limit = 50): Promise<ProModelRootsScanResult> {
+  return normalizeModelRootsScanResult(await requestJson(`/api/pro/models/scan?limit=${encodeURIComponent(String(limit))}`, { method: 'POST' }))
+}
+
+export async function getModelRootsScanPage(
+  scanId: string,
+  options: { offset: number; limit?: number; query?: string },
+): Promise<ProModelRootsScanResult> {
+  const params = new URLSearchParams({
+    offset: String(options.offset),
+    limit: String(options.limit ?? 50),
+    query: options.query ?? '',
+  })
+  return normalizeModelRootsScanResult(await requestJson(`/api/pro/models/scan/${encodeURIComponent(scanId)}?${params.toString()}`))
+}
+
+export async function previewSharedModelPlacement(
+  scanId: string,
+  path: string,
+): Promise<ProModelRootPlacementPreview> {
+  const response = asRecord(await requestJson(`/api/pro/models/scan/${encodeURIComponent(scanId)}/placements/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scanId, path }),
+  }))
+  return {
+    planId: readString(response, ['planId', 'plan_id'], ''),
+    scanId: readString(response, ['scanId', 'scan_id'], scanId),
+    source: readString(response, ['source'], path),
+    destination: readString(response, ['destination'], ''),
+    sizeBytes: readNumber(response, ['sizeBytes', 'size_bytes'], 0),
+    requiredFreeBytes: readNumber(response, ['requiredFreeBytes', 'required_free_bytes'], 0),
+    availableFreeBytes: readNumber(response, ['availableFreeBytes', 'available_free_bytes'], 0),
+    collision: readBoolean(response, ['collision'], false),
+    canApply: readBoolean(response, ['canApply', 'can_apply'], false),
+    status: readString(response, ['status'], 'unknown'),
+    expiresInSeconds: readNumber(response, ['expiresInSeconds', 'expires_in_seconds'], 0),
+  }
+}
+
+export async function applySharedModelPlacement(planId: string): Promise<ProModelRootPlacementResult> {
+  const response = asRecord(await requestJson('/api/pro/models/scan/placements/apply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ planId }),
+  }))
+  return {
+    status: readString(response, ['status'], 'unknown'),
+    source: readString(response, ['source'], ''),
+    destination: readString(response, ['destination'], ''),
+    sourcePreserved: readBoolean(response, ['sourcePreserved', 'source_preserved'], false),
+    inventoryRefresh: readString(response, ['inventoryRefresh', 'inventory_refresh'], 'unknown'),
+  }
 }
 
 export async function runVideoLab(payload: Record<string, unknown>, signal?: AbortSignal): Promise<VideoLabResult> {
@@ -1032,6 +1684,51 @@ export interface ProEnhanceImageRequest {
   tileSize: number
   tileOverlap: number
   restoreFirst: boolean
+}
+
+export interface ProEnhanceModel {
+  id: string
+  title: string
+  filename: string
+  kind: 'upscaler' | 'restorer'
+  architecture: string
+  scale: number
+  installed: boolean
+  installAvailable: boolean
+}
+
+export async function fetchProEnhanceModels(signal?: AbortSignal): Promise<ProEnhanceModel[]> {
+  const payload = await requestJson('/api/pro/enhance/models', { signal })
+  return readArray(asRecord(payload), ['models']).map((item) => {
+    const record = asRecord(item)
+    const kind: ProEnhanceModel['kind'] = readString(record, ['kind'], '') === 'upscaler' ? 'upscaler' : 'restorer'
+    return {
+      id: readString(record, ['id'], ''),
+      title: readString(record, ['title'], ''),
+      filename: readString(record, ['filename'], ''),
+      kind,
+      architecture: readString(record, ['architecture'], ''),
+      scale: readNumber(record, ['scale'], 1),
+      installed: readBoolean(record, ['installed'], false),
+      installAvailable: readBoolean(record, ['installAvailable', 'install_available'], false),
+    }
+  }).filter((model) => model.id.length > 0)
+}
+
+export async function installProEnhanceModel(modelId: string): Promise<ProEnhanceModel> {
+  const payload = await requestJson(`/api/pro/enhance/models/${encodeURIComponent(modelId)}/install`, { method: 'POST' })
+  const record = asRecord(asRecord(payload).model)
+  const kind: ProEnhanceModel['kind'] = readString(record, ['kind'], '') === 'upscaler' ? 'upscaler' : 'restorer'
+  return {
+    id: readString(record, ['id'], modelId),
+    title: readString(record, ['title'], modelId),
+    filename: readString(record, ['filename'], ''),
+    kind,
+    architecture: readString(record, ['architecture'], ''),
+    scale: readNumber(record, ['scale'], 1),
+    installed: readBoolean(record, ['installed'], false),
+    installAvailable: readBoolean(record, ['installAvailable', 'install_available'], false),
+  }
 }
 
 export interface ProImageProcessResult {
@@ -1219,6 +1916,47 @@ export async function unloadProModel(): Promise<ProRuntimeStatus> {
   })
   const record = asRecord(payload)
   return normalizeRuntime(readUnknown(record, ['runtime']))
+}
+
+export async function loadProModel(modelId: string): Promise<ProRuntimeStatus> {
+  const payload = await requestJson('/api/pro/models/load', {
+    method: 'POST',
+    body: JSON.stringify({ modelId }),
+  })
+  const record = asRecord(payload)
+  return normalizeRuntime(readUnknown(record, ['runtime']))
+}
+
+export interface ProModelRoutePreparation {
+  ready: boolean
+  loaded: boolean
+  routeLifecycle: RouteLifecycleState
+}
+
+export async function prepareProVideoRoute(
+  request: ProGenerateRequest,
+): Promise<ProModelRoutePreparation> {
+  const payload = await requestJson('/api/pro/models/prepare', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...toGeneratePayload(request), mode: 'video' }),
+  })
+  const record = asRecord(payload)
+  const lifecycle = normalizeRuntime({ routeLifecycle: [readUnknown(record, ['routeLifecycle', 'route_lifecycle'])] })
+    .routeLifecycle[0]
+  return {
+    ready: readBoolean(record, ['ready'], false),
+    loaded: readBoolean(record, ['loaded'], false),
+    routeLifecycle: lifecycle ?? {
+      route: '',
+      modelId: request.modelId,
+      supportRevision: '',
+      status: 'unknown',
+      operationId: '',
+      resident: null,
+      detail: 'Video route preparation returned no lifecycle state.',
+    },
+  }
 }
 
 export function formatApiError(error: unknown): string {
@@ -1462,6 +2200,8 @@ async function postClientLog(path: string, payload: object): Promise<void> {
 }
 
 function toGeneratePayload(request: ProGenerateRequest): JsonRecord {
+  const ltxPipeline = ltxPipelineForModelId(request.modelId)
+  const isLtx = ltxPipeline !== undefined
   return {
     mode: request.mode,
     prompt: request.prompt,
@@ -1483,15 +2223,20 @@ function toGeneratePayload(request: ProGenerateRequest): JsonRecord {
     hr_steps: request.hiresSteps,
     hr_denoising_strength: request.hiresDenoise,
     hr_upscaler: request.hiresUpscaler,
-    frames: request.frames,
+    frames: isLtx ? ltxFrameCount(request.frames) : request.frames,
     fps: request.fps,
-    source_image_data_url: request.sourceImageDataUrl,
-    source_image_name: request.sourceImageName,
+    source_image_data_url: request.mode === 'video' ? request.sourceImageDataUrl || undefined : undefined,
+    source_image_name: request.mode === 'video' ? request.sourceImageName || undefined : undefined,
+    ltx_pipeline: ltxPipeline,
+    ltx_image_strength: isLtx && request.modelId !== 'ltx:diffusers_2b' ? request.ltxImageStrength : undefined,
+    ltx_offload: isLtx && request.modelId !== 'ltx:diffusers_2b' ? request.ltxOffload : undefined,
+    ltx_quantization: isLtx && request.modelId !== 'ltx:diffusers_2b' ? request.ltxQuantization : undefined,
+    ltx_enhance_prompt: isLtx && request.modelId !== 'ltx:diffusers_2b' ? request.ltxEnhancePrompt : undefined,
     sana_quantization: request.sanaQuantization,
     sana_vae_tiling: request.sanaVaeTiling,
     offload_text_encoder_after_encode: request.offloadTextEncoderAfterEncode,
     use_sage_attention: request.useSageAttention,
-    generate_audio: request.generateAudio,
+    generate_audio: isLtx ? undefined : request.generateAudio,
     wan_runtime_mode: request.wanRuntimeMode,
     high_noise_model_id: request.highNoiseModelId || undefined,
     low_noise_model_id: request.lowNoiseModelId || undefined,
@@ -1534,6 +2279,17 @@ function toGeneratePayload(request: ProGenerateRequest): JsonRecord {
   }
 }
 
+function ltxPipelineForModelId(modelId: string): string | undefined {
+  if (modelId === 'ltx:diffusers_2b') return 'diffusers_2b'
+  if (modelId === 'ltx:distilled') return 'distilled'
+  if (modelId === 'ltx:one_stage') return 'one_stage'
+  return undefined
+}
+
+function ltxFrameCount(frames: number): number {
+  return Math.max(9, Math.min(257, Math.round((frames - 1) / 8) * 8 + 1))
+}
+
 function normalizeBootstrap(value: unknown): ProBootstrap {
   const record = asRecord(value)
   const fallback = getFallbackBootstrap()
@@ -1559,7 +2315,8 @@ function normalizeBootstrap(value: unknown): ProBootstrap {
     .filter(isPresent)
 
   const ratios = aspectRatios.length > 0 ? aspectRatios : fallback.aspectRatios
-  const modelOptions = models.length > 0 ? models : fallback.models
+  const modelPayload = readUnknown(record, ['models', 'checkpoints'])
+  const modelOptions = modelPayload === undefined ? fallback.models : models
   const samplerOptions = samplers.length > 0 ? samplers : fallback.samplers
   const defaults = normalizeSettings(defaultsRecord, fallback.defaults, ratios, modelOptions, samplerOptions)
 
@@ -1645,6 +2402,14 @@ function normalizeDownloadsStatus(value: unknown): ProDownloadsStatus {
     bundles,
     catalog,
     civitaiLinks,
+    catalogAction: readRecord(record, ['catalogAction']).key
+      ? {
+          key: readString(readRecord(record, ['catalogAction']), ['key'], ''),
+          status: readString(readRecord(record, ['catalogAction']), ['status'], ''),
+          path: readString(readRecord(record, ['catalogAction']), ['path'], '') || undefined,
+          source: readString(readRecord(record, ['catalogAction']), ['source'], '') || undefined,
+        }
+      : undefined,
     counts: {
       categories: readNumber(counts, ['categories'], categories.length),
       catalog: readNumber(counts, ['catalog', 'items'], catalog.length),
@@ -1752,6 +2517,7 @@ function normalizeSettingsStatus(value: unknown): ProSettingsStatus {
       genlog: readBoolean(runtime, ['genlog'], false),
       backend: readString(runtime, ['backend'], 'unknown'),
       onnxProvider: readString(runtime, ['onnxProvider', 'onnx_provider'], 'auto'),
+      onnxModelDir: readString(runtime, ['onnxModelDir', 'onnx_model_dir'], ''),
       attention: readString(runtime, ['attention'], 'unknown'),
       xformers: readBoolean(runtime, ['xformers'], false),
       optSdpAttention: readBoolean(runtime, ['optSdpAttention', 'opt_sdp_attention'], false),
@@ -1833,6 +2599,7 @@ function normalizeReadinessStatus(value: unknown, fallback: ProReadinessStatus):
     ),
     total: readNumber(record, ['total'], sumReadinessCounts(counts)),
     error: readString(record, ['error'], fallback.error),
+    sourceMessage: readString(record, ['sourceMessage', 'source_message'], ''),
   }
 }
 
@@ -1950,11 +2717,15 @@ function normalizeDownloadCatalogItem(value: unknown) {
     filename: readOptionalString(record, ['filename']),
     url: readOptionalString(record, ['url']),
     notes: readOptionalString(record, ['notes']),
+    platformBlocked: readBoolean(record, ['platformBlocked', 'platform_blocked'], false),
+    platformBlockReason: readOptionalString(record, ['platformBlockReason', 'platform_block_reason']),
     snapshot: readBoolean(record, ['snapshot'], false),
     installed: readBoolean(record, ['installed'], false),
+    sharedSnapshotAvailable: readBoolean(record, ['sharedSnapshotAvailable', 'shared_snapshot_available'], false),
     destination: readString(record, ['destination', 'folder', 'path'], ''),
     engineId: normalizeEngineId(readUnknown(record, ['engineId', 'engine_id', 'engine'])),
     engineLabel: readOptionalString(record, ['engineLabel', 'engine_label']),
+    catalogUrl: readOptionalString(record, ['catalogUrl', 'catalog_url', 'hfUrl', 'hf_url']),
     hfUrl: readOptionalString(record, ['hfUrl', 'hf_url']),
     requiresAuth: readBoolean(record, ['requiresAuth', 'requires_auth'], false),
     canDownload: readBoolean(record, ['canDownload', 'can_download'], false),
@@ -2020,6 +2791,27 @@ function normalizeRuntime(value: unknown): ProRuntimeStatus {
     resources,
     job: normalizeRuntimeJob(readRecord(record, ['job']), fallback.job),
     loadedModel: normalizeLoadedModel(loadedModelRecord, fallback.loadedModel),
+    modelLoad: (() => {
+      const modelLoad = readRecord(record, ['modelLoad', 'model_load'])
+      return {
+        status: readString(modelLoad, ['status'], fallback.modelLoad.status),
+        modelId: readString(modelLoad, ['modelId', 'model_id'], fallback.modelLoad.modelId),
+        detail: readString(modelLoad, ['detail', 'message'], fallback.modelLoad.detail),
+      }
+    })(),
+    routeLifecycle: readArray(record, ['routeLifecycle', 'route_lifecycle']).map((item): RouteLifecycleState => {
+      const route = asRecord(item)
+      const resident = readUnknown(route, ['resident'])
+      return {
+        route: readString(route, ['route'], ''),
+        modelId: readString(route, ['modelId', 'model_id'], ''),
+        supportRevision: readString(route, ['supportRevision', 'support_revision'], ''),
+        status: readString(route, ['status'], 'unknown'),
+        operationId: readString(route, ['operationId', 'operation_id'], ''),
+        resident: typeof resident === 'boolean' ? resident : null,
+        detail: readString(route, ['detail'], ''),
+      }
+    }),
   }
 }
 
@@ -2067,6 +2859,7 @@ function normalizeGenerateResult(
           ? 'Generation complete.'
           : 'Generation submitted.',
     ),
+    verificationStatus: normalizeVerificationStatus(readUnknown(record, ['verificationStatus', 'verification_status'])),
     output: directOutput,
     recentOutputs: sessionOutputs,
     progress: readArray(record, ['progress', 'events']).map(normalizeProgressEvent),
@@ -2076,6 +2869,36 @@ function normalizeGenerateResult(
     quantization: readOptionalString(record, ['quantization']),
     vaeTiling: readOptionalString(record, ['vaeTiling', 'vae_tiling']),
   }
+}
+
+function normalizeCheckpointPathStatus(value: unknown): ProModelOption['checkpointPathStatus'] {
+  return value === 'present' || value === 'missing' ? value : 'unknown'
+}
+
+function normalizeRouteStatus(value: unknown): ProModelOption['routeStatus'] {
+  return value === 'request-eligible' || value === 'blocked' ? value : 'unknown'
+}
+
+function normalizeSetupRoute(value: unknown): ProModelOption['setupRoute'] {
+  if (!value || typeof value !== 'object') return undefined
+  const route = asRecord(value)
+  const routeKey = readString(route, ['routeKey', 'route_key'], '')
+  const modality = readString(route, ['modality'], '')
+  const preflightKey = readString(route, ['preflightKey', 'preflight_key'], '')
+  if (!routeKey || !['image', 'video', 'audio'].includes(modality) || !preflightKey) return undefined
+  return {
+    routeKey,
+    modality: modality as 'image' | 'video' | 'audio',
+    supportState: readString(route, ['supportState', 'support_state'], 'supported'),
+    preflightKey,
+    setupBundleKey: readOptionalString(route, ['setupBundleKey', 'setup_bundle_key']),
+    setupAction: readOptionalString(route, ['setupAction', 'setup_action']),
+    limitation: readOptionalString(route, ['limitation']),
+  }
+}
+
+function normalizeVerificationStatus(value: unknown): ProGenerateResult['verificationStatus'] {
+  return value === 'verified' ? 'verified' : 'unverified'
 }
 
 function normalizeImportedGenerationMetadata(value: unknown): ImportedGenerationMetadata {
@@ -2168,6 +2991,10 @@ function normalizeSettings(
     fps: readNumber(record, ['fps'], fallback.fps),
     sourceImageDataUrl: readString(record, ['source_image_data_url', 'sourceImageDataUrl'], fallback.sourceImageDataUrl),
     sourceImageName: readString(record, ['source_image_name', 'sourceImageName'], fallback.sourceImageName),
+    ltxImageStrength: readNumber(record, ['ltx_image_strength', 'ltxImageStrength'], fallback.ltxImageStrength),
+    ltxOffload: readString(record, ['ltx_offload', 'ltxOffload'], fallback.ltxOffload),
+    ltxQuantization: readString(record, ['ltx_quantization', 'ltxQuantization'], fallback.ltxQuantization),
+    ltxEnhancePrompt: readBoolean(record, ['ltx_enhance_prompt', 'ltxEnhancePrompt'], fallback.ltxEnhancePrompt),
     sanaQuantization: readString(record, ['sana_quantization', 'sanaQuantization'], fallback.sanaQuantization),
     sanaVaeTiling: readString(record, ['sana_vae_tiling', 'sanaVaeTiling', 'vae_tiling', 'vaeTiling'], fallback.sanaVaeTiling),
     offloadTextEncoderAfterEncode: readBoolean(
@@ -2271,10 +3098,29 @@ function normalizeModel(value: unknown): ProModelOption | null {
     status: readOptionalString(record, ['status', 'state']),
     reason: readOptionalString(record, ['reason']),
     suggestedAction: readOptionalString(record, ['suggestedAction', 'suggested_action']),
+    setupBundleKey: readOptionalString(record, ['setupBundleKey', 'setup_bundle_key']),
+    setupRoute: normalizeSetupRoute(record.setupRoute ?? record.setup_route),
+    generationModes: (() => {
+      const modes = readRecord(record, ['generationModes', 'generation_modes'])
+      if (Object.keys(modes).length === 0) return undefined
+      return {
+        textToVideo: readBoolean(modes, ['textToVideo', 'text_to_video'], false),
+        imageToVideo: readBoolean(modes, ['imageToVideo', 'image_to_video'], false),
+      }
+    })(),
+    checkpointPathStatus: normalizeCheckpointPathStatus(readUnknown(record, ['checkpointPathStatus', 'checkpoint_path_status'])),
+    routeStatus: normalizeRouteStatus(readUnknown(record, ['routeStatus', 'route_status'])),
     estVramGb: readNumber(record, ['estVramGb', 'est_vram_gb'], 0),
     heavyFor12Gb: Boolean(readUnknown(record, ['heavyFor12Gb', 'heavy_for_12gb'])),
-    generationPreset: normalizeModelPreset(readRecord(record, ['generationPreset', 'generation_preset'])),
+    generationPreset: normalizeModelPreset(readRecord(record, ['generationPreset', 'generation_preset'])) ?? ltxGenerationPreset(id),
   }
+}
+
+function ltxGenerationPreset(modelId: string): Partial<GenerationSettings> | undefined {
+  if (modelId === 'ltx:diffusers_2b') return { width: 768, height: 512, steps: 1, cfgScale: 3 }
+  if (modelId === 'ltx:distilled') return { width: 768, height: 512, steps: 20, cfgScale: 1 }
+  if (modelId === 'ltx:one_stage') return { width: 768, height: 512, steps: 20, cfgScale: 1 }
+  return undefined
 }
 
 function normalizeModelPreset(record: JsonRecord): Partial<GenerationSettings> | undefined {
@@ -2425,6 +3271,7 @@ function normalizeResourceMetric(record: JsonRecord, fallback: ResourceMetric): 
 
 function normalizeLoadedModel(record: JsonRecord, fallback: LoadedModelInfo): LoadedModelInfo {
   return {
+    id: readString(record, ['id', 'modelId', 'model_id'], fallback.id),
     name: readString(record, ['name', 'title'], fallback.name),
     type: readString(record, ['type'], fallback.type),
     baseModel: readString(record, ['base_model', 'baseModel'], fallback.baseModel),
@@ -2567,8 +3414,11 @@ function normalizeEngineId(value: unknown): ProModelOption['engineId'] {
     value === 'flux' ||
     value === 'flux_fill' ||
     value === 'flux2' ||
+    value === 'flux2_generic' ||
+    value === 'krea2' ||
     value === 'sana_video' ||
     value === 'wan' ||
+    value === 'ltx' ||
     value === 'sd15' ||
     value === 'sdxl' ||
     value === 'sd35' ||

@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AIWF Studio for Windows: native shell (C++/WinRT + WinUI 3, Windows App SDK 1.7, MSVC v143).
+  Unpackaged and self-contained: the Windows App SDK runtime ships next to the exe, so nothing has to be
+  installed system-wide. Build with build.ps1 (restore + MSBuild). See ..\DESIGN.md.
+-->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- package props come first so the WinUI/CppWinRT toolchain sees them -->
+  <Import Project="..\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.props" Condition="Exists('..\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.props')" />
+  <Import Project="..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.9169\build\Microsoft.Windows.SDK.BuildTools.props" Condition="Exists('..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.9169\build\Microsoft.Windows.SDK.BuildTools.props')" />
+  <Import Project="..\packages\Microsoft.WindowsAppSDK.1.7.260224002\build\native\Microsoft.WindowsAppSDK.props" Condition="Exists('..\packages\Microsoft.WindowsAppSDK.1.7.260224002\build\native\Microsoft.WindowsAppSDK.props')" />
+
+  <PropertyGroup Label="Globals">
+    <CppWinRTOptimized>true</CppWinRTOptimized>
+    <CppWinRTRootNamespaceAutoMerge>true</CppWinRTRootNamespaceAutoMerge>
+    <ProjectGuid>{1A04C2FE-B364-4D7E-8AE3-BBDE78FA75E7}</ProjectGuid>
+    <ProjectName>AIWF.Desktop</ProjectName>
+    <RootNamespace>AiwfDesktop</RootNamespace>
+    <DefaultLanguage>en-US</DefaultLanguage>
+    <MinimumVisualStudioVersion>16.0</MinimumVisualStudioVersion>
+    <AppxPackage>false</AppxPackage>
+    <!-- plain Win32 desktop project: these Build Tools have no UWP ("Windows Store") application type,
+         and a WinUI 3 desktop app does not need it -->
+    <!-- "false" makes the XAML compiler emit desktop (Win32) code instead of UWP code -->
+    <AppContainerApplication>false</AppContainerApplication>
+    <!-- pinned: "10.0" asks MSBuild for the latest registered SDK, which Build Tools-only machines may not report -->
+    <WindowsTargetPlatformVersion>10.0.22621.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformMinVersion>10.0.19041.0</WindowsTargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <!-- plain exe (no MSIX identity) with the Windows App SDK runtime copied beside it -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <TargetName>AIWFStudio</TargetName>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <DesktopCompatible>true</DesktopCompatible>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <LinkIncremental>true</LinkIncremental>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Release'" Label="Configuration">
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)bin\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)obj\$(Configuration)\</IntDir>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
+      <WarningLevel>Level4</WarningLevel>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>%(AdditionalOptions) /bigobj /utf-8</AdditionalOptions>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- XAML-generated sources (obj\...\Generated Files) include our page headers by bare name -->
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <!-- desktop APIs: engine supervisor (CreateProcess, Job Objects, TCP owner table), GPU monitor
+           (PDH counters, DXGI adapter LUID), known folders and shell launching -->
+      <AdditionalDependencies>kernel32.lib;user32.lib;shell32.lib;advapi32.lib;ole32.lib;pdh.lib;dxgi.lib;iphlpapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile><PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile><PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+    <Link><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences></Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <Manifest Include="app.manifest" />
+    <!-- exe icon and version information -->
+    <ResourceCompile Include="app.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- the window and one page per task (see ..\DESIGN.md section 5) -->
+    <ApplicationDefinition Include="App.xaml" />
+    <Page Include="MainWindow.xaml" />
+    <Page Include="HomePage.xaml" />
+    <Page Include="ChatPage.xaml" />
+    <Page Include="CreatePage.xaml" />
+    <Page Include="DatasetsPage.xaml" />
+    <Page Include="TrainPage.xaml" />
+    <Page Include="ProjectsPage.xaml" />
+    <Page Include="SettingsPage.xaml" />
+    <Page Include="SetupPage.xaml" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- this workstation's engine list, copied next to AIWFStudio.exe (a per-user copy in
+         %LOCALAPPDATA%\AIWF Studio overrides it) -->
+    <CopyFileToFolders Include="engines.json">
+      <DestinationFolders>$(OutDir)</DestinationFolders>
+    </CopyFileToFolders>
+    <!-- the window sets this icon on its title bar and taskbar button at startup -->
+    <CopyFileToFolders Include="Assets\AIWF.ico">
+      <DestinationFolders>$(OutDir)Assets</DestinationFolders>
+    </CopyFileToFolders>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- services: plain C++ shared by every page -->
+    <ClInclude Include="Services\AppState.h" />
+    <ClInclude Include="Services\EngineSupervisor.h" />
+    <ClInclude Include="Services\GpuMonitor.h" />
+    <ClInclude Include="Services\Http.h" />
+    <ClInclude Include="Services\Paths.h" />
+    <ClInclude Include="Services\Ui.h" />
+    <ClCompile Include="Services\AppState.cpp" />
+    <ClCompile Include="Services\EngineSupervisor.cpp" />
+    <ClCompile Include="Services\GpuMonitor.cpp" />
+    <ClCompile Include="Services\Http.cpp" />
+    <ClCompile Include="Services\Paths.cpp" />
+    <ClCompile Include="Services\Ui.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="pch.h" />
+    <ClInclude Include="App.xaml.h"><DependentUpon>App.xaml</DependentUpon></ClInclude>
+    <ClInclude Include="MainWindow.xaml.h"><DependentUpon>MainWindow.xaml</DependentUpon></ClInclude>
+    <ClInclude Include="HomePage.xaml.h"><DependentUpon>HomePage.xaml</DependentUpon></ClInclude>
+    <ClInclude Include="ChatPage.xaml.h"><DependentUpon>ChatPage.xaml</DependentUpon></ClInclude>
+    <ClInclude Include="CreatePage.xaml.h"><DependentUpon>CreatePage.xaml</DependentUpon></ClInclude>
+    <ClInclude Include="DatasetsPage.xaml.h"><DependentUpon>DatasetsPage.xaml</DependentUpon></ClInclude>
+    <ClInclude Include="TrainPage.xaml.h"><DependentUpon>TrainPage.xaml</DependentUpon></ClInclude>
+    <ClInclude Include="ProjectsPage.xaml.h"><DependentUpon>ProjectsPage.xaml</DependentUpon></ClInclude>
+    <ClInclude Include="SettingsPage.xaml.h"><DependentUpon>SettingsPage.xaml</DependentUpon></ClInclude>
+    <ClInclude Include="SetupPage.xaml.h"><DependentUpon>SetupPage.xaml</DependentUpon></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="pch.cpp"><PrecompiledHeader>Create</PrecompiledHeader></ClCompile>
+    <ClCompile Include="App.xaml.cpp"><DependentUpon>App.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="MainWindow.xaml.cpp"><DependentUpon>MainWindow.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="HomePage.xaml.cpp"><DependentUpon>HomePage.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="ChatPage.xaml.cpp"><DependentUpon>ChatPage.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="CreatePage.xaml.cpp"><DependentUpon>CreatePage.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="DatasetsPage.xaml.cpp"><DependentUpon>DatasetsPage.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="TrainPage.xaml.cpp"><DependentUpon>TrainPage.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="ProjectsPage.xaml.cpp"><DependentUpon>ProjectsPage.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="SettingsPage.xaml.cpp"><DependentUpon>SettingsPage.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="SetupPage.xaml.cpp"><DependentUpon>SetupPage.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <Midl Include="MainWindow.idl"><SubType>Code</SubType><DependentUpon>MainWindow.xaml</DependentUpon></Midl>
+    <Midl Include="HomePage.idl"><SubType>Code</SubType><DependentUpon>HomePage.xaml</DependentUpon></Midl>
+    <Midl Include="ChatPage.idl"><SubType>Code</SubType><DependentUpon>ChatPage.xaml</DependentUpon></Midl>
+    <Midl Include="CreatePage.idl"><SubType>Code</SubType><DependentUpon>CreatePage.xaml</DependentUpon></Midl>
+    <Midl Include="DatasetsPage.idl"><SubType>Code</SubType><DependentUpon>DatasetsPage.xaml</DependentUpon></Midl>
+    <Midl Include="TrainPage.idl"><SubType>Code</SubType><DependentUpon>TrainPage.xaml</DependentUpon></Midl>
+    <Midl Include="ProjectsPage.idl"><SubType>Code</SubType><DependentUpon>ProjectsPage.xaml</DependentUpon></Midl>
+    <Midl Include="SettingsPage.idl"><SubType>Code</SubType><DependentUpon>SettingsPage.xaml</DependentUpon></Midl>
+    <Midl Include="SetupPage.idl"><SubType>Code</SubType><DependentUpon>SetupPage.xaml</DependentUpon></Midl>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="..\packages\Microsoft.WindowsAppSDK.1.7.260224002\build\native\Microsoft.WindowsAppSDK.targets" Condition="Exists('..\packages\Microsoft.WindowsAppSDK.1.7.260224002\build\native\Microsoft.WindowsAppSDK.targets')" />
+    <Import Project="..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.9169\build\Microsoft.Windows.SDK.BuildTools.targets" Condition="Exists('..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.9169\build\Microsoft.Windows.SDK.BuildTools.targets')" />
+    <Import Project="..\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.targets" Condition="Exists('..\packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\Microsoft.Windows.CppWinRT.targets')" />
+    <Import Project="..\packages\Microsoft.Windows.ImplementationLibrary.1.0.250325.1\build\native\Microsoft.Windows.ImplementationLibrary.targets" Condition="Exists('..\packages\Microsoft.Windows.ImplementationLibrary.1.0.250325.1\build\native\Microsoft.Windows.ImplementationLibrary.targets')" />
+    <Import Project="..\packages\Microsoft.Web.WebView2.1.0.2903.40\build\native\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.2903.40\build\native\Microsoft.Web.WebView2.targets')" />
+    <!-- last: schedules the Windows App SDK XAML compiler inside this C++ build (see the file header) -->
+    <Import Project="DesktopBuildHooks.targets" />
+  </ImportGroup>
+</Project>

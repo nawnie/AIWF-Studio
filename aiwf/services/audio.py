@@ -4,16 +4,19 @@ import gc
 import importlib.util
 import json
 import logging
+import math
 import os
 import random
 import shutil
+import struct
 import subprocess
 import sys
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -21,10 +24,50 @@ from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.audio import AudioGenerationOptions, AudioGenerationResult, AudioMuxResult
 from aiwf.core.domain.engine import EngineTenant
 from aiwf.infrastructure.video.processing import VideoProcessor, _resolve_ffmpeg
+from aiwf.services.model_files import configured_model_roots
+from aiwf.services.route_lifecycle import support_revision
 
 logger = logging.getLogger(__name__)
 
+
+def _is_nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _is_complete_safetensors(path: Path) -> bool:
+    """Check the safetensors header and declared payload length without loading tensors."""
+    try:
+        with path.open("rb") as stream:
+            prefix = stream.read(8)
+            if len(prefix) != 8:
+                return False
+            header_length = struct.unpack("<Q", prefix)[0]
+            if header_length <= 0 or header_length > 100 * 1024 * 1024:
+                return False
+            header_bytes = stream.read(header_length)
+            if len(header_bytes) != header_length:
+                return False
+            header = json.loads(header_bytes.decode("utf-8"))
+            tensors = [value for key, value in header.items() if key != "__metadata__"]
+            if not tensors:
+                return False
+            offsets = sorted((int(item["data_offsets"][0]), int(item["data_offsets"][1])) for item in tensors)
+            data_bytes = path.stat().st_size - 8 - header_length
+            cursor = 0
+            for start, end in offsets:
+                if start != cursor or end < start:
+                    return False
+                cursor = end
+            return cursor == data_bytes
+    except (OSError, ValueError, KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, struct.error):
+        return False
+
+
 _MINIMUM_AUDIO_SETUP_LOCK = threading.Lock()
+_AUDIO_MODEL_OPERATION_LOCK = threading.Lock()
 _MUSICGEN_MINIMUM_FILES = (
     "config.json",
     "generation_config.json",
@@ -34,8 +77,35 @@ _MUSICGEN_MINIMUM_FILES = (
     "tokenizer.json",
     "tokenizer_config.json",
 )
+_MUSICGEN_VARIANTS = {
+    "small": "facebook/musicgen-small",
+    "medium": "facebook/musicgen-medium",
+    "melody": "facebook/musicgen-melody",
+    "stereo-small": "facebook/musicgen-stereo-small",
+}
 _MMAUDIO_SHARED_FILES = (
     Path("ext_weights") / "synchformer_state_dict.pth",
+)
+_MMAUDIO_CLIP_REPO = "apple/DFN5B-CLIP-ViT-H-14-384"
+_MMAUDIO_CLIP_REPO_CACHE = "models--apple--DFN5B-CLIP-ViT-H-14-384"
+_MMAUDIO_CLIP_REQUIRED_FILES = (
+    "open_clip_config.json",
+)
+_MMAUDIO_CLIP_WEIGHT_FILES = (
+    "open_clip_pytorch_model.safetensors",
+    "open_clip_pytorch_model.bin",
+)
+_MMAUDIO_CLIP_HUB_LAYOUTS = (
+    Path("hub"),
+    Path(".cache") / "huggingface" / "hub",
+    Path("audio") / "MMAudio" / ".cache" / "huggingface" / "hub",
+    Path("AIWF") / "mmaudio" / ".cache" / "huggingface" / "hub",
+    Path("AIWF") / "audio" / "MMAudio" / ".cache" / "huggingface" / "hub",
+)
+_MMAUDIO_CLIP_ALLOW_PATTERNS = (
+    "open_clip_config.json",
+    "open_clip_pytorch_model.safetensors",
+    "open_clip_pytorch_model.bin",
 )
 _MMAUDIO_16K_FILES = (
     Path("weights") / "mmaudio_small_16k.pth",
@@ -43,6 +113,90 @@ _MMAUDIO_16K_FILES = (
     Path("ext_weights") / "best_netG.pt",
     *_MMAUDIO_SHARED_FILES,
 )
+_MMAUDIO_INSTALLABLE_VARIANTS = (
+    "small_16k",
+    "large_44k_v2",
+    "large_44k",
+    "medium_44k",
+    "small_44k",
+)
+
+
+def _mmaudio_variant_files(variant: str) -> tuple[Path, ...]:
+    """Files required by the upstream MMAudio demo for one checkpoint variant."""
+    if variant == "small_16k":
+        return (
+            Path("weights") / "mmaudio_small_16k.pth",
+            *_MMAUDIO_16K_FILES[1:],
+        )
+    if variant in _MMAUDIO_INSTALLABLE_VARIANTS:
+        return (
+            Path("weights") / f"mmaudio_{variant}.pth",
+            Path("ext_weights") / "v1-44.pth",
+            *_MMAUDIO_SHARED_FILES,
+        )
+    return ()
+
+
+_MMAUDIO_SHARED_LAYOUTS = (
+    Path(),
+    Path("MMAudio"),
+    Path("audio") / "MMAudio",
+    Path("models") / "MMAudio",
+    Path("models") / "audio" / "MMAudio",
+    Path("engines") / "audio" / "MMAudio",
+)
+
+
+def _mmaudio_clip_cache_ready(cache_root: Path) -> bool:
+    """Check for the upstream OpenCLIP HF snapshot without loading model weights."""
+    try:
+        resolved_root = cache_root.resolve(strict=True)
+        repo_root = (resolved_root / _MMAUDIO_CLIP_REPO_CACHE).resolve(strict=True)
+        repo_root.relative_to(resolved_root)
+        revision_path = repo_root / "refs" / "main"
+        if not _mmaudio_cache_file_ready(revision_path, resolved_root):
+            return False
+        revision = revision_path.read_text(encoding="utf-8").strip()
+        if len(revision) != 40 or any(char not in "0123456789abcdefABCDEF" for char in revision):
+            return False
+        snapshot = (repo_root / "snapshots" / revision).resolve(strict=True)
+        snapshot.relative_to(resolved_root)
+        required_paths = [snapshot / name for name in _MMAUDIO_CLIP_REQUIRED_FILES]
+        weight_paths = [snapshot / name for name in _MMAUDIO_CLIP_WEIGHT_FILES]
+        if all(_mmaudio_cache_file_ready(path, resolved_root) for path in required_paths):
+            return any(_mmaudio_cache_file_ready(path, resolved_root) for path in weight_paths)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return False
+
+
+def _mmaudio_cache_file_ready(path: Path, cache_root: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(cache_root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return _is_nonempty_file(resolved)
+
+
+def _find_mmaudio_clip_hub_cache(model_roots: list[Path]) -> Path | None:
+    """Find a complete DFN5B OpenCLIP snapshot under configured model roots."""
+    for root in model_roots:
+        try:
+            resolved_root = root.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        for layout in _MMAUDIO_CLIP_HUB_LAYOUTS:
+            candidate = resolved_root / layout
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(resolved_root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if _mmaudio_clip_cache_ready(resolved):
+                return resolved
+    return None
 
 
 class AudioUnavailable(RuntimeError):
@@ -52,11 +206,19 @@ class AudioUnavailable(RuntimeError):
 class AudioGenerationService:
     """Optional local text-to-audio, video-conditioned audio, and video muxing."""
 
-    def __init__(self, flags: RuntimeFlags, settings: UserSettings, devices=None, supervisor=None) -> None:
+    def __init__(
+        self,
+        flags: RuntimeFlags,
+        settings: UserSettings,
+        devices=None,
+        supervisor=None,
+        unload_image_models: Callable[[], Any] | None = None,
+    ) -> None:
         self.flags = flags
         self.settings = settings
         self.devices = devices
         self.supervisor = supervisor
+        self.unload_image_models = unload_image_models
         self._model: Any | None = None
         self._model_key: tuple[str, str, str] | None = None
 
@@ -71,6 +233,13 @@ class AudioGenerationService:
         except RuntimeError as exc:
             raise AudioUnavailable(f"GPU busy: {exc}") from exc
 
+    @staticmethod
+    def _resolve_ffprobe(ffmpeg: str) -> str | None:
+        ffmpeg_path = Path(ffmpeg)
+        probe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+        sibling_probe = ffmpeg_path.with_name(probe_name)
+        return str(sibling_probe) if sibling_probe.is_file() else shutil.which("ffprobe")
+
     def folder_help(self) -> str:
         return (
             "Music uses Transformers MusicGen. Sound effects and video-conditioned audio use an isolated "
@@ -81,24 +250,23 @@ class AudioGenerationService:
     def music_model_choices(self) -> list[tuple[str, str]]:
         return [
             ("MusicGen small (minimum)", "facebook/musicgen-small"),
-            ("MusicGen medium (downloads on first use)", "facebook/musicgen-medium"),
-            ("MusicGen melody (downloads on first use)", "facebook/musicgen-melody"),
-            ("MusicGen stereo small (downloads on first use)", "facebook/musicgen-stereo-small"),
+            ("MusicGen medium", "facebook/musicgen-medium"),
+            ("MusicGen melody", "facebook/musicgen-melody"),
+            ("MusicGen stereo small", "facebook/musicgen-stereo-small"),
         ]
 
     def sfx_model_choices(self) -> list[tuple[str, str]]:
-        return [
-            ("MMAudio small 16k (minimum)", "mmaudio:small_16k"),
-            ("AudioGen medium (AudioCraft required)", "facebook/audiogen-medium"),
-        ]
+        # AudioGen currently has no isolated in-app AudioCraft installer or
+        # runtime. Keep it out of selectable choices until setup can complete.
+        return self.video_audio_model_choices()
 
     def video_audio_model_choices(self) -> list[tuple[str, str]]:
         return [
             ("MMAudio small 16k (minimum)", "mmaudio:small_16k"),
-            ("MMAudio large 44k v2 (downloads on first use)", "mmaudio:large_44k_v2"),
-            ("MMAudio large 44k (downloads on first use)", "mmaudio:large_44k"),
-            ("MMAudio medium 44k (downloads on first use)", "mmaudio:medium_44k"),
-            ("MMAudio small 44k (downloads on first use)", "mmaudio:small_44k"),
+            ("MMAudio large 44k v2 (install separately)", "mmaudio:large_44k_v2"),
+            ("MMAudio large 44k (install separately)", "mmaudio:large_44k"),
+            ("MMAudio medium 44k (install separately)", "mmaudio:medium_44k"),
+            ("MMAudio small 44k (install separately)", "mmaudio:small_44k"),
         ]
 
     def available_video_audio_model_choices(self) -> list[tuple[str, str]]:
@@ -111,27 +279,28 @@ class AudioGenerationService:
     def setup_status(self, *, deep: bool = False) -> dict[str, Any]:
         root = self.flags.data_dir.resolve()
         musicgen_root = self._minimum_musicgen_root()
-        musicgen_missing = [name for name in _MUSICGEN_MINIMUM_FILES if not (musicgen_root / name).is_file()]
+        musicgen_missing = self._musicgen_missing_files("small")
         dependency_modules = ("torch", "transformers", "scipy", "huggingface_hub")
         missing_dependencies = [name for name in dependency_modules if importlib.util.find_spec(name) is None]
 
         mmaudio_root = self._mmaudio_root()
         mmaudio_python = self._audio_engine_python()
         mmaudio_demo = mmaudio_root / "demo.py"
-        mmaudio_missing = [str(path) for path in _MMAUDIO_16K_FILES if not (mmaudio_root / path).is_file()]
-        mmaudio_import_ok = mmaudio_python.is_file() and mmaudio_demo.is_file()
-        mmaudio_import_error = ""
-        if deep and mmaudio_import_ok:
-            result = subprocess.run(
-                [str(mmaudio_python), "-c", "import mmaudio; print('ok')"],
-                cwd=str(mmaudio_root),
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            mmaudio_import_ok = result.returncode == 0
-            if not mmaudio_import_ok:
-                mmaudio_import_error = (result.stderr or result.stdout or "MMAudio import failed").strip()[-1200:]
+        mmaudio_missing = [
+            str(path) for path in _MMAUDIO_16K_FILES
+            if not _is_nonempty_file(mmaudio_root / path)
+        ]
+        if not self._mmaudio_clip_hub_cache():
+            mmaudio_missing.append(f"Hugging Face cache for {_MMAUDIO_CLIP_REPO} (open_clip_config.json and model weights)")
+
+        mmaudio_import_error = (
+            self._mmaudio_runtime_import_error() if deep else ""
+        )
+        mmaudio_import_ok = (
+            mmaudio_python.is_file()
+            and mmaudio_demo.is_file()
+            and (not deep or not mmaudio_import_error)
+        )
 
         from aiwf.services.audio_lab import AudioLabService
 
@@ -140,9 +309,18 @@ class AudioGenerationService:
         mmaudio_ready = mmaudio_import_ok and not mmaudio_missing
         lab_ready = bool(lab_status.installed)
         ffmpeg = _resolve_ffmpeg()
-        minimum_ready = music_ready and mmaudio_ready and lab_ready and bool(ffmpeg)
-        if minimum_ready:
-            message = "Minimum Audio setup is ready."
+        ffprobe = self._resolve_ffprobe(ffmpeg) if ffmpeg else None
+        mux_ready = bool(ffmpeg and ffprobe)
+        mux_missing = []
+        if not ffmpeg:
+            mux_missing.append("ffmpeg")
+        if ffmpeg and not ffprobe:
+            mux_missing.append("ffprobe")
+        minimum_ready = music_ready and mmaudio_ready and lab_ready and mux_ready
+        if minimum_ready and deep:
+            message = "Minimum Audio runtime checks passed. Models are not loaded until selected for generation."
+        elif minimum_ready:
+            message = "Minimum Audio files and dependencies are detected; runtime checks have not run."
         elif _MINIMUM_AUDIO_SETUP_LOCK.locked():
             message = "Minimum Audio setup is running. Keep Studio open until it finishes."
         else:
@@ -150,12 +328,16 @@ class AudioGenerationService:
 
         return {
             "minimumReady": minimum_ready,
+            "runtimeChecksPerformed": bool(deep),
             "installing": _MINIMUM_AUDIO_SETUP_LOCK.locked(),
             "musicReady": music_ready,
+            "musicDependenciesReady": not missing_dependencies,
             "sfxReady": mmaudio_ready,
-            "videoAudioReady": mmaudio_ready,
+            # Video-audio routes must finish by muxing generated audio back
+            # into the source video; model/runtime readiness alone is not enough.
+            "videoAudioReady": mmaudio_ready and mux_ready,
             "labReady": lab_ready,
-            "muxReady": bool(ffmpeg),
+            "muxReady": mux_ready,
             "message": message,
             "estimatedDownload": "Up to about 10 GB on a clean install; existing files are reused.",
             "licenseNotice": (
@@ -167,21 +349,45 @@ class AudioGenerationService:
                 "videoAudio": "mmaudio:small_16k",
             },
             "components": [
-                {
-                    "id": "musicgen-small",
-                    "label": "MusicGen Small",
-                    "ready": music_ready,
-                    "path": str(musicgen_root),
-                    "missing": [*missing_dependencies, *musicgen_missing],
-                },
+                *[
+                    {
+                        "id": f"musicgen-{variant}",
+                        "label": f"MusicGen {variant.replace('-', ' ').title()}",
+                        "ready": self._musicgen_variant_ready(variant) and not missing_dependencies,
+                        "path": str(self._musicgen_root(variant)),
+                        "missing": [*missing_dependencies, *self._musicgen_missing_files(variant)],
+                    }
+                    for variant in _MUSICGEN_VARIANTS
+                ],
                 {
                     "id": "mmaudio-small-16k",
                     "label": "MMAudio Small 16 kHz",
                     "ready": mmaudio_ready,
+                    "sharedReady": self._mmaudio_variant_shared_ready("small_16k"),
                     "path": str(mmaudio_root),
                     "missing": mmaudio_missing,
                     "error": mmaudio_import_error,
                 },
+                *[
+                    {
+                        "id": f"mmaudio-{variant.replace('_', '-')}",
+                        "label": f"MMAudio {variant.replace('_', ' ').title()}",
+                        "ready": self._mmaudio_variant_ready(variant),
+                        "sharedReady": self._mmaudio_variant_shared_ready(variant),
+                        "path": str(mmaudio_root),
+                        "missing": [
+                            str(path)
+                            for path in _mmaudio_variant_files(variant)
+                            if not _is_nonempty_file(mmaudio_root / path)
+                        ] + (
+                            [f"Hugging Face cache for {_MMAUDIO_CLIP_REPO} (open_clip_config.json and model weights)"]
+                            if not self._mmaudio_clip_hub_cache()
+                            else []
+                        ),
+                    }
+                    for variant in _MMAUDIO_INSTALLABLE_VARIANTS
+                    if variant != "small_16k"
+                ],
                 {
                     "id": "audio-lab",
                     "label": "Audio Lab DSP",
@@ -192,27 +398,127 @@ class AudioGenerationService:
                 {
                     "id": "ffmpeg",
                     "label": "FFmpeg audio mux",
-                    "ready": bool(ffmpeg),
+                    "ready": mux_ready,
                     "path": str(ffmpeg or ""),
-                    "missing": [] if ffmpeg else ["ffmpeg"],
+                    "missing": mux_missing,
                 },
             ],
         }
 
-    def install_minimum(self) -> dict[str, Any]:
+    def install_musicgen_variant(self, variant: str) -> dict[str, Any]:
+        """Install one allowlisted MusicGen model into Studio's local model tree."""
+        normalized = str(variant or "").strip()
+        repo_id = _MUSICGEN_VARIANTS.get(normalized)
+        if not repo_id:
+            raise AudioUnavailable(f"Unsupported MusicGen variant: {normalized or '(empty)'}")
+        if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
+            raise AudioUnavailable("An audio render or model setup operation is already running.")
         if not _MINIMUM_AUDIO_SETUP_LOCK.acquire(blocking=False):
+            _AUDIO_MODEL_OPERATION_LOCK.release()
+            raise AudioUnavailable("Another audio setup operation is already running.")
+        try:
+            if self._musicgen_variant_ready(normalized):
+                return {
+                    "variant": normalized,
+                    "modelId": repo_id,
+                    "installed": True,
+                    "path": str(self._musicgen_root(normalized)),
+                }
+            try:
+                from huggingface_hub import snapshot_download
+
+                destination = self._musicgen_install_root(normalized)
+                destination.mkdir(parents=True, exist_ok=True)
+                snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=str(destination),
+                    allow_patterns=[*_MUSICGEN_MINIMUM_FILES, "special_tokens_map.json"],
+                )
+            except Exception as exc:
+                raise AudioUnavailable(f"Could not install {repo_id}: {exc}") from exc
+            if not self._musicgen_variant_ready(normalized):
+                raise AudioUnavailable(f"{repo_id} installation finished, but its required files are incomplete.")
+            return {"variant": normalized, "modelId": repo_id, "installed": True, "path": str(destination)}
+        finally:
+            _MINIMUM_AUDIO_SETUP_LOCK.release()
+            _AUDIO_MODEL_OPERATION_LOCK.release()
+
+    def install_mmaudio_variant(self, variant: str) -> dict[str, Any]:
+        """Download one allowlisted MMAudio checkpoint into the isolated engine."""
+        normalized = str(variant or "").strip()
+        if normalized not in _MMAUDIO_INSTALLABLE_VARIANTS:
+            raise AudioUnavailable(f"Unsupported MMAudio variant: {normalized or '(empty)'}")
+        if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
+            raise AudioUnavailable("An audio render or model setup operation is already running.")
+        if not _MINIMUM_AUDIO_SETUP_LOCK.acquire(blocking=False):
+            _AUDIO_MODEL_OPERATION_LOCK.release()
+            raise AudioUnavailable("Another audio setup operation is already running.")
+        try:
+            root = self._mmaudio_root()
+            python = self._audio_engine_python()
+            if not (root / "demo.py").is_file() or not python.is_file():
+                raise AudioUnavailable("Install the minimum Audio setup before adding an MMAudio variant.")
+            if self._mmaudio_variant_ready(normalized):
+                return {"variant": normalized, "installed": True, "path": str(root)}
+            self._install_mmaudio_clip_assets(python)
+            self._import_shared_mmaudio_assets(normalized)
+            command = (
+                "from mmaudio.eval_utils import all_model_cfg; "
+                f"all_model_cfg[{normalized!r}].download_if_needed()"
+            )
+            try:
+                result = subprocess.run(
+                    [str(python), "-c", command],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=4 * 60 * 60,
+                    env=self._mmaudio_install_environment(),
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise AudioUnavailable(f"Could not install MMAudio {normalized}: {exc}") from exc
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "MMAudio variant installation failed").strip()
+                raise AudioUnavailable(detail[-5000:])
+            if not self._mmaudio_variant_ready(normalized):
+                raise AudioUnavailable(f"MMAudio {normalized} installation finished, but its required files are incomplete.")
+            return {"variant": normalized, "installed": True, "path": str(root)}
+        finally:
+            _MINIMUM_AUDIO_SETUP_LOCK.release()
+            _AUDIO_MODEL_OPERATION_LOCK.release()
+
+    def install_minimum(self) -> dict[str, Any]:
+        if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
+            raise AudioUnavailable("An audio render or model setup operation is already running.")
+        if not _MINIMUM_AUDIO_SETUP_LOCK.acquire(blocking=False):
+            _AUDIO_MODEL_OPERATION_LOCK.release()
             raise AudioUnavailable("Minimum Audio setup is already running.")
         try:
             root = self.flags.data_dir.resolve()
             script = root / "scripts" / "bootstrap_audio_minimum.py"
             if not script.is_file():
                 raise AudioUnavailable(f"Minimum Audio setup script is missing: {script}")
+            command = [
+                sys.executable,
+                str(script),
+                "--repo",
+                str(root),
+                "--models-dir",
+                str(self.flags.resolved_models_dir()),
+                "--json",
+            ]
+            command.extend(
+                argument
+                for model_root in self.flags.resolved_extra_model_dirs()
+                for argument in ("--extra-model-dir", str(model_root))
+            )
             result = subprocess.run(
-                [sys.executable, str(script), "--repo", str(root), "--json"],
+                command,
                 cwd=str(root),
                 capture_output=True,
                 text=True,
                 timeout=4 * 60 * 60,
+                env=self._mmaudio_install_environment(),
             )
             if result.returncode != 0:
                 detail = (result.stderr or result.stdout or "Minimum Audio setup failed").strip()
@@ -232,6 +538,7 @@ class AudioGenerationService:
             return status
         finally:
             _MINIMUM_AUDIO_SETUP_LOCK.release()
+            _AUDIO_MODEL_OPERATION_LOCK.release()
 
     def video_audio_status(self) -> str:
         status = self.setup_status(deep=False)
@@ -250,16 +557,109 @@ class AudioGenerationService:
         root = self.flags.resolved_output_dir() / getattr(self.settings, "audio_output_subdir", "audio")
         root.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return root / f"{stem}_{stamp}{suffix}"
+        nonce = uuid.uuid4().hex
+        return root / f"{stem}_{stamp}_{nonce}{suffix}"
 
     def video_output_path(self, input_video: str | Path) -> Path:
         root = self.flags.resolved_output_dir() / getattr(self.settings, "audio_video_output_subdir", "audio-videos")
         root.mkdir(parents=True, exist_ok=True)
         stem = Path(input_video).stem or "video"
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return root / f"{stem}_audio_{stamp}.mp4"
+        nonce = uuid.uuid4().hex
+        return root / f"{stem}_audio_{stamp}_{nonce}.mp4"
+    @staticmethod
+    def _require_output_file(path: Path, label: str) -> None:
+        try:
+            if not path.is_file() or path.stat().st_size <= 0:
+                raise AudioUnavailable(f"{label} did not produce a non-empty output file.")
+        except OSError as exc:
+            raise AudioUnavailable(f"{label} output could not be verified: {exc}") from exc
+
+    @contextmanager
+    def _staged_output(self, destination: Path, label: str):
+        staged = destination.with_name(
+            f".{destination.stem}.{uuid.uuid4().hex}.partial{destination.suffix}"
+        )
+        try:
+            yield staged
+            self._require_output_file(staged, label)
+            try:
+                os.replace(staged, destination)
+            except OSError as exc:
+                raise AudioUnavailable(f"{label} output could not be published: {exc}") from exc
+        finally:
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove staged audio output %s", staged, exc_info=True)
 
     def generate(
+        self,
+        options: AudioGenerationOptions,
+        *,
+        output_path: str | Path | None = None,
+    ) -> AudioGenerationResult:
+        if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
+            raise AudioUnavailable("Audio setup or another audio render is already running. Try again when it finishes.")
+        try:
+            return self._generate_with_model_lock(options, output_path=output_path)
+        finally:
+            _AUDIO_MODEL_OPERATION_LOCK.release()
+
+    def prepare(self, *, kind: str, model_id: str) -> dict[str, Any]:
+        """Prepare an installed audio model without generating output or installing weights.
+
+        MusicGen exposes an in-process model object, so its residency can be
+        confirmed after loading. MMAudio is an isolated per-render subprocess;
+        this operation only verifies its exact setup and reports residency as
+        unknown rather than claiming that weights were loaded.
+        """
+        normalized_kind = str(kind or "").strip().lower()
+        normalized_model = str(model_id or "").strip()
+        if normalized_kind not in {"music", "sfx"}:
+            raise AudioUnavailable("Audio kind must be 'music' or 'sfx'.")
+        choices = self.music_model_choices() if normalized_kind == "music" else self.sfx_model_choices()
+        if normalized_model not in {model for _, model in choices}:
+            raise AudioUnavailable(f"Choose a supported {normalized_kind} model.")
+        if normalized_model == "facebook/audiogen-medium":
+            raise AudioUnavailable("AudioGen is unavailable because AudioCraft is not installed in the shared Studio runtime.")
+        if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
+            raise AudioUnavailable("Audio setup or another audio render is already running. Try again when it finishes.")
+        try:
+            if normalized_model.startswith("facebook/musicgen-"):
+                variant = normalized_model.removeprefix("facebook/musicgen-")
+                setup = self.setup_status(deep=False)
+                if not self._musicgen_variant_ready(variant):
+                    raise AudioUnavailable(f"{normalized_model} is not installed. Install it from the Audio model setup panel first.")
+                if not setup.get("musicDependenciesReady", setup.get("musicReady", False)):
+                    raise AudioUnavailable("Install the minimum Audio setup before preparing MusicGen runtime dependencies.")
+                with self._gpu_tenant("Audio model preparation"):
+                    self._release_image_models()
+                    headroom_issue = self._audio_headroom_issue(normalized_model)
+                    if headroom_issue:
+                        raise AudioUnavailable(headroom_issue)
+                    source = self._musicgen_model_source(normalized_model)
+                    self._load_transformers_musicgen(normalized_model, source)
+                    resident = self._musicgen_model_is_resident(normalized_model)
+                    if not resident:
+                        raise AudioUnavailable("MusicGen loader returned without confirming the selected model is resident.")
+                    return {"kind": normalized_kind, "modelId": normalized_model, "ready": True, "resident": True}
+
+            variant = normalized_model.split(":", 1)[1]
+            if not self._mmaudio_variant_ready(variant):
+                raise AudioUnavailable(f"MMAudio {variant} is not installed completely. Install this variant in Audio Studio first.")
+            import_error = self._mmaudio_runtime_import_error()
+            if import_error:
+                raise AudioUnavailable(f"MMAudio runtime is not ready: {import_error}")
+            with self._gpu_tenant("Prepare MMAudio and release prior in-process models"):
+                self._release_image_models()
+                self.unload()
+            return {"kind": normalized_kind, "modelId": normalized_model, "ready": True, "resident": None,
+                    "detail": "MMAudio is installed and ready; its isolated runtime loads weights per render, so residency is unreported."}
+        finally:
+            _AUDIO_MODEL_OPERATION_LOCK.release()
+
+    def _generate_with_model_lock(
         self,
         options: AudioGenerationOptions,
         *,
@@ -275,18 +675,20 @@ class AudioGenerationService:
         dest = Path(output_path) if output_path else self.output_path(stem=self._safe_stem(prompt), suffix=suffix)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        with self._gpu_tenant("Audio generation"):
-            if options.seed is not None and int(options.seed) >= 0:
-                self._set_seed(int(options.seed))
-            try:
-                if mmaudio_text:
-                    sample_rate = self._generate_mmaudio_text_audio(options, dest)
-                elif options.kind == "sfx":
-                    sample_rate = self._generate_audiocraft(options, dest)
-                else:
-                    sample_rate = self._generate_transformers_musicgen(options, dest)
-            finally:
-                self._park_cached_model_on_cpu()
+        with self._staged_output(dest, "Audio generation") as staged_dest:
+            with self._gpu_tenant("Audio generation"):
+                self._release_image_models()
+                if options.seed is not None and int(options.seed) >= 0:
+                    self._set_seed(int(options.seed))
+                try:
+                    if mmaudio_text:
+                        sample_rate = self._generate_mmaudio_text_audio(options, staged_dest)
+                    elif options.kind == "sfx":
+                        sample_rate = self._generate_audiocraft(options, staged_dest)
+                    else:
+                        sample_rate = self._generate_transformers_musicgen(options, staged_dest)
+                finally:
+                    self._park_cached_model_on_cpu()
 
         infotext = f"Audio {options.kind}: {options.model_id}, {options.duration_seconds:.1f}s"
         return AudioGenerationResult(
@@ -323,6 +725,20 @@ class AudioGenerationService:
         *,
         output_path: str | Path | None = None,
     ) -> AudioGenerationResult:
+        if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
+            raise AudioUnavailable("Audio setup or another audio render is already running. Try again when it finishes.")
+        try:
+            return self._generate_video_audio_with_model_lock(video_path, options, output_path=output_path)
+        finally:
+            _AUDIO_MODEL_OPERATION_LOCK.release()
+
+    def _generate_video_audio_with_model_lock(
+        self,
+        video_path: str | Path,
+        options: AudioGenerationOptions,
+        *,
+        output_path: str | Path | None = None,
+    ) -> AudioGenerationResult:
         prompt = (options.prompt or "").strip()
         if not prompt:
             raise AudioUnavailable("Enter an audio prompt first.")
@@ -333,8 +749,10 @@ class AudioGenerationService:
         dest = Path(output_path) if output_path else self.output_path(stem=stem, suffix=".flac")
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        with self._gpu_tenant("Video audio generation"):
-            sample_rate = self._generate_mmaudio_video_audio(src_video, options, dest)
+        with self._staged_output(dest, "Video audio generation") as staged_dest:
+            with self._gpu_tenant("Video audio generation"):
+                self._release_image_models()
+                sample_rate = self._generate_mmaudio_video_audio(src_video, options, staged_dest)
 
         infotext = (
             f"Video audio {options.model_id}: {options.duration_seconds:.1f}s, "
@@ -350,6 +768,50 @@ class AudioGenerationService:
             message=f"Saved video-conditioned audio -> {dest}",
             infotext=infotext,
         )
+
+    @staticmethod
+    def _validate_mux_container(path: Path, ffprobe: str) -> None:
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=format_name,duration:stream=codec_type",
+                    "-of",
+                    "json",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                raise AudioUnavailable("Audio mux output is not a readable media container.")
+            probe_data = json.loads(result.stdout or "{}")
+            if not isinstance(probe_data, dict):
+                raise AudioUnavailable("Audio mux container validation returned malformed data.")
+            container = probe_data.get("format")
+            streams = probe_data.get("streams")
+            if not isinstance(container, dict) or not isinstance(streams, list):
+                raise AudioUnavailable("Audio mux container validation returned malformed data.")
+            if any(not isinstance(stream, dict) for stream in streams):
+                raise AudioUnavailable("Audio mux container validation returned malformed streams.")
+            format_name = str(container.get("format_name") or "").strip()
+            try:
+                duration = float(container.get("duration"))
+            except (TypeError, ValueError) as exc:
+                raise AudioUnavailable("Audio mux output must report a positive finite duration.") from exc
+            if not math.isfinite(duration) or duration <= 0:
+                raise AudioUnavailable("Audio mux output must report a positive finite duration.")
+            stream_types = {str(item.get("codec_type") or "") for item in streams}
+            if not format_name or not {"video", "audio"}.issubset(stream_types):
+                raise AudioUnavailable("Audio mux output must contain a readable container with video and audio streams.")
+        except AudioUnavailable:
+            raise
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
+            raise AudioUnavailable(f"Audio mux container could not be validated: {exc}") from exc
 
     def mux_audio(
         self,
@@ -367,8 +829,12 @@ class AudioGenerationService:
             raise AudioUnavailable(f"Video not found: {src_video}")
         if not src_audio.is_file():
             raise AudioUnavailable(f"Audio not found: {src_audio}")
+        ffprobe = self._resolve_ffprobe(ffmpeg)
+        if ffprobe is None:
+            raise AudioUnavailable("ffprobe is required to validate the muxed video container.")
         dest = Path(output_path) if output_path else self.video_output_path(src_video)
         dest.parent.mkdir(parents=True, exist_ok=True)
+        staged = dest.with_name(f".{dest.stem}.{uuid.uuid4().hex}.partial{dest.suffix or '.mp4'}")
         command = [
             ffmpeg,
             "-y",
@@ -389,14 +855,29 @@ class AudioGenerationService:
             "-shortest",
             "-movflags",
             "+faststart",
-            str(dest),
+            str(staged),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=3600)
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            raise AudioUnavailable(f"Audio mux failed: {detail}")
-        if not dest.is_file() or dest.stat().st_size <= 0:
-            raise AudioUnavailable("Audio mux did not produce an output video.")
+        try:
+            try:
+                result = subprocess.run(command, capture_output=True, text=True, timeout=3600)
+            except subprocess.TimeoutExpired as exc:
+                raise AudioUnavailable("Audio mux exceeded its 60-minute time limit.") from exc
+            except OSError as exc:
+                raise AudioUnavailable(f"Audio mux could not start ffmpeg: {exc}") from exc
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                raise AudioUnavailable(f"Audio mux failed: {detail}")
+            self._require_output_file(staged, "Audio mux")
+            self._validate_mux_container(staged, ffprobe)
+            try:
+                os.replace(staged, dest)
+            except OSError as exc:
+                raise AudioUnavailable(f"Audio mux output could not be published: {exc}") from exc
+        finally:
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove staged audio mux output %s", staged, exc_info=True)
         return AudioMuxResult.saved(src_video, src_audio, dest)
 
     def generate_and_mux(
@@ -422,47 +903,53 @@ class AudioGenerationService:
         except Exception:
             pass
 
-    def _generate_audiocraft(self, options: AudioGenerationOptions, dest: Path) -> int:
-        try:
-            import torchaudio
-            from audiocraft.models import AudioGen, MusicGen
-        except Exception as exc:
-            raise AudioUnavailable(
-                "AudioCraft is not installed in the shared Studio venv because current releases pin "
-                "older torch packages. Use music generation, which falls back to Transformers MusicGen."
-            ) from exc
+    def release_cached_model_for_modality_switch(self) -> bool:
+        """Drop the in-process audio cache only while audio owns the model lock and GPU tenant.
 
-        kind = "sfx" if options.kind == "sfx" else "music"
-        model_cls = AudioGen if kind == "sfx" else MusicGen
-        model_id = options.model_id or ("facebook/audiogen-medium" if kind == "sfx" else "facebook/musicgen-small")
-        model = self._load_audiocraft_model(model_cls, model_id, kind)
-        params = {
-            "duration": float(options.duration_seconds),
-            "temperature": float(options.temperature),
-        }
-        if kind == "music":
-            params["cfg_coef"] = float(options.cfg_coef)
-            params["top_k"] = int(options.top_k)
-        model.set_generation_params(**params)
-        wav = model.generate([options.prompt])
-        sample_rate = int(getattr(model, "sample_rate", 32000 if kind == "music" else 16000))
-        torchaudio.save(str(dest), wav[0].detach().cpu(), sample_rate=sample_rate)
-        return sample_rate
+        The method is intentionally nonblocking: an active render/setup or another GPU
+        tenant keeps ownership, so the caller must defer its route switch or let the
+        normal tenant scheduler serialize the work.
+        """
+        if self._model is None:
+            return True
+        if self.supervisor is None or not callable(getattr(self.supervisor, "tenant_session", None)):
+            return False
+        if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
+            return False
+        try:
+            with self.supervisor.tenant_session(
+                EngineTenant.AUDIO,
+                reason="Release cached audio model before switching modalities",
+            ):
+                self.unload()
+            return self._model is None and self._model_key is None
+        except Exception:
+            logger.info("Could not release cached audio model for modality switch", exc_info=True)
+            return False
+        finally:
+            _AUDIO_MODEL_OPERATION_LOCK.release()
+
+    def _release_image_models(self) -> None:
+        """Free the shared image backend before audio work claims GPU memory."""
+        if not callable(self.unload_image_models):
+            return
+        try:
+            self.unload_image_models()
+        except Exception as exc:
+            logger.exception("Could not unload the image backend before audio work")
+            raise AudioUnavailable(f"Could not release the image model before audio work: {exc}") from exc
+
+    def _generate_audiocraft(self, options: AudioGenerationOptions, dest: Path) -> int:
+        raise AudioUnavailable(
+            "AudioCraft generation has no explicit local model installer in Studio. "
+            "Choose an installed MusicGen or MMAudio model so generation does not download weights implicitly."
+        )
 
     def _load_audiocraft_model(self, model_cls, model_id: str, kind: str):
-        key = ("audiocraft", kind, model_id)
-        if self._model is not None and self._model_key == key:
-            if hasattr(self._model, "to"):
-                self._model.to(self._device_string())
-            return self._model
-        device = self._device_string()
-        try:
-            model = model_cls.get_pretrained(model_id, device=device)
-        except TypeError:
-            model = model_cls.get_pretrained(model_id)
-        self._model = model
-        self._model_key = key
-        return model
+        del model_cls, model_id, kind
+        raise AudioUnavailable(
+            "AudioCraft model loading is disabled until Studio provides an explicit local installer and readiness check."
+        )
 
     def _generate_transformers_musicgen(self, options: AudioGenerationOptions, dest: Path) -> int:
         try:
@@ -480,20 +967,14 @@ class AudioGenerationService:
                 "Use Audio Lab to arrange or crossfade longer pieces."
             )
         model_id = options.model_id or "facebook/musicgen-small"
+        headroom_issue = self._audio_headroom_issue(
+            model_id,
+            model_resident=self._musicgen_model_is_resident(model_id),
+        )
+        if headroom_issue:
+            raise AudioUnavailable(headroom_issue)
         model_source = self._musicgen_model_source(model_id)
-        key = ("transformers", "music", model_id)
-        if self._model is None or self._model_key != key:
-            processor = AutoProcessor.from_pretrained(model_source)
-            device = self._device_string()
-            load_options: dict[str, Any] = {"low_cpu_mem_usage": True, "use_safetensors": True}
-            if device == "cuda":
-                load_options.update(dtype=torch.float16, attn_implementation="sdpa")
-                torch.backends.cuda.matmul.allow_tf32 = True
-            model = MusicgenForConditionalGeneration.from_pretrained(model_source, **load_options)
-            model.to(device)
-            self._model = (processor, model)
-            self._model_key = key
-        processor, model = self._model
+        processor, model = self._load_transformers_musicgen(model_id, model_source)
         device = self._device_string()
         if str(model.device) != device:
             model.to(device)
@@ -517,6 +998,90 @@ class AudioGenerationService:
         scipy.io.wavfile.write(str(dest), sample_rate, audio)
         return sample_rate
 
+    def _load_transformers_musicgen(self, model_id: str, model_source: str):
+        try:
+            import torch
+            from transformers import AutoProcessor, MusicgenForConditionalGeneration
+        except Exception as exc:
+            raise AudioUnavailable(
+                "MusicGen needs `transformers` and `torch`. Run the minimum Audio setup first."
+            ) from exc
+        key = self._musicgen_cache_key(model_id, model_source)
+        if self._model is None or self._model_key != key:
+            previous_model = self._model
+            previous_key = self._model_key
+            if previous_model is not None:
+                self._park_cached_model_on_cpu()
+            try:
+                processor = AutoProcessor.from_pretrained(model_source, local_files_only=True)
+                device = self._device_string()
+                load_options: dict[str, Any] = {"low_cpu_mem_usage": True, "use_safetensors": True}
+                if device == "cuda":
+                    load_options.update(dtype=torch.float16, attn_implementation="sdpa")
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                model = MusicgenForConditionalGeneration.from_pretrained(model_source, local_files_only=True, **load_options)
+                model.to(device)
+            except Exception:
+                # Keep the previous cache available on CPU if switching fails.
+                # Its key remains accurate, so readiness for the requested model
+                # cannot be reported as resident.
+                self._model = previous_model
+                self._model_key = previous_key
+                raise
+            self._model = (processor, model)
+            self._model_key = key
+        else:
+            # Generation parks the cached weights on CPU after every render.
+            # Re-entering prepare for the same model must put them back on the
+            # selected device before the caller can report residency.
+            model = self._model[1]
+            device = self._device_string()
+            if str(getattr(model, "device", "")) != device:
+                model.to(device)
+        return self._model
+
+    def _musicgen_model_is_resident(self, model_id: str) -> bool:
+        cached = self._model
+        expected_key = self._musicgen_current_cache_key(model_id)
+        if self._model_key != expected_key or not isinstance(cached, tuple) or len(cached) != 2:
+            return False
+        model = cached[1]
+        if model is None:
+            return False
+        device = self._device_string()
+        try:
+            return str(model.device) == device
+        except Exception:
+            return False
+
+    def musicgen_model_is_parked_on_cpu(self, model_id: str) -> bool:
+        """Confirm that this selected MusicGen cache remains available on CPU."""
+        cached = self._model
+        expected_key = self._musicgen_current_cache_key(model_id)
+        if self._model_key != expected_key or not isinstance(cached, tuple) or len(cached) != 2:
+            return False
+        model = cached[1]
+        if model is None:
+            return False
+        try:
+            return str(model.device).strip().lower() == "cpu"
+        except Exception:
+            return False
+
+    @staticmethod
+    def _musicgen_cache_key(model_id: str, model_source: str) -> tuple[Any, ...]:
+        source_path = Path(str(model_source)).expanduser()
+        if not source_path.exists():
+            return ("transformers", "music", model_id)
+        return ("transformers", "music", model_id, support_revision([str(source_path)]))
+
+    def _musicgen_current_cache_key(self, model_id: str) -> tuple[Any, ...]:
+        try:
+            model_source = self._musicgen_model_source(model_id)
+        except AudioUnavailable:
+            return ("transformers", "music", model_id)
+        return self._musicgen_cache_key(model_id, model_source)
+
     def _generate_mmaudio_text_audio(self, options: AudioGenerationOptions, dest: Path) -> int:
         root = self._mmaudio_root()
         demo = root / "demo.py"
@@ -524,13 +1089,22 @@ class AudioGenerationService:
         if not demo.is_file() or not python.is_file():
             raise AudioUnavailable("MMAudio is not installed. Run the minimum Audio setup first.")
         variant = self._mmaudio_variant(options.model_id)
-        if variant == "small_16k" and not self._mmaudio_variant_ready(variant):
-            raise AudioUnavailable("MMAudio Small 16 kHz is incomplete. Run the minimum Audio setup first.")
-        run_dir = dest.parent / f"{dest.stem}_mmaudio"
-        run_dir.mkdir(parents=True, exist_ok=True)
+        if variant not in _MMAUDIO_INSTALLABLE_VARIANTS:
+            raise AudioUnavailable(f"Unsupported MMAudio variant: {variant}")
+        if not self._mmaudio_variant_ready(variant):
+            raise AudioUnavailable(f"MMAudio {variant} is not installed completely. Install this variant in Audio Studio first.")
+        import_error = self._mmaudio_runtime_import_error()
+        if import_error:
+            raise AudioUnavailable(f"MMAudio runtime is not ready: {import_error}")
+        headroom_issue = self._audio_headroom_issue(options.model_id, external_worker=True)
+        if headroom_issue:
+            raise AudioUnavailable(headroom_issue)
+        run_dir = dest.parent / f"{dest.stem}_mmaudio_{uuid.uuid4().hex}"
+        run_dir.mkdir(parents=True, exist_ok=False)
         seed = int(options.seed) if options.seed is not None and int(options.seed) >= 0 else random.randint(0, 2**31 - 1)
         command = [
             str(python),
+            str(self.flags.data_dir.resolve() / "scripts" / "run_mmaudio_offline.py"),
             str(demo),
             "--variant",
             variant,
@@ -550,7 +1124,14 @@ class AudioGenerationService:
             str(run_dir),
             "--skip_video_composite",
         ]
-        result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, timeout=3600)
+        result = subprocess.run(
+            command,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            env=self._mmaudio_offline_environment(),
+        )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             raise AudioUnavailable(f"MMAudio sound generation failed: {detail}")
@@ -574,13 +1155,22 @@ class AudioGenerationService:
             raise AudioUnavailable(f"MMAudio engine Python not found: {python}")
 
         variant = self._mmaudio_variant(options.model_id)
-        if variant == "small_16k" and not self._mmaudio_variant_ready(variant):
-            raise AudioUnavailable("MMAudio Small 16 kHz is incomplete. Run the minimum Audio setup first.")
-        run_dir = dest.parent / f"{dest.stem}_mmaudio"
-        run_dir.mkdir(parents=True, exist_ok=True)
+        if variant not in _MMAUDIO_INSTALLABLE_VARIANTS:
+            raise AudioUnavailable(f"Unsupported MMAudio variant: {variant}")
+        if not self._mmaudio_variant_ready(variant):
+            raise AudioUnavailable(f"MMAudio {variant} is not installed completely. Install this variant in Audio Studio first.")
+        import_error = self._mmaudio_runtime_import_error()
+        if import_error:
+            raise AudioUnavailable(f"MMAudio runtime is not ready: {import_error}")
+        headroom_issue = self._audio_headroom_issue(options.model_id, external_worker=True)
+        if headroom_issue:
+            raise AudioUnavailable(headroom_issue)
+        run_dir = dest.parent / f"{dest.stem}_mmaudio_{uuid.uuid4().hex}"
+        run_dir.mkdir(parents=True, exist_ok=False)
         seed = int(options.seed) if options.seed is not None and int(options.seed) >= 0 else random.randint(0, 2**31 - 1)
         command = [
             str(python),
+            str(self.flags.data_dir.resolve() / "scripts" / "run_mmaudio_offline.py"),
             str(demo),
             "--variant",
             variant,
@@ -602,7 +1192,14 @@ class AudioGenerationService:
             str(run_dir),
             "--skip_video_composite",
         ]
-        result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, timeout=3600)
+        result = subprocess.run(
+            command,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            env=self._mmaudio_offline_environment(),
+        )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             raise AudioUnavailable(f"MMAudio video audio failed: {detail}")
@@ -637,25 +1234,280 @@ class AudioGenerationService:
         )
 
     def _minimum_musicgen_root(self) -> Path:
-        return self.flags.data_dir.resolve() / "models" / "audio" / "MusicGen" / "musicgen-small"
+        return self._musicgen_root("small")
+
+    def _musicgen_root(self, variant: str) -> Path:
+        if variant not in _MUSICGEN_VARIANTS:
+            raise AudioUnavailable(f"Unsupported MusicGen variant: {variant or '(empty)'}")
+        relative_candidates = (
+            Path("audio") / "MusicGen" / f"musicgen-{variant}",
+            Path("MusicGen") / f"musicgen-{variant}",
+        )
+        for root in configured_model_roots(self.flags):
+            for relative in relative_candidates:
+                candidate = root / relative
+                try:
+                    resolved = candidate.resolve(strict=False)
+                    resolved.relative_to(root)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                if self._musicgen_files_ready(resolved):
+                    return resolved
+        return self._musicgen_install_root(variant)
+
+    def _musicgen_install_root(self, variant: str) -> Path:
+        """Return Studio's writable destination, never a configured shared root."""
+        if variant not in _MUSICGEN_VARIANTS:
+            raise AudioUnavailable(f"Unsupported MusicGen variant: {variant or '(empty)'}")
+        return self.flags.resolved_models_dir() / "audio" / "MusicGen" / f"musicgen-{variant}"
+
+    @staticmethod
+    def _musicgen_files_ready(root: Path) -> bool:
+        return all(
+            _is_nonempty_file(root / name) if name != "model.safetensors" else _is_complete_safetensors(root / name)
+            for name in _MUSICGEN_MINIMUM_FILES
+        )
+
+    def _musicgen_variant_ready(self, variant: str) -> bool:
+        if variant not in _MUSICGEN_VARIANTS:
+            return False
+        return self._musicgen_files_ready(self._musicgen_root(variant))
+
+    def _musicgen_missing_files(self, variant: str) -> list[str]:
+        if variant not in _MUSICGEN_VARIANTS:
+            return ["unsupported MusicGen variant"]
+        root = self._musicgen_root(variant)
+        missing = []
+        for name in _MUSICGEN_MINIMUM_FILES:
+            path = root / name
+            valid = _is_complete_safetensors(path) if name == "model.safetensors" else _is_nonempty_file(path)
+            if not valid:
+                missing.append(name if name != "model.safetensors" or not path.exists() else "model.safetensors (invalid or truncated)")
+        return missing
+
+    def model_support_paths(self, model_id: str) -> list[str]:
+        """Return exact variant files used to fingerprint setup lifecycle state.
+
+        Include expected paths even when files are absent so installation or a
+        replacement invalidates an earlier readiness receipt. No weights are
+        opened or loaded here.
+        """
+        normalized = str(model_id or "").strip()
+        variant = next((key for key, repo_id in _MUSICGEN_VARIANTS.items() if repo_id == normalized), None)
+        if variant is not None:
+            root = self._musicgen_root(variant)
+            return [str(root / name) for name in _MUSICGEN_MINIMUM_FILES]
+        if normalized.startswith("mmaudio:"):
+            variant = normalized.split(":", 1)[1]
+            if variant not in _MMAUDIO_INSTALLABLE_VARIANTS:
+                return []
+            root = self._mmaudio_root()
+            cache = self._mmaudio_clip_hub_cache() or self._mmaudio_clip_install_cache()
+            snapshots = self._mmaudio_clip_snapshots(cache)
+            if not snapshots:
+                snapshots = [cache / _MMAUDIO_CLIP_REPO_CACHE / "snapshots" / "main"]
+            cache_files = [
+                str(snapshot / filename)
+                for snapshot in snapshots
+                for filename in (*_MMAUDIO_CLIP_REQUIRED_FILES, *_MMAUDIO_CLIP_WEIGHT_FILES)
+            ]
+            return [str(root / relative) for relative in _mmaudio_variant_files(variant)] + cache_files
+        return []
 
     def _musicgen_model_source(self, model_id: str) -> str:
-        if model_id == "facebook/musicgen-small":
-            root = self._minimum_musicgen_root()
-            if all((root / name).is_file() for name in _MUSICGEN_MINIMUM_FILES):
-                return str(root)
-        return model_id
+        variant = next((key for key, repo_id in _MUSICGEN_VARIANTS.items() if repo_id == model_id), None)
+        if variant is None:
+            raise AudioUnavailable(f"Unsupported MusicGen model: {model_id}")
+        root = self._musicgen_root(variant)
+        if not self._musicgen_variant_ready(variant):
+            raise AudioUnavailable(f"{model_id} is not installed. Install it from the Audio model setup panel first.")
+        return str(root)
 
     def _mmaudio_variant_ready(self, variant: str) -> bool:
+        if variant not in _MMAUDIO_INSTALLABLE_VARIANTS:
+            return False
         root = self._mmaudio_root()
         if not (root / "demo.py").is_file() or not self._audio_engine_python().is_file():
             return False
-        if variant == "small_16k":
-            required = _MMAUDIO_16K_FILES
-        else:
-            weight = Path("weights") / f"mmaudio_{variant}.pth"
-            required = (weight, Path("ext_weights") / "v1-44.pth", *_MMAUDIO_SHARED_FILES)
-        return all((root / path).is_file() and (root / path).stat().st_size > 0 for path in required)
+        required = _mmaudio_variant_files(variant)
+        return all(_is_nonempty_file(root / path) for path in required) and bool(self._mmaudio_clip_hub_cache())
+
+    def _mmaudio_clip_snapshots(self, cache_root: Path) -> list[Path]:
+        snapshots_root = cache_root / _MMAUDIO_CLIP_REPO_CACHE / "snapshots"
+        try:
+            resolved_cache = cache_root.resolve(strict=True)
+            resolved_snapshots = snapshots_root.resolve(strict=True)
+            resolved_snapshots.relative_to(resolved_cache)
+            return [
+                resolved
+                for item in resolved_snapshots.iterdir()
+                if self._confined_path(item, resolved_cache) is not None
+                for resolved in [item.resolve(strict=True)]
+            ]
+        except (OSError, RuntimeError, ValueError):
+            return []
+
+    @staticmethod
+    def _confined_path(path: Path, root: Path) -> Path | None:
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root.resolve(strict=True))
+            return resolved
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def _mmaudio_clip_hub_cache(self) -> Path | None:
+        return _find_mmaudio_clip_hub_cache(configured_model_roots(self.flags))
+
+    def _mmaudio_clip_install_cache(self) -> Path:
+        roots = configured_model_roots(self.flags)
+        if not roots:
+            raise AudioUnavailable("No configured model root is available for the MMAudio CLIP cache.")
+        root = roots[0]
+        candidate = root / "hub"
+        try:
+            candidate.resolve(strict=False).relative_to(root.resolve(strict=False))
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise AudioUnavailable(f"Unsafe MMAudio CLIP cache destination: {candidate}") from exc
+        return candidate
+
+    def _mmaudio_install_environment(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["HF_HUB_CACHE"] = str(self._mmaudio_clip_hub_cache() or self._mmaudio_clip_install_cache())
+        env["HF_HUB_OFFLINE"] = "0"
+        return env
+
+    def _mmaudio_offline_environment(self) -> dict[str, str]:
+        cache = self._mmaudio_clip_hub_cache()
+        if cache is None:
+            raise AudioUnavailable(f"MMAudio CLIP encoder is missing from configured model roots ({_MMAUDIO_CLIP_REPO}).")
+        env = os.environ.copy()
+        env["HF_HUB_CACHE"] = str(cache)
+        env["HF_HUB_OFFLINE"] = "1"
+        env["TRANSFORMERS_OFFLINE"] = "1"
+        return env
+
+    def _install_mmaudio_clip_assets(self, python: Path) -> Path:
+        existing = self._mmaudio_clip_hub_cache()
+        if existing is not None:
+            return existing
+        cache = self._mmaudio_clip_install_cache()
+        program = (
+            "import sys; from huggingface_hub import snapshot_download; "
+            f"snapshot_download(repo_id={_MMAUDIO_CLIP_REPO!r}, cache_dir=sys.argv[1], "
+            f"allow_patterns={list(_MMAUDIO_CLIP_ALLOW_PATTERNS)!r})"
+        )
+        try:
+            result = subprocess.run(
+                [str(python), "-c", program, str(cache)],
+                cwd=str(self._mmaudio_root()),
+                capture_output=True,
+                text=True,
+                timeout=4 * 60 * 60,
+                env=self._mmaudio_install_environment(),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AudioUnavailable(f"Could not install MMAudio CLIP encoder {_MMAUDIO_CLIP_REPO}: {exc}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "MMAudio CLIP encoder installation failed").strip()
+            raise AudioUnavailable(detail[-5000:])
+        installed = self._mmaudio_clip_hub_cache()
+        if installed is None:
+            raise AudioUnavailable(f"MMAudio CLIP encoder {_MMAUDIO_CLIP_REPO} setup finished, but its config or weights are missing.")
+        return installed
+
+    def _mmaudio_runtime_import_error(self) -> str:
+        """Probe the isolated MMAudio environment before claiming setup-ready."""
+        root = self._mmaudio_root()
+        python = self._audio_engine_python()
+        if not python.is_file():
+            return f"Audio engine Python is missing: {python}"
+        if not (root / "demo.py").is_file():
+            return f"MMAudio entrypoint is missing: {root / 'demo.py'}"
+        try:
+            result = subprocess.run(
+                [str(python), str(root / "demo.py"), "--help"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=self._mmaudio_offline_environment(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return str(exc) or "MMAudio import check failed."
+        if result.returncode == 0:
+            return ""
+        return (result.stderr or result.stdout or "MMAudio demo import check failed").strip()[-1200:]
+
+    def _mmaudio_shared_asset_sources(self, variant: str) -> dict[Path, Path]:
+        """Find variant assets under configured roots without following escapes.
+
+        The upstream demo resolves all checkpoint paths relative to its working
+        directory and may overwrite files whose checksums differ. Shared roots
+        therefore serve as read-only import sources; assets are copied into the
+        Studio-owned engine directory before the demo is allowed to use them.
+        """
+        required = _mmaudio_variant_files(variant)
+        if not required:
+            return {}
+        found: dict[Path, Path] = {}
+        for root in configured_model_roots(self.flags):
+            for relative in required:
+                if relative in found:
+                    continue
+                for layout in _MMAUDIO_SHARED_LAYOUTS:
+                    candidate = root / layout / relative
+                    try:
+                        resolved = candidate.resolve(strict=True)
+                        resolved.relative_to(root)
+                        if _is_nonempty_file(resolved):
+                            found[relative] = resolved
+                            break
+                    except (OSError, RuntimeError, ValueError):
+                        continue
+        return found
+
+    def _mmaudio_variant_shared_ready(self, variant: str) -> bool:
+        required = _mmaudio_variant_files(variant)
+        found = self._mmaudio_shared_asset_sources(variant)
+        return bool(required) and all(path in found for path in required)
+
+    def _import_shared_mmaudio_assets(self, variant: str) -> list[str]:
+        """Copy discovered shared weights into Studio-owned paths, never write shared roots."""
+        root = self._mmaudio_root().resolve()
+        for shared_root in configured_model_roots(self.flags):
+            try:
+                root.relative_to(shared_root.resolve())
+            except (OSError, RuntimeError, ValueError):
+                continue
+            raise AudioUnavailable(
+                f"MMAudio install directory is inside a configured read-only shared model root: {root}"
+            )
+        sources = self._mmaudio_shared_asset_sources(variant)
+        copied: list[str] = []
+        for relative, source in sources.items():
+            destination = root / relative
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                resolved_destination = destination.resolve(strict=False)
+                resolved_destination.relative_to(root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise AudioUnavailable(f"Unsafe MMAudio install destination: {destination}") from exc
+            if _is_nonempty_file(resolved_destination):
+                continue
+            staged = resolved_destination.with_name(f".{resolved_destination.name}.{uuid.uuid4().hex}.partial")
+            try:
+                shutil.copyfile(source, staged)
+                os.replace(staged, resolved_destination)
+            except OSError as exc:
+                raise AudioUnavailable(f"Could not import shared MMAudio asset {relative}: {exc}") from exc
+            finally:
+                try:
+                    staged.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Could not remove partial MMAudio import %s", staged, exc_info=True)
+            copied.append(str(relative))
+        return copied
 
     def _park_cached_model_on_cpu(self) -> None:
         cached = self._model
@@ -698,6 +1550,56 @@ class AudioGenerationService:
             return "cuda" if torch.cuda.is_available() and not self.flags.cpu else "cpu"
         except Exception:
             return "cpu"
+
+    def _audio_headroom_issue(
+        self,
+        model_id: str,
+        *,
+        model_resident: bool = False,
+        external_worker: bool = False,
+    ) -> str | None:
+        """Refuse an audio model load when device-wide VRAM is not safely available."""
+        device_name = self._device_string().strip().lower()
+        if not external_worker and not device_name.startswith("cuda"):
+            return None
+        try:
+            from aiwf.services.gpu_memory import measured_cuda_free_bytes
+
+            if external_worker:
+                from aiwf.services.gpu_memory import nvidia_smi_free_bytes
+
+                free_bytes = nvidia_smi_free_bytes()
+            else:
+                import torch
+
+                if not torch.cuda.is_available():
+                    return "Audio model loading deferred because CUDA is unavailable to PyTorch."
+                device = torch.device(device_name)
+                free_bytes = measured_cuda_free_bytes(torch, device)
+        except Exception:
+            free_bytes = None
+        if free_bytes is None:
+            return "Audio model loading deferred because available GPU memory could not be verified."
+
+        normalized = str(model_id or "").strip().lower()
+        if normalized.startswith("facebook/musicgen-"):
+            required_gb = 2.0 if model_resident else (5.0 if normalized != "facebook/musicgen-small" else 3.5)
+        else:
+            variant = self._mmaudio_variant(normalized)
+            required_gb = {
+                "small_16k": 6.0,
+                "small_44k": 8.0,
+                "medium_44k": 10.0,
+                "large_44k": 12.0,
+                "large_44k_v2": 12.0,
+            }.get(variant, 8.0)
+        free_gb = float(free_bytes) / (1024**3)
+        if free_gb < required_gb:
+            return (
+                f"Audio model loading deferred: {free_gb:.1f} GB VRAM is free; "
+                f"the selected route needs at least {required_gb:.1f} GB headroom."
+            )
+        return None
 
     @staticmethod
     def _set_seed(seed: int) -> None:

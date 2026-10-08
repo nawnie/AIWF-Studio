@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Projects: create projects and choose the one in focus; see what each has recorded.
+  A project's ID links images, catalog entries, imported training data, plans and chat context
+  across every engine. The list and the activity timeline are built in code.
+-->
+<Page
+    x:Class="AiwfDesktop.ProjectsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AiwfDesktop">
+    <!-- list beside details when the page is wide; below 820 layout units the list sits above the details
+         (ProjectsPage::ApplyLayout switches the sizes in code) -->
+    <Grid x:Name="RootGrid" Padding="{StaticResource PagePadding}" ColumnSpacing="28" RowSpacing="16">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="ListColumn" Width="380" />
+            <ColumnDefinition x:Name="DetailColumn" Width="*" />
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition x:Name="ListRow" Height="*" />
+            <RowDefinition x:Name="DetailRow" Height="0" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.ColumnSpan="2" Spacing="2">
+            <TextBlock Text="Projects" Style="{StaticResource TitleLargeTextBlockStyle}" />
+            <TextBlock Text="One project is in focus at a time. Everything you make, catalog, import, plan or ask about is recorded against it."
+                       Style="{StaticResource BodyTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap" />
+        </StackPanel>
+
+        <!-- left: new project and the list -->
+        <Grid x:Name="ListPane" Grid.Row="1" RowSpacing="12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <InfoBar x:Name="EngineBar" IsOpen="False" IsClosable="False">
+                <InfoBar.ActionButton>
+                    <Button Content="Start engine API" Click="StartEngine_Click" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+            <Grid Grid.Row="1" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="NewName" PlaceholderText="New project name" MaxLength="120" KeyDown="NewName_KeyDown"
+                         AutomationProperties.Name="New project name" />
+                <Button Grid.Column="1" Style="{StaticResource AccentButtonStyle}" Click="Create_Click" AutomationProperties.Name="Create project">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE710;" FontSize="14" />
+                        <TextBlock Text="Create" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+            <ListView x:Name="ProjectList" Grid.Row="2" SelectionMode="Single" SelectionChanged="ProjectList_SelectionChanged"
+                      AutomationProperties.Name="Projects" />
+        </Grid>
+
+        <!-- right: the selected project's activity -->
+        <Border x:Name="DetailPane" Grid.Row="1" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="20">
+            <ScrollViewer>
+                <StackPanel Spacing="10">
+                    <TextBlock x:Name="DetailName" Text="Choose a project" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="DetailId" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.6" IsTextSelectionEnabled="True" />
+                    <TextBlock Text="Activity" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,0" />
+                    <StackPanel x:Name="Events" Spacing="10" />
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+    </Grid>
+</Page>

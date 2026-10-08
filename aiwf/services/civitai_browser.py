@@ -47,9 +47,11 @@ _TYPE_LABELS: dict[str, str] = {
     "Controlnet": "ControlNet",
     "Upscaler": "Upscaler",
     "VAE": "VAE",
+    "MotionModule": "Motion Module",
     "Poses": "Poses",
     "Wildcards": "Wildcards",
     "Workflows": "Workflows",
+    "Detection": "Detection",
     "Other": "Other",
 }
 
@@ -133,6 +135,9 @@ class CivitAIBrowser:
             stats_rating=float(stats.get("rating") or 0.0),
             creator=(raw.get("creator") or {}).get("username", ""),
             versions=versions,
+            supports_generation=(
+                bool(raw["supportsGeneration"]) if "supportsGeneration" in raw else None
+            ),
         )
 
     # ------------------------------------------------------------------

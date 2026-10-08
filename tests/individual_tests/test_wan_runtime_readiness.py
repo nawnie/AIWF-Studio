@@ -12,6 +12,8 @@ from aiwf.core.domain.wan import (
     WanI2VRequest,
 )
 from aiwf.infrastructure.quant.fp8_linear import collect_fp8_linear_metrics
+from aiwf.services.model_download_catalog import MODEL_DOWNLOAD_CATALOG, QUICK_START_BUNDLES
+from aiwf.services.model_setup_manifest import MODEL_SETUP_ROUTES
 from aiwf.services.wan import WanService
 from aiwf.web.app import register_default_tabs
 from aiwf.web.registry import WebRegistry
@@ -29,11 +31,11 @@ def _write_component_base(service: WanService, name: str = "Wan2.2-TI2V-5B-Diffu
     (base / "text_encoder").mkdir(parents=True)
     (base / "tokenizer").mkdir()
     (base / "scheduler").mkdir()
-    (base / "model_index.json").write_text("{}", encoding="utf-8")
-    (base / "text_encoder" / "config.json").write_text("{}", encoding="utf-8")
+    (base / "model_index.json").write_text('{"_class_name": "WanPipeline"}', encoding="utf-8")
+    (base / "text_encoder" / "config.json").write_text('{"hidden_size": 8}', encoding="utf-8")
     (base / "text_encoder" / "model.safetensors").write_bytes(b"fake")
-    (base / "tokenizer" / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (base / "scheduler" / "scheduler_config.json").write_text("{}", encoding="utf-8")
+    (base / "tokenizer" / "tokenizer.json").write_text('{"version": "1.0"}', encoding="utf-8")
+    (base / "scheduler" / "scheduler_config.json").write_text('{"_class_name": "FlowMatchEulerDiscreteScheduler"}', encoding="utf-8")
     return base
 
 
@@ -106,6 +108,46 @@ def test_pass5_fast_5b_preflight_is_local_only_and_does_not_need_high_low(tmp_pa
     assert ready.high_noise_model is None
     assert ready.low_noise_model is None
     assert ready.components_base == str(base.resolve())
+
+
+def test_wan_component_base_rejects_incomplete_indexed_text_encoder(tmp_path: Path):
+    service = _svc(tmp_path)
+    base = _write_component_base(service)
+    text_encoder = base / "text_encoder"
+    (text_encoder / "model.safetensors").unlink()
+    (text_encoder / "model.safetensors.index.json").write_text(
+        '{"weight_map":{"tensor":"missing-shard.safetensors"}}', encoding="utf-8"
+    )
+
+    assert service._is_components_base(base) is False
+    assert any("model.safetensors" in item for item in service._component_base_missing(base))
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "contents"),
+    [
+        ("model_index.json", ""),
+        ("model_index.json", "not json"),
+        ("model_index.json", "{}"),
+        ("text_encoder/config.json", ""),
+        ("text_encoder/config.json", "not json"),
+        ("text_encoder/config.json", "{}"),
+        ("tokenizer/tokenizer.json", ""),
+        ("tokenizer/tokenizer.json", "not json"),
+        ("tokenizer/tokenizer.json", "{}"),
+        ("scheduler/scheduler_config.json", ""),
+        ("scheduler/scheduler_config.json", "not json"),
+        ("scheduler/scheduler_config.json", "{}"),
+    ],
+)
+def test_wan_component_base_rejects_invalid_metadata(tmp_path: Path, relative_path: str, contents: str):
+    service = _svc(tmp_path)
+    base = _write_component_base(service)
+    invalid_metadata = base / relative_path
+    invalid_metadata.write_text(contents, encoding="utf-8")
+
+    assert service._is_components_base(base) is False
+    assert str(invalid_metadata) in service._component_base_missing(base)
 
 
 def test_pass5_fast_5b_preflight_rejects_wan21_vae(tmp_path: Path, monkeypatch):
@@ -199,6 +241,61 @@ def test_pass5_fp8_preflight_rejects_fun_control_channel_count(tmp_path: Path, m
     assert result.ok is False
     assert any("52-channel patch embedding" in error for error in result.errors)
     assert any("36-channel Wan A14B I2V" in error for error in result.errors)
+
+
+def test_wan_a14b_setup_bundle_components_pass_fp8_route_preflight(tmp_path: Path, monkeypatch):
+    import json
+    import aiwf.services.wan as wan_service_module
+
+    service = _svc(tmp_path)
+    monkeypatch.setattr(service, "_wan_file_candidates", lambda: [])
+    monkeypatch.setattr(wan_service_module, "_native_fp8_runtime_available", lambda: True)
+
+    route = next(route for route in MODEL_SETUP_ROUTES if route.route_key == "pro.video.wan.fp8-pair")
+    bundle = QUICK_START_BUNDLES[route.bundle_key]
+    entries = {entry.key: entry for entry in MODEL_DOWNLOAD_CATALOG if entry.key in bundle}
+    components_entry = entries["wan-ti2v-components"]
+    assert components_entry.snapshot_allow_patterns == (
+        "model_index.json",
+        "scheduler/**",
+        "tokenizer/**",
+        "text_encoder/config.json",
+        "text_encoder/model.safetensors.index.json",
+        "text_encoder/model-*.safetensors",
+    )
+    assert entries["wan-vae-21"].filename.endswith("wan_2.1_vae.safetensors")
+
+    # Materialize the filtered snapshot shape the bundle downloads. The
+    # repository is sharded, and the 5B transformer and Wan 2.2 VAE are absent.
+    base = _write_component_base(service)
+    text_encoder = base / "text_encoder"
+    (text_encoder / "model.safetensors").unlink()
+    (text_encoder / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"weight": "model-00001-of-00003.safetensors"}}),
+        encoding="utf-8",
+    )
+    for shard in range(1, 4):
+        (text_encoder / f"model-0000{shard}-of-00003.safetensors").write_bytes(b"fixture shard")
+
+    vae = service.flags.resolved_models_dir() / "VAE" / "wan2.1_vae.safetensors"
+    high = service.models_dir() / "Safetensor" / "wan2.2_i2v_14B_high_noise_fp8_scaled.safetensors"
+    low = service.models_dir() / "Safetensor" / "wan2.2_i2v_14B_low_noise_fp8_scaled.safetensors"
+    _write_fake_safetensors(vae)
+    _write_fake_comfy_fp8_wan_transformer(high, in_channels=36)
+    _write_fake_comfy_fp8_wan_transformer(low, in_channels=36)
+
+    result = service.preflight(
+        WanI2VRequest(
+            runtime_mode=WAN_RUNTIME_HIGH_LOW_FP8,
+            high_noise_model_id=high.name,
+            low_noise_model_id=low.name,
+            offload="streamed",
+        )
+    )
+
+    assert result.ok, result.message()
+    assert result.components_base == str(base.resolve())
+    assert result.vae == str(vae.resolve())
 
 
 def test_pass5_fp8_metric_aggregation_deduplicates_shared_modules(monkeypatch):

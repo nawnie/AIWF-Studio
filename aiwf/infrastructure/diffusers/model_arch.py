@@ -4,9 +4,14 @@ import json
 import logging
 import re
 import struct
+import zipfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+# Legacy ZIP and pickle checkpoints can expand far beyond their on-disk size
+# while the shape reader enumerates state dictionaries. Keep discovery bounded
+# to smaller files and use filename/folder evidence for larger checkpoints.
+_MAX_LEGACY_CHECKPOINT_SHAPE_LOAD_BYTES = 256 * 1024 * 1024
 
 # Key names aligned with diffusers single-file detection (A1111 sd_models_config.py logic).
 UNET_INPUT_KEY = "model.diffusion_model.input_blocks.0.0.weight"
@@ -24,11 +29,15 @@ ARCH_SD35 = "sd35"
 ARCH_FLUX = "flux"
 ARCH_FLUX_FILL = "flux_fill"
 ARCH_FLUX_KONTEXT = "flux_kontext"
+ARCH_FLUX2 = "flux2"
 ARCH_FLUX2_KLEIN = "flux2_klein"
+ARCH_LONGCAT_IMAGE = "longcat_image"
 ARCH_Z_IMAGE = "z_image"
 ARCH_KREA2 = "krea2"
 ARCH_ANIMA = "anima"
 ARCH_QWEN_IMAGE = "qwen_image"
+ARCH_QWEN_IMAGE_EDIT = "qwen_image_edit"
+ARCH_QWEN_IMAGE_EDIT_PLUS = "qwen_image_edit_plus"
 ARCH_QWEN_IMAGE_NUNCHAKU = "qwen_image_nunchaku"
 ARCH_SANA = "sana"
 ARCH_SANA_VIDEO = "sana_video"
@@ -55,6 +64,12 @@ def _has_anima_marker(text: str) -> bool:
 def _architecture_from_name(filename: str) -> str | None:
     lower = filename.lower().replace("_", "-")
     compact = lower.replace("-", "")
+    if "qwenimage21pipeline" in compact:
+        return ARCH_QWEN_IMAGE
+    if "qwenimageeditpluspipeline" in compact or "qwen-image-edit-plus" in lower:
+        return ARCH_QWEN_IMAGE_EDIT_PLUS
+    if "qwenimageeditpipeline" in compact or "qwen-image-edit" in lower:
+        return ARCH_QWEN_IMAGE_EDIT
     if "refiner" in lower and (
         "sdxl" in compact
         or "sd-xl" in lower
@@ -67,6 +82,8 @@ def _architecture_from_name(filename: str) -> str | None:
         return ARCH_KREA2
     if _has_anima_marker(filename):
         return ARCH_ANIMA
+    if "longcat" in lower or "meituan-longcat" in lower:
+        return ARCH_LONGCAT_IMAGE
     if ("qwen-image" in lower or "qwenimage" in compact or "qwen2.0" in lower) and _is_qwen_nunchaku_name(lower):
         return ARCH_QWEN_IMAGE_NUNCHAKU
     if "qwen-image" in lower or "qwenimage" in compact or "qwen2.0" in lower:
@@ -77,10 +94,12 @@ def _architecture_from_name(filename: str) -> str | None:
         return ARCH_SANA
     if "z-image" in lower or "zimage" in compact:
         return ARCH_Z_IMAGE
-    if "flux.2" in lower or "flux2" in compact or "klein" in lower:
+    if "klein" in lower or re.search(r"(?<![a-z0-9])f2k(?![a-z0-9])", lower):
         return ARCH_FLUX2_KLEIN
     if "kontext" in lower:
         return ARCH_FLUX_KONTEXT
+    if "flux.2" in lower or "flux2" in compact:
+        return ARCH_FLUX2
     if "flux" in lower and "fill" in lower:
         return ARCH_FLUX_FILL
     if "flux" in lower:
@@ -119,9 +138,28 @@ def _safetensors_metadata(path: Path) -> dict[str, str]:
 def _ckpt_tensor_shapes(path: Path) -> dict[str, list[int]]:
     """Best-effort shape map for legacy .ckpt checkpoints."""
     try:
-        import torch
+        # Modern torch checkpoints are zip archives. Memory mapping keeps
+        # architecture discovery from eagerly copying multi-gigabyte tensors
+        # into RAM when the caller only inspects state-dict keys and shapes.
+        # Older non-zip checkpoints do not support mmap; inspect those only
+        # below a conservative size bound, otherwise use filename evidence.
+        if zipfile.is_zipfile(path):
+            if is_torchscript_archive(path):
+                # torch.load dispatches TorchScript archives to torch.jit.load,
+                # materializing the scripted module. Discovery only needs
+                # tensor shapes and must never instantiate it.
+                return {}
+            if path.stat().st_size > _MAX_LEGACY_CHECKPOINT_SHAPE_LOAD_BYTES:
+                return {}
+            import torch
 
-        state = torch.load(path, map_location="cpu", weights_only=True)
+            state = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        elif path.stat().st_size <= _MAX_LEGACY_CHECKPOINT_SHAPE_LOAD_BYTES:
+            import torch
+
+            state = torch.load(path, map_location="cpu", weights_only=True)
+        else:
+            return {}
         if not isinstance(state, dict):
             return {}
         state_dict = state.get("state_dict", state)
@@ -133,6 +171,19 @@ def _ckpt_tensor_shapes(path: Path) -> dict[str, list[int]]:
     except Exception:
         logger.debug("Could not inspect ckpt shapes for %s", path, exc_info=True)
         return {}
+
+
+def is_torchscript_archive(path: Path | str) -> bool:
+    """Detect TorchScript ZIPs by member names without opening their weights."""
+    try:
+        with zipfile.ZipFile(Path(path)) as archive:
+            for info in archive.infolist():
+                name = info.filename.replace("\\", "/").casefold()
+                if "/code/__torch__/" in f"/{name}" or name.endswith("/constants.pkl"):
+                    return True
+    except (OSError, zipfile.BadZipFile, RuntimeError):
+        return False
+    return False
 
 
 def _shapes_for_checkpoint(path: Path) -> dict[str, list[int]]:
@@ -309,11 +360,15 @@ def architecture_label(architecture: str) -> str:
         ARCH_FLUX: "Flux",
         ARCH_FLUX_FILL: "Flux Fill (inpaint)",
         ARCH_FLUX_KONTEXT: "Flux Kontext",
+        ARCH_FLUX2: "Flux.2",
         ARCH_FLUX2_KLEIN: "Flux.2 Klein",
+        ARCH_LONGCAT_IMAGE: "LongCat Image Edit",
         ARCH_Z_IMAGE: "Z-Image",
         ARCH_KREA2: "Krea 2",
         ARCH_ANIMA: "Anima",
         ARCH_QWEN_IMAGE: "Qwen Image",
+        ARCH_QWEN_IMAGE_EDIT: "Qwen Image Edit (unsupported)",
+        ARCH_QWEN_IMAGE_EDIT_PLUS: "Qwen Image Edit Plus (unsupported)",
         ARCH_QWEN_IMAGE_NUNCHAKU: "Qwen Image Nunchaku",
         ARCH_SANA: "Sana",
         ARCH_SANA_VIDEO: "Sana Video",

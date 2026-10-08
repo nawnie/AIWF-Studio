@@ -1,5 +1,6 @@
 import type { GenerationSettings, ProBootstrap, ProModelOption, ProRuntimeStatus } from '../../types'
 import type { WorkflowCodeBlock } from './LayoutTypes'
+import { formatStudioModelFamily } from './modelLabels.ts'
 
 export const WORKFLOW_BLOCK_STORAGE_KEY = 'aiwf.workflowCodeBlocks.v12'
 
@@ -29,15 +30,53 @@ function nextId(prefix: string): string {
 }
 
 function engineLabel(model: ProModelOption | undefined): string {
-  return model?.engineLabel || model?.engineId || model?.architecture || model?.backend || 'Unknown family'
+  return model ? formatStudioModelFamily(model) : 'Unknown family'
+}
+
+function packetFamilyLabel(model: ProModelOption | undefined, family: string): string {
+  if (family === 'flux_kontext') return 'Flux Kontext'
+  if (family === 'flux2') return 'Flux.2'
+  if (family === 'flux2_klein') return 'Flux.2 Klein'
+  return engineLabel(model)
 }
 
 function inferFamily(model: ProModelOption | undefined, settings: GenerationSettings, selectedModelName: string): string {
-  const text = `${settings.modelId} ${selectedModelName} ${model?.engineId ?? ''} ${model?.architecture ?? ''} ${model?.backend ?? ''}`.toLowerCase()
+  const architecture = (model?.architecture ?? '').trim().toLowerCase().replace(/[.\s-]+/g, '_')
+  const identity = `${settings.modelId} ${model?.id ?? ''} ${selectedModelName} ${model?.name ?? ''} ${model?.backend ?? ''}`.toLowerCase()
+
+  // A precise name can repair a broad/stale Flux architecture, but identity
+  // tokens never override a different, explicitly recognized architecture.
+  if (architecture === 'flux' && identity.includes('kontext')) return 'flux_kontext'
+  if (architecture === 'flux2' && (identity.includes('klein') || /(^|[^a-z0-9])f2k([^a-z0-9]|$)/.test(identity))) return 'flux2_klein'
+
+  const architectureFamilies: Record<string, string> = {
+    wan: 'wan',
+    sana_video: 'sana_video',
+    ltx: 'ltx',
+    flux_kontext: 'flux_kontext',
+    flux2_klein: 'flux2_klein',
+    flux2: 'flux2',
+    flux_fill: 'flux_fill',
+    flux: 'flux',
+    qwen_image_nunchaku: 'qwen_image',
+    qwen_image: 'qwen_image',
+    z_image: 'z_image',
+    sana: 'sana',
+    sdxl: 'sdxl',
+    sd35: 'sd35',
+    sd15: 'sd15',
+    inpaint: 'sd15',
+  }
+  if (architectureFamilies[architecture]) return architectureFamilies[architecture]
+
+  const text = `${identity} ${architecture}`
   if (text.includes('wan')) return 'wan'
   if (text.includes('sana_video') || text.includes('sana-video')) return 'sana_video'
   if (text.includes('ltx')) return 'ltx'
-  if (text.includes('flux2') || text.includes('flux.2') || text.includes('klein')) return 'flux2_klein'
+  if (text.includes('kontext')) return 'flux_kontext'
+  if (text.includes('klein') || /(^|[^a-z0-9])f2k([^a-z0-9]|$)/.test(text)) return 'flux2_klein'
+  if (text.includes('flux2') || text.includes('flux.2') || model?.engineId === 'flux2') return 'flux2'
+  if (text.includes('flux_fill') || text.includes('flux fill')) return 'flux_fill'
   if (text.includes('flux')) return 'flux'
   if (text.includes('qwen') || text.includes('nunchaku')) return 'qwen_image'
   if (text.includes('z-image') || text.includes('zimage')) return 'z_image'
@@ -48,17 +87,35 @@ function inferFamily(model: ProModelOption | undefined, settings: GenerationSett
   return 'unknown'
 }
 
-function selectionGate(model: ProModelOption | undefined): Record<string, unknown> {
-  const status = String(model?.status ?? 'metadata-only').toLowerCase()
+function selectionGate(model: ProModelOption | undefined, route: string): Record<string, unknown> {
+  const status = String(model?.status ?? 'metadata-only').trim().toLowerCase().replace(/[ _]+/g, '-')
   const reason = model?.reason ?? ''
   const suggestedAction = model?.suggestedAction ?? ''
-  if (['broken-runtime', 'blocked-cleanly', 'unsupported-no-route'].includes(status)) {
+  const routeStatus = String(model?.routeStatus ?? '').trim().toLowerCase().replace(/[ _]+/g, '-')
+  if (route.startsWith('unsupported-')) {
+    return {
+      normalSelectable: false,
+      level: 'block',
+      status: 'unsupported-no-route',
+      reason: reason || 'This model family has no active generation route for the selected mode.',
+      suggestedAction: suggestedAction || 'Choose a model with a supported route for this generation mode.',
+    }
+  }
+  if (['broken-runtime', 'blocked-cleanly', 'unsupported-no-route', 'missing-assets', 'blocked-runtime'].includes(status) || routeStatus === 'blocked') {
     return { normalSelectable: false, level: 'block', status, reason: reason || 'Blocked from normal generation selection.', suggestedAction }
   }
   if (['metadata-only', 'needs-smoke', 'experimental', 'candidate'].includes(status)) {
     return { normalSelectable: true, requiresWarning: true, level: 'warn', status, reason: reason || 'Discovered but not smoke-certified.', suggestedAction }
   }
-  return { normalSelectable: true, requiresWarning: false, level: 'pass', status, reason, suggestedAction }
+  const selectable = ['working', 'ready', 'loaded', 'supported', 'supported-smoked', 'supported-gated', 'partial-supported', 'supported-experimental-quants'].includes(status)
+  return {
+    normalSelectable: true,
+    requiresWarning: !selectable && status !== '' && status !== 'unknown',
+    level: selectable ? 'pass' : 'info',
+    status,
+    reason,
+    suggestedAction,
+  }
 }
 
 function detectPrecision(value: string): string {
@@ -84,8 +141,13 @@ function detectPrecision(value: string): string {
 }
 
 function routeFor(settings: GenerationSettings, family: string): string {
+  if (family === 'flux2') return 'unsupported-generic-flux2'
+  if (family === 'flux_kontext') {
+    if (settings.mode === 'image') return 'pro.image.flux-kontext'
+    return `unsupported-flux-kontext-${settings.mode}`
+  }
   if (settings.mode === 'inpaint') {
-    if (family === 'flux') return 'flux-fill-inpaint'
+    if (family === 'flux' || family === 'flux_fill') return 'flux-fill-inpaint'
     return 'inpaint'
   }
   if (settings.mode === 'video') {
@@ -95,6 +157,7 @@ function routeFor(settings: GenerationSettings, family: string): string {
     return 'image-to-video'
   }
   if (family === 'flux2_klein') return 'flux2-klein-image'
+  if (family === 'flux_fill') return 'unsupported-flux-fill-image'
   if (family === 'qwen_image') return 'qwen-image'
   if (family === 'z_image') return 'z-image'
   if (family === 'sana') return 'sana-image'
@@ -106,7 +169,7 @@ function payloadFor({ settings, bootstrap, runtime, selectedModel, selectedModel
   const family = inferFamily(selectedModel, settings, selectedModelName)
   const route = routeFor(settings, family)
   const selectedModelRecord = (selectedModel ?? {}) as Record<string, unknown>
-  const familyLabel = engineLabel(selectedModel)
+  const familyLabel = packetFamilyLabel(selectedModel, family)
   const precision = detectPrecision(`${selectedModelName} ${selectedModel?.architecture ?? ''} ${selectedModel?.assetSummary ?? ''} ${selectedModel?.backend ?? ''}`)
   const basePayload: Record<string, unknown> = {
     schema: 'aiwf.studio-generation-packet.v1',
@@ -126,17 +189,18 @@ function payloadFor({ settings, bootstrap, runtime, selectedModel, selectedModel
       id: settings.modelId,
       name: selectedModelName,
       engineId: selectedModel?.engineId ?? '',
-      engineLabel: selectedModel?.engineLabel ?? '',
+      engineLabel: familyLabel,
       architecture: selectedModel?.architecture ?? '',
       backend: selectedModel?.backend ?? '',
       status: selectedModel?.status ?? '',
+      routeStatus: selectedModel?.routeStatus ?? 'unknown',
       reason: selectedModel?.reason ?? '',
       suggestedAction: selectedModel?.suggestedAction ?? '',
       assetSummary: selectedModel?.assetSummary ?? '',
       estVramGb: selectedModel?.estVramGb ?? null,
       heavyFor12Gb: selectedModel?.heavyFor12Gb ?? false,
     },
-    selectionGate: selectionGate(selectedModel),
+    selectionGate: selectionGate(selectedModel, route),
     generation: {
       width: settings.width,
       height: settings.height,

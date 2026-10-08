@@ -21,6 +21,7 @@ import {
   streamAgentChat,
 } from './studioApiClient'
 import type { AgentMessage, AgentModel, AgentTool } from './studioApiClient'
+import { formatAgentModelLabel } from './agentModelLabel'
 import './studioLayouts.css'
 
 const STARTER_MESSAGES: AgentMessage[] = [
@@ -47,7 +48,6 @@ const FALLBACK_TOOLS: AgentTool[] = [
 export function AgenticChatLayout({
   settings,
   runtime,
-  selectedModelName,
   statusMessage,
   onSendToWorkflow,
 }: LayoutProps) {
@@ -62,6 +62,7 @@ export function AgenticChatLayout({
   const [connectionMessage, setConnectionMessage] = useState('Ollama backend not checked yet.')
 
   const visibleMessages = useMemo(() => messages.filter((message) => message.role !== 'system'), [messages])
+  const selectedAgentModelLabel = formatAgentModelLabel(selectedModel, models)
 
   const refreshBackend = useCallback(() => {
     setConnectionMessage('Checking Ollama at 127.0.0.1:11434...')
@@ -69,7 +70,7 @@ export function AgenticChatLayout({
       .then((nextModels) => {
         setModels(nextModels)
         setSelectedModel((current) => current || nextModels[0]?.id || '')
-        setConnectionMessage(nextModels.length ? `Loaded ${nextModels.length} Ollama model(s).` : 'Ollama answered but returned no models.')
+        setConnectionMessage(nextModels.length ? `Found ${nextModels.length} Ollama model(s).` : 'Ollama answered but returned no models.')
       })
       .catch((error: unknown) => {
         setConnectionMessage(error instanceof Error ? error.message : 'Ollama is unavailable.')
@@ -123,7 +124,7 @@ export function AgenticChatLayout({
           <header><Bot size={16} /><strong>Backend Loader</strong></header>
           <label className="studio-field-mini">Model
             <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
-              {models.length ? models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>) : <option value="">No Ollama model loaded</option>}
+              {models.length ? models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>) : <option value="">No Ollama models available</option>}
             </select>
           </label>
           <button type="button" className="studio-wide-button" onClick={refreshBackend}><RefreshCcw size={14} /> Refresh Ollama</button>
@@ -154,7 +155,7 @@ export function AgenticChatLayout({
           <div>
             <span className="studio-eyebrow">ADVANCED AGENTIC CHAT</span>
             <strong>Plan, inspect, draft, and use AIWF tools safely</strong>
-            <small>{runtime.state} · {selectedModelName} · {statusMessage}</small>
+            <small>{runtime.state} · {selectedAgentModelLabel} · {statusMessage}</small>
           </div>
           <div className="studio-agent-mode-tabs">
             {[

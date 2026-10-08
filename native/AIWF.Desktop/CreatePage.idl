@@ -1,0 +1,9 @@
+namespace AiwfDesktop
+{
+    // Create: Qwen Image 2.1 generation through the engine API
+    [default_interface]
+    runtimeclass CreatePage : Microsoft.UI.Xaml.Controls.Page
+    {
+        CreatePage();
+    }
+}
