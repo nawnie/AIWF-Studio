@@ -161,6 +161,9 @@ class FakeApps:
                     return httpx.Response(409, json={"detail": "These weights are already on this PC."})
                 return httpx.Response(200, json={"job_id": "0123456789ab", "model_id": body["modelId"], "repo": "Qwen/Qwen2.5-7B-Instruct", "status": "running", "total_bytes": 100, "done_bytes": 10, "files_total": 3, "files_done": 0, "message": "", "destination_name": "Qwen--Qwen2.5-7B-Instruct", "process": "secret"})
             if sub.startswith("/download/"):
+                # ReTrain answers 404 for a download ID it does not know
+                if sub.startswith("/download/000000000000"):
+                    return httpx.Response(404, json={"detail": "Unknown download."})
                 cancelled = sub.endswith("/cancel")
                 return httpx.Response(200, json={"job_id": "0123456789ab", "model_id": "qwen2.5-7b", "repo": "Qwen/Qwen2.5-7B-Instruct", "status": "cancelled" if cancelled else "completed", "total_bytes": 100, "done_bytes": 100, "files_total": 3, "files_done": 3, "message": "", "destination_name": "Qwen--Qwen2.5-7B-Instruct"})
             return httpx.Response(404, json={"detail": "Not Found"})

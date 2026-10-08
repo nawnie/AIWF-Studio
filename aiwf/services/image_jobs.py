@@ -644,22 +644,33 @@ class ImageJobs:
         return job
 
     def _finish(self, job_id: str, state: str, error: dict[str, str] | None) -> None:
+        # 1. claim the finish once (the cancel route and the watcher can both get here)
         with self._lock:
             job = self._jobs.get(job_id)
-            if job is None or job["state"] in FINAL_STATES:
+            if job is None or job["state"] in FINAL_STATES or job.get("_finishing"):
                 return
-            job["state"], job["error"], job["finished_at"], job["queue_position"] = state, error, _utc_now(), None
-            snapshot = dict(job)
+            job["_finishing"] = True
+            finished_at = _utc_now()
+            snapshot = {**job, "state": state, "error": error, "finished_at": finished_at, "queue_position": None}
+            snapshot.pop("_finishing", None)
             on_finished = job.pop("on_finished", None)
-        if self._on_done is not None:
-            try:
-                self._on_done(snapshot)
-            except Exception:  # noqa: BLE001 - a ledger problem must not lose the finished image
-                pass
+            snapshot.pop("on_finished", None)
+        # 2. give back the GPU lease before the final state is visible, so a caller that sees
+        #    "done" or "cancelled" can start the next GPU job at once instead of meeting gpu_busy
         if callable(on_finished):
             try:
                 on_finished(snapshot)
             except Exception:  # noqa: BLE001 - cleanup callbacks must not corrupt job state
+                pass
+        # 3. publish the final state
+        with self._lock:
+            job["state"], job["error"], job["finished_at"], job["queue_position"] = state, error, finished_at, None
+            job.pop("_finishing", None)
+        # 4. record it in the project ledger
+        if self._on_done is not None:
+            try:
+                self._on_done(snapshot)
+            except Exception:  # noqa: BLE001 - a ledger problem must not lose the finished image
                 pass
 
     def _prune_locked(self) -> None:

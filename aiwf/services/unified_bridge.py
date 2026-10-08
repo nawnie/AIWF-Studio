@@ -33,6 +33,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from dataclasses import dataclass, field
@@ -143,10 +144,43 @@ class BridgeConfig:
 # --- shared project ledger -------------------------------------------------------------
 # One JSON file per project. Writes go to a temp file and are swapped in with
 # os.replace, so a crash never leaves a half-written ledger behind.
+#
+# Windows refuses to open a file for a moment while os.replace swaps it, and refuses
+# the swap while another handle has the file open; either side then sees
+# PermissionError. Inside one process the ledger lock keeps reads and writes apart.
+# Pro and the engine API are separate processes sharing this folder, so both sides
+# also retry that transient error briefly instead of failing the request.
+_SHARING_RETRIES = 12          # about half a second in total
+_SHARING_RETRY_SECONDS = 0.04
+
+
+def _read_json_retrying(path: Path) -> Any:
+    for attempt in range(_SHARING_RETRIES):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            if attempt == _SHARING_RETRIES - 1:
+                raise
+            time.sleep(_SHARING_RETRY_SECONDS)
+    return None   # not reached
+
+
+def _replace_retrying(source: str, target: Path) -> None:
+    for attempt in range(_SHARING_RETRIES):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == _SHARING_RETRIES - 1:
+                raise
+            time.sleep(_SHARING_RETRY_SECONDS)
+
+
 class ProjectLedger:
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
-        self._lock = threading.Lock()
+        # reentrant: append() reads the record through get() while it holds the lock
+        self._lock = threading.RLock()
 
     def _path(self, project_id: str) -> Path:
         if not isinstance(project_id, str) or not _PROJECT_ID.fullmatch(project_id):
@@ -162,7 +196,7 @@ class ProjectLedger:
                 json.dump(record, stream, ensure_ascii=False, indent=2)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temp_name, target)
+            _replace_retrying(temp_name, target)
         except BaseException:
             Path(temp_name).unlink(missing_ok=True)
             raise
@@ -185,7 +219,8 @@ class ProjectLedger:
     def get(self, project_id: str) -> dict[str, Any]:
         path = self._path(project_id)
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
+            with self._lock:
+                record = _read_json_retrying(path)
         except FileNotFoundError as exc:
             raise BridgeError(404, "project_not_found", "That unified project does not exist.") from exc
         except (OSError, json.JSONDecodeError) as exc:
@@ -201,7 +236,8 @@ class ProjectLedger:
         # this loop summarizes every readable project; damaged files are skipped, not deleted
         for path in sorted(self.root.glob("aiwfp-*.json")):
             try:
-                record = json.loads(path.read_text(encoding="utf-8"))
+                with self._lock:
+                    record = _read_json_retrying(path)
             except (OSError, json.JSONDecodeError):
                 continue
             if not isinstance(record, dict) or not _PROJECT_ID.fullmatch(str(record.get("project_id", ""))):
@@ -771,10 +807,20 @@ class UnifiedBridge:
         return {"schema_version": SCHEMA_VERSION, "download": _download_view(job)}
 
     def download_status(self, job_id: str) -> dict[str, Any]:
-        return {"schema_version": SCHEMA_VERSION, "download": _download_view(self._retrain_json("GET", f"/download/{quote(job_id, safe='')}", "Model download status"))}
+        return {"schema_version": SCHEMA_VERSION, "download": _download_view(self._download_job("GET", job_id, "", "Model download status"))}
 
     def cancel_download(self, job_id: str) -> dict[str, Any]:
-        return {"schema_version": SCHEMA_VERSION, "download": _download_view(self._retrain_json("POST", f"/download/{quote(job_id, safe='')}/cancel", "Model download cancel"))}
+        return {"schema_version": SCHEMA_VERSION, "download": _download_view(self._download_job("POST", job_id, "/cancel", "Model download cancel"))}
+
+    # an unknown download ID is the caller's mistake, not a ReTrain failure: say so with its own code,
+    # the way unknown image jobs answer job_not_found
+    def _download_job(self, method: str, job_id: str, suffix: str, action: str) -> dict[str, Any]:
+        try:
+            return self._retrain_json(method, f"/download/{quote(job_id, safe='')}{suffix}", action)
+        except BridgeError as exc:
+            if exc.status_code == 404:
+                raise BridgeError(404, "download_not_found", "No model download with that ID (downloads are kept until ReTrain restarts).") from exc
+            raise
 
     # ---------------------------------------------------------------------------------
     # flow 4: explicit project context -> Qwen Chat
