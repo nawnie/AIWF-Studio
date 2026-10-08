@@ -1,0 +1,9 @@
+namespace AiwfDesktop
+{
+    // Settings: engine list and logs, this app's memory use, privacy
+    [default_interface]
+    runtimeclass SettingsPage : Microsoft.UI.Xaml.Controls.Page
+    {
+        SettingsPage();
+    }
+}

@@ -147,6 +147,11 @@ def align_to_multiple_of_16(width: int, height: int) -> tuple[int, int]:
     return max(16, (width // 16) * 16), max(16, (height // 16) * 16)
 
 
+def align_to_multiple_of_32(width: int, height: int) -> tuple[int, int]:
+    """Qwen Image 2.1 truncates requested dimensions to 32-pixel blocks."""
+    return max(32, (width // 32) * 32), max(32, (height // 32) * 32)
+
+
 def merge_inpaint_masks(
     painted: Image.Image | None,
     sam_mask: Image.Image | None,

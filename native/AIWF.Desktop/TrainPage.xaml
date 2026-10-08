@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Train: prepare a fine-tune and check it against this GPU, in three steps.
+    1. Base model: on this PC, downloadable (open on Hugging Face), or needs the user's key (gated).
+       Downloads ask first, show size and progress, and can be cancelled.
+    2. Training data: one exact package revision (from Datasets or picked here) imported into the
+       training engine.
+    3. Plan: a dry run with gates, VRAM estimate and dependency checks. Training itself is started
+       in ReTrain; this page never starts it.
+  Model rows, gate lists and dialogs are built in TrainPage.xaml.cpp.
+-->
+<Page
+    x:Class="AiwfDesktop.TrainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AiwfDesktop"
+    NavigationCacheMode="Required">
+    <ScrollViewer>
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="16" MaxWidth="1100" HorizontalAlignment="Stretch">
+            <StackPanel Spacing="2">
+                <TextBlock Text="Train" Style="{StaticResource TitleLargeTextBlockStyle}" />
+                <TextBlock Text="Prepare a QLoRA or LoRA fine-tune and check it against this GPU. Runs start in ReTrain; this app never starts training on its own."
+                           Style="{StaticResource BodyTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap" />
+            </StackPanel>
+
+            <InfoBar x:Name="EngineBar" IsOpen="False" IsClosable="False">
+                <InfoBar.ActionButton>
+                    <Button Content="Start engines" Click="StartEngine_Click" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <!-- step 1: base model -->
+            <Border Style="{StaticResource CardStyle}" Padding="20">
+                <StackPanel Spacing="12">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="1   Base model" Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBlock x:Name="KeyState" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Click="Key_Click" VerticalAlignment="Center" AutomationProperties.Name="Hugging Face key">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE8D7;" FontSize="14" />
+                                <TextBlock Text="Hugging Face key" />
+                            </StackPanel>
+                        </Button>
+                    </Grid>
+                    <StackPanel x:Name="Models" Spacing="6" />
+                    <StackPanel x:Name="DownloadPanel" Spacing="6" Visibility="Collapsed">
+                        <TextBlock x:Name="DownloadText" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap" />
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ProgressBar x:Name="DownloadProgress" Minimum="0" Maximum="100" VerticalAlignment="Center" />
+                            <Button x:Name="CancelDownloadButton" Grid.Column="1" Content="Cancel download" Click="CancelDownload_Click" />
+                        </Grid>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- step 2: training data -->
+            <Border Style="{StaticResource CardStyle}" Padding="20">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="2   Training data" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <ComboBox x:Name="PackagePicker" PlaceholderText="Choose a published package revision" HorizontalAlignment="Stretch"
+                                  AutomationProperties.Name="Package revision" />
+                        <Button x:Name="ImportButton" Grid.Column="1" Click="Import_Click" AutomationProperties.Name="Import into the training engine">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE896;" FontSize="14" />
+                                <TextBlock Text="Import into training engine" />
+                            </StackPanel>
+                        </Button>
+                    </Grid>
+                    <TextBlock x:Name="ImportResult" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap" Opacity="0.85" />
+                </StackPanel>
+            </Border>
+
+            <!-- step 3: the plan -->
+            <Border Style="{StaticResource CardStyle}" Padding="20">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="3   Plan (dry run)" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <ComboBox x:Name="MethodPicker" Header="Method" SelectedIndex="0" MinWidth="160">
+                            <ComboBoxItem Content="QLoRA (4-bit)" Tag="QLoRA" />
+                            <ComboBoxItem Content="LoRA" Tag="LoRA" />
+                        </ComboBox>
+                        <Button x:Name="PlanButton" Style="{StaticResource AccentButtonStyle}" Click="Plan_Click" VerticalAlignment="Bottom"
+                                AutomationProperties.Name="Check plan">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE9D9;" FontSize="14" />
+                                <TextBlock Text="Check plan" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                    <StackPanel x:Name="PlanResult" Spacing="8" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

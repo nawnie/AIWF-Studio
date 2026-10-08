@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Setup: the guided first run, also reachable from Configure Studio.
+  Five steps, one visible at a time:
+    1. This PC          GPU, the AIWF Studio code folder, its Python environment, the engine API
+    2. Save locations   where images, the dataset catalog and packages are saved
+    3. Model locations  where image and training models are found
+    4. Engines          how each engine starts here, and the optional Hugging Face key
+    5. Review           every change, then apply
+  Folder rows and engine rows are built in code (SetupPage.xaml.cpp) from one list of fields.
+  Nothing is downloaded and no engine is started without the person pressing a button.
+-->
+<Page
+    x:Class="AiwfDesktop.SetupPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AiwfDesktop">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <ScrollViewer x:Name="StepScroll">
+            <StackPanel Padding="{StaticResource PagePadding}" Spacing="16" MaxWidth="900" HorizontalAlignment="Stretch">
+                <!-- header: title, one line of reassurance, and where in the five steps we are -->
+                <StackPanel Spacing="4">
+                    <TextBlock Text="Set up AIWF Studio" Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock Style="{StaticResource BodyTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap"
+                               Text="Choose where Studio saves your work and finds your models. Nothing is downloaded and no engine starts unless you press its button." />
+                </StackPanel>
+                <StackPanel Spacing="6">
+                    <TextBlock x:Name="StepLabel" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <ProgressBar x:Name="StepProgress" Minimum="0" Maximum="5" Value="1" AutomationProperties.Name="Setup progress" />
+                </StackPanel>
+
+                <!-- 1. this PC -->
+                <StackPanel x:Name="StepPc" Spacing="12">
+                    <Border Style="{StaticResource CardStyle}" Padding="20">
+                        <StackPanel x:Name="PcRows" Spacing="14" />
+                    </Border>
+                </StackPanel>
+
+                <!-- 2. save locations -->
+                <StackPanel x:Name="StepSave" Spacing="12" Visibility="Collapsed">
+                    <TextBlock Style="{StaticResource BodyTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap"
+                               Text="Leave a box empty to keep the default shown in it. Folders on a fast drive with plenty of free space work best." />
+                    <StackPanel x:Name="SaveRows" Spacing="12" />
+                </StackPanel>
+
+                <!-- 3. model locations -->
+                <StackPanel x:Name="StepModels" Spacing="12" Visibility="Collapsed">
+                    <TextBlock Style="{StaticResource BodyTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap"
+                               Text="Point Studio at the models you already have. Extra folders are only searched, never written to, so a shared model library stays as it is." />
+                    <StackPanel x:Name="ModelRows" Spacing="12" />
+                </StackPanel>
+
+                <!-- 4. engines -->
+                <StackPanel x:Name="StepEngines" Spacing="12" Visibility="Collapsed">
+                    <TextBlock Style="{StaticResource BodyTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap"
+                               Text="Each engine is a local service. AIWF Studio can start the ones its engine list knows how to start; the others are used when they are already running." />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Open engine list" Click="OpenEngineList_Click" />
+                        <Button Content="Reload engine list" Click="ReloadEngines_Click" />
+                    </StackPanel>
+                    <StackPanel x:Name="EngineRows" Spacing="10" />
+                    <Border Style="{StaticResource CardStyle}" Padding="20">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Hugging Face key (optional)" Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBlock x:Name="KeyText" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap" />
+                            <Button x:Name="KeyButton" Content="Add or change key" Click="Key_Click" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- 5. review and apply -->
+                <StackPanel x:Name="StepReview" Spacing="12" Visibility="Collapsed">
+                    <Border Style="{StaticResource CardStyle}" Padding="20">
+                        <StackPanel x:Name="ReviewRows" Spacing="10" />
+                    </Border>
+                    <InfoBar x:Name="ResultBar" IsOpen="False" IsClosable="False">
+                        <InfoBar.ActionButton>
+                            <Button x:Name="HomeButton" Content="Go to Home" Click="Home_Click" Visibility="Collapsed" />
+                        </InfoBar.ActionButton>
+                    </InfoBar>
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- the step buttons stay visible at every window size -->
+        <Border Grid.Row="1" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                Background="{ThemeResource LayerFillColorDefaultBrush}">
+            <!-- same width and side padding as the content column, so Back lines up with the cards -->
+            <Grid Padding="36,12,36,12" ColumnSpacing="8" MaxWidth="900" HorizontalAlignment="Stretch">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Button x:Name="BackButton" Content="Back" Click="Back_Click" />
+                <Button x:Name="SkipButton" Grid.Column="2" Content="Skip for now" Click="Skip_Click"
+                        ToolTipService.ToolTip="Keeps everything as it is. Setup stays available in Configure Studio." />
+                <Button x:Name="NextButton" Grid.Column="3" Content="Next" Click="Next_Click" Style="{StaticResource AccentButtonStyle}" MinWidth="120" />
+            </Grid>
+        </Border>
+    </Grid>
+</Page>

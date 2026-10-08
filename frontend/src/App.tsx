@@ -21,6 +21,7 @@ import {
   Eye,
   EyeOff,
   FileImage,
+  FolderInput,
   Hand,
   HardDrive,
   Highlighter,
@@ -53,11 +54,17 @@ import {
 import type { WorkflowCodeBlock } from './types'
 import { ModelFamilyMatrixLayout } from './layouts/studio/ModelFamilyMatrixLayout'
 import { ProjectCenterLayout } from './layouts/studio/ProjectCenterLayout'
+import { UnifiedWorkspaceLayout } from './layouts/studio/UnifiedWorkspaceLayout'
 import { AgenticChatLayout } from './layouts/studio/AgenticChatLayout'
+import { formatDownloadCategoryLabel } from './layouts/studio/downloadLabels'
+import { formatSetupBundleLabel } from './layouts/studio/setupBundleLabels'
+import { formatControlNetCompatibilityLabel } from './layouts/studio/controlNetLabels'
 import { PipelineAtlasLayout } from './layouts/studio/PipelineAtlasLayout'
 import { MediaFoundryImageLayout } from './layouts/studio/MediaFoundryImageLayout'
+import { formatInventoryAssetLabel, formatRouteLifecycleStatus, formatStudioEngineLabel, formatStudioModelAvailability, formatStudioModelFamily, formatStudioModelLabel } from './layouts/studio/modelLabels'
 import { AudioStudioLayout } from './layouts/studio/AudioStudioLayout'
 import { QwenImageEditorLayout } from './layouts/studio/QwenImageEditorLayout'
+import { videoLabExtendModels } from './layouts/studio/videoLabModels'
 import { CommandPalette } from './layouts/studio/CommandPalette'
 import type { LayoutProps } from './layouts/studio/LayoutTypes'
 import {
@@ -66,12 +73,20 @@ import {
   fetchProCapabilities,
   fetchProDownloads,
   downloadCatalogModel,
+  importSharedCatalogSnapshot,
+  previewSharedCatalogSnapshot,
+  installCatalogBundle,
+  runProSetupAction,
+  fetchProLtxEngineInstallStatus,
+  fetchProQwenNunchakuEngineInstallStatus,
   fetchProLogs,
   fetchProRuntime,
+  fetchProControlNetModels,
   fetchProStartup,
   fetchProExtensions,
   fetchProSettings,
   fetchVideoLabStatus,
+  prepareVideoLabAudioModel,
   toggleProExtension,
   formatApiError,
   generateAutoMask,
@@ -81,16 +96,25 @@ import {
   runFaceSwap,
   runVideoLab,
   reorganizeModels,
+  planModelReorganize,
+  scanModelRoots,
+  getModelRootsScanPage,
+  previewSharedModelPlacement,
+  applySharedModelPlacement,
   uploadModelFile,
   uploadVideoLabFile,
   getFallbackBootstrap,
   getFallbackRuntime,
+  loadProModel,
+  prepareProVideoRoute,
   ProApiError,
   notifyProWindowReady,
   reportProClientError,
   reportProClientEvent,
   requestProRestart,
   runEnhanceImage,
+  fetchProEnhanceModels,
+  installProEnhanceModel,
   saveProSettings,
   setGerrorEnabled,
   streamProRuntime,
@@ -98,12 +122,14 @@ import {
   unloadProModel,
   runVsrImage,
 } from './api'
-import type { ProExtensionsStatus, ProModelSortResult, ProStartupStatus, VideoLabProbe, VideoLabStatus } from './api'
+import type { ProControlNetModel, ProControlNetSetupOption, ProEnhanceModel } from './api'
+import type { ProExtensionsStatus, ProModelAssetScanProposal, ProModelRootsScanResult, ProModelSortResult, ProStartupStatus, VideoLabProbe, VideoLabStatus } from './api'
 import type {
   AspectRatioOption,
   CreationMode,
   EngineId,
   EngineSummary,
+  ProSharedSnapshotImportPreview,
   GenerationSettings,
   GenerationProgressEvent,
   ImportedGenerationMetadata,
@@ -142,6 +168,32 @@ interface XyPlotCell {
 }
 
 type GenerationSettingsPatch = Partial<GenerationSettings> & { modelName?: string }
+
+function withSavedWanModelComponents(
+  settings: GenerationSettings,
+  models: readonly ProModelOption[],
+  savedVideoSettings: ProSettingsStatus['video'] | undefined,
+): GenerationSettings {
+  const selectedModel = models.find((model) => model.id === settings.modelId)
+  if (settings.mode !== 'video' || selectedModel?.engineId !== 'wan' || !savedVideoSettings) return settings
+  const savedVae = savedVideoSettings.wanVae || ''
+  const normalizedSavedVae = savedVae.toLowerCase().replace(/[\\/]/g, '/')
+  const savedLooksWan21 = /wan[_ .-]*2[._-]*1|wan21/.test(normalizedSavedVae)
+  const savedLooksWan22 = /wan[_ .-]*2[._-]*2|wan22/.test(normalizedSavedVae)
+  const savedVaeMatchesRuntime = settings.wanRuntimeMode === 'fast_5b'
+    ? !savedLooksWan21
+    : !savedLooksWan22
+  return {
+    ...settings,
+    highNoiseModelId: settings.highNoiseModelId || savedVideoSettings.wanHigh,
+    lowNoiseModelId: settings.lowNoiseModelId || savedVideoSettings.wanLow,
+    // A cleared VAE after switching Wan runtime families means the old saved
+    // sidecar must not be reintroduced when its version is known to conflict.
+    // Keep explicit user choices intact so route preflight can explain a mismatch.
+    vaeId: settings.vaeId || (savedVaeMatchesRuntime ? savedVae : ''),
+    textEncoderPath: settings.textEncoderPath || savedVideoSettings.wanTextEncoder,
+  }
+}
 
 interface SupportIssue {
   title: string
@@ -269,6 +321,7 @@ const RAIL_ITEMS: IconItem<string>[] = [
   { id: 'foundry', label: 'Foundry', icon: Image },
   { id: 'pipeline', label: 'Pipeline', icon: WorkflowIcon },
   { id: 'projects', label: 'Projects', icon: Boxes },
+  { id: 'unified', label: 'Studio Flow', icon: Database },
   { id: 'assistant', label: 'Assistant', icon: Sparkles },
   { id: 'audiolab', label: 'Audio', icon: Wand2 },
   { id: 'tools', label: 'Tools', icon: Wand2 },
@@ -282,14 +335,14 @@ const RAIL_IDS = new Set(RAIL_ITEMS.map((item) => item.id))
 const RAIL_ITEM_BY_ID = new Map(RAIL_ITEMS.map((item) => [item.id, item]))
 
 const RAILS_BY_MODE: Record<string, string[]> = {
-  image: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'projects', 'data', 'monitor', 'logs'],
-  inpaint: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'data', 'monitor', 'logs'],
-  'qwen-edit': ['qwen-edit', 'data', 'monitor', 'logs'],
-  video: ['create', 'workflow', 'models', 'pipeline', 'projects', 'data', 'monitor', 'logs'],
-  audio: ['audiolab', 'projects', 'data', 'monitor', 'logs'],
-  settings: ['settings', 'models', 'data', 'monitor', 'logs', 'assistant'],
-  models: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'projects', 'data', 'monitor', 'logs'],
-  data: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'projects', 'data', 'monitor', 'logs'],
+  image: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'projects', 'unified', 'data', 'monitor', 'logs'],
+  inpaint: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'unified', 'data', 'monitor', 'logs'],
+  'qwen-edit': ['qwen-edit', 'unified', 'data', 'monitor', 'logs'],
+  video: ['create', 'workflow', 'models', 'pipeline', 'projects', 'unified', 'data', 'monitor', 'logs'],
+  audio: ['audiolab', 'projects', 'unified', 'data', 'monitor', 'logs'],
+  settings: ['settings', 'models', 'unified', 'data', 'monitor', 'logs', 'assistant'],
+  models: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'projects', 'unified', 'data', 'monitor', 'logs'],
+  data: ['create', 'workflow', 'models', 'families', 'foundry', 'pipeline', 'projects', 'unified', 'data', 'monitor', 'logs'],
 }
 
 const STUDIO_RAIL_ATTRIBUTE: Record<string, string> = {
@@ -298,7 +351,7 @@ const STUDIO_RAIL_ATTRIBUTE: Record<string, string> = {
   audiolab: 'audio',
 }
 
-const FULL_SURFACE_RAILS = new Set(['workflow', 'families', 'foundry', 'pipeline', 'projects', 'assistant', 'audiolab', 'qwen-edit'])
+const FULL_SURFACE_RAILS = new Set(['workflow', 'families', 'foundry', 'pipeline', 'projects', 'unified', 'assistant', 'audiolab', 'qwen-edit'])
 
 const SANA_QUANTIZATION_OPTIONS = [
   { value: 'auto', label: 'Auto' },
@@ -405,7 +458,7 @@ const SETTINGS_SECTIONS: Array<{ id: SettingsSectionId; label: string; hint: str
   { id: 'generation', label: 'Generation', hint: 'Default model, sampler, and quality values' },
   { id: 'interface', label: 'Interface', hint: 'Previews, gallery, and layout memory' },
   { id: 'output', label: 'Output & Metadata', hint: 'File formats, filenames, and infotext' },
-  { id: 'video', label: 'Video & Performance', hint: 'Wan/LTX precision, offload, and VRAM strategy' },
+  { id: 'video', label: 'Video & Performance', hint: 'Wan and LTX precision, offload, and runtime settings' },
   { id: 'system', label: 'System & Launch', hint: 'Paths, runtime flags, and API policy' },
   { id: 'about', label: 'About', hint: 'Build and credits' },
 ]
@@ -504,9 +557,13 @@ function App() {
   const [generationTimings, setGenerationTimings] = useState<Record<string, number>>({})
   const [generationReceiptPath, setGenerationReceiptPath] = useState('')
   const [generationError, setGenerationError] = useState('')
+  const [verifiedModelIds, setVerifiedModelIds] = useState<Set<string>>(() => new Set())
   const [supportIssue, setSupportIssue] = useState<SupportIssue | null>(null)
   const [activeMode, setActiveMode] = useState<ProMode>(readInitialMode)
   const [activeRail, setActiveRail] = useState(readInitialRail)
+  const [modelSorterFocusRequest, setModelSorterFocusRequest] = useState(0)
+  const startupBootstrapResolvedRef = useRef(false)
+  const startupCreationModeResolvedRef = useRef(false)
   const [workflowBlocks, setWorkflowBlocks] = useState<WorkflowCodeBlock[]>(() => loadWorkflowBlocksFromStorage())
   const [workflowStatus, setWorkflowStatus] = useState('')
   const [previews, setPreviews] = useState<Partial<Record<CreationMode, RecentOutput | null>>>({
@@ -539,6 +596,7 @@ function App() {
   const [backendRecovering, setBackendRecovering] = useState(false)
   const [engineFilter, setEngineFilter] = useState<EngineId>('all')
   const [downloadingCatalogKey, setDownloadingCatalogKey] = useState('')
+  const [installingBundleKey, setInstallingBundleKey] = useState('')
   const [leftPanelWidth, setLeftPanelWidth] = useState(initialLayout.leftPanelWidth)
   const [rightPanelWidth, setRightPanelWidth] = useState(initialLayout.rightPanelWidth)
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
@@ -565,6 +623,18 @@ function App() {
   const [enhanceVsrStrength, setEnhanceVsrStrength] = useState(0.4)
   const [enhanceBusy, setEnhanceBusy] = useState(false)
   const [enhanceMessage, setEnhanceMessage] = useState('')
+  const [enhanceModels, setEnhanceModels] = useState<ProEnhanceModel[]>([])
+  const [enhanceModelsLoading, setEnhanceModelsLoading] = useState(false)
+  const [enhanceVsrAvailable, setEnhanceVsrAvailable] = useState<boolean | null>(null)
+  const [enhanceInstallingModel, setEnhanceInstallingModel] = useState('')
+  const selectedEnhanceRestorer = enhanceModels.find((model) => model.id === enhanceRestoreModel && model.kind === 'restorer')
+  const selectedEnhanceUpscaler = enhanceModels.find((model) => model.id === enhanceUpscaleModel && model.kind === 'upscaler')
+  const enhanceRequiredModelsReady = enhanceMode === 'vsr'
+    ? enhanceVsrAvailable === true
+    : (
+    ((enhanceMode !== 'restore' && enhanceMode !== 'restore-upscale') || Boolean(selectedEnhanceRestorer?.installed))
+    && ((enhanceMode !== 'upscale' && enhanceMode !== 'restore-upscale') || Boolean(selectedEnhanceUpscaler?.installed))
+  )
   const [segmentationMode, setSegmentationMode] = useState('Auto mask')
   const [reactorSourceDataUrl, setReactorSourceDataUrl] = useState('')
   const [reactorBusy, setReactorBusy] = useState(false)
@@ -579,6 +649,64 @@ function App() {
   const auxiliaryFingerprintRef = useRef<Record<string, string>>({})
   const auxiliaryFetchInFlightRef = useRef<Record<string, boolean>>({})
   const fileDropDepthRef = useRef(0)
+  const modelSelectionSequenceRef = useRef(0)
+  const hasUserSelectedModelRef = useRef(false)
+  const startupFallbackReconciliationRef = useRef('')
+  const startupFallbackRetryAttemptsRef = useRef<Record<string, number>>({})
+  const controlNetChoiceByFamilyRef = useRef<Record<'sd15' | 'sdxl', { modelId: string; enabled: boolean } | undefined>>({
+    sd15: undefined,
+    sdxl: undefined,
+  })
+  const [startupFallbackRetry, setStartupFallbackRetry] = useState(0)
+  const currentSettingsRef = useRef(settings)
+  currentSettingsRef.current = settings
+  const pendingImageModelLoadRef = useRef<{ modelId: string; label: string; sequence: number } | null>(null)
+
+  useEffect(() => {
+    if (activeModal !== 'enhance') return
+    const controller = new AbortController()
+    setEnhanceModelsLoading(true)
+    setEnhanceMessage('Checking local Enhance model files...')
+    fetchProEnhanceModels(controller.signal)
+      .then((models) => {
+        setEnhanceModels(models)
+        setEnhanceRestoreModel((current) =>
+          models.some((model) => model.id === current && model.kind === 'restorer')
+            ? current
+            : models.find((model) => model.kind === 'restorer')?.id ?? '',
+        )
+        setEnhanceUpscaleModel((current) =>
+          models.some((model) => model.id === current && model.kind === 'upscaler')
+            ? current
+            : models.find((model) => model.kind === 'upscaler')?.id ?? '',
+        )
+        setEnhanceMessage(models.length ? 'Model inventory checked.' : 'No Enhance models are listed.')
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) setEnhanceMessage(`Could not check Enhance models: ${formatApiError(error)}`)
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setEnhanceModelsLoading(false)
+      })
+    fetchVideoLabStatus(controller.signal)
+      .then((status) => setEnhanceVsrAvailable(Boolean(status.vsr.upscaleAvailable)))
+      .catch(() => {
+        if (!controller.signal.aborted) setEnhanceVsrAvailable(false)
+      })
+    return () => controller.abort()
+  }, [activeModal])
+  const imageModelLoadWorkerRef = useRef(false)
+  const videoRoutePreparationKeyRef = useRef('')
+  const [videoRoutePreparationRetry, setVideoRoutePreparationRetry] = useState(0)
+  const [videoRoutePreparationBusy, setVideoRoutePreparationBusy] = useState(false)
+  const [videoRoutePreparationError, setVideoRoutePreparationError] = useState('')
+  const [videoRoutePreparationRetryable, setVideoRoutePreparationRetryable] = useState(false)
+  const [videoRoutePreparationUnready, setVideoRoutePreparationUnready] = useState(false)
+  const [imageModelSelection, setImageModelSelection] = useState<{
+    modelId: string
+    status: 'loading' | 'failed'
+    detail: string
+  } | null>(null)
   const [fileDropActive, setFileDropActive] = useState(false)
   const continuousGenerateRef = useRef(false)
   const runtimeJobActive = isRuntimeJobActive(runtime.job)
@@ -589,6 +717,135 @@ function App() {
   useEffect(() => {
     setGerrorEnabled(runtime.gerror)
   }, [runtime.gerror])
+
+  useEffect(() => {
+    if (activeMode !== 'video') {
+      videoRoutePreparationKeyRef.current = ''
+      setVideoRoutePreparationBusy(false)
+      setVideoRoutePreparationError('')
+      setVideoRoutePreparationRetryable(false)
+      setVideoRoutePreparationUnready(false)
+      return
+    }
+    const selectedModel = [...bootstrap.models, ...bootstrap.blockedModels]
+      .find((item) => item.id === settings.modelId)
+    if (!selectedModel || !['wan', 'sana_video', 'ltx'].includes(selectedModel.engineId ?? '')) {
+      videoRoutePreparationKeyRef.current = ''
+      setVideoRoutePreparationBusy(false)
+      setVideoRoutePreparationError('')
+      setVideoRoutePreparationRetryable(false)
+      setVideoRoutePreparationUnready(false)
+      return
+    }
+
+    const routeSettings = withSavedWanModelComponents(settings, bootstrap.models, settingsStatus?.video)
+    const selectionKey = [
+      activeMode,
+      settings.modelId,
+      settings.sourceImageDataUrl,
+      settings.wanRuntimeMode,
+      routeSettings.highNoiseModelId,
+      routeSettings.lowNoiseModelId,
+      routeSettings.vaeId,
+      routeSettings.textEncoderPath,
+      settings.ltxOffload,
+      settings.ltxQuantization,
+      settings.sanaQuantization,
+      settings.sanaVaeTiling,
+      settings.generateAudio,
+      settings.offloadTextEncoderAfterEncode,
+      settings.useSageAttention,
+    ].join('|')
+    if (videoRoutePreparationKeyRef.current === selectionKey) return
+    videoRoutePreparationKeyRef.current = selectionKey
+
+    const selectionSequence = ++modelSelectionSequenceRef.current
+    let cancelled = false
+    const label = formatStudioModelLabel(selectedModel, [...bootstrap.models, ...bootstrap.blockedModels])
+    setVideoRoutePreparationBusy(true)
+    setVideoRoutePreparationError('')
+    setVideoRoutePreparationRetryable(false)
+    setVideoRoutePreparationUnready(false)
+    setStatusMessage(`Checking ${label} and its video support assets...`)
+    const prepareWithConflictRetry = async () => {
+      const retryDelaysMs = [250, 500, 1000] as const
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await prepareProVideoRoute({ ...routeSettings, mode: 'video' })
+        } catch (error: unknown) {
+          const delay = error instanceof ProApiError && error.status === 409
+            ? retryDelaysMs[attempt]
+            : undefined
+          if (cancelled || delay === undefined) throw error
+          await new Promise((resolve) => window.setTimeout(resolve, delay))
+        }
+      }
+    }
+    void prepareWithConflictRetry().then((preparation) => {
+      if (cancelled || selectionSequence !== modelSelectionSequenceRef.current) return
+      setVideoRoutePreparationBusy(false)
+      setRuntime((current) => ({
+        ...current,
+        routeLifecycle: [
+          ...current.routeLifecycle.filter((route) => route.route !== preparation.routeLifecycle.route),
+          preparation.routeLifecycle,
+        ],
+      }))
+      if (preparation.ready) {
+        setVideoRoutePreparationError('')
+        setVideoRoutePreparationRetryable(false)
+        setVideoRoutePreparationUnready(false)
+      } else {
+        const detail = preparation.routeLifecycle.detail?.trim() || 'The selected video route did not pass its current readiness check.'
+        setVideoRoutePreparationError(detail)
+        setVideoRoutePreparationUnready(true)
+        // A setup correction may make a later explicit check succeed. Never
+        // loop automatically when the route reports incomplete prerequisites.
+        setVideoRoutePreparationRetryable(true)
+      }
+      setStatusMessage(preparation.ready
+        ? preparation.loaded
+          ? `${label} is loaded and ready. Generation not run.`
+          : `${label} route is ready on demand. Model not loaded; generation not run.`
+        : `${label} route needs attention. Review its readiness details before generating.`)
+    }).catch((error: unknown) => {
+      if (!cancelled && selectionSequence === modelSelectionSequenceRef.current) {
+        const detail = formatApiError(error)
+        setVideoRoutePreparationBusy(false)
+        setVideoRoutePreparationError(detail)
+        setVideoRoutePreparationUnready(false)
+        setVideoRoutePreparationRetryable(
+          !(error instanceof ProApiError) || error.status === 409 || error.status >= 500,
+        )
+        setStatusMessage(`Video route check failed: ${detail}`)
+      }
+    })
+
+    return () => {
+      cancelled = true
+      if (selectionSequence === modelSelectionSequenceRef.current) modelSelectionSequenceRef.current += 1
+    }
+  }, [
+    activeMode,
+    bootstrap.blockedModels,
+    bootstrap.models,
+    settingsStatus?.video,
+    settings.highNoiseModelId,
+    settings.lowNoiseModelId,
+    settings.ltxOffload,
+    settings.ltxQuantization,
+    settings.modelId,
+    settings.offloadTextEncoderAfterEncode,
+    settings.sanaQuantization,
+    settings.sanaVaeTiling,
+    settings.generateAudio,
+    settings.sourceImageDataUrl,
+    settings.textEncoderPath,
+    settings.useSageAttention,
+    settings.vaeId,
+    settings.wanRuntimeMode,
+    videoRoutePreparationRetry,
+  ])
 
   useEffect(() => {
     const nextBackend =
@@ -610,6 +867,14 @@ function App() {
     }, 0)
     return () => window.clearTimeout(timeoutId)
   }, [dualRuntimeAvailable, sdcppRuntimeAvailable, settings.pipelineBackend])
+
+  const retryVideoRoutePreparation = useCallback(() => {
+    videoRoutePreparationKeyRef.current = ''
+    setVideoRoutePreparationError('')
+    setVideoRoutePreparationRetryable(false)
+    setVideoRoutePreparationUnready(false)
+    setVideoRoutePreparationRetry((attempt) => attempt + 1)
+  }, [])
 
   const setDisconnectedRuntime = useCallback((message: string) => {
     setRuntime((current) => ({
@@ -646,6 +911,8 @@ function App() {
       const message = typeof errorOrMessage === 'string' ? errorOrMessage : formatApiError(errorOrMessage)
       const detail = errorOrMessage instanceof ProApiError ? errorOrMessage.detail : undefined
       const apiLatency = getProApiLatencySamples().slice(-10)
+      const supportModel = bootstrap.models.find((model) => model.id === settings.modelId)
+      const supportModelLabel = supportModel ? formatStudioModelLabel(supportModel, bootstrap.models) : settings.modelId
       const issue: SupportIssue = {
         title,
         message,
@@ -657,7 +924,7 @@ function App() {
           activeRail,
           activeMode,
           selectedModelId: settings.modelId,
-          selectedModelName: bootstrap.models.find((model) => model.id === settings.modelId)?.name ?? settings.modelId,
+          selectedModelName: supportModelLabel,
           runtimeState: runtime.state,
           backend: runtime.backend,
           device: runtime.device,
@@ -770,18 +1037,73 @@ function App() {
     }
   }, [])
 
+  const handleModelRuntimeSetupComplete = useCallback(async () => {
+    try {
+      const nextBootstrap = await fetchProBootstrap()
+      setBootstrap(nextBootstrap)
+      retryVideoRoutePreparation()
+      setStatusMessage('Model runtime setup finished. Model inventory refreshed; checking route readiness.')
+    } catch (error: unknown) {
+      setStatusMessage(`Model runtime setup finished, but the model inventory refresh failed: ${formatApiError(error)}`)
+    }
+  }, [retryVideoRoutePreparation])
+
+  const handleModelBundleSetupComplete = useCallback(async (modelId: string, mode: CreationMode) => {
+    try {
+      const nextBootstrap = await fetchProBootstrap()
+      setBootstrap(nextBootstrap)
+      const model = [...nextBootstrap.models, ...nextBootstrap.blockedModels].find((item) => item.id === modelId)
+      const label = model ? formatStudioModelLabel(model, [...nextBootstrap.models, ...nextBootstrap.blockedModels]) : modelId
+      if (mode === 'video') {
+        setImageModelSelection(null)
+        retryVideoRoutePreparation()
+        setStatusMessage(`${label} assets are installed. Checking the selected video route and its support assets.`)
+        return
+      }
+      if (isDedicatedInpaintModel(model)) {
+        setImageModelSelection(null)
+        setStatusMessage(`${label} assets are installed. Its dedicated inpaint pipeline loads when you start an inpaint job.`)
+        return
+      }
+      if (model?.routeStatus !== 'request-eligible' || model.checkpointPathStatus !== 'present') {
+        setImageModelSelection(null)
+        setStatusMessage(`${label} assets are installed, but its route preflight is still incomplete. Review the model readiness details.`)
+        return
+      }
+      setImageModelSelection({ modelId, status: 'loading', detail: '' })
+      setStatusMessage(`Loading ${label} and its family support assets…`)
+      const nextRuntime = await loadProModel(modelId)
+      setRuntime(nextRuntime)
+      setImageModelSelection(null)
+      setGenerationError('')
+      setStatusMessage(`${label} and its family support assets are loaded. Generation has not been verified yet.`)
+    } catch (error: unknown) {
+      if (mode !== 'video') {
+        setImageModelSelection({ modelId, status: 'failed', detail: formatApiError(error) })
+      }
+      setStatusMessage(`Setup finished, but selected model readiness or loading failed: ${formatApiError(error)}`)
+    }
+  }, [retryVideoRoutePreparation, setRuntime])
+
   useEffect(() => {
     const controller = new AbortController()
     fetchProBootstrap(controller.signal)
       .then((nextBootstrap) => {
+        startupBootstrapResolvedRef.current = true
         setBootstrap(nextBootstrap)
         setPreview((currentPreview) => currentPreview ?? nextBootstrap.recentOutputs[0] ?? null)
         setSettings((current) => {
           const merged = settingsMatch(current, fallbackBootstrap.defaults)
             ? nextBootstrap.defaults
             : mergeBootstrapDefaults(current, nextBootstrap)
-          const model = nextBootstrap.models.find((item) => item.id === merged.modelId)
-          return applyModelPresetSettings(merged, model, nextBootstrap.aspectRatios)
+          const model = nextBootstrap.models.find((item) => item.id === merged.modelId) ??
+            nextBootstrap.blockedModels.find((item) => item.id === merged.modelId)
+          return applySelectedModelSettings(
+            merged,
+            model,
+            [...nextBootstrap.models, ...nextBootstrap.blockedModels],
+            nextBootstrap.aspectRatios,
+          )
         })
         setBackendConnected(true)
         setBackendRecovering(false)
@@ -802,6 +1124,118 @@ function App() {
 
     return () => controller.abort()
   }, [fallbackBootstrap.defaults, setPreview])
+
+  useEffect(() => {
+    const loadedModelId = runtime.modelLoad.modelId
+    if (
+      !startupBootstrapResolvedRef.current ||
+      hasUserSelectedModelRef.current ||
+      runtime.modelLoad.status !== 'loaded' ||
+      !loadedModelId ||
+      loadedModelId === settings.modelId
+    ) return
+
+    const allModels = [...bootstrap.models, ...bootstrap.blockedModels]
+    const selectedModel = allModels.find((model) => model.id === settings.modelId)
+    const loadedModel = bootstrap.models.find((model) => model.id === loadedModelId)
+    if (
+      (selectedModel && !isModelBlocked(selectedModel)) ||
+      !loadedModel ||
+      isModelBlocked(loadedModel) ||
+      !modelFitsCreationMode(loadedModel, settings.mode)
+    ) return
+
+    // Startup can replace a blocked saved image choice with a ready fallback
+    // after the initial bootstrap has already reached the browser. Reconcile
+    // only when the backend has persisted this exact resident model, and only
+    // while the user has not made a newer model choice.
+    const selectionAtLoad = settings.modelId
+    const reconciliationKey = `${selectionAtLoad}|${loadedModelId}`
+    if (startupFallbackReconciliationRef.current === reconciliationKey) return
+    startupFallbackReconciliationRef.current = reconciliationKey
+    let cancelled = false
+    let reconciled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    void fetchProBootstrap()
+      .then((nextBootstrap) => {
+        if (cancelled || hasUserSelectedModelRef.current) return
+        if (
+          currentSettingsRef.current.modelId !== selectionAtLoad ||
+          currentSettingsRef.current.mode !== settings.mode
+        ) return
+        if (nextBootstrap.defaults.modelId !== loadedModelId) {
+          const attempts = (startupFallbackRetryAttemptsRef.current[reconciliationKey] ?? 0) + 1
+          startupFallbackRetryAttemptsRef.current[reconciliationKey] = attempts
+          if (attempts < 4) {
+            startupFallbackReconciliationRef.current = ''
+            retryTimer = setTimeout(() => {
+              if (!cancelled) setStartupFallbackRetry((current) => current + 1)
+            }, 500)
+          }
+          return
+        }
+        const nextModel = nextBootstrap.models.find((model) => model.id === loadedModelId)
+        if (!nextModel || isModelBlocked(nextModel) || !modelFitsCreationMode(nextModel, settings.mode)) {
+          startupFallbackReconciliationRef.current = ''
+          return
+        }
+        reconciled = true
+        delete startupFallbackRetryAttemptsRef.current[reconciliationKey]
+        setBootstrap(nextBootstrap)
+        setSettings((current) => current.modelId === selectionAtLoad
+          ? applySelectedModelSettings(
+            current,
+            nextModel,
+            [...nextBootstrap.models, ...nextBootstrap.blockedModels],
+            nextBootstrap.aspectRatios,
+          )
+          : current)
+        setStatusMessage(`Startup loaded ${formatStudioModelLabel(nextModel, nextBootstrap.models)} as the ready fallback. Generation remains unverified.`)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          startupFallbackReconciliationRef.current = ''
+        }
+      })
+    return () => {
+      cancelled = true
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
+      if (!reconciled && startupFallbackReconciliationRef.current === reconciliationKey) {
+        startupFallbackReconciliationRef.current = ''
+      }
+    }
+  }, [bootstrap.aspectRatios, bootstrap.blockedModels, bootstrap.models, runtime.modelLoad.modelId, runtime.modelLoad.status, settings.modelId, settings.mode, startupFallbackRetry])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchProCapabilities(controller.signal)
+      .then(setCapabilitiesStatus)
+      .catch((error: unknown) => {
+        if (isAbortError(error)) return
+        reportProClientError({
+          kind: 'api',
+          message: formatApiError(error),
+          source: 'initial-readiness',
+          context: { route: '/api/pro/capabilities' },
+        })
+        setCapabilitiesStatus((current) => current ?? {
+          ...EMPTY_CAPABILITIES,
+          readiness: {
+            ...EMPTY_CAPABILITIES.readiness,
+            error: `Readiness check failed: ${formatApiError(error)}`,
+          },
+        })
+      })
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchProSettings(controller.signal)
+      .then(setSettingsStatus)
+      .catch(() => undefined)
+    return () => controller.abort()
+  }, [])
 
   // Read via ref so the stream effect does not tear down and rebuild the
   // EventSource every time the recovery flag flips.
@@ -1193,19 +1627,88 @@ function App() {
   )
 
   const selectedModel = useMemo(() => {
-    return (
-      filteredModels.find((model) => model.id === settings.modelId) ??
-      filteredModels[0] ??
-      creationModels[0]
-    )
-  }, [creationModels, filteredModels, settings.modelId])
+    return bootstrap.models.find((model) => model.id === settings.modelId) ??
+      bootstrap.blockedModels.find((model) => model.id === settings.modelId)
+  }, [bootstrap.blockedModels, bootstrap.models, settings.modelId])
+
+  useEffect(() => {
+    if (!startupBootstrapResolvedRef.current || startupCreationModeResolvedRef.current || !selectedModel) return
+    startupCreationModeResolvedRef.current = true
+    const hash = window.location.hash.replace(/^#/, '').trim()
+    const explicitModeHash = ['image', 'inpaint', 'qwen-edit', 'video', 'audio', 'models', 'data', 'settings'].includes(hash)
+    if (explicitModeHash || !['wan', 'sana_video', 'ltx'].includes(selectedModel.engineId ?? '')) return
+    setSettings((current) => applyCreationModeSettings(
+      current,
+      'video',
+      [...bootstrap.models, ...bootstrap.blockedModels],
+      bootstrap.aspectRatios,
+    ))
+    setActiveMode('video')
+  }, [bootstrap.aspectRatios, bootstrap.blockedModels, bootstrap.models, selectedModel])
+  const selectedModelLabel = selectedModel
+    ? formatStudioModelLabel(selectedModel, bootstrap.models)
+    : settings.modelId || 'No model selected'
+
+  const recoveryModel = useMemo(
+    () => bootstrap.models.find((model) =>
+      modelFitsCreationMode(model, settings.mode) &&
+      !isModelBlocked(model) &&
+      (settings.mode === 'video'
+        ? model.status?.trim().toLowerCase() === 'ready'
+        : (
+        model.checkpointPathStatus === 'present' &&
+        model.routeStatus === 'request-eligible'
+        )),
+    ),
+    [bootstrap.models, settings.mode],
+  )
 
   const selectedModelWarning = useMemo(() => {
+    if (settings.mode === 'video' && videoRoutePreparationBusy) {
+      return 'Checking the selected video route and its supporting models. Wait for the check to finish before generating.'
+    }
+    if (settings.mode === 'video' && videoRoutePreparationError) {
+      return videoRoutePreparationUnready
+        ? `The selected video route is not ready: ${videoRoutePreparationError}`
+        : `The selected video route could not be checked: ${videoRoutePreparationError}`
+    }
+    const selectedImageLoad = settings.mode !== 'video' && imageModelSelection?.modelId === settings.modelId
+      ? imageModelSelection
+      : null
+    if (selectedImageLoad?.status === 'loading') {
+      return `Loading ${selectedModelLabel} and its family support assets. Wait for preparation to finish before generating.`
+    }
+    if (selectedImageLoad?.status === 'failed') {
+      return `Could not load ${selectedModelLabel} and its family support assets: ${selectedImageLoad.detail}`
+    }
+    const startupLoadFailed = settings.mode !== 'video'
+      && runtime.modelLoad.modelId === settings.modelId
+      && ['failed', 'deferred', 'not-ready', 'load-unconfirmed'].includes(runtime.modelLoad.status)
+    if (startupLoadFailed) {
+      return runtime.modelLoad.detail || `The selected model ${selectedModelLabel} did not finish loading.`
+    }
+    if (runtime.modelLoad.status === 'loading' || runtime.modelLoad.status === 'unloading') {
+      return runtime.modelLoad.status === 'loading'
+        ? 'Wait for the selected model and support assets to finish loading.'
+        : 'Wait for the current model to finish unloading.'
+    }
     const requestedModel = bootstrap.models.find((model) => model.id === settings.modelId)
+    if (
+      settings.mode === 'video'
+      && settings.sourceImageDataUrl
+      && requestedModel?.engineId === 'sana_video'
+      && requestedModel.generationModes?.imageToVideo === false
+    ) {
+      return 'This Sana Video setup supports text-to-video only. Clear the source image or choose a model with image-to-video support.'
+    }
+    const blockedRequestedModel = bootstrap.blockedModels.find((model) => model.id === settings.modelId)
     if (requestedModel && !modelFitsCreationMode(requestedModel, settings.mode)) {
       return settings.mode === 'video'
-        ? 'Pick a Wan or Sana Video model before generating video.'
+        ? 'Pick a Wan, Sana Video, or LTX model before generating video.'
         : 'Video models are only available from the Video tab.'
+    }
+    if (blockedRequestedModel) {
+      return modelBlockedMessage(blockedRequestedModel)
     }
     if (isModelBlocked(selectedModel)) {
       return modelBlockedMessage(selectedModel)
@@ -1214,7 +1717,22 @@ function App() {
       return 'Selected model is not available in the current Pro model list.'
     }
     return ''
-  }, [bootstrap.models, selectedModel, settings.mode, settings.modelId])
+  }, [bootstrap.blockedModels, bootstrap.models, imageModelSelection, runtime.modelLoad, selectedModel, selectedModelLabel, settings.mode, settings.modelId, settings.sourceImageDataUrl, videoRoutePreparationBusy, videoRoutePreparationError, videoRoutePreparationUnready])
+
+  const imageModelLoadRetryAvailable = settings.mode !== 'video' && (
+    (imageModelSelection?.modelId === settings.modelId && imageModelSelection.status === 'failed')
+    || (runtime.modelLoad.modelId === settings.modelId
+      && ['failed', 'deferred', 'not-ready', 'load-unconfirmed'].includes(runtime.modelLoad.status))
+  )
+
+  const selectedModelReadinessHint = useMemo(() => {
+    if (!selectedModel || selectedModelWarning) return ''
+    if (verifiedModelIds.has(selectedModel.id)) return `${selectedModelLabel} generated successfully in this session.`
+    if (selectedModel.checkpointPathStatus === 'present' && selectedModel.routeStatus === 'request-eligible') {
+      return `${selectedModelLabel} has a checkpoint path and its family can accept a Pro request. A saved generation has not been verified in this session.`
+    }
+    return `${selectedModelLabel} is listed, but its assets or generation route have not been fully verified.`
+  }, [selectedModel, selectedModelLabel, selectedModelWarning, verifiedModelIds])
 
   const controlNetCompatibility = useMemo(
     () => getControlNetCompatibility(selectedModel, settings.controlNetModel),
@@ -1234,7 +1752,7 @@ function App() {
             bootstrap,
             runtime,
             selectedModel,
-            selectedModelName: selectedModel?.name ?? settings.modelId,
+            selectedModelName: selectedModelLabel,
             source,
           },
           current.length,
@@ -1243,7 +1761,7 @@ function App() {
       })
       setWorkflowStatus('Captured current settings as a workflow node. Open the Workflow tab to reorder.')
     },
-    [bootstrap, runtime, selectedModel, settings],
+    [bootstrap, runtime, selectedModel, selectedModelLabel, settings],
   )
 
   useEffect(() => {
@@ -1252,29 +1770,16 @@ function App() {
     }
     const shouldResetFilter =
       engineFilter !== 'all' && !creationModels.some((model) => matchesEngineFilter(model, engineFilter))
-    const replacement = creationModels.some((model) => model.id === settings.modelId) ? null : creationModels[0]
-    if (!shouldResetFilter && !replacement) {
+    if (!shouldResetFilter) {
       return undefined
     }
     const timeoutId = window.setTimeout(() => {
       if (shouldResetFilter) {
         setEngineFilter('all')
       }
-      if (replacement) {
-        setSettings((current) =>
-          applyModelPresetSettings(
-            {
-              ...current,
-              modelId: replacement.id,
-            },
-            replacement,
-            bootstrap.aspectRatios,
-          ),
-        )
-      }
     }, 0)
     return () => window.clearTimeout(timeoutId)
-  }, [bootstrap.aspectRatios, creationModels, engineFilter, settings.modelId])
+  }, [creationModels, engineFilter])
 
   const recentOutputs = useMemo(() => {
     const source = dataStatus?.recentOutputs.length ? dataStatus.recentOutputs : bootstrap.recentOutputs
@@ -1316,39 +1821,8 @@ function App() {
   const handleModeSelect = useCallback((mode: ProMode) => {
     setActiveMode(mode)
     if (isCreationMode(mode)) {
-      if (mode === 'video') {
-        const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
-        const videoModels = modelsForCreationMode(bootstrap.models, 'video')
-        const currentIsVideo = currentModel ? modelFitsCreationMode(currentModel, 'video') : false
-        const videoModel = currentIsVideo
-          ? currentModel
-          : videoModels.find((model) => model.engineId === 'wan') ??
-            videoModels.find((model) => model.engineId === 'sana_video') ??
-            videoModels[0]
-        setEngineFilter(videoModel?.engineId ?? 'sana_video')
-        setSettings((current) => ({
-          ...current,
-          mode,
-          modelId: videoModel?.id ?? current.modelId,
-          aspectRatioId: '16:9',
-          width: 832,
-          height: 480,
-          batchSize: 1,
-        }))
-      } else {
-        const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
-        const routeModels = modelsForCreationMode(bootstrap.models, mode)
-        const routeModel = currentModel && modelFitsCreationMode(currentModel, mode) ? currentModel : routeModels[0]
-        setEngineFilter(routeModel?.engineId ?? 'all')
-        setSettings((current) => {
-          const next = {
-            ...current,
-            mode,
-            modelId: routeModel?.id ?? current.modelId,
-          }
-          return routeModel ? applyModelPresetSettings(next, routeModel, bootstrap.aspectRatios) : next
-        })
-      }
+      setEngineFilter('all')
+      setSettings((current) => applyCreationModeSettings(current, mode, [...bootstrap.models, ...bootstrap.blockedModels], bootstrap.aspectRatios))
       setActiveRail('create')
       if (window.location.hash !== `#${mode}`) {
         window.history.replaceState(null, '', `#${mode}`)
@@ -1369,52 +1843,19 @@ function App() {
         window.history.replaceState(null, '', `#${mode}`)
       }
     }
-  }, [bootstrap.aspectRatios, bootstrap.models, settings.modelId])
+  }, [bootstrap.aspectRatios, bootstrap.blockedModels, bootstrap.models])
 
   useEffect(() => {
     if (!isCreationMode(activeMode) || settings.mode === activeMode) {
       return undefined
     }
     const creationMode = activeMode
-    if (creationMode === 'video') {
-      const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
-      const videoModels = modelsForCreationMode(bootstrap.models, 'video')
-      const currentIsVideo = currentModel ? modelFitsCreationMode(currentModel, 'video') : false
-      const videoModel = currentIsVideo
-        ? currentModel
-        : videoModels.find((model) => model.engineId === 'wan') ??
-          videoModels.find((model) => model.engineId === 'sana_video') ??
-          videoModels[0]
-      const timeoutId = window.setTimeout(() => {
-        setEngineFilter(videoModel?.engineId ?? 'sana_video')
-        setSettings((current) => ({
-          ...current,
-          mode: creationMode,
-          modelId: videoModel?.id ?? current.modelId,
-          aspectRatioId: '16:9',
-          width: 832,
-          height: 480,
-          batchSize: 1,
-        }))
-      }, 0)
-      return () => window.clearTimeout(timeoutId)
-    }
-    const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
-    const routeModels = modelsForCreationMode(bootstrap.models, creationMode)
-    const routeModel = currentModel && modelFitsCreationMode(currentModel, creationMode) ? currentModel : routeModels[0]
     const timeoutId = window.setTimeout(() => {
-      setEngineFilter(routeModel?.engineId ?? 'all')
-      setSettings((current) => {
-        const next = {
-          ...current,
-          mode: creationMode,
-          modelId: routeModel?.id ?? current.modelId,
-        }
-        return routeModel ? applyModelPresetSettings(next, routeModel, bootstrap.aspectRatios) : next
-      })
+      setEngineFilter('all')
+      setSettings((current) => applyCreationModeSettings(current, creationMode, [...bootstrap.models, ...bootstrap.blockedModels], bootstrap.aspectRatios))
     }, 0)
     return () => window.clearTimeout(timeoutId)
-  }, [activeMode, bootstrap.aspectRatios, bootstrap.models, settings.mode, settings.modelId])
+  }, [activeMode, bootstrap.aspectRatios, bootstrap.blockedModels, bootstrap.models, settings.mode])
 
   const handleRailSelect = useCallback((id: string) => {
     setActiveRail(id)
@@ -1423,6 +1864,11 @@ function App() {
     }
     if (id === 'models') {
       setActiveMode('models')
+      if (!downloadsStatus) {
+        void fetchProDownloads().then(setDownloadsStatus).catch((error: unknown) => {
+          setStatusMessage(`Model catalog could not be loaded: ${formatApiError(error)}`)
+        })
+      }
     } else if (id === 'data') {
       setActiveMode('data')
     } else if (id === 'settings') {
@@ -1432,24 +1878,21 @@ function App() {
     } else if (id === 'create') {
       const nextMode: CreationMode = isCreationMode(activeMode) ? activeMode : settings.mode
       setActiveMode(nextMode)
-      const imageModels = modelsForCreationMode(bootstrap.models, nextMode)
-      const currentModel = bootstrap.models.find((model) => model.id === settings.modelId)
-      const imageModel = currentModel && modelFitsCreationMode(currentModel, nextMode) ? currentModel : imageModels[0]
-      setEngineFilter(imageModel?.engineId ?? 'all')
-      setSettings((current) => {
-        const next = {
-          ...current,
-          mode: nextMode,
-          modelId: imageModel?.id ?? current.modelId,
-        }
-        return imageModel ? applyModelPresetSettings(next, imageModel, bootstrap.aspectRatios) : next
-      })
+      setEngineFilter('all')
+      setSettings((current) => nextMode === 'video'
+        ? { ...current, mode: nextMode, aspectRatioId: '16:9', width: 832, height: 480, batchSize: 1 }
+        : { ...current, mode: nextMode })
     } else {
       // Rails like projects/families/tools can be reached from any mode via
       // menu or hash; keep the mode consistent so the rail list contains them.
       setActiveMode((current) => modeContainingRail(id, current))
     }
-  }, [activeMode, bootstrap.aspectRatios, bootstrap.models, settings])
+  }, [activeMode, downloadsStatus, settings.mode])
+
+  const openModelSorter = useCallback(() => {
+    setModelSorterFocusRequest((current) => current + 1)
+    handleRailSelect('settings')
+  }, [handleRailSelect])
 
   const handleRatioSelect = useCallback((ratio: AspectRatioOption) => {
     setSettings((current) => ({
@@ -1463,39 +1906,142 @@ function App() {
   const handleEngineFilterChange = useCallback(
     (nextFilter: EngineId) => {
       setEngineFilter(nextFilter)
-      const nextModels = creationModels.filter((model) => matchesEngineFilter(model, nextFilter))
-      if (nextModels.length === 0) {
-        return
-      }
-      setSettings((current) => {
-        const selected = nextModels.find((model) => model.id === current.modelId) ?? nextModels[0]
-        if (nextFilter === 'all' && selected.id === current.modelId) {
-          return current
-        }
-        return applyModelPresetSettings(
-          selected.id === current.modelId ? current : { ...current, modelId: selected.id },
-          selected,
-          bootstrap.aspectRatios,
-        )
-      })
     },
-    [bootstrap.aspectRatios, creationModels],
+    [],
   )
 
   const handleModelSelect = useCallback(
-    (modelId: string) => {
-      const model = creationModels.find((item) => item.id === modelId) ?? bootstrap.models.find((item) => item.id === modelId)
-      setSettings((current) => applyModelPresetSettings({ ...current, modelId }, model, bootstrap.aspectRatios))
+    async (modelId: string) => {
+      hasUserSelectedModelRef.current = true
+      const selectionSequence = ++modelSelectionSequenceRef.current
+      setImageModelSelection(null)
+      // A newer selection supersedes any queued image load. A load already in
+      // progress cannot be cancelled safely, so the worker will load this
+      // latest choice as soon as the current backend operation releases its lock.
+      pendingImageModelLoadRef.current = null
+      const model = creationModels.find((item) => item.id === modelId)
+        ?? bootstrap.models.find((item) => item.id === modelId)
+        ?? bootstrap.blockedModels.find((item) => item.id === modelId)
+      const knownModels = [...bootstrap.models, ...bootstrap.blockedModels]
+      const previousModel = knownModels.find((item) => item.id === settings.modelId)
+      const previousControlNetFamily = controlNetFamilyForModel(previousModel)
+      if (
+        previousControlNetFamily &&
+        settings.controlNetModel &&
+        getControlNetCompatibility(previousModel, settings.controlNetModel).supported
+      ) {
+        controlNetChoiceByFamilyRef.current[previousControlNetFamily] = {
+          modelId: settings.controlNetModel,
+          enabled: settings.controlNetEnabled,
+        }
+      }
+      const selectedSettings = applySelectedModelSettings(
+        settings,
+        model,
+        knownModels,
+        bootstrap.aspectRatios,
+      )
+      setSettings(selectedSettings)
+      const nextControlNetFamily = controlNetFamilyForModel(model)
+      const rememberedControlNet = nextControlNetFamily
+        ? controlNetChoiceByFamilyRef.current[nextControlNetFamily]
+        : undefined
+      if (
+        model &&
+        rememberedControlNet &&
+        selectedSettings.controlNetModel !== rememberedControlNet.modelId
+      ) {
+        void fetchProControlNetModels()
+          .then(({ models: installedModels }) => {
+            const confirmedLocalChoice = installedModels.find((candidate) =>
+              candidate.id === rememberedControlNet.modelId &&
+              controlNetFamilyForName(candidate.id) === nextControlNetFamily,
+            )
+            if (
+              !confirmedLocalChoice ||
+              selectionSequence !== modelSelectionSequenceRef.current ||
+              currentSettingsRef.current.modelId !== model.id ||
+              currentSettingsRef.current.controlNetModel !== selectedSettings.controlNetModel ||
+              currentSettingsRef.current.controlNetEnabled !== selectedSettings.controlNetEnabled
+            ) return
+            setSettings((current) => current.modelId === model.id
+              ? {
+                ...current,
+                controlNetModel: confirmedLocalChoice.id,
+                controlNetEnabled: rememberedControlNet.enabled,
+              }
+              : current)
+          })
+          .catch(() => {
+            // The base model remains selected with ControlNet safely cleared.
+          })
+      }
       if (model?.engineId) {
         setEngineFilter(model.engineId)
       }
-      setStatusMessage(
-        model
-          ? `${model.name} selected. Runtime loads it when generation starts.`
-          : `${modelId} selected. Runtime loads it when generation starts.`,
-      )
+      const label = model ? formatStudioModelLabel(model, [...bootstrap.models, ...bootstrap.blockedModels]) : modelId
+      if (model?.engineId === 'wan' || model?.engineId === 'sana_video' || model?.engineId === 'ltx') {
+        setStatusMessage(`${label} selected. Checking video route readiness...`)
+        return
+      }
+      if (isDedicatedInpaintModel(model)) {
+        setStatusMessage(`${label} selected. Its dedicated inpaint pipeline loads when you start an inpaint job.`)
+        return
+      }
+      if (model?.routeStatus !== 'request-eligible' || model.checkpointPathStatus !== 'present') {
+        setStatusMessage(`${label} selected. Review the model readiness details before loading it.`)
+        return
+      }
+      setImageModelSelection({ modelId, status: 'loading', detail: '' })
+      pendingImageModelLoadRef.current = { modelId, label, sequence: selectionSequence }
+      if (imageModelLoadWorkerRef.current) return
+
+      imageModelLoadWorkerRef.current = true
+      try {
+        while (pendingImageModelLoadRef.current) {
+          const requested = pendingImageModelLoadRef.current
+          pendingImageModelLoadRef.current = null
+          setStatusMessage(`Loading ${requested.label} and its family support assets...`)
+          try {
+            const retryDelaysMs = [250, 500, 1000] as const
+            let runtime: ProRuntimeStatus | undefined
+            for (let attempt = 0; ; attempt += 1) {
+              try {
+                runtime = await loadProModel(requested.modelId)
+                break
+              } catch (error: unknown) {
+                const delay = error instanceof ProApiError && error.status === 409
+                  ? retryDelaysMs[attempt]
+                  : undefined
+                if (delay === undefined) throw error
+                await new Promise((resolve) => window.setTimeout(resolve, delay))
+                if (pendingImageModelLoadRef.current) break
+              }
+            }
+            if (pendingImageModelLoadRef.current || !runtime) continue
+            if (requested.sequence === modelSelectionSequenceRef.current) {
+              setRuntime(runtime)
+              setImageModelSelection(null)
+              setGenerationError('')
+              setStatusMessage(`${requested.label} and its family support assets are loaded. Generation has not been verified yet.`)
+            }
+          } catch (error: unknown) {
+            // If a newer model was selected during this request, move straight
+            // to it instead of surfacing a stale error or exhausting a short
+            // fixed retry window while the previous load still owns the lock.
+            if (pendingImageModelLoadRef.current) continue
+            if (requested.sequence === modelSelectionSequenceRef.current) {
+              const detail = formatApiError(error)
+              setImageModelSelection({ modelId: requested.modelId, status: 'failed', detail })
+              setStatusMessage(detail)
+            }
+          }
+        }
+      } finally {
+        imageModelLoadWorkerRef.current = false
+      }
     },
-    [bootstrap.aspectRatios, bootstrap.models, creationModels],
+    [bootstrap.aspectRatios, bootstrap.blockedModels, bootstrap.models, creationModels, settings, setRuntime],
   )
 
   const uploadModelFilesAndRefresh = useCallback(
@@ -1523,23 +2069,130 @@ function App() {
   )
 
   const reorganizeModelFilesNow = useCallback(async () => {
-    setStatusMessage('Re-reading model headers...')
-    const result = await reorganizeModels()
+    setStatusMessage('Reviewing safe model placement proposals...')
+    const plan = await planModelReorganize()
+    const moves = plan.actions.filter((action) => action.status === 'would-move')
+    if (moves.length === 0) {
+      const message = plan.actions.some((action) => ['left', 'conflict', 'error'].includes(action.status))
+        ? 'No confidently identified moves are available. Review the files left in place.'
+        : 'All identified model files are already in their recommended folders.'
+      setStatusMessage(message)
+      return message
+    }
+    if (!plan.planId) {
+      throw new Error('The model placement preview did not return an apply token. Review the files and try again.')
+    }
+    const preview = moves.slice(0, 12).map((action) => `${action.filename} → ${action.destSubdir}`).join('\n')
+    const remainder = moves.length > 12 ? `\n…and ${moves.length - 12} more` : ''
+    if (!window.confirm(`Move ${moves.length} confidently identified model file(s) to their recommended folders?\n\n${preview}${remainder}\n\nAmbiguous files and conflicts will stay in place.`)) {
+      const message = `Placement preview ready: ${moves.length} safe move(s); no files moved.`
+      setStatusMessage(message)
+      return message
+    }
+    const result = await reorganizeModels(plan.planId)
     await refreshWorkspaceDataNow()
     const message = summarizeModelSort(result)
     setStatusMessage(message)
     return message
   }, [refreshWorkspaceDataNow])
 
+  const scanModelRootsNow = useCallback(async (options?: { scanId: string; offset: number; query?: string }) => {
+    const report = options
+      ? await getModelRootsScanPage(options.scanId, { offset: options.offset, query: options.query })
+      : await scanModelRoots()
+    if (!options) await refreshWorkspaceDataNow()
+    return report
+  }, [refreshWorkspaceDataNow])
+
+  const autoPlaceSharedModelAssets = useCallback(async (scan: ProModelRootsScanResult) => {
+    if (!scan.scanId) {
+      return { message: 'Run a fresh model-root scan before placing files.', refreshedScan: null }
+    }
+    const candidates: ProModelAssetScanProposal[] = []
+    for (let offset = 0; offset < scan.matchedCount; offset += 250) {
+      const page = await getModelRootsScanPage(scan.scanId, {
+        offset,
+        limit: 250,
+        query: scan.query,
+      })
+      candidates.push(...page.assets.filter((asset) => asset.placement === 'candidate'))
+    }
+    if (candidates.length === 0) {
+      return { message: 'There are no confident placement candidates in the matching scan results.', refreshedScan: null }
+    }
+    const previews = []
+    const previewErrors: string[] = []
+    for (const asset of candidates) {
+      try {
+        previews.push({ asset, preview: await previewSharedModelPlacement(scan.scanId, asset.path) })
+      } catch (error: unknown) {
+        previewErrors.push(`${asset.filename}: ${formatApiError(error)}`)
+      }
+    }
+    const ready = previews.filter(({ preview }) => preview.canApply && preview.status === 'ready' && preview.planId)
+    const blockedPreviewDetails = previews
+      .filter(({ preview }) => !preview.canApply || preview.status !== 'ready')
+      .map(({ asset, preview }) => {
+        const reason = preview.collision || preview.status === 'collision'
+          ? 'destination already exists'
+          : preview.status === 'insufficient_space'
+            ? `not enough space (${formatBytes(preview.availableFreeBytes)} available, ${formatBytes(preview.requiredFreeBytes)} required)`
+            : 'placement is not currently safe'
+        return `${asset.filename}: ${reason}.`
+      })
+    const blocked = previews.length - ready.length + previewErrors.length
+    if (ready.length === 0) {
+      return {
+        message: `No files can be placed safely right now. ${[...blockedPreviewDetails, ...previewErrors].slice(0, 3).join(' ') || `${blocked} candidate(s) need review.`}`.trim(),
+        refreshedScan: null,
+      }
+    }
+    const previewText = ready.slice(0, 12).map(({ asset, preview }) =>
+      `${asset.filename} → ${preview.destination} (${formatBytes(preview.sizeBytes)})`,
+    ).join('\n')
+    const remainder = ready.length > 12 ? `\n…and ${ready.length - 12} more` : ''
+    const blockedReasons = [...blockedPreviewDetails, ...previewErrors].slice(0, 3)
+    const blockedText = blocked ? `\n${blocked} candidate(s) will stay in place. ${blockedReasons.join(' ')}` : ''
+    const scanScope = scan.query ? ` matching “${scan.query}” result(s)` : ' result(s)'
+    if (!window.confirm(`Copy ${ready.length} confident model file(s) from all${scanScope}? Source files are preserved.\n\n${previewText}${remainder}${blockedText}\n\nThe app will revalidate every file before copying.`)) {
+      return { message: `Preview ready: ${ready.length} safe copy/copies; no files copied.`, refreshedScan: null }
+    }
+    let copied = 0
+    const applyErrors: string[] = []
+    for (const { asset, preview } of ready) {
+      try {
+        const result = await applySharedModelPlacement(preview.planId)
+        if (result.status === 'copied_from_shared_root' && result.sourcePreserved) copied += 1
+        else applyErrors.push(`${asset.filename}: placement result was not confirmed.`)
+      } catch (error: unknown) {
+        applyErrors.push(`${asset.filename}: ${formatApiError(error)}`)
+      }
+    }
+    await refreshWorkspaceDataNow()
+    const refreshedScan = await scanModelRoots()
+    const skippedDetails = [...blockedPreviewDetails, ...previewErrors, ...applyErrors].slice(0, 3)
+    const message = `Copied ${copied} of ${ready.length} model file(s); source files were preserved. ${blocked} candidate(s) were skipped.${skippedDetails.length ? ` ${skippedDetails.join(' ')}` : ''}`.trim()
+    return { message, refreshedScan }
+  }, [refreshWorkspaceDataNow])
+
   const handleCatalogDownload = useCallback(
     async (key: string) => {
       setDownloadingCatalogKey(key)
-      setStatusMessage('Downloading model...')
+      setStatusMessage('Preparing model setup...')
       try {
         const nextDownloads = await downloadCatalogModel(key)
         setDownloadsStatus(nextDownloads)
         await refreshWorkspaceDataNow()
-        setStatusMessage('Model downloaded and inventory refreshed.')
+        const action = nextDownloads.catalogAction
+        setStatusMessage(
+          action?.status === 'placed'
+            ? 'Found the model in your models folder, sorted it into the expected location, and refreshed inventory.'
+            : action?.status === 'copied_from_shared_root'
+              ? 'Copied the verified model from your shared model folder; the source file was kept, and inventory was refreshed.'
+              : action?.status === 'already_installed'
+                ? 'Model is already installed; inventory refreshed.'
+                : 'Model downloaded and inventory refreshed.',
+        )
       } catch (error: unknown) {
         const message = formatApiError(error)
         setStatusMessage(message)
@@ -1559,6 +2212,144 @@ function App() {
     },
     [refreshWorkspaceDataNow, showSupportIssue],
   )
+
+  const handleSharedSnapshotImport = useCallback(async (key: string) => {
+    setDownloadingCatalogKey(key)
+    let preview: ProSharedSnapshotImportPreview | null
+    try {
+      preview = await previewSharedCatalogSnapshot(key)
+    } catch (error: unknown) {
+      setStatusMessage(formatApiError(error))
+      setDownloadingCatalogKey('')
+      return
+    }
+    if (!preview) {
+      setStatusMessage('No unique complete snapshot was found in the configured shared model roots.')
+      setDownloadingCatalogKey('')
+      return
+    }
+    const required = formatBytes(preview.requiredBytes)
+    const free = formatBytes(preview.freeBytes)
+    if (!preview.enoughSpace) {
+      setStatusMessage(`Cannot copy snapshot: ${required} required including reserve; ${free} free on the destination volume.`)
+      setDownloadingCatalogKey('')
+      return
+    }
+    const approved = window.confirm(
+      `Copy this verified Diffusers snapshot to AIWF's model folder?\n\nSource: ${preview.source}\nDestination: ${preview.target}\nSnapshot size: ${formatBytes(preview.sizeBytes)}\nRequired free space: ${required}\nAvailable: ${free}\n\nThe source folder will be kept.`,
+    )
+    if (!approved) {
+      setDownloadingCatalogKey('')
+      return
+    }
+    try {
+      const nextDownloads = await importSharedCatalogSnapshot(key, preview)
+      setDownloadsStatus(nextDownloads)
+      await refreshWorkspaceDataNow()
+      setStatusMessage(`Copied the snapshot (${formatBytes(preview.sizeBytes)}). Source preserved; inventory refreshed. Route readiness still requires its own preflight.`)
+    } catch (error: unknown) {
+      setStatusMessage(formatApiError(error))
+    } finally {
+      setDownloadingCatalogKey('')
+    }
+  }, [refreshWorkspaceDataNow])
+
+  const handleBundleInstall = useCallback(async (bundleKey: string, completeSelectedRoute = true): Promise<boolean> => {
+    const selectionSequence = modelSelectionSequenceRef.current
+    setInstallingBundleKey(bundleKey)
+    setStatusMessage(`Checking ${bundleKey} models and installing missing assets...`)
+    try {
+      const result = await installCatalogBundle(bundleKey)
+      setDownloadsStatus(result.status)
+      let confirmedSnapshotCount = 0
+      for (const item of result.items) {
+        const preview = item.sharedSnapshotPreview
+        if (item.status !== 'shared_snapshot_confirmation_required' || !preview) continue
+        const required = formatBytes(preview.requiredBytes)
+        const free = formatBytes(preview.freeBytes)
+        if (!preview.enoughSpace) {
+          item.status = 'shared_snapshot_insufficient_space'
+          continue
+        }
+        const approved = window.confirm(
+          `Copy this verified Diffusers snapshot as part of ${bundleKey}?\n\nSource: ${preview.source}\nDestination: ${preview.target}\nSnapshot size: ${formatBytes(preview.sizeBytes)}\nRequired free space: ${required}\nAvailable: ${free}\n\nThe source folder will be kept. Route readiness will be checked separately after the files are placed.`,
+        )
+        if (!approved) {
+          item.status = 'shared_snapshot_confirmation_required'
+          continue
+        }
+        try {
+          const nextDownloads = await importSharedCatalogSnapshot(item.key, preview)
+          setDownloadsStatus(nextDownloads)
+          item.status = 'copied_snapshot_from_shared_root'
+          item.source = preview.source
+          item.path = preview.target
+          confirmedSnapshotCount += 1
+        } catch (error: unknown) {
+          item.status = 'failed'
+          item.error = formatApiError(error)
+        }
+      }
+      await refreshWorkspaceDataNow()
+      const downloaded = result.items.filter((item) => item.status === 'downloaded').length
+      const existing = result.items.filter((item) => item.status === 'already_installed').length
+      const placed = result.items.filter((item) => item.status === 'placed').length
+      const imported = result.items.filter((item) => item.status === 'copied_from_shared_root').length
+      const importedSnapshots = result.items.filter((item) => item.status === 'copied_snapshot_from_shared_root').length
+      const unavailable = result.items.filter((item) => item.status === 'unavailable').length
+      const manualAccess = result.items.filter((item) => item.status === 'manual_access_required').length
+      const deferred = result.items.filter((item) => item.status === 'deferred-active-operation').length
+      const failed = result.items.filter((item) => item.status === 'failed').length
+      const pendingConfirmation = result.items.filter((item) => item.status === 'shared_snapshot_confirmation_required').length
+      const insufficientSpace = result.items.filter((item) => item.status === 'shared_snapshot_insufficient_space').length
+      const insufficientDetails = result.items
+        .filter((item) => item.status === 'shared_snapshot_insufficient_space')
+        .map((item) => {
+          const preview = item.sharedSnapshotPreview
+          return preview
+            ? `${item.key} (${formatBytes(preview.requiredBytes)} required including reserve; ${formatBytes(preview.freeBytes)} free)`
+            : item.key
+        })
+        .join(', ')
+      const itemKeys = (status: string) => result.items
+        .filter((item) => item.status === status)
+        .map((item) => item.key)
+        .join(', ')
+      const statuses = [
+        unavailable ? `unavailable: ${itemKeys('unavailable')}` : '',
+        manualAccess ? `manual access required: ${itemKeys('manual_access_required')}` : '',
+        deferred ? `deferred while another model operation is active: ${itemKeys('deferred-active-operation')}` : '',
+        pendingConfirmation ? `shared snapshot confirmation declined: ${itemKeys('shared_snapshot_confirmation_required')}` : '',
+        insufficientSpace ? `not copied because destination space is insufficient: ${insufficientDetails}` : '',
+        failed ? `failed: ${itemKeys('failed')}` : '',
+      ].filter(Boolean)
+      setStatusMessage(`${bundleKey}: ${downloaded} downloaded, ${existing} already available, ${placed} sorted into place, ${imported + importedSnapshots} copied from shared folders${confirmedSnapshotCount ? ` (${confirmedSnapshotCount} snapshot${confirmedSnapshotCount === 1 ? '' : 's'} confirmed)` : ''}${statuses.length ? `; ${statuses.join(', ')}` : ''}. Route readiness remains a separate check.`)
+      const installedStatuses = new Set(['downloaded', 'already_installed', 'placed', 'copied_from_shared_root', 'copied_snapshot_from_shared_root'])
+      const installed = result.items.length > 0 && result.items.every((item) => installedStatuses.has(item.status))
+      const selectedModel = [...bootstrap.models, ...bootstrap.blockedModels]
+        .find((model) => model.id === settings.modelId)
+      if (
+        installed &&
+        completeSelectedRoute &&
+        selectionSequence === modelSelectionSequenceRef.current &&
+        selectedModel?.id === settings.modelId &&
+        selectedModel.setupBundleKey === bundleKey
+      ) {
+        await handleModelBundleSetupComplete(selectedModel.id, settings.mode)
+      }
+      return installed
+    } catch (error: unknown) {
+      const message = formatApiError(error)
+      setStatusMessage(message)
+      showSupportIssue('Model bundle install failed', error, 'bundle-install', {
+        route: `/api/pro/downloads/bundles/${bundleKey}`,
+        bundleKey,
+      })
+      return false
+    } finally {
+      setInstallingBundleKey('')
+    }
+  }, [bootstrap.blockedModels, bootstrap.models, handleModelBundleSetupComplete, refreshWorkspaceDataNow, settings.modelId, settings.mode, showSupportIssue])
 
   const handleUnloadModel = useCallback(async () => {
     setStatusMessage('Unloading current model...')
@@ -1742,6 +2533,17 @@ function App() {
       setStatusMessage('Generation is already running in the backend.')
       return false
     }
+    if (selectedModelWarning) {
+      setGenerationError(selectedModelWarning)
+      setStatusMessage(selectedModelWarning)
+      return false
+    }
+    if (settings.modelId === 'ltx:diffusers_2b' && settings.sourceImageDataUrl) {
+      const message = 'LTX 2B Diffusers supports text-to-video only. Clear the source image or choose an LTX 2.3 pipeline.'
+      setGenerationError(message)
+      setStatusMessage(message)
+      return false
+    }
     if (!settings.prompt.trim()) {
       setStatusMessage('Enter a prompt before generating.')
       return false
@@ -1750,7 +2552,7 @@ function App() {
     if (requestedModel && !modelFitsCreationMode(requestedModel, settings.mode)) {
       const message =
         settings.mode === 'video'
-          ? 'Pick a Wan or Sana Video model before generating video.'
+          ? 'Pick a Wan, Sana Video, or LTX model before generating video.'
           : 'Video models are only available from the Video tab.'
       setGenerationError(message)
       setStatusMessage(message)
@@ -1787,6 +2589,13 @@ function App() {
       setStatusMessage(message)
       return false
     }
+    const blockedRequestedModel = bootstrap.blockedModels.find((model) => model.id === settings.modelId)
+    if (blockedRequestedModel) {
+      const message = modelBlockedMessage(blockedRequestedModel)
+      setGenerationError(message)
+      setStatusMessage(message)
+      return false
+    }
     if (!bootstrap.models.some((model) => model.id === settings.modelId)) {
       const message = 'Selected model is not available in the current Pro model list.'
       setGenerationError(message)
@@ -1812,7 +2621,8 @@ function App() {
       },
     })
     try {
-      const result = await generateProOutput(settings, controller.signal)
+      const generationSettings = withSavedWanModelComponents(settings, bootstrap.models, settingsStatus?.video)
+      const result = await generateProOutput(generationSettings, controller.signal)
       setGenerationProgress(result.progress)
       setGenerationTimings(result.timings)
       setGenerationReceiptPath(result.receiptPath ?? '')
@@ -1824,8 +2634,11 @@ function App() {
             : []
       const stampedOutputs = sessionOutputs.map((item) => ({
         ...item,
-        modelName: item.modelName || selectedModel?.name || settings.modelId,
+        modelName: item.modelName || selectedModelLabel || settings.modelId,
       }))
+      if (result.verificationStatus === 'verified' && stampedOutputs.length > 0) {
+        setVerifiedModelIds((current) => new Set(current).add(settings.modelId))
+      }
       if (stampedOutputs.length > 0) {
         setPreview(stampedOutputs[stampedOutputs.length - 1])
         commitRecentOutputs(stampedOutputs)
@@ -1871,7 +2684,7 @@ function App() {
       void fetchProRuntime().then(setRuntime).catch(() => undefined)
       void fetchProLogs().then(setLogStatus).catch(() => undefined)
     }
-  }, [bootstrap.models, commitRecentOutputs, generationActive, selectedModel, setPreview, settings, showSupportIssue])
+  }, [bootstrap.blockedModels, bootstrap.models, commitRecentOutputs, generationActive, selectedModel, selectedModelWarning, setPreview, settings, settingsStatus?.video, showSupportIssue])
 
   // Shared props bundle for the full-surface studio layouts. These screens stay
   // presentational while the shell owns runtime state and actions.
@@ -1883,27 +2696,34 @@ function App() {
       recentOutputs,
       preview,
       selectedModel,
-      selectedModelName: selectedModel?.name ?? settings.modelId,
+      selectableModels: creationModels,
+      selectedModelName: selectedModelLabel,
       statusMessage,
       isGenerating,
       onSettingsChange: setSettings,
+      onModelSelect: handleModelSelect,
       onGenerate: handleGenerate,
       onSendToWorkflow: handleSendToWorkflow,
       workflowBlocks,
       onWorkflowBlocksChange: setWorkflowBlocks,
       onPreviewSelect: setPreview,
       onOpenModels: () => handleRailSelect('models'),
+      onOpenModelSorter: openModelSorter,
       onOpenSettings: () => handleRailSelect('settings'),
     }),
     [
       bootstrap,
+      creationModels,
       handleGenerate,
+      handleModelSelect,
       handleRailSelect,
       handleSendToWorkflow,
+      openModelSorter,
       isGenerating,
       preview,
       recentOutputs,
       runtime,
+      selectedModelLabel,
       selectedModel,
       setPreview,
       settings,
@@ -2028,13 +2848,14 @@ function App() {
           initImageDataUrl: '',
           maskImageDataUrl: '',
         }
-        setXyPlotStatus(`Running ${index + 1} of ${runnableCells.length}: ${model.name}, ${requestSettings.steps} steps.`)
-        setStatusMessage(`Running X/Y plot ${index + 1}/${runnableCells.length}: ${model.name}.`)
+        const modelLabel = formatStudioModelLabel(model, bootstrap.models)
+        setXyPlotStatus(`Running ${index + 1} of ${runnableCells.length}: ${modelLabel}, ${requestSettings.steps} steps.`)
+        setStatusMessage(`Running X/Y plot ${index + 1}/${runnableCells.length}: ${modelLabel}.`)
         const result = await generateProOutput(requestSettings, controller.signal)
         setGenerationProgress(result.progress)
         setGenerationTimings(result.timings)
         setGenerationReceiptPath(result.receiptPath ?? '')
-        const stampedOutputs = collectGenerateOutputs(result, model.name)
+        const stampedOutputs = collectGenerateOutputs(result, modelLabel)
         if (stampedOutputs.length > 0) {
           allOutputs.push(...stampedOutputs)
           setPreview(stampedOutputs[stampedOutputs.length - 1])
@@ -2079,7 +2900,7 @@ function App() {
       void fetchProRuntime().then(setRuntime).catch(() => undefined)
       void fetchProLogs().then(setLogStatus).catch(() => undefined)
     }
-  }, [commitRecentOutputs, generationActive, setPreview, settings, showSupportIssue, xyPlotCells, xyPlotModels])
+  }, [bootstrap.models, commitRecentOutputs, generationActive, setPreview, settings, showSupportIssue, xyPlotCells, xyPlotModels])
 
   const handleStopGenerate = useCallback(() => {
     continuousGenerateRef.current = false
@@ -2225,6 +3046,25 @@ function App() {
     reader.readAsDataURL(file)
   }, [])
 
+  const handleInstallEnhanceModel = useCallback(async (modelId: string) => {
+    const model = enhanceModels.find((candidate) => candidate.id === modelId)
+    if (!model || !model.installAvailable) {
+      setEnhanceMessage('This model is not available through the built-in installer.')
+      return
+    }
+    setEnhanceInstallingModel(modelId)
+    setEnhanceMessage(`Installing ${model.title} into the local model library...`)
+    try {
+      const installed = await installProEnhanceModel(modelId)
+      setEnhanceModels((current) => current.map((candidate) => candidate.id === modelId ? installed : candidate))
+      setEnhanceMessage(`${installed.title} is installed. Model loading is checked when you run Enhance.`)
+    } catch (error: unknown) {
+      setEnhanceMessage(`Could not install ${model.title}: ${formatApiError(error)}`)
+    } finally {
+      setEnhanceInstallingModel('')
+    }
+  }, [enhanceModels])
+
   const handleUsePreviewForEnhance = useCallback(async () => {
     try {
       const dataUrl = await readCurrentPreviewDataUrl()
@@ -2241,6 +3081,24 @@ function App() {
   }, [readCurrentPreviewDataUrl])
 
   const handleRunEnhance = useCallback(async () => {
+    if (enhanceMode !== 'vsr') {
+      const required = [
+        ...(enhanceMode === 'restore' || enhanceMode === 'restore-upscale'
+          ? [enhanceModels.find((model) => model.id === enhanceRestoreModel && model.kind === 'restorer')]
+          : []),
+        ...(enhanceMode === 'upscale' || enhanceMode === 'restore-upscale'
+          ? [enhanceModels.find((model) => model.id === enhanceUpscaleModel && model.kind === 'upscaler')]
+          : []),
+      ]
+      const unavailableIndex = required.findIndex((model) => !model || !model.installed)
+      if (unavailableIndex >= 0) {
+        const unavailable = required[unavailableIndex]
+        setEnhanceMessage(unavailable
+          ? `${unavailable.title} needs setup. Install it before running Enhance.`
+          : 'Choose a model from the local Enhance catalog.')
+        return
+      }
+    }
     let source = enhanceSourceDataUrl
     if (!source) {
       source = await readCurrentPreviewDataUrl()
@@ -2329,6 +3187,9 @@ function App() {
     readCurrentPreviewDataUrl,
     settings.height,
     settings.width,
+    enhanceModels,
+    enhanceRestoreModel,
+    enhanceUpscaleModel,
     setPreview,
     showSupportIssue,
   ])
@@ -2451,7 +3312,7 @@ function App() {
       {startupSplashVisible ? <StartupSplash ready={backendConnected} /> : null}
       {fileDropActive ? (
         <div className="pro-file-drop-overlay" aria-hidden="true">
-          <div>
+              <div>
             <HardDrive size={28} aria-hidden="true" />
             <strong>Drop files</strong>
             <span>Images load into the current canvas. Videos go to Video Lab. Models go to the sorter.</span>
@@ -2530,7 +3391,7 @@ function App() {
           isGenerating={generationActive}
           statusMessage={statusMessage}
           generationError={generationError}
-          selectedModelName={selectedModel?.name ?? settings.modelId}
+          selectedModelName={selectedModelLabel}
           generationProgress={generationProgress}
           backendConnected={backendConnected}
           backendRecovering={backendRecovering}
@@ -2554,6 +3415,8 @@ function App() {
             <MediaFoundryImageLayout {...buildLayoutProps()} />
           ) : activeRail === 'pipeline' ? (
             <PipelineAtlasLayout {...buildLayoutProps()} />
+          ) : activeRail === 'unified' ? (
+            <UnifiedWorkspaceLayout recentOutputs={recentOutputs} />
           ) : activeRail === 'projects' ? (
             <ProjectCenterLayout {...buildLayoutProps()} />
           ) : activeRail === 'assistant' ? (
@@ -2585,7 +3448,11 @@ function App() {
               onEngineFilterChange={handleEngineFilterChange}
               onModelSelect={handleModelSelect}
               onCatalogDownload={handleCatalogDownload}
+              onSharedSnapshotImport={handleSharedSnapshotImport}
               downloadingCatalogKey={downloadingCatalogKey}
+              onBundleInstall={handleBundleInstall}
+              installingBundleKey={installingBundleKey}
+              onOpenModelSorter={openModelSorter}
             />
           ) : activeRail === 'data' ? (
             <>
@@ -2594,7 +3461,7 @@ function App() {
                 runtime={runtime}
                 dataStatus={dataStatus}
                 recentOutputs={recentOutputs}
-                selectedModelName={selectedModel?.name ?? settings.modelId}
+                selectedModelName={selectedModelLabel}
                 onOpenModels={() => handleRailSelect('models')}
               />
               <ResizeHandle
@@ -2607,7 +3474,7 @@ function App() {
                 runtime={runtime}
                 dataStatus={dataStatus}
                 recentOutputs={recentOutputs}
-                selectedModelName={selectedModel?.name ?? settings.modelId}
+                selectedModelName={selectedModelLabel}
               />
               <ResizeHandle
                 axis="vertical"
@@ -2639,6 +3506,7 @@ function App() {
                 capabilitiesStatus={capabilitiesStatus}
                 runtime={runtime}
                 wanModels={bootstrap.models.filter((model) => (model.engineId ?? 'unknown') === 'wan')}
+                ltxModels={[...bootstrap.models, ...bootstrap.blockedModels].filter((model) => model.engineId === 'ltx')}
                 onOpenCreate={() => handleRailSelect('create')}
                 onOpenVideo={() => {
                   handleRailSelect('create')
@@ -2648,6 +3516,7 @@ function App() {
                 onOpenSegmentation={() => setActiveModal('segmentation')}
                 onOpenEnhance={() => setActiveModal('enhance')}
                 onOpenReactor={() => setActiveModal('reactor')}
+                onOpenModelSorter={openModelSorter}
               />
               <ResizeHandle
                 axis="vertical"
@@ -2699,7 +3568,7 @@ function App() {
                 statusMessage={statusMessage}
                 generationError={generationError}
                 recentOutputs={recentOutputs}
-                selectedModelName={selectedModel?.name ?? settings.modelId}
+                selectedModelName={selectedModelLabel}
                 generationProgress={generationProgress}
               />
               <ResizeHandle
@@ -2736,14 +3605,18 @@ function App() {
                 settings={settings}
                 settingsStatus={settingsStatus}
                 recentOutputs={recentOutputs}
+                onModelSelect={handleModelSelect}
                 onSettingsChange={setSettings}
                 onSettingsStatusChange={setSettingsStatus}
                 onSaveSettings={handleSaveProSettings}
                 onModelFilesUpload={uploadModelFilesAndRefresh}
                 onModelReorganize={reorganizeModelFilesNow}
+                onModelRootsScan={scanModelRootsNow}
+                onAutoPlaceSharedAssets={autoPlaceSharedModelAssets}
                 onUnloadModel={handleUnloadModel}
                 onRestartBackend={handleRecoverBackend}
                 onReloadFrontend={handleReloadFrontend}
+                modelSorterFocusRequest={modelSorterFocusRequest}
                 settingsSaveStatus={settingsSaveStatus}
                 leftPanelWidth={leftPanelWidth}
                 rightPanelWidth={rightPanelWidth}
@@ -2766,9 +3639,10 @@ function App() {
                   settings={settings}
                   bootstrap={bootstrap}
                   filteredModels={filteredModels}
+                  recoveryModel={recoveryModel}
                   engineFilter={engineFilter}
                   engines={creationEngines}
-                  selectedModelName={selectedModel?.name ?? settings.modelId}
+                  selectedModelName={selectedModelLabel}
                   activeRatio={activeRatio}
                   showAdvanced={showAdvanced}
                   isGenerating={generationActive}
@@ -2793,8 +3667,20 @@ function App() {
                   onToggleRightPanel={toggleRightPanel}
                   onOpenXyPlot={handleOpenXyPlot}
                   onOpenModels={() => handleRailSelect('models')}
+                  onOpenModelSorter={openModelSorter}
                   onPromptAnalyze={handlePromptAnalyze}
                   selectedModelWarning={selectedModelWarning}
+                  imageModelLoadRetryAvailable={imageModelLoadRetryAvailable}
+                  selectedModelReadinessHint={selectedModelReadinessHint}
+                  videoRoutePreparationBusy={videoRoutePreparationBusy}
+                  videoRoutePreparationError={videoRoutePreparationError}
+                  videoRoutePreparationRetryable={videoRoutePreparationRetryable}
+                  videoRoutePreparationUnready={videoRoutePreparationUnready}
+                  onRetryVideoRoutePreparation={retryVideoRoutePreparation}
+                  onModelRuntimeSetupComplete={handleModelRuntimeSetupComplete}
+                  onModelBundleSetupComplete={handleModelBundleSetupComplete}
+                  onBundleInstall={handleBundleInstall}
+                  installingBundleKey={installingBundleKey}
                   rightPanelCollapsed={rightPanelCollapsed}
                   dualRuntimeAvailable={dualRuntimeAvailable}
                   sdcppRuntimeAvailable={sdcppRuntimeAvailable}
@@ -2865,7 +3751,7 @@ function App() {
                   selectedOutput={preview}
                   statusMessage={statusMessage}
                   generationError={generationError}
-                  selectedModelName={selectedModel?.name ?? settings.modelId}
+                  selectedModelName={selectedModelLabel}
                   onPreviewSelect={setPreview}
                   onApplyOutputSettings={handleApplyOutputSettings}
                   onResizeStart={startBottomDrag}
@@ -2888,7 +3774,10 @@ function App() {
           ) : (
             <RuntimePanel
               runtime={runtime}
-              selectedModelName={selectedModel?.name ?? settings.modelId}
+              selectedModelName={selectedModelLabel}
+              selectedModelId={settings.modelId}
+              isVideoRoute={activeRail === 'create' && settings.mode === 'video'}
+              preferredVideoRouteId={selectedModel?.engineId === 'wan' ? `video.wan.${settings.wanRuntimeMode}` : ''}
               onUnloadModel={handleUnloadModel}
               onToggleRightPanel={() => setRightPanelCollapsed(true)}
             />
@@ -2913,9 +3802,16 @@ function App() {
 
       <ToolModal open={activeModal === 'controlnet'} title="ControlNet" onClose={() => setActiveModal(null)}>
         <ControlNetSettingsModal
+          isOpen={activeModal === 'controlnet'}
           settings={settings}
           onSettingsChange={setSettings}
           compatibility={controlNetCompatibility}
+          onCatalogDownload={(catalogKey) => void handleCatalogDownload(catalogKey)}
+          downloadingCatalogKey={downloadingCatalogKey}
+          onOpenModelSorter={() => {
+            setActiveModal(null)
+            openModelSorter()
+          }}
         />
       </ToolModal>
 
@@ -3034,13 +3930,29 @@ function App() {
             <>
               <label className="pro-field">
                 <FieldLabel label="Face restorer model" />
-                <input
+                <select
                   value={enhanceRestoreModel}
                   onChange={(event) => setEnhanceRestoreModel(event.target.value)}
-                  placeholder="gfpgan-v1.4 or codeformer"
-                  disabled={enhanceBusy}
-                />
+                  disabled={enhanceBusy || enhanceModelsLoading || Boolean(enhanceInstallingModel)}
+                >
+                  {enhanceModels.filter((model) => model.kind === 'restorer').map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.title} · {model.installed ? 'Installed' : 'Needs setup'}
+                    </option>
+                  ))}
+                  {!enhanceModels.some((model) => model.kind === 'restorer') ? <option value="">No restorers listed</option> : null}
+                </select>
               </label>
+              {selectedEnhanceRestorer && !selectedEnhanceRestorer.installed && selectedEnhanceRestorer.installAvailable ? (
+                <button
+                  type="button"
+                  className="pro-secondary-button"
+                  onClick={() => void handleInstallEnhanceModel(selectedEnhanceRestorer.id)}
+                  disabled={enhanceBusy || Boolean(enhanceInstallingModel)}
+                >
+                  {enhanceInstallingModel === selectedEnhanceRestorer.id ? `Installing ${selectedEnhanceRestorer.title}...` : `Install ${selectedEnhanceRestorer.title}`}
+                </button>
+              ) : null}
               <RangeField
                 label="Restore strength"
                 min={0}
@@ -3063,13 +3975,29 @@ function App() {
             <>
               <label className="pro-field">
                 <FieldLabel label="Upscaler model" />
-                <input
+                <select
                   value={enhanceUpscaleModel}
                   onChange={(event) => setEnhanceUpscaleModel(event.target.value)}
-                  placeholder="realesrgan-x4plus"
-                  disabled={enhanceBusy}
-                />
+                  disabled={enhanceBusy || enhanceModelsLoading || Boolean(enhanceInstallingModel)}
+                >
+                  {enhanceModels.filter((model) => model.kind === 'upscaler').map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.title} · {model.installed ? 'Installed' : 'Needs setup'}
+                    </option>
+                  ))}
+                  {!enhanceModels.some((model) => model.kind === 'upscaler') ? <option value="">No upscalers listed</option> : null}
+                </select>
               </label>
+              {selectedEnhanceUpscaler && !selectedEnhanceUpscaler.installed && selectedEnhanceUpscaler.installAvailable ? (
+                <button
+                  type="button"
+                  className="pro-secondary-button"
+                  onClick={() => void handleInstallEnhanceModel(selectedEnhanceUpscaler.id)}
+                  disabled={enhanceBusy || Boolean(enhanceInstallingModel)}
+                >
+                  {enhanceInstallingModel === selectedEnhanceUpscaler.id ? `Installing ${selectedEnhanceUpscaler.title}...` : `Install ${selectedEnhanceUpscaler.title}`}
+                </button>
+              ) : null}
               <RangeField label="Scale" min={1} max={8} step={0.5} value={enhanceUpscaleScale} onChange={setEnhanceUpscaleScale} />
               <div className="pro-control-grid">
                 <label className="pro-field">
@@ -3130,11 +4058,23 @@ function App() {
               <p className="pro-field-note">Video VSR is also available from Video Lab after uploading a clip.</p>
             </>
           ) : null}
+          {enhanceMode === 'vsr' && enhanceVsrAvailable !== true ? (
+            <p className="pro-field-note" role="status">
+              {enhanceVsrAvailable === null
+                ? 'Checking NVIDIA VideoFX availability...'
+                : 'NVIDIA VideoFX is unavailable. Install or configure the VideoFX runtime before using VSR.'}
+            </p>
+          ) : null}
           <div className="pro-settings-actions">
-            <button type="button" className="pro-primary-button" onClick={handleRunEnhance} disabled={enhanceBusy}>
+            <button
+              type="button"
+              className="pro-primary-button"
+              onClick={handleRunEnhance}
+              disabled={enhanceBusy || enhanceModelsLoading || Boolean(enhanceInstallingModel) || !enhanceRequiredModelsReady}
+            >
               {enhanceBusy ? 'Working...' : 'Run'}
             </button>
-            <span>{enhanceMessage || 'Ready.'}</span>
+            <span role="status" aria-live="polite">{enhanceMessage || 'Checking model setup before running.'}</span>
           </div>
         </div>
       </ToolModal>
@@ -3280,7 +4220,7 @@ function XyPlotSetupModal({
                 {models.length === 0 ? <option value="">No ready image models</option> : null}
                 {models.map((model) => (
                   <option key={model.id} value={model.id}>
-                    {formatModelOptionLabel(model)}
+                    {formatStudioModelLabel(model, models)}
                   </option>
                 ))}
               </select>
@@ -3600,6 +4540,7 @@ function PromptPanelImpl({
   settings,
   bootstrap,
   filteredModels,
+  recoveryModel,
   engineFilter,
   engines,
   selectedModelName,
@@ -3627,8 +4568,20 @@ function PromptPanelImpl({
   onToggleRightPanel,
   onOpenXyPlot,
   onOpenModels,
+  onOpenModelSorter,
   onPromptAnalyze,
   selectedModelWarning,
+  imageModelLoadRetryAvailable,
+  selectedModelReadinessHint,
+  videoRoutePreparationBusy,
+  videoRoutePreparationError,
+  videoRoutePreparationRetryable,
+  videoRoutePreparationUnready,
+  onRetryVideoRoutePreparation,
+  onModelRuntimeSetupComplete,
+  onModelBundleSetupComplete,
+  onBundleInstall,
+  installingBundleKey,
   rightPanelCollapsed,
   dualRuntimeAvailable,
   sdcppRuntimeAvailable,
@@ -3636,6 +4589,7 @@ function PromptPanelImpl({
   settings: GenerationSettings
   bootstrap: ProBootstrap
   filteredModels: ProModelOption[]
+  recoveryModel: ProModelOption | undefined
   engineFilter: EngineId
   engines: EngineSummary[]
   selectedModelName: string
@@ -3663,12 +4617,30 @@ function PromptPanelImpl({
   onToggleRightPanel: () => void
   onOpenXyPlot: () => void
   onOpenModels: () => void
+  onOpenModelSorter: () => void
   onPromptAnalyze: () => void
   selectedModelWarning: string
+  imageModelLoadRetryAvailable: boolean
+  selectedModelReadinessHint: string
+  videoRoutePreparationBusy: boolean
+  videoRoutePreparationError: string
+  videoRoutePreparationRetryable: boolean
+  videoRoutePreparationUnready: boolean
+  onRetryVideoRoutePreparation: () => void
+  onModelRuntimeSetupComplete: () => void
+  onModelBundleSetupComplete: (modelId: string, mode: CreationMode) => Promise<void>
+  onBundleInstall: (bundleKey: string, completeSelectedRoute?: boolean) => Promise<boolean>
+  installingBundleKey: string
   rightPanelCollapsed: boolean
   dualRuntimeAvailable: boolean
   sdcppRuntimeAvailable: boolean
 }) {
+  const [ltxInstallBusy, setLtxInstallBusy] = useState(false)
+  const [ltxInstallRunning, setLtxInstallRunning] = useState(false)
+  const [ltxInstallMessage, setLtxInstallMessage] = useState('')
+  const [qwenNunchakuInstallBusy, setQwenNunchakuInstallBusy] = useState(false)
+  const [qwenNunchakuInstallRunning, setQwenNunchakuInstallRunning] = useState(false)
+  const [qwenNunchakuInstallMessage, setQwenNunchakuInstallMessage] = useState('')
   const handlePromptKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== 'Enter' || !event.shiftKey || event.nativeEvent.isComposing) {
       return
@@ -3676,9 +4648,124 @@ function PromptPanelImpl({
     event.preventDefault()
     onGenerate()
   }
+  const handleLtxEngineInstall = async () => {
+    setLtxInstallBusy(true)
+    setLtxInstallMessage('Starting LTX 2.3 engine setup...')
+    try {
+      const result = await runProSetupAction('POST /api/pro/engines/ltx/install')
+      if (!('pid' in result)) throw new Error('The LTX setup action returned an audio setup result.')
+      setLtxInstallRunning(true)
+      setLtxInstallMessage(`${result.message} Installer log: ${result.logPath}`)
+    } catch (error: unknown) {
+      setLtxInstallMessage(formatApiError(error))
+    } finally {
+      setLtxInstallBusy(false)
+    }
+  }
+  const handleQwenNunchakuEngineInstall = async () => {
+    setQwenNunchakuInstallBusy(true)
+    setQwenNunchakuInstallMessage('Starting isolated Qwen Nunchaku runtime setup...')
+    try {
+      const result = await runProSetupAction('POST /api/pro/engines/qwen_nunchaku/install')
+      if (!('pid' in result)) throw new Error('The Qwen Nunchaku setup action returned an audio setup result.')
+      setQwenNunchakuInstallRunning(true)
+      setQwenNunchakuInstallMessage(`${result.message} Installer log: ${result.logPath}`)
+    } catch (error: unknown) {
+      setQwenNunchakuInstallMessage(formatApiError(error))
+    } finally {
+      setQwenNunchakuInstallBusy(false)
+    }
+  }
   const selectedModel =
-    filteredModels.find((model) => model.id === settings.modelId) ?? filteredModels[0]
+    bootstrap.models.find((model) => model.id === settings.modelId) ??
+    bootstrap.blockedModels.find((model) => model.id === settings.modelId)
+  const setupCandidates = bootstrap.blockedModels.filter((model) =>
+    model.setupRoute?.supportState === 'setup-available'
+    || model.setupRoute?.supportState === 'supported-when-folder-installed'
+    || model.setupRoute?.supportState === 'runtime-dependent',
+  )
+  const candidateModels = [...filteredModels, ...setupCandidates.filter((candidate) => !filteredModels.some((model) => model.id === candidate.id))]
+  const modelSelectOptions = selectedModel
+    ? [selectedModel, ...candidateModels.filter((model) => model.id !== selectedModel.id)]
+    : candidateModels
+  const selectedModelOptionDisabled = Boolean(
+    selectedModel && (isModelBlocked(selectedModel) || !modelFitsCreationMode(selectedModel, settings.mode)),
+  )
+  const recommendedSetupBundleKey = selectedModel?.setupBundleKey ?? ''
+  const canInstallRecommendedSetup = Boolean(recommendedSetupBundleKey)
   const selectedEngine = selectedModel?.engineId ?? 'unknown'
+  const needsLtxWorkerSetup = Boolean(
+    selectedModel?.setupRoute?.setupAction === 'POST /api/pro/engines/ltx/install',
+  )
+  const needsQwenNunchakuSetup = Boolean(
+    selectedModel?.setupRoute?.setupAction === 'POST /api/pro/engines/qwen_nunchaku/install',
+  )
+  const handleSelectedModelSetup = async () => {
+    if (canInstallRecommendedSetup) {
+      const bundleInstalled = await onBundleInstall(recommendedSetupBundleKey, false)
+      if (!bundleInstalled) return
+    }
+    if (needsLtxWorkerSetup) {
+      await handleLtxEngineInstall()
+      return
+    }
+    if (needsQwenNunchakuSetup) {
+      await handleQwenNunchakuEngineInstall()
+      return
+    }
+    if (selectedModel) await onModelBundleSetupComplete(selectedModel.id, settings.mode)
+  }
+  useEffect(() => {
+    if (!ltxInstallRunning) return
+    let active = true
+    const checkInstall = async () => {
+      try {
+        const status = await fetchProLtxEngineInstallStatus()
+        if (!active || status.running || status.status !== 'finished') return
+        setLtxInstallRunning(false)
+        if (status.exitCode === 0) {
+          setLtxInstallMessage(`LTX engine setup finished. Refreshing model inventory and checking route readiness. Installer log: ${status.logPath}`)
+          onModelRuntimeSetupComplete()
+        } else {
+          setLtxInstallMessage(`LTX engine setup exited with code ${status.exitCode ?? 'unknown'}. See installer log: ${status.logPath}`)
+        }
+      } catch {
+        // Keep polling through temporary API disconnects while the installer runs.
+      }
+    }
+    void checkInstall()
+    const timer = window.setInterval(() => void checkInstall(), 3000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [ltxInstallRunning, onModelRuntimeSetupComplete])
+  useEffect(() => {
+    if (!qwenNunchakuInstallRunning) return
+    let active = true
+    const checkInstall = async () => {
+      try {
+        const status = await fetchProQwenNunchakuEngineInstallStatus()
+        if (!active || status.running || status.status !== 'finished') return
+        setQwenNunchakuInstallRunning(false)
+        if (status.exitCode === 0 && status.runtimeReady) {
+          setQwenNunchakuInstallMessage(`Qwen Nunchaku runtime setup finished. Refreshing model inventory. Generation remains blocked pending a real route smoke test. Installer log: ${status.logPath}`)
+          onModelRuntimeSetupComplete()
+        } else {
+          const detail = status.runtimeMessages.join('; ')
+          setQwenNunchakuInstallMessage(`Qwen Nunchaku setup exited with code ${status.exitCode ?? 'unknown'}${detail ? `; ${detail}` : ''}. See installer log: ${status.logPath}`)
+        }
+      } catch {
+        // Keep polling through temporary API disconnects while the installer runs.
+      }
+    }
+    void checkInstall()
+    const timer = window.setInterval(() => void checkInstall(), 3000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [onModelRuntimeSetupComplete, qwenNunchakuInstallRunning])
   // Flow-match DiT families run their own scheduler; the sampler picker has no effect.
   const samplerIgnored = ['flux', 'flux2', 'zimage', 'sd35', 'qwen', 'sana'].includes(selectedEngine)
   // Flux.2 Klein is step-distilled; classifier-free guidance is ignored by the pipeline.
@@ -3768,6 +4855,7 @@ function PromptPanelImpl({
           value={settings.prompt}
           maxLength={1500}
           rows={5}
+          aria-label="Prompt"
           aria-keyshortcuts="Shift+Enter"
           onKeyDown={handlePromptKeyDown}
           onChange={(event) =>
@@ -3802,7 +4890,7 @@ function PromptPanelImpl({
             <FileImage size={17} aria-hidden="true" />
             <div>
               <strong>Source image</strong>
-              <span>{settings.sourceImageName || 'Optional first frame for image-to-video.'}</span>
+              <span>{settings.sourceImageName || (selectedEngine === 'ltx' && settings.modelId === 'ltx:diffusers_2b' ? 'Text-to-video only for this LTX pipeline.' : selectedEngine === 'ltx' ? 'Optional LTX first frame for image-to-video.' : 'Optional first frame for image-to-video.')}</span>
             </div>
           </div>
           {settings.sourceImageDataUrl ? (
@@ -3811,17 +4899,15 @@ function PromptPanelImpl({
             <div className="pro-video-source-empty">No image selected</div>
           )}
           <div className="pro-video-source-actions">
-            <label className="pro-secondary-button" htmlFor="pro-video-source-input">
-              <FileImage size={15} aria-hidden="true" />
-              <span>Upload image</span>
-            </label>
-            <input
-              id="pro-video-source-input"
-              className="pro-file-input-hidden"
-              type="file"
-              accept={IMAGE_FILE_ACCEPT}
-              onChange={handleVideoSourceChange}
-            />
+            {!(selectedEngine === 'ltx' && settings.modelId === 'ltx:diffusers_2b') ? (
+              <>
+                <label className="pro-secondary-button" htmlFor="pro-video-source-input">
+                  <FileImage size={15} aria-hidden="true" />
+                  <span>Upload image</span>
+                </label>
+                <input id="pro-video-source-input" className="pro-file-input-hidden" type="file" accept={IMAGE_FILE_ACCEPT} onChange={handleVideoSourceChange} />
+              </>
+            ) : null}
             {settings.sourceImageDataUrl ? (
               <button
                 type="button"
@@ -3834,10 +4920,16 @@ function PromptPanelImpl({
                   }))
                 }
               >
-                Clear
+                {selectedEngine === 'ltx' && settings.modelId === 'ltx:diffusers_2b' ? 'Clear unsupported source image' : 'Clear'}
               </button>
             ) : null}
           </div>
+          {selectedEngine === 'ltx' && settings.modelId === 'ltx:diffusers_2b' && settings.sourceImageDataUrl ? (
+            <p className="pro-field-note" role="alert">LTX 2B Diffusers only supports text-to-video. Clear this source image or choose an LTX 2.3 pipeline for image-to-video.</p>
+          ) : null}
+          {selectedEngine === 'sana_video' && settings.sourceImageDataUrl && selectedModel?.generationModes?.imageToVideo === false ? (
+            <p className="pro-field-note" role="alert">Sana Video on this installation supports text-to-video only. Clear this source image or choose a model with image-to-video support.</p>
+          ) : null}
         </section>
       ) : null}
 
@@ -3952,9 +5044,105 @@ function PromptPanelImpl({
       </div>
       {selectedModelWarning ? (
         <div className="pro-model-readiness-note" role="alert">
-          <strong>{isModelBlocked(selectedModel) ? 'Model not ready' : 'Model unavailable'}</strong>
+          <strong>{settings.mode === 'video' && videoRoutePreparationBusy
+            ? 'Checking video route'
+            : settings.mode === 'video' && videoRoutePreparationError
+              ? videoRoutePreparationUnready ? 'Video route setup incomplete' : 'Video route check failed'
+              : isModelBlocked(selectedModel) || bootstrap.blockedModels.some((model) => model.id === settings.modelId)
+                ? 'Model not ready'
+                : 'Model unavailable'}</strong>
           <span>{selectedModelWarning}</span>
-          {selectedModel?.suggestedAction ? <small>{selectedModel.suggestedAction}</small> : null}
+          <span>{settings.mode === 'video' && (videoRoutePreparationBusy || videoRoutePreparationError)
+            ? 'Generation is blocked until the video route check succeeds.'
+            : 'Generation is blocked until you choose a usable model.'}</span>
+          {settings.mode === 'video' && videoRoutePreparationError && videoRoutePreparationRetryable ? (
+            <button
+              type="button"
+              className="pro-secondary-button"
+              onClick={onRetryVideoRoutePreparation}
+            >
+              Retry video route check
+            </button>
+          ) : null}
+          {imageModelLoadRetryAvailable ? (
+            <button
+              type="button"
+              className="pro-secondary-button"
+              onClick={() => onModelSelect(settings.modelId)}
+            >
+              Retry selected model load
+            </button>
+          ) : null}
+          {bootstrap.blockedModels.find((model) => model.id === settings.modelId)?.suggestedAction ?? selectedModel?.suggestedAction ? (
+            <small>{bootstrap.blockedModels.find((model) => model.id === settings.modelId)?.suggestedAction ?? selectedModel?.suggestedAction}</small>
+          ) : null}
+          {selectedModel?.setupRoute
+            && !selectedModel.setupRoute.setupBundleKey
+            && !selectedModel.setupRoute.setupAction
+            && selectedModel.setupRoute.limitation ? (
+              <small className="pro-field-note" role="note">{selectedModel.setupRoute.limitation}</small>
+            ) : null}
+          {needsLtxWorkerSetup ? (
+            <>
+              <small className="pro-field-note">
+                Set up this LTX route’s model assets and isolated worker together. Setup checks for existing files, places supported assets in their model folders, and installs missing downloadable items.
+              </small>
+              {ltxInstallMessage ? <small className="pro-field-note" role="status">{ltxInstallMessage}</small> : null}
+            </>
+          ) : null}
+          {needsQwenNunchakuSetup ? (
+            <>
+              <small className="pro-field-note">
+                Setup installs the Qwen Image base snapshot, Nunchaku transformer, and a pinned isolated CUDA runtime. Generation stays blocked until a real load-and-generate smoke passes.
+              </small>
+              {qwenNunchakuInstallMessage ? <small className="pro-field-note" role="status">{qwenNunchakuInstallMessage}</small> : null}
+            </>
+          ) : null}
+          {canInstallRecommendedSetup || needsLtxWorkerSetup || needsQwenNunchakuSetup ? (
+            <button
+                type="button"
+                className="pro-secondary-button"
+                disabled={Boolean(installingBundleKey) || ltxInstallBusy || ltxInstallRunning || qwenNunchakuInstallBusy || qwenNunchakuInstallRunning}
+                onClick={() => void handleSelectedModelSetup()}
+              >
+              {qwenNunchakuInstallRunning
+                ? 'Installing Qwen Nunchaku runtime...'
+                : qwenNunchakuInstallBusy
+                  ? 'Starting Qwen Nunchaku setup...'
+                  : ltxInstallRunning
+                ? 'Installing LTX model and worker support...'
+                : ltxInstallBusy
+                  ? 'Starting LTX worker setup...'
+                  : installingBundleKey === recommendedSetupBundleKey
+                ? `Installing ${formatSetupBundleLabel(recommendedSetupBundleKey)}...`
+                : needsQwenNunchakuSetup && canInstallRecommendedSetup
+                  ? 'Set up Qwen Nunchaku model and runtime'
+                  : needsQwenNunchakuSetup
+                    ? 'Set up Qwen Nunchaku runtime'
+                    : needsLtxWorkerSetup && canInstallRecommendedSetup
+                  ? 'Set up LTX model and worker'
+                  : needsLtxWorkerSetup
+                    ? 'Set up LTX worker'
+                    : `Install ${formatSetupBundleLabel(recommendedSetupBundleKey)}`}
+            </button>
+          ) : null}
+          <button type="button" className="pro-secondary-button" onClick={onOpenModelSorter}>
+            Find and organize local model files
+          </button>
+          {recoveryModel ? (
+            <button type="button" className="pro-secondary-button" onClick={() => onModelSelect(recoveryModel.id)}>
+              Use {recoveryModel.name}
+            </button>
+          ) : (
+            <button type="button" className="pro-secondary-button" onClick={onOpenModels}>
+              Open model inventory
+            </button>
+          )}
+        </div>
+      ) : selectedModelReadinessHint ? (
+        <div className="pro-model-readiness-note" role="status">
+          <strong>Model readiness</strong>
+          <span>{selectedModelReadinessHint}</span>
         </div>
       ) : null}
 
@@ -4030,9 +5218,14 @@ function PromptPanelImpl({
             value={settings.modelId}
             onChange={(event) => onModelSelect(event.target.value)}
           >
-            {filteredModels.map((model) => (
-              <option key={model.id} value={model.id}>
-                {formatModelOptionLabel(model)}
+            {!modelSelectOptions.some((model) => model.id === settings.modelId) ? (
+              <option key={`unavailable-${settings.modelId}`} value={settings.modelId} disabled>
+                {settings.modelId ? `Unavailable model: ${settings.modelId}` : 'Choose a model'}
+              </option>
+            ) : null}
+            {modelSelectOptions.map((model) => (
+              <option key={model.id} value={model.id} disabled={model.id === settings.modelId && selectedModelOptionDisabled}>
+                {formatStudioModelLabel(model, modelSelectOptions)}
               </option>
             ))}
           </select>
@@ -4104,7 +5297,9 @@ function PromptPanelImpl({
           {settings.mode === 'video'
             ? selectedEngine === 'wan'
               ? 'Wan video settings'
-              : 'Sana video settings'
+              : selectedEngine === 'ltx'
+                ? 'LTX video settings'
+                : 'Sana video settings'
             : 'Image settings'}
         </div>
         <RangeField
@@ -4132,10 +5327,10 @@ function PromptPanelImpl({
           <>
             <RangeField
               label="Frames"
-              tooltip="Frame count controls video duration and denoise work. Wan normalizes to 4k+1 frames (e.g. 81). Keep smoke tests short, then increase after timing receipts look sane."
-              min={5}
+              tooltip={selectedEngine === 'ltx' ? 'LTX requires 8k+1 frames, such as 9, 81, or 121. Keep smoke tests short, then increase after timing receipts look sane.' : 'Frame count controls video duration and denoise work. Wan normalizes to 4k+1 frames (e.g. 81). Keep smoke tests short, then increase after timing receipts look sane.'}
+              min={selectedEngine === 'ltx' ? 9 : 5}
               max={257}
-              step={1}
+              step={selectedEngine === 'ltx' ? 8 : 1}
               value={settings.frames}
               onChange={(value) => onSettingsChange((current) => ({ ...current, frames: value }))}
             />
@@ -4154,7 +5349,27 @@ function PromptPanelImpl({
                 source image above is the first frame for image-to-video.
               </p>
             ) : null}
-            {selectedEngine !== 'wan' ? (
+            {selectedEngine === 'ltx' && settings.modelId !== 'ltx:diffusers_2b' ? (
+              <>
+                <RangeField label="LTX image strength" tooltip="Controls how strongly the uploaded first frame guides LTX image-to-video. It is sent only for LTX requests." min={0} max={1} step={0.05} value={settings.ltxImageStrength} onChange={(value) => onSettingsChange((current) => ({ ...current, ltxImageStrength: value }))} />
+                <label className="pro-field pro-compact-field">
+                  <FieldLabel label="LTX offload" tooltip="Auto lets the LTX worker choose a safe memory plan; model and none force the worker strategy." />
+                  <select value={settings.ltxOffload} onChange={(event) => onSettingsChange((current) => ({ ...current, ltxOffload: event.target.value }))}>
+                    <option value="none">No offload</option><option value="cpu">CPU offload</option><option value="disk">Disk offload</option>
+                  </select>
+                </label>
+                <label className="pro-field pro-compact-field">
+                  <FieldLabel label="LTX quantization" tooltip="Auto uses the configured LTX checkpoint format. Choose an override only when the selected pipeline supports it." />
+                  <select value={settings.ltxQuantization} onChange={(event) => onSettingsChange((current) => ({ ...current, ltxQuantization: event.target.value }))}>
+                    <option value="none">None</option><option value="fp8-cast">FP8 cast</option><option value="fp8-scaled-mm">FP8 scaled matrix multiply</option>
+                  </select>
+                </label>
+                <label className="pro-toggle">
+                  <input type="checkbox" checked={settings.ltxEnhancePrompt} onChange={(event) => onSettingsChange((current) => ({ ...current, ltxEnhancePrompt: event.target.checked }))} />
+                  <span>Enhance prompt for LTX</span>
+                </label>
+              </>
+            ) : selectedEngine === 'sana_video' ? (
             <>
             <label className="pro-field pro-compact-field">
               <FieldLabel
@@ -4414,14 +5629,65 @@ function isVideoUrl(value: string): boolean {
 }
 
 function ControlNetSettingsModal({
+  isOpen,
   settings,
   onSettingsChange,
   compatibility,
+  onCatalogDownload,
+  downloadingCatalogKey,
+  onOpenModelSorter,
 }: {
+  isOpen: boolean
   settings: GenerationSettings
   onSettingsChange: Dispatch<SetStateAction<GenerationSettings>>
   compatibility: ControlNetCompatibility
+  onCatalogDownload: (catalogKey: string) => void
+  downloadingCatalogKey: string
+  onOpenModelSorter: () => void
 }) {
+  const [localModels, setLocalModels] = useState<ProControlNetModel[]>([])
+  const [setupOptions, setSetupOptions] = useState<ProControlNetSetupOption[]>([])
+  const [selectedSetupKey, setSelectedSetupKey] = useState('')
+  const [localModelsChecked, setLocalModelsChecked] = useState(false)
+  const pendingSetupModelIdRef = useRef('')
+  useEffect(() => {
+    if (!isOpen || !compatibility.modelFamily || downloadingCatalogKey) return
+    const controller = new AbortController()
+    setLocalModelsChecked(false)
+    fetchProControlNetModels(controller.signal).then((models) => {
+      if (controller.signal.aborted) return
+      setLocalModels(models.models)
+      setSetupOptions(models.setupOptions)
+      const pendingModelId = pendingSetupModelIdRef.current
+      if (pendingModelId) {
+        const installedModel = models.models.find((model) => model.id === pendingModelId)
+        if (installedModel && controlNetFamilyForName(installedModel.id) === compatibility.modelFamily) {
+          onSettingsChange((current) => ({ ...current, controlNetModel: installedModel.id }))
+        }
+        pendingSetupModelIdRef.current = ''
+      }
+      const familyOptions = models.setupOptions.filter((option) => option.family === compatibility.modelFamily)
+      setSelectedSetupKey((current) => familyOptions.some((option) => option.key === current)
+        ? current
+        : familyOptions[0]?.key ?? '')
+      setLocalModelsChecked(true)
+    }).catch(() => {
+      if (controller.signal.aborted) return
+      setLocalModels([])
+      setSetupOptions([])
+      pendingSetupModelIdRef.current = ''
+      setLocalModelsChecked(true)
+    })
+    return () => controller.abort()
+  }, [compatibility.modelFamily, downloadingCatalogKey, isOpen, onSettingsChange])
+  const matchingModels = compatibility.modelFamily
+    ? localModels.filter((model) => controlNetFamilyForName(model.id) === compatibility.modelFamily)
+    : []
+  const familySetupOptions = compatibility.modelFamily
+    ? setupOptions.filter((option) => option.family === compatibility.modelFamily)
+    : []
+  const selectedSetupOption = familySetupOptions.find((option) => option.key === selectedSetupKey)
+  const modelOptionsId = `controlnet-model-options-${compatibility.modelFamily ?? 'none'}`
   const handleControlNetImageChange = (event: ReactChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.target.value = ''
@@ -4447,7 +5713,7 @@ function ControlNetSettingsModal({
   return (
     <div className="pro-modal-form">
       <div className={disabled ? 'pro-controlnet-status is-blocked' : 'pro-controlnet-status'} role={disabled ? 'alert' : undefined}>
-        <strong>{disabled ? 'ControlNet unavailable' : 'ControlNet ready'}</strong>
+        <strong>{formatControlNetCompatibilityLabel(compatibility)}</strong>
         <span>{compatibility.message}</span>
       </div>
       <section className="pro-controlnet-card" aria-label="ControlNet unit">
@@ -4471,13 +5737,69 @@ function ControlNetSettingsModal({
             tooltip="Use a local ControlNet model id or path that matches the selected SD/SDXL family."
           />
           <input
+            list={modelOptionsId}
             value={settings.controlNetModel}
             placeholder="control_v11p_sd15_canny, diffusers folder, or local path"
             onChange={(event) =>
               onSettingsChange((current) => ({ ...current, controlNetModel: event.target.value }))
             }
           />
+          <datalist id={modelOptionsId}>
+            {matchingModels.map((model) => (
+              <option key={model.id} value={model.id} label={model.path} />
+            ))}
+          </datalist>
+          <small className="pro-field-note">
+            {downloadingCatalogKey
+              ? `Setting up ${selectedSetupOption?.label ?? 'ControlNet'}; checking detected files after the action completes.`
+              : localModelsChecked
+              ? matchingModels.length
+                ? `${matchingModels.length} matching local ControlNet model${matchingModels.length === 1 ? '' : 's'} detected.`
+                : 'No matching local model detected. Choose one to install or import files from a shared folder.'
+              : 'Checking local ControlNet files…'}
+          </small>
         </label>
+        {compatibility.modelFamily ? (
+          <div className="pro-controlnet-setup-actions">
+            <p className="pro-field-note">
+              Find or install one {compatibility.modelFamily === 'sd15' ? 'SD 1.5' : 'SDXL'} ControlNet at a time. Local shared-folder matches are checked before downloading.
+            </p>
+            <label className="pro-field pro-compact-field">
+              <FieldLabel label="ControlNet to install" />
+              <select
+                aria-label="ControlNet to install"
+                value={selectedSetupKey}
+                onChange={(event) => setSelectedSetupKey(event.target.value)}
+                disabled={!familySetupOptions.length || Boolean(downloadingCatalogKey)}
+              >
+                {familySetupOptions.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {option.label}{option.sizeMb ? ` · ${formatBytes(option.sizeMb * 1024 * 1024)}` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="pro-secondary-button"
+              disabled={!selectedSetupOption || Boolean(downloadingCatalogKey)}
+              onClick={() => {
+                if (!selectedSetupOption) return
+                pendingSetupModelIdRef.current = selectedSetupOption.modelId
+                onCatalogDownload(selectedSetupOption.key)
+              }}
+            >
+              {downloadingCatalogKey
+                ? `Setting up ${selectedSetupOption?.label ?? 'ControlNet'}…`
+                : selectedSetupOption
+                  ? `Find or install ${selectedSetupOption.label}`
+                  : 'ControlNet setup options unavailable'}
+            </button>
+            <button type="button" className="pro-secondary-button" onClick={onOpenModelSorter}>
+              Find and organize local model files
+            </button>
+          </div>
+        ) : null}
         <label className="pro-field pro-compact-field">
           <FieldLabel
             label="Preprocessor"
@@ -4680,6 +6002,7 @@ function modelPromptTextForEngine(engineId: EngineId): string {
       return 'clean composition, crisp subject detail, balanced color'
     case 'wan':
     case 'sana_video':
+    case 'ltx':
       return 'smooth motion, stable subject, cinematic framing'
     default:
       return 'clear subject, detailed lighting, clean composition'
@@ -4780,7 +6103,11 @@ function ModelsWorkspaceImpl({
   onEngineFilterChange,
   onModelSelect,
   onCatalogDownload,
+  onSharedSnapshotImport,
   downloadingCatalogKey,
+  onBundleInstall,
+  installingBundleKey,
+  onOpenModelSorter,
 }: {
   engineFilter: EngineId
   engines: EngineSummary[]
@@ -4790,11 +6117,18 @@ function ModelsWorkspaceImpl({
   onEngineFilterChange: (value: EngineId) => void
   onModelSelect: (modelId: string) => void
   onCatalogDownload: (key: string) => void
+  onSharedSnapshotImport: (key: string) => void
   downloadingCatalogKey: string
+  onBundleInstall: (bundleKey: string) => void
+  installingBundleKey: string
+  onOpenModelSorter: () => void
 }) {
+  const [selectedBundleKey, setSelectedBundleKey] = useState('')
+  const [catalogSearch, setCatalogSearch] = useState('')
+  const [showAllCatalogItems, setShowAllCatalogItems] = useState(false)
   const visibleModels = models.filter((model) => matchesEngineFilter(model, engineFilter))
   const groupedModels = groupModelsByEngine(visibleModels, engines)
-  const downloadSummary = summarizeDownloads(downloadsStatus, engineFilter)
+  const downloadSummary = summarizeDownloads(downloadsStatus, engineFilter, catalogSearch, showAllCatalogItems)
 
   return (
     <section className="pro-models-workspace" aria-label="Model inventory">
@@ -4826,21 +6160,119 @@ function ModelsWorkspaceImpl({
           <strong>Download catalog</strong>
           <span>{downloadSummary.subtitle}</span>
         </div>
+        <button
+          type="button"
+          className="pro-secondary-button"
+          onClick={onOpenModelSorter}
+        >
+          Find and organize local model files
+        </button>
         <div className="pro-download-stat-row">
           <StatTile label="Catalog" value={`${downloadSummary.total}`} hint="known entries" />
-          <StatTile label="Installed" value={`${downloadSummary.installed}`} hint="ready locally" />
+          <StatTile label="Installed" value={`${downloadSummary.installed}`} hint="catalog assets found" />
           <StatTile label="Route" value={`${downloadSummary.routeTotal}`} hint={downloadSummary.routeLabel} />
         </div>
+        {downloadsStatus && Object.keys(downloadsStatus.bundles).length > 0 ? (
+          <div className="pro-download-chip-row">
+            <label className="pro-models-filter">
+              <FieldLabel label="Model, video, and tool bundles" tooltip="Checks the selected bundle's local assets, then installs available missing files. Some sources require sign-in or manual access." />
+              <select
+                aria-label="Model setup bundle"
+                value={selectedBundleKey}
+                onChange={(event) => setSelectedBundleKey(event.target.value)}
+              >
+                <option value="">Choose a bundle...</option>
+                {Object.keys(downloadsStatus.bundles).map((key) => (
+                  <option key={key} value={key}>{formatSetupBundleLabel(key)}</option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="pro-button"
+              disabled={!selectedBundleKey || Boolean(installingBundleKey)}
+              onClick={() => onBundleInstall(selectedBundleKey)}
+            >
+              {installingBundleKey ? `Checking ${formatSetupBundleLabel(installingBundleKey)}...` : 'Check and install available assets'}
+            </button>
+          </div>
+        ) : null}
+        {downloadSummary.routeTotal > 0 ? (
+          <div className="pro-download-chip-row" aria-label="Catalog search and visibility controls">
+            <label className="pro-models-filter">
+              <FieldLabel label="Search catalog" tooltip="Search every catalog entry for this engine, including entries outside the initial list." />
+              <input
+                type="search"
+                aria-label="Search download catalog"
+                placeholder="Search models and support assets"
+                value={catalogSearch}
+                onChange={(event) => setCatalogSearch(event.target.value)}
+              />
+            </label>
+            {!catalogSearch.trim() && downloadSummary.filteredTotal > 8 ? (
+              <button
+                type="button"
+                className="pro-button"
+                onClick={() => setShowAllCatalogItems((shown) => !shown)}
+              >
+                {showAllCatalogItems ? 'Show fewer catalog entries' : `Show all ${downloadSummary.filteredTotal} catalog entries`}
+              </button>
+            ) : null}
+            <span role="status">Showing {downloadSummary.items.length} of {downloadSummary.filteredTotal} matching catalog entries</span>
+          </div>
+        ) : null}
         <div className="pro-download-chip-row">
-          {downloadSummary.items.map((item) => {
+          {downloadSummary.items.length > 0 ? downloadSummary.items.map((item) => {
             const linkLabel = item.source === 'civitai' ? 'Open CivitAI' : 'Open source'
+            const categoryLabel = formatDownloadCategoryLabel(item.category)
+            if (item.platformBlocked) {
+              return (
+                <div key={item.key} className="pro-download-chip" title={item.platformBlockReason || 'This asset is unavailable on this platform.'}>
+                  <strong>{item.title}</strong>
+                  <small>{item.platformBlockReason || 'Blocked on this platform'}</small>
+                </div>
+              )
+            }
             const subtitle = item.installed
-              ? 'Installed'
+              ? item.snapshot
+                ? 'Snapshot assets found; route readiness is checked separately'
+                : 'Installed'
               : item.canDownload
-                ? `${item.category} | Direct download`
-                : item.hfUrl
-                  ? `${item.category} | ${linkLabel}`
-                  : item.category
+                ? `${categoryLabel} | Direct download`
+              : item.catalogUrl
+                  ? `${categoryLabel} | ${linkLabel}`
+                  : categoryLabel
+            if (item.comingSoon) {
+              return (
+                <div key={item.key} className="pro-download-chip" title={item.notes || item.destination}>
+                  <strong>{item.title}</strong>
+                  <small>Coming soon · automatic install is not available yet</small>
+                </div>
+              )
+            }
+            if (item.snapshot && item.installed && item.sharedSnapshotAvailable) {
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className="pro-download-chip pro-download-chip-button"
+                  title="Inspect configured shared roots, size the copy, and ask before copying."
+                  onClick={() => onSharedSnapshotImport(item.key)}
+                  disabled={downloadingCatalogKey === item.key}
+                >
+                  <strong>{item.title}</strong>
+                  <small>{downloadingCatalogKey === item.key ? 'Checking shared roots...' : 'Installed; inspect shared copy options'}</small>
+                </button>
+              )
+            }
+            if (item.snapshot && item.installed) {
+              return (
+                <div key={item.key} className="pro-download-chip" title="Snapshot files are present locally; route readiness is checked separately.">
+                  <strong>{item.title}</strong>
+                  <small>Installed locally · route readiness separate</small>
+                </div>
+              )
+            }
             if (item.canDownload && !item.installed) {
               return (
                 <button
@@ -4856,11 +6288,11 @@ function ModelsWorkspaceImpl({
                 </button>
               )
             }
-            return item.hfUrl ? (
+            return item.catalogUrl ? (
               <a
                 key={item.key}
                 className={item.installed ? 'pro-download-chip pro-download-chip-ready' : 'pro-download-chip pro-download-chip-link'}
-                href={item.hfUrl}
+                href={item.catalogUrl}
                 target="_blank"
                 rel="noreferrer"
                 title={`${item.destination}${item.notes ? ` - ${item.notes}` : ''}`}
@@ -4878,11 +6310,9 @@ function ModelsWorkspaceImpl({
                 <small>{subtitle}</small>
               </span>
             )
-          })}
+          }) : <span className="pro-download-note">No catalog entries match this search for the selected engine.</span>}
         </div>
-        <p className="pro-download-note">
-          Downloaded-model and installable-model browsers are coming soon.
-        </p>
+        <p className="pro-download-note">Installed status includes models found in configured shared model folders.</p>
       </section>
 
       {downloadsStatus && downloadsStatus.civitaiLinks.length > 0 ? (
@@ -4931,13 +6361,13 @@ function ModelsWorkspaceImpl({
                       onClick={() => onModelSelect(model.id)}
                     >
                       <div className="pro-model-card-top">
-                        <span>{model.engineLabel ?? group.label}</span>
-                        <small>{model.status ?? 'Available'}</small>
+                        <span>{formatStudioModelFamily(model)}</span>
+                        <small>{formatStudioModelAvailability(model)}</small>
                       </div>
-                      <strong>{model.name}</strong>
+                      <strong>{formatStudioModelLabel(model, group.models)}</strong>
                       <div className="pro-model-card-meta">
-                        <span>{model.architecture ?? 'Unknown architecture'}</span>
-                        <small>{model.assetSummary && !model.name.includes(model.assetSummary) ? model.assetSummary : 'Local asset'}</small>
+                        <span>{formatStudioModelFamily(model)}</span>
+                        <small>{model.assetSummary && !model.name.toLowerCase().includes(model.assetSummary.toLowerCase()) ? model.assetSummary : 'Asset details unavailable'}</small>
                       </div>
                       {model.heavyFor12Gb ? (
                         <div className="pro-model-card-vram-flag" title={`Estimated ~${model.estVramGb ?? '?'} GB of VRAM in use - may exceed 12 GB GPUs`}>
@@ -5143,7 +6573,7 @@ function ToolsControlPanel({
           </div>
           <div className="pro-inline-controls pro-wrap-controls">
             <button type="button" className="pro-primary-button" onClick={onOpenCreate}>Create</button>
-            <button type="button" className="pro-secondary-button" onClick={onOpenVideo}>Sana Video</button>
+            <button type="button" className="pro-secondary-button" onClick={onOpenVideo}>Video Create</button>
             <button type="button" className="pro-secondary-button" onClick={onOpenData}>Data</button>
             <button type="button" className="pro-secondary-button" onClick={onOpenSegmentation}>Segment</button>
             <button type="button" className="pro-secondary-button" onClick={onOpenEnhance}>Enhance</button>
@@ -5238,7 +6668,7 @@ function ExtensionsCard() {
 
 type VideoLabOp = 'vsr' | 'rife' | 'audio' | 'extend'
 
-function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
+export function VideoLabCard({ wanModels, onOpenModelSorter }: { wanModels: ProModelOption[]; onOpenModelSorter?: () => void }) {
   const [labStatus, setLabStatus] = useState<VideoLabStatus | null>(null)
   const [source, setSource] = useState<VideoLabProbe | null>(null)
   const [op, setOp] = useState<VideoLabOp>('vsr')
@@ -5249,10 +6679,18 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
   const [vsrMode, setVsrMode] = useState(0)
   const [rifeMultiplier, setRifeMultiplier] = useState(2)
   const [audioPrompt, setAudioPrompt] = useState('')
+  const [audioModelId, setAudioModelId] = useState(() => {
+    try { return window.localStorage.getItem('aiwf.video-lab.audio-model') || '' } catch { return '' }
+  })
+  const audioPrepareKeyRef = useRef('')
+  const audioDefaultHydratedRef = useRef(false)
   const [extendPrompt, setExtendPrompt] = useState('')
   const [extendFrames, setExtendFrames] = useState(81)
   const [extendModelId, setExtendModelId] = useState('')
-  const resolvedExtendModelId = extendModelId || wanModels[0]?.id || ''
+  const extendWanModels = videoLabExtendModels(wanModels)
+  const resolvedExtendModelId = extendWanModels.some((model) => model.id === extendModelId)
+    ? extendModelId
+    : extendWanModels[0]?.id || ''
 
   useEffect(() => {
     const controller = new AbortController()
@@ -5261,6 +6699,104 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
       .catch(() => setLabStatus(null))
     return () => controller.abort()
   }, [])
+
+  const audioModelChoices = labStatus?.audio.modelChoices ?? []
+  const selectedAudioModel = audioModelChoices.find((choice) => choice.id === audioModelId)
+  const selectedAudioSetupAction = selectedAudioModel?.setupRoute?.setupAction || ''
+  const videoAudioNeedsMinimumSetup = Boolean(
+    selectedAudioModel?.setupRoute?.preflightKey === 'musicgen'
+      ? !labStatus?.audio.musicGenReady
+      : selectedAudioModel?.setupRoute?.preflightKey === 'mmaudio' && !labStatus?.audio.ready,
+  )
+  useEffect(() => {
+    if (audioDefaultHydratedRef.current || audioModelChoices.length === 0) return
+    const saved = audioModelChoices.find((choice) => choice.id === labStatus?.audio.defaultModelId)
+    const current = audioModelChoices.find((choice) => choice.id === audioModelId && choice.available)
+    // Keep this device's explicit selection across reloads when it still exists;
+    // the backend default is only the fallback for a fresh/invalid local choice.
+    const preferred = current || saved || audioModelChoices.find((choice) => choice.ready) || audioModelChoices.find((choice) => choice.available)
+    if (preferred && preferred.id !== audioModelId) setAudioModelId(preferred.id)
+    audioDefaultHydratedRef.current = true
+  }, [audioModelChoices, audioModelId, labStatus?.audio.defaultModelId])
+
+  useEffect(() => {
+    if (op !== 'audio' || !selectedAudioModel?.ready || audioPrepareKeyRef.current === selectedAudioModel.id) return
+    const modelId = selectedAudioModel.id
+    audioPrepareKeyRef.current = modelId
+    let cancelled = false
+    setBusy(true)
+    setMessage(`Preparing ${selectedAudioModel.label}…`)
+    const prepare = async () => {
+      const delays = [250, 500, 1000, 2000]
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await prepareVideoLabAudioModel(modelId)
+        } catch (error: unknown) {
+          const delay = delays[attempt]
+          if (cancelled || !(error instanceof ProApiError) || error.status !== 409 || delay === undefined) throw error
+          await new Promise((resolve) => window.setTimeout(resolve, delay))
+        }
+      }
+    }
+    void prepare()
+      .then((result) => {
+        if (cancelled) return
+        if (!result.ready) throw new Error(result.detail || 'The selected soundtrack model is not ready.')
+        setMessage(selectedAudioModel.conditioningMode === 'video-conditioned'
+          ? `${selectedAudioModel.label} setup is ready. Its weights load on demand for each render.`
+          : `${selectedAudioModel.label} setup passed. The runtime loads or reuses its weights when you generate.`)
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        audioPrepareKeyRef.current = ''
+        setMessage(`Audio model preparation failed: ${formatApiError(error)}`)
+      })
+      .finally(() => { if (!cancelled) setBusy(false) })
+    return () => { cancelled = true }
+  }, [op, selectedAudioModel])
+
+  const handleVideoAudioSetup = async () => {
+    if (!selectedAudioModel && !videoAudioNeedsMinimumSetup) return
+    setBusy(true)
+    setMessage(videoAudioNeedsMinimumSetup
+      ? `Setting up the Audio runtime and ${selectedAudioModel?.label || 'soundtrack model'}…`
+      : `Installing ${selectedAudioModel?.label || 'soundtrack model'}…`)
+    try {
+      let refreshed = labStatus
+      if (videoAudioNeedsMinimumSetup) {
+        const minimumResult = await runProSetupAction('POST /api/pro/audio/setup/minimum')
+        if (!('minimumReady' in minimumResult) || !minimumResult.minimumReady) {
+          throw new Error('The minimum Audio runtime is still incomplete after setup.')
+        }
+        refreshed = await fetchVideoLabStatus()
+        setLabStatus(refreshed)
+      }
+      const modelAfterRuntimeSetup = selectedAudioModel
+        ? refreshed?.audio.modelChoices.find((choice) => choice.id === selectedAudioModel.id) || selectedAudioModel
+        : undefined
+      if (modelAfterRuntimeSetup?.installed === false) {
+        if (!modelAfterRuntimeSetup.installable) {
+          throw new Error(modelAfterRuntimeSetup.unavailableReason || 'The selected soundtrack model is not installable yet.')
+        }
+        const setupAction = modelAfterRuntimeSetup.setupRoute?.setupAction || selectedAudioSetupAction
+        if (!setupAction) throw new Error('The selected soundtrack model has no setup action in its route manifest.')
+        await runProSetupAction(setupAction, modelAfterRuntimeSetup.id)
+      }
+      const finalStatus = await fetchVideoLabStatus()
+      setLabStatus(finalStatus)
+      if (selectedAudioModel) {
+        const finalChoice = finalStatus.audio.modelChoices.find((choice) => choice.id === selectedAudioModel.id)
+        if (!finalChoice?.ready) {
+          throw new Error(finalChoice?.unavailableReason || `${selectedAudioModel.label} did not become ready after setup.`)
+        }
+      }
+      setMessage('Soundtrack setup refreshed. Preparing the selected model when its route is ready…')
+    } catch (error: unknown) {
+      setMessage(`Soundtrack setup failed: ${formatApiError(error)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const handleUpload = async (event: ReactChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -5285,18 +6821,30 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
   }
 
   const handleRun = async () => {
+    if (op === 'audio' && !selectedAudioModel?.ready) {
+      setMessage('Set up the selected soundtrack model before running Video Lab.')
+      return
+    }
     if (!source) {
       setMessage('Upload a video first.')
       return
     }
     setBusy(true)
     setResultUrl('')
-    setMessage(
+    setMessage(op === 'audio'
+      ? `Checking ${selectedAudioModel?.label || 'soundtrack model'} before generation…`
+      :
       op === 'extend'
         ? 'Extending video (generates a Wan continuation, then stitches — this takes a while)…'
-        : 'Running…',
-    )
+        : 'Running…')
     try {
+      // Another Studio route can evict MusicGen while Video Lab stays mounted.
+      // Reconfirm the selected route at the point of use instead of trusting
+      // a component-local prepared flag that may describe an old residency.
+      if (op === 'audio' && selectedAudioModel) {
+        const prepared = await prepareVideoLabAudioModel(selectedAudioModel.id)
+        if (!prepared.ready) throw new Error(prepared.detail || 'The selected soundtrack model could not be prepared.')
+      }
       const result = await runVideoLab({
         op,
         videoPath: source.path,
@@ -5304,6 +6852,7 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
         mode: vsrMode,
         multiplier: rifeMultiplier,
         audioPrompt,
+        audioModel: audioModelId,
         prompt: extendPrompt,
         frames: extendFrames,
         checkpointId: resolvedExtendModelId,
@@ -5337,20 +6886,21 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
     {
       id: 'audio',
       label: 'Add audio',
-      enabled: true,
-      hint:
-        (labStatus?.audio.videoAudioModels.length ?? 0) > 0
-          ? 'Video-conditioned audio (MMAudio) available.'
-          : 'Falls back to text-to-music audio muxed over the clip.',
+      enabled: audioModelChoices.length > 0,
+      hint: selectedAudioModel?.ready
+        ? selectedAudioModel.conditioningMode === 'video-conditioned'
+          ? `${selectedAudioModel.label} setup is ready; weights load on demand for each render.`
+          : `${selectedAudioModel.label} setup is ready; the runtime loads or reuses its weights when you generate.`
+        : selectedAudioModel?.unavailableReason || audioModelChoices.find((choice) => choice.unavailableReason)?.unavailableReason || 'Install a MusicGen or MMAudio model to add a soundtrack.',
     },
     {
       id: 'extend',
       label: 'Extend video',
-      enabled: wanModels.length > 0,
+      enabled: extendWanModels.length > 0,
       hint:
-        wanModels.length > 0
+        extendWanModels.length > 0
           ? labStatus?.extend.note || 'Continues motion from the last frame via Wan 5B.'
-          : 'No Wan video models detected.',
+          : 'Extend video requires a selectable Wan TI2V 5B model.',
     },
   ]
   const activeChoice = opChoices.find((choice) => choice.id === op)
@@ -5432,15 +6982,63 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
           </label>
         ) : null}
         {op === 'audio' ? (
-          <label className="pro-field">
-            <FieldLabel label="Audio prompt" />
-            <input
-              value={audioPrompt}
-              onChange={(event) => setAudioPrompt(event.target.value)}
-              placeholder="e.g. gentle rain with distant thunder"
-              disabled={busy}
-            />
-          </label>
+          <>
+            <div className="pro-field">
+              <FieldLabel label="Soundtrack model" />
+              <select
+                aria-label="Soundtrack model"
+                value={audioModelId}
+                onChange={(event) => {
+                  const next = event.target.value
+                  setAudioModelId(next)
+                  audioPrepareKeyRef.current = ''
+                  try { window.localStorage.setItem('aiwf.video-lab.audio-model', next) } catch { /* Storage may be disabled. */ }
+                }}
+                disabled={busy}
+              >
+                <option value="" disabled>Select a soundtrack model</option>
+                {audioModelChoices.map((choice) => (
+                  <option key={choice.id} value={choice.id} disabled={!choice.available}>
+                    {choice.label}{choice.installed ? '' : ' · install required'}
+                  </option>
+                ))}
+              </select>
+              {videoAudioNeedsMinimumSetup || (selectedAudioModel?.installed === false && selectedAudioModel.installable) ? (
+                <button
+                  type="button"
+                  className="pro-secondary-button"
+                  onClick={() => void handleVideoAudioSetup()}
+                  disabled={busy || (selectedAudioModel?.installable && selectedAudioModel.installed === false && !selectedAudioSetupAction && !videoAudioNeedsMinimumSetup)}
+                >
+                  {videoAudioNeedsMinimumSetup
+                    ? `Set up ${selectedAudioModel?.label || 'soundtrack'} and Audio runtime`
+                    : `Install ${selectedAudioModel?.label || 'selected soundtrack model'}`}
+                </button>
+              ) : null}
+              {onOpenModelSorter ? (
+                <button type="button" className="pro-secondary-button" onClick={onOpenModelSorter}>
+                  Find and organize local model files
+                </button>
+              ) : null}
+              <p className="pro-field-note">
+                {selectedAudioModel?.conditioningMode === 'prompt-only'
+                  ? 'MusicGen creates audio from your text prompt, then adds it to the video.'
+                  : selectedAudioModel?.conditioningMode === 'video-conditioned'
+                    ? 'MMAudio uses the source video and your prompt to create synchronized audio.'
+                    : 'Choosing an installed model prepares its matching audio route.'}{' '}
+                Selection is saved on this device.
+              </p>
+            </div>
+            <label className="pro-field">
+              <FieldLabel label="Audio prompt" />
+              <input
+                value={audioPrompt}
+                onChange={(event) => setAudioPrompt(event.target.value)}
+                placeholder="e.g. gentle rain with distant thunder"
+                disabled={busy}
+              />
+            </label>
+          </>
         ) : null}
         {op === 'extend' ? (
           <>
@@ -5467,11 +7065,12 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
                 />
               </label>
               <label className="pro-field">
-                <FieldLabel label="Wan model" />
-                <select value={resolvedExtendModelId} onChange={(event) => setExtendModelId(event.target.value)} disabled={busy}>
-                  {wanModels.map((model) => (
+                <FieldLabel label="Wan TI2V 5B model" />
+                <select value={resolvedExtendModelId} onChange={(event) => setExtendModelId(event.target.value)} disabled={busy || !extendWanModels.length}>
+                  {!extendWanModels.length ? <option value="">No compatible Wan TI2V 5B model available</option> : null}
+                  {extendWanModels.map((model) => (
                     <option key={model.id} value={model.id}>
-                      {model.name}
+                      {formatStudioModelLabel(model, extendWanModels)}
                     </option>
                   ))}
                 </select>
@@ -5484,7 +7083,7 @@ function VideoLabCard({ wanModels }: { wanModels: ProModelOption[] }) {
             type="button"
             className="pro-primary-button"
             onClick={handleRun}
-            disabled={busy || !source || !(activeChoice?.enabled ?? false)}
+            disabled={busy || !source || !(activeChoice?.enabled ?? false) || (op === 'audio' && !selectedAudioModel?.ready)}
           >
             {busy ? 'Working…' : 'Run'}
           </button>
@@ -5502,22 +7101,26 @@ function ToolsWorkspace({
   capabilitiesStatus,
   runtime,
   wanModels,
+  ltxModels,
   onOpenCreate,
   onOpenVideo,
   onOpenData,
   onOpenSegmentation,
   onOpenEnhance,
   onOpenReactor,
+  onOpenModelSorter,
 }: {
   capabilitiesStatus: ProCapabilitiesStatus | null
   runtime: ProRuntimeStatus
   wanModels: ProModelOption[]
+  ltxModels: ProModelOption[]
   onOpenCreate: () => void
   onOpenVideo: () => void
   onOpenData: () => void
   onOpenSegmentation: () => void
   onOpenEnhance: () => void
   onOpenReactor: () => void
+  onOpenModelSorter: () => void
 }) {
   const status = capabilitiesStatus ?? EMPTY_CAPABILITIES
   const readiness = status.readiness
@@ -5527,6 +7130,8 @@ function ToolsWorkspace({
   const needsWorkCount = Math.max(0, readiness.total - readyCount)
   const readinessFamilies = readiness.families.slice(0, 6)
   const readinessIssues = readiness.needsWork.slice(0, 5)
+  const ltxReadyCount = ltxModels.filter((model) => model.status?.trim().toLowerCase() === 'ready').length
+  const ltxSetupCount = Math.max(0, ltxModels.length - ltxReadyCount)
   const lanes: ToolLaneCard[] = [
     {
       id: 'create',
@@ -5554,10 +7159,12 @@ function ToolsWorkspace({
     {
       id: 'video',
       title: 'Video Tools',
-      summary: 'Sana generation is wired in React; Wan/LTX and post stages remain visible for Gradio routes.',
-      stats: [`${status.counts.sanaVideo} Sana`, `${status.counts.wan} Wan models`],
-      note: status.counts.sanaVideo > 0 ? 'Sana snapshot detected.' : 'Sana snapshot not detected yet.',
-      actions: [{ label: 'Open Sana', onClick: onOpenVideo }],
+      summary: 'Sana, Wan, and LTX use family-specific Pro video routes. Ready means local preflight passed; it does not confirm a generated video.',
+      stats: [`${status.counts.sanaVideo} Sana`, `${status.counts.wan} Wan models`, `${ltxReadyCount} LTX preflight-ready`, `${ltxSetupCount} LTX need setup or runtime repair`],
+      note: status.counts.sanaVideo > 0 || wanModels.length > 0 || ltxReadyCount > 0
+        ? 'Select a video model to review its pipeline readiness.'
+        : 'No video route is currently ready.',
+      actions: [{ label: 'Open Video Create', onClick: onOpenVideo }],
     },
     {
       id: 'data',
@@ -5576,7 +7183,7 @@ function ToolsWorkspace({
         description="Four QA lanes for the current Studio surface. React controls stay up front; raw coverage stays in one drawer."
       />
       <div className="pro-workspace-grid">
-        <VideoLabCard wanModels={wanModels} />
+        <VideoLabCard wanModels={wanModels} onOpenModelSorter={onOpenModelSorter} />
         <InfoCard title="Current surface" subtitle="Inventory only. This view does not load models or start generation.">
           <div className="pro-stat-grid">
             <StatTile label="Backend" value={runtime.backend} hint="active route" />
@@ -5594,6 +7201,9 @@ function ToolsWorkspace({
           </div>
           {readiness.error ? (
             <div className="pro-readiness-alert">{readiness.error}</div>
+          ) : null}
+          {readiness.sourceMessage ? (
+            <div className="pro-readiness-alert" role="status">{readiness.sourceMessage}</div>
           ) : null}
           <div className="pro-readiness-layout">
             <div className="pro-readiness-section">
@@ -6005,7 +7615,7 @@ function SettingsControlPanel({
         </InfoCard>
         <InfoCard title="Session scope" subtitle="Show what the shell is actually carrying right now before persistence is expanded.">
           <dl className="pro-runtime-list">
-            <MetricRow label="Loaded model" value={runtime.loadedModel.name || settings.modelId} />
+            <MetricRow label="Loaded model" value={runtime.loadedModel.loaded ? runtime.loadedModel.name || 'Unknown loaded model' : 'No model loaded'} />
             <MetricRow label="Recent receipts" value={`${recentOutputs.length}`} />
             <MetricRow label="Unique models" value={`${summary.uniqueModels}`} />
             <MetricRow label="Persistence key" value={LAYOUT_STORAGE_KEY} />
@@ -6023,14 +7633,18 @@ function SettingsWorkspace({
   settings,
   settingsStatus,
   recentOutputs,
+  onModelSelect,
   onSettingsChange,
   onSettingsStatusChange,
   onSaveSettings,
   onModelFilesUpload,
   onModelReorganize,
+  onModelRootsScan,
+  onAutoPlaceSharedAssets,
   onUnloadModel,
   onRestartBackend,
   onReloadFrontend,
+  modelSorterFocusRequest,
   settingsSaveStatus,
   leftPanelWidth,
   rightPanelWidth,
@@ -6043,14 +7657,18 @@ function SettingsWorkspace({
   settings: GenerationSettings
   settingsStatus: ProSettingsStatus | null
   recentOutputs: RecentOutput[]
+  onModelSelect: (modelId: string) => void
   onSettingsChange: Dispatch<SetStateAction<GenerationSettings>>
   onSettingsStatusChange: Dispatch<SetStateAction<ProSettingsStatus | null>>
   onSaveSettings: () => void
   onModelFilesUpload: (files: File[]) => Promise<string>
   onModelReorganize: () => Promise<string>
+  onModelRootsScan: (options?: { scanId: string; offset: number; query?: string }) => Promise<ProModelRootsScanResult>
+  onAutoPlaceSharedAssets: (scan: ProModelRootsScanResult) => Promise<{ message: string; refreshedScan: ProModelRootsScanResult | null }>
   onUnloadModel: () => void
   onRestartBackend: () => void
   onReloadFrontend: () => void
+  modelSorterFocusRequest: number
   settingsSaveStatus: string
   leftPanelWidth: number
   rightPanelWidth: number
@@ -6063,7 +7681,25 @@ function SettingsWorkspace({
   const [settingsQuery, setSettingsQuery] = useState('')
   const [modelSortBusy, setModelSortBusy] = useState(false)
   const [modelSortStatus, setModelSortStatus] = useState('')
+  const [modelRootsScan, setModelRootsScan] = useState<ProModelRootsScanResult | null>(null)
+  const [modelScanQuery, setModelScanQuery] = useState('')
   const modelUploadInputRef = useRef<HTMLInputElement>(null)
+  const modelSorterFocusPendingRef = useRef(false)
+  useEffect(() => {
+    if (!modelSorterFocusRequest) return
+    modelSorterFocusPendingRef.current = true
+    setActiveSection('system')
+  }, [modelSorterFocusRequest])
+  useEffect(() => {
+    if (!modelSorterFocusPendingRef.current || activeSection !== 'system' || settingsQuery) return
+    const frame = window.requestAnimationFrame(() => {
+      const sorter = document.getElementById('model-file-sorter')
+      sorter?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      sorter?.focus({ preventScroll: true })
+      modelSorterFocusPendingRef.current = false
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [activeSection, modelSorterFocusRequest, settingsQuery])
   const show = useCallback(
     (section: SettingsSectionId, keywords: string) => {
       const query = settingsQuery.trim().toLowerCase()
@@ -6135,6 +7771,7 @@ function SettingsWorkspace({
     genlog: false,
     backend: 'diffusers',
     onnxProvider: 'auto',
+    onnxModelDir: '',
     attention: 'sage_sdpa',
     xformers: false,
     optSdpAttention: false,
@@ -6168,6 +7805,17 @@ function SettingsWorkspace({
     extraModelDirs: '',
     extraCheckpointDirs: '',
   }
+  const modelRootsConfigKey = JSON.stringify([
+    runtimeSettings.modelsDir,
+    runtimeSettings.checkpointDir,
+    runtimeSettings.extraModelDirs,
+    runtimeSettings.extraCheckpointDirs,
+  ])
+  const modelRootsConfigKeyRef = useRef(modelRootsConfigKey)
+  modelRootsConfigKeyRef.current = modelRootsConfigKey
+  useEffect(() => {
+    setModelRootsScan(null)
+  }, [modelRootsConfigKey])
   const settingsModelOptions = modelsForCreationMode(bootstrap.models, settings.mode)
 
   const updateGenerationSetting = useCallback(
@@ -6284,6 +7932,44 @@ function SettingsWorkspace({
       .finally(() => setModelSortBusy(false))
   }, [onModelReorganize])
 
+  const handleSettingsModelRootsScan = useCallback(() => {
+    const scannedConfigKey = modelRootsConfigKeyRef.current
+    setModelScanQuery('')
+    setModelSortBusy(true)
+    setModelSortStatus('Scanning configured model roots. Files will not be moved.')
+    void onModelRootsScan()
+      .then((report) => {
+        if (modelRootsConfigKeyRef.current !== scannedConfigKey) return
+        setModelRootsScan(report)
+        setModelSortStatus(`Scanned ${report.inventoryCount} model assets across configured roots. Route readiness is checked separately.`)
+      })
+      .catch((error: unknown) => setModelSortStatus(formatApiError(error)))
+      .finally(() => setModelSortBusy(false))
+  }, [onModelRootsScan])
+
+  const handleSettingsModelRootsAutoPlace = useCallback(() => {
+    if (!modelRootsScan) return
+    setModelSortBusy(true)
+    setModelSortStatus('Loading matching scan results and checking safe-copy options...')
+    void onAutoPlaceSharedAssets(modelRootsScan)
+      .then(({ message, refreshedScan }) => {
+        setModelSortStatus(message)
+        if (refreshedScan) setModelRootsScan(refreshedScan)
+      })
+      .catch((error: unknown) => setModelSortStatus(formatApiError(error)))
+      .finally(() => setModelSortBusy(false))
+  }, [modelRootsScan, onAutoPlaceSharedAssets])
+
+  const handleModelRootsScanPage = useCallback((offset: number, query = modelScanQuery) => {
+    if (!modelRootsScan?.scanId) return
+    setModelSortBusy(true)
+    setModelSortStatus(query.trim() ? `Searching all ${modelRootsScan.inventoryCount} model assets...` : 'Loading model placement proposals...')
+    void onModelRootsScan({ scanId: modelRootsScan.scanId, offset, query })
+      .then(setModelRootsScan)
+      .catch((error: unknown) => setModelSortStatus(formatApiError(error)))
+      .finally(() => setModelSortBusy(false))
+  }, [modelRootsScan, modelScanQuery, onModelRootsScan])
+
   const outputToggles: Array<{ key: keyof ProSettingsStatus['output']; label: string }> = [
     { key: 'embedMetadata', label: 'Embed metadata' },
     { key: 'saveSidecarTxt', label: 'Write sidecar txt' },
@@ -6385,11 +8071,11 @@ function SettingsWorkspace({
               <FieldLabel label="Default model" />
               <select
                 value={settings.modelId}
-                onChange={(event) => updateGenerationSetting({ modelId: event.target.value })}
+                onChange={(event) => onModelSelect(event.target.value)}
               >
                 {settingsModelOptions.map((model) => (
                   <option key={model.id} value={model.id}>
-                    {model.name}
+                    {formatStudioModelLabel(model, settingsModelOptions)}
                   </option>
                 ))}
               </select>
@@ -6641,7 +8327,7 @@ function SettingsWorkspace({
         {show('video', 'video performance ltx precision bfloat16 float16 dtype cpu offload streamed group blocks gguf cuda kernels vram wan speed') && (
         <InfoCard
           title="Video engine performance"
-          subtitle="Precision and VRAM strategy for the Wan and LTX pipelines. Changes apply to the next generation — no restart needed."
+          subtitle="Wan runtime controls and LTX precision and offload preferences. Generation uses the selected engine's Pro route."
         >
           <div className="pro-form-stack">
             <div className="pro-control-grid">
@@ -6861,6 +8547,7 @@ function SettingsWorkspace({
               <FieldLabel label="High model" />
               <input
                 value={videoSettings.wanHigh}
+                placeholder="Enter a detected or custom model path"
                 onChange={(event) => updateVideoSetting({ wanHigh: event.target.value })}
                 disabled={!settingsStatus}
               />
@@ -6869,6 +8556,7 @@ function SettingsWorkspace({
               <FieldLabel label="Low model" />
               <input
                 value={videoSettings.wanLow}
+                placeholder="Enter a detected or custom model path"
                 onChange={(event) => updateVideoSetting({ wanLow: event.target.value })}
                 disabled={!settingsStatus}
               />
@@ -6877,6 +8565,7 @@ function SettingsWorkspace({
               <FieldLabel label="VAE" />
               <input
                 value={videoSettings.wanVae}
+                placeholder="Enter a detected or custom VAE path"
                 onChange={(event) => updateVideoSetting({ wanVae: event.target.value })}
                 disabled={!settingsStatus}
               />
@@ -6885,10 +8574,12 @@ function SettingsWorkspace({
               <FieldLabel label="Text encoder" />
               <input
                 value={videoSettings.wanTextEncoder}
+                placeholder="Enter a detected or custom encoder path"
                 onChange={(event) => updateVideoSetting({ wanTextEncoder: event.target.value })}
                 disabled={!settingsStatus}
               />
             </label>
+            <p className="pro-field-note">Wan route preflight checks whether the selected files work with the active transformer.</p>
           </div>
         </InfoCard>
         )}
@@ -6952,6 +8643,15 @@ function SettingsWorkspace({
                     </option>
                   ))}
                 </select>
+              </label>
+              <label className="pro-field">
+                <FieldLabel label="ONNX model folder" tooltip="Complete ONNX pipeline folder containing text_encoder/, unet/, and vae_decoder/. Leave blank to use the default models/onnx folder." />
+                <input
+                  value={runtimeSettings.onnxModelDir}
+                  placeholder="Default: models/onnx"
+                  onChange={(event) => updateRuntimeSetting({ onnxModelDir: event.target.value })}
+                  disabled={!settingsStatus}
+                />
               </label>
             </div>
             <div className="pro-control-grid">
@@ -7087,8 +8787,18 @@ function SettingsWorkspace({
         </InfoCard>
         )}
         {show('system', 'models upload drag drop sort reorganize reread headers gguf safetensors checkpoint inventory') && (
+        <div id="model-file-sorter" tabIndex={-1}>
         <InfoCard title="Model file sorter" subtitle="Drop or pick model files; AIWF reads headers and moves confident matches.">
           <div className="pro-settings-action-row">
+            <button
+              type="button"
+              className="pro-secondary-button"
+              onClick={handleSettingsModelRootsScan}
+              disabled={modelSortBusy || !settingsStatus}
+            >
+              <ScanSearch size={14} aria-hidden="true" />
+              Scan model roots
+            </button>
             <button
               type="button"
               className="pro-secondary-button"
@@ -7115,12 +8825,106 @@ function SettingsWorkspace({
               <RefreshCcw size={14} aria-hidden="true" />
               Reorganize models
             </button>
+            {modelRootsScan?.assets.some((asset) => asset.placement === 'candidate') ? (
+              <button
+                type="button"
+                className="pro-secondary-button"
+                onClick={handleSettingsModelRootsAutoPlace}
+                disabled={modelSortBusy || !settingsStatus}
+              >
+                <FolderInput size={14} aria-hidden="true" />
+                Place confident files from scan
+              </button>
+            ) : null}
           </div>
           <p className="pro-field-note">
-            Reorganize scans the main models directory, reads model headers, and moves confident matches without overwriting files.
+            Scan checks all configured model and checkpoint roots without moving files. Reorganize sorts confident matches already in the main models directory. “Place confident files” previews candidates from configured extra roots, checks conflicts and free space, then asks once before copying; source files stay in place.
           </p>
+          {modelRootsScan ? (
+            <>
+            <ul className="pro-bullet-list" aria-label="Model root scan results">
+              {modelRootsScan.roots.map((root) => {
+                const status = root.status === 'scanned'
+                  ? `Scanned · ${root.assetCount} assets`
+                  : root.status === 'partial'
+                    ? `Partially scanned · ${root.assetCount} assets · ${root.errorCount} access errors`
+                  : root.status === 'nested'
+                    ? 'Covered by another configured root'
+                    : root.status === 'missing'
+                      ? 'Folder not found'
+                      : root.status === 'unreadable'
+                        ? 'Folder is not readable'
+                        : root.status === 'not-directory'
+                          ? 'Path is not a folder'
+                          : 'Not scanned'
+                const families = Object.entries(root.familyCounts).sort(([left], [right]) => left.localeCompare(right))
+                return (
+                  <li key={`${root.label}:${root.path}`}>
+                    <strong>{root.label}: {status}</strong>
+                    <div><code>{root.path}</code></div>
+                    {families.length ? <small>{families.map(([family, count]) => `${family}: ${count}`).join(' · ')}</small> : null}
+                    {root.errors.map((error, index) => <small key={`${root.path}:error:${index}`}>{error}</small>)}
+                  </li>
+                )
+              })}
+            </ul>
+            <details className="pro-model-scan-assets">
+              <summary>Review model asset placements · {modelRootsScan.inventoryCount} total discovered</summary>
+              <form
+                className="pro-settings-action-row"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  handleModelRootsScanPage(0, modelScanQuery)
+                }}
+              >
+                <label className="pro-field">
+                  <span>Search all discovered assets</span>
+                  <input
+                    type="search"
+                    value={modelScanQuery}
+                    onChange={(event) => setModelScanQuery(event.target.value)}
+                    placeholder="Filename, path, family, or placement"
+                    aria-label="Search discovered model assets"
+                  />
+                </label>
+                <button type="submit" className="pro-secondary-button" disabled={modelSortBusy}>Search proposals</button>
+              </form>
+              <p className="pro-muted" aria-live="polite">
+                {modelRootsScan.matchedCount === 0
+                  ? 'No matching proposals.'
+                  : `Showing ${modelRootsScan.offset + 1}–${modelRootsScan.offset + modelRootsScan.assets.length} of ${modelRootsScan.matchedCount} matching proposals${modelRootsScan.query ? ` for “${modelRootsScan.query}”` : ''}.`}
+                {modelRootsScan.assetsTruncated > 0 ? ` ${modelRootsScan.assetsTruncated} more available on later pages.` : ''}
+              </p>
+              <ul className="pro-bullet-list" aria-label="Discovered model asset placement proposals">
+                {modelRootsScan.assets.map((asset) => (
+                  <li key={asset.path}>
+                    <strong>{asset.filename} · {formatInventoryAssetLabel(asset.family, asset.architecture)}</strong>
+                    <small>{asset.placement === 'candidate' ? `Copy candidate from an extra root: ${asset.recommendedSubdir}` : asset.placement === 'reorganize-candidate' ? `Reorganize candidate in the main Models folder: ${asset.recommendedSubdir}` : asset.placement === 'reorganize-check' ? 'Run Reorganize to check this Diffusers folder; unsupported or incomplete folders stay in place.' : asset.placement === 'manual-review' ? `Manual review: ${asset.placementReason || 'automatic placement is not safe'}${asset.recommendedSubdir ? ` · Suggested folder: ${asset.recommendedSubdir}` : ''}` : `Current folder: ${asset.currentSubdir || '(root)'}`}</small>
+                    <div><code>{asset.path}</code></div>
+                    {Object.keys(asset.signals).length ? <small>Header signals: {Object.entries(asset.signals).map(([key, value]) => `${key}=${value}`).join(' · ')}</small> : null}
+                  </li>
+                ))}
+              </ul>
+              <div className="pro-settings-action-row" aria-label="Model asset proposal pages">
+                <button
+                  type="button"
+                  className="pro-secondary-button"
+                  onClick={() => handleModelRootsScanPage(Math.max(0, modelRootsScan.offset - modelRootsScan.limit))}
+                  disabled={modelSortBusy || modelRootsScan.offset <= 0}
+                >Previous</button>
+                <button
+                  type="button"
+                  className="pro-secondary-button"
+                  onClick={() => handleModelRootsScanPage(modelRootsScan.nextOffset ?? modelRootsScan.offset + modelRootsScan.limit)}
+                  disabled={modelSortBusy || !modelRootsScan.hasMore}
+                >Next</button>
+              </div>
+            </details>
+            </>
+          ) : null}
           {modelSortStatus ? <p className="pro-muted">{modelSortStatus}</p> : null}
         </InfoCard>
+        </div>
         )}
         {show('interface', 'layout memory panel width dock height advanced') && (
         <InfoCard title="Layout memory" subtitle="Local shell layout is already persisted; this page makes those values obvious.">
@@ -8132,15 +9936,42 @@ function CollapsedPanelButton({
 function RuntimePanel({
   runtime,
   selectedModelName,
+  selectedModelId,
+  isVideoRoute,
+  preferredVideoRouteId,
   onUnloadModel,
   onToggleRightPanel,
 }: {
   runtime: ProRuntimeStatus
   selectedModelName: string
+  selectedModelId: string
+  isVideoRoute: boolean
+  preferredVideoRouteId: string
   onUnloadModel: () => void
   onToggleRightPanel: () => void
 }) {
   const loadedModelName = runtime.loadedModel.loaded ? runtime.loadedModel.name : 'No model loaded'
+  const matchingRoutes = runtime.routeLifecycle.filter((route) => route.modelId === selectedModelId)
+  const selectedRoute = isVideoRoute
+    ? preferredVideoRouteId
+      ? matchingRoutes.find((route) => route.route === preferredVideoRouteId)
+      : matchingRoutes.at(-1)
+    : matchingRoutes.at(-1)
+  const modelLoadLabel = isVideoRoute
+    ? selectedRoute
+      ? formatRouteLifecycleStatus(selectedRoute.status, selectedRoute.resident)
+      : 'Route readiness is checked before a job starts'
+    : runtime.modelLoad.status === 'loading' || runtime.modelLoad.status === 'unloading'
+    ? runtime.modelLoad.status === 'loading' ? 'Loading selected model' : 'Unloading model'
+    : runtime.loadedModel.loaded && runtime.loadedModel.id === selectedModelId
+      ? 'Loaded'
+      : runtime.loadedModel.loaded
+        ? 'Different model is loaded'
+      : runtime.modelLoad.status === 'deferred'
+        ? 'Waiting for available resources'
+        : runtime.modelLoad.status === 'failed' || runtime.modelLoad.status === 'not-ready'
+          ? 'Model needs attention'
+          : 'Select a model to load'
   return (
     <aside className="pro-status-panel" aria-label="Runtime status">
       <div className="pro-status-heading">
@@ -8190,10 +10021,10 @@ function RuntimePanel({
       </div>
 
       <div className="pro-loaded-model">
-        <span className="pro-section-label">Loaded model</span>
+        <span className="pro-section-label">{isVideoRoute ? 'Image model cache (video route selected)' : 'Image runtime model'}</span>
         <div className="pro-loaded-model-title">
           <strong>{loadedModelName}</strong>
-          <span>{runtime.loadedModel.loaded ? 'Loaded' : 'Loads on generate'}</span>
+          <span>{modelLoadLabel}</span>
         </div>
         <div className="pro-loaded-model-banner">
           <Cpu size={14} aria-hidden="true" />
@@ -8201,7 +10032,7 @@ function RuntimePanel({
           <small>{runtime.attention}</small>
         </div>
         <dl className="pro-runtime-list">
-          <MetricRow label="Selected model" value={selectedModelName} />
+          <MetricRow label={isVideoRoute ? 'Video selection' : 'Selected image model'} value={selectedModelName} />
           <MetricRow label="Type" value={runtime.loadedModel.type} />
           <MetricRow label="Base model" value={runtime.loadedModel.baseModel} />
           <MetricRow label="Size on disk" value={runtime.loadedModel.sizeOnDisk} />
@@ -8210,14 +10041,21 @@ function RuntimePanel({
           <MetricRow label="Text encoder" value={runtime.loadedModel.textEncoder} />
           <MetricRow label="UNet" value={runtime.loadedModel.unet} />
         </dl>
-        <button
-          type="button"
-          className="pro-unload-button"
-          onClick={onUnloadModel}
-          disabled={!runtime.loadedModel.loaded}
-        >
-          Unload model
-        </button>
+        {isVideoRoute
+          ? <p className="pro-field-note">{selectedRoute
+            ? `${selectedRoute.detail} Residency: ${selectedRoute.resident === null ? 'not reported by this backend' : selectedRoute.resident ? 'confirmed loaded' : 'not loaded'}.`
+            : 'This shows the image backend cache. The selected video route reports readiness after its route check.'}</p>
+          : runtime.modelLoad.detail ? <p className="pro-field-note">{runtime.modelLoad.detail}</p> : null}
+        {!isVideoRoute ? (
+          <button
+            type="button"
+            className="pro-unload-button"
+            onClick={onUnloadModel}
+            disabled={!runtime.loadedModel.loaded}
+          >
+            Unload model
+          </button>
+        ) : null}
       </div>
 
       <div className="pro-queue-row">
@@ -8261,9 +10099,11 @@ function getControlNetCompatibility(model: ProModelOption | undefined, controlNe
     supported: true,
     modelFamily,
     controlNetFamily,
-    message: controlNetFamily
-      ? `Ready for ${controlNetFamilyLabel(modelFamily)} ControlNet.`
-      : `Ready for ${controlNetFamilyLabel(modelFamily)} ControlNet. Use a matching local model id or path.`,
+    message: !controlNetModel.trim()
+      ? `Choose a local ${controlNetFamilyLabel(modelFamily)} ControlNet model. Local availability is checked before generation.`
+      : controlNetFamily
+        ? `The name matches ${controlNetFamilyLabel(modelFamily)}. Local file availability is checked before generation.`
+        : `The family cannot be confirmed from this name. The backend must resolve and validate the local asset before generation.`,
   }
 }
 
@@ -8311,7 +10151,7 @@ function controlNetFamilyLabel(family: 'sd15' | 'sdxl'): string {
 function modelFitsCreationMode(model: ProModelOption, mode: CreationMode): boolean {
   const engineId = model.engineId ?? 'unknown'
   const kind = `${model.kind ?? ''}`.toLowerCase()
-  const isVideoModel = kind === 'video' || engineId === 'sana_video' || engineId === 'wan'
+  const isVideoModel = kind === 'video' || engineId === 'sana_video' || engineId === 'wan' || engineId === 'ltx'
   if (mode === 'video') {
     return isVideoModel
   }
@@ -8329,6 +10169,44 @@ function modelsForCreationMode(models: ProModelOption[], mode: CreationMode): Pr
   return models.filter((model) => modelFitsCreationMode(model, mode))
 }
 
+function resolveCreationModeModel(
+  models: ProModelOption[],
+  currentModelId: string,
+  mode: CreationMode,
+): ProModelOption | undefined {
+  const isUsable = (model: ProModelOption) => !isModelBlocked(model) && (
+    mode === 'video'
+      ? model.status?.trim().toLowerCase() === 'ready'
+      : model.checkpointPathStatus === 'present' && model.routeStatus === 'request-eligible'
+  )
+  const compatible = modelsForCreationMode(models, mode)
+  return compatible.find((model) => model.id === currentModelId && isUsable(model)) ??
+    (mode === 'video' ? compatible.find((model) => model.engineId === 'ltx' && isUsable(model)) : undefined) ??
+    compatible.find(isUsable)
+}
+
+function applyCreationModeSettings(
+  current: GenerationSettings,
+  mode: CreationMode,
+  models: ProModelOption[],
+  ratios: AspectRatioOption[],
+): GenerationSettings {
+  const modeSettings: GenerationSettings = mode === 'video'
+    ? {
+        ...current,
+        mode,
+        aspectRatioId: '16:9',
+        width: 832,
+        height: 480,
+        batchSize: 1,
+      }
+    : { ...current, mode }
+  const targetModel = resolveCreationModeModel(models, current.modelId, mode)
+  return targetModel
+    ? applySelectedModelSettings(modeSettings, targetModel, models, ratios)
+    : modeSettings
+}
+
 function summarizeEnginesForModels(engines: EngineSummary[], models: ProModelOption[]): EngineSummary[] {
   const labels = new Map<EngineId, string>()
   for (const engine of engines) {
@@ -8336,7 +10214,8 @@ function summarizeEnginesForModels(engines: EngineSummary[], models: ProModelOpt
   }
   const counts = new Map<EngineId, number>()
   for (const model of models) {
-    const id = (model.engineId ?? 'unknown') as EngineId
+    const genericFlux2 = model.engineId === 'unknown' && (model.engineLabel ?? '').trim().toLowerCase() === 'flux.2'
+    const id = (genericFlux2 ? 'flux2_generic' : model.engineId ?? 'unknown') as EngineId
     counts.set(id, (counts.get(id) ?? 0) + 1)
   }
   return Array.from(counts.entries())
@@ -8349,37 +10228,18 @@ function summarizeEnginesForModels(engines: EngineSummary[], models: ProModelOpt
 }
 
 function modelEngineFallbackLabel(engineId: EngineId): string {
-  switch (engineId) {
-    case 'flux':
-      return 'Flux'
-    case 'flux_fill':
-      return 'Flux Fill (inpaint)'
-    case 'flux2':
-      return 'Flux.2 Klein'
-    case 'sana_video':
-      return 'Sana Video'
-    case 'wan':
-      return 'Wan Video'
-    case 'sd15':
-      return 'Stable Diffusion 1.5'
-    case 'sdxl':
-      return 'Stable Diffusion XL'
-    case 'sd35':
-      return 'Stable Diffusion 3.5'
-    case 'zimage':
-      return 'Z-Image'
-    case 'qwen':
-      return 'Qwen Image'
-    case 'sana':
-      return 'Sana'
-    default:
-      return 'Other'
-  }
+  return formatStudioEngineLabel(engineId)
 }
 
 function matchesEngineFilter(model: ProModelOption, filter: EngineId): boolean {
   if (filter === 'all') {
     return true
+  }
+  if (filter === 'flux2_generic') {
+    return model.engineId === 'unknown' && (model.engineLabel ?? '').trim().toLowerCase() === 'flux.2'
+  }
+  if (model.engineId === 'unknown' && (model.engineLabel ?? '').trim().toLowerCase() === 'flux.2') {
+    return false
   }
   if (model.engineId) {
     return model.engineId === filter
@@ -8389,11 +10249,15 @@ function matchesEngineFilter(model: ProModelOption, filter: EngineId): boolean {
     case 'flux':
       return architecture.includes('flux') && !architecture.includes('flux2') && !architecture.includes('klein')
     case 'flux2':
-      return architecture.includes('flux2') || architecture.includes('flux.2') || architecture.includes('klein')
+      return architecture.includes('klein') || /(^|[^a-z0-9])f2k([^a-z0-9]|$)/.test(architecture)
+    case 'krea2':
+      return architecture.includes('krea2') || architecture.includes('krea 2') || architecture.includes('krea-2')
     case 'sana_video':
       return architecture.includes('sana') && architecture.includes('video')
     case 'wan':
       return architecture.includes('wan')
+    case 'ltx':
+      return architecture.includes('ltx')
     case 'sd15':
       return architecture.includes('sd15') || architecture.includes('sd1.5') || architecture.includes('stable diffusion 1.5')
     case 'sdxl':
@@ -8411,18 +10275,12 @@ function matchesEngineFilter(model: ProModelOption, filter: EngineId): boolean {
   }
 }
 
-function formatModelOptionLabel(model: ProModelOption): string {
-  if (model.assetSummary && !model.name.includes(model.assetSummary)) {
-    return `${model.name} (${model.assetSummary})`
-  }
-  return model.name
-}
-
 function isModelBlocked(model: ProModelOption | undefined): boolean {
-  if (!model?.status) {
+  if (!model) {
     return false
   }
-  return ['blocked-cleanly', 'broken-runtime', 'unsupported-no-route'].includes(model.status)
+  const status = model.status?.trim().toLowerCase().replaceAll('_', '-')
+  return model.checkpointPathStatus === 'missing' || model.routeStatus === 'blocked' || ['blocked-cleanly', 'broken-runtime', 'unsupported-no-route', 'missing-assets', 'needs snapshot', 'disabled'].includes(status ?? '')
 }
 
 function modelBlockedMessage(model: ProModelOption | undefined): string {
@@ -8433,7 +10291,7 @@ function modelBlockedMessage(model: ProModelOption | undefined): string {
   if (reason) {
     return reason
   }
-  return `${model.name} is not ready for Pro generation.`
+  return `${formatStudioModelLabel(model)} is not ready for Pro generation.`
 }
 
 function groupModelsByEngine(models: ProModelOption[], engines: EngineSummary[]) {
@@ -8451,7 +10309,7 @@ function groupModelsByEngine(models: ProModelOption[], engines: EngineSummary[])
     } else {
       groups.set(id, {
         id,
-        label: model.engineLabel ?? labels.get(id) ?? 'Other',
+        label: formatStudioEngineLabel(id, model.engineLabel ?? labels.get(id)),
         models: [model],
       })
     }
@@ -8459,7 +10317,7 @@ function groupModelsByEngine(models: ProModelOption[], engines: EngineSummary[])
   return Array.from(groups.values()).sort((left, right) => left.label.localeCompare(right.label))
 }
 
-function summarizeDownloads(downloadsStatus: ProDownloadsStatus | null, engineFilter: EngineId) {
+function summarizeDownloads(downloadsStatus: ProDownloadsStatus | null, engineFilter: EngineId, search = '', showAll = false) {
   const routeLabel = engineFilter === 'all' ? 'all engines' : engineFilter
   if (!downloadsStatus) {
     return {
@@ -8468,23 +10326,33 @@ function summarizeDownloads(downloadsStatus: ProDownloadsStatus | null, engineFi
       installed: 0,
       routeTotal: 0,
       routeLabel,
+      filteredTotal: 0,
       items: [] as ProDownloadsStatus['catalog'],
     }
   }
   const routeItems = downloadsStatus.catalog.filter(
     (item) => engineFilter === 'all' || item.engineId === engineFilter,
   )
-  const items = routeItems
+  const sortedItems = routeItems
     .slice()
     .sort((left, right) => Number(right.installed) - Number(left.installed) || left.title.localeCompare(right.title))
-    .slice(0, 8)
+  const normalizedSearch = search.trim().toLocaleLowerCase()
+  const filteredItems = normalizedSearch
+    ? sortedItems.filter((item) => [item.title, item.key, item.category, item.destination, item.repoId, item.filename, item.source, item.notes]
+      .filter(Boolean)
+      .join(' ')
+      .toLocaleLowerCase()
+      .includes(normalizedSearch))
+    : sortedItems
+  const items = showAll || normalizedSearch ? filteredItems : filteredItems.slice(0, 8)
 
   return {
     subtitle: 'Local install state from the guarded model download service.',
     total: downloadsStatus.counts.catalog,
-    installed: downloadsStatus.counts.installed,
+    installed: routeItems.filter((item) => item.installed).length,
     routeTotal: routeItems.length,
     routeLabel,
+    filteredTotal: filteredItems.length,
     items,
   }
 }
@@ -8841,6 +10709,9 @@ function normalizeGenerationSettingsPatch(value: unknown): GenerationSettingsPat
   assignStringPatch(patch, record, 'hiresUpscaler', ['hiresUpscaler', 'hires_upscaler', 'hrUpscaler', 'hr_upscaler'])
   assignStringPatch(patch, record, 'sourceImageDataUrl', ['sourceImageDataUrl', 'source_image_data_url'])
   assignStringPatch(patch, record, 'sourceImageName', ['sourceImageName', 'source_image_name'])
+  assignNumberPatch(patch, record, 'ltxImageStrength', ['ltxImageStrength', 'ltx_image_strength'])
+  assignStringPatch(patch, record, 'ltxOffload', ['ltxOffload', 'ltx_offload'])
+  assignStringPatch(patch, record, 'ltxQuantization', ['ltxQuantization', 'ltx_quantization'])
   assignStringPatch(patch, record, 'sanaQuantization', ['sanaQuantization', 'sana_quantization'])
   assignStringPatch(patch, record, 'sanaVaeTiling', ['sanaVaeTiling', 'sana_vae_tiling', 'vaeTiling', 'vae_tiling'])
   assignStringPatch(patch, record, 'wanRuntimeMode', ['wanRuntimeMode', 'wan_runtime_mode', 'runtimeMode', 'runtime_mode'])
@@ -8894,6 +10765,7 @@ function normalizeGenerationSettingsPatch(value: unknown): GenerationSettingsPat
   assignBooleanPatch(patch, record, 'useSageAttention', ['useSageAttention', 'use_sage_attention'])
   assignBooleanPatch(patch, record, 'generateAudio', ['generateAudio', 'generate_audio'])
   assignBooleanPatch(patch, record, 'inpaintOnlyMasked', ['inpaintOnlyMasked', 'inpaint_only_masked'])
+  assignBooleanPatch(patch, record, 'ltxEnhancePrompt', ['ltxEnhancePrompt', 'ltx_enhance_prompt'])
   assignBooleanPatch(patch, record, 'autoMaskEnabled', ['autoMaskEnabled', 'auto_mask_enabled'])
   assignBooleanPatch(patch, record, 'controlNetEnabled', ['controlNetEnabled', 'controlnet_enabled'])
   assignBooleanPatch(patch, record, 'saveImages', ['saveImages', 'save_images'])
@@ -8938,6 +10810,10 @@ function applyGenerationSettingsPatch(
     fps: patch.fps !== undefined ? clamp(Math.round(finiteNumber(patch.fps) ?? next.fps), 1, 60) : next.fps,
     sourceImageDataUrl: typeof patch.sourceImageDataUrl === 'string' ? patch.sourceImageDataUrl : next.sourceImageDataUrl,
     sourceImageName: typeof patch.sourceImageName === 'string' ? patch.sourceImageName : next.sourceImageName,
+    ltxImageStrength: patch.ltxImageStrength !== undefined ? clamp(finiteNumber(patch.ltxImageStrength) ?? next.ltxImageStrength, 0, 1) : next.ltxImageStrength,
+    ltxOffload: typeof patch.ltxOffload === 'string' && patch.ltxOffload.length > 0 ? patch.ltxOffload : next.ltxOffload,
+    ltxQuantization: typeof patch.ltxQuantization === 'string' && patch.ltxQuantization.length > 0 ? patch.ltxQuantization : next.ltxQuantization,
+    ltxEnhancePrompt: typeof patch.ltxEnhancePrompt === 'boolean' ? patch.ltxEnhancePrompt : next.ltxEnhancePrompt,
     sanaQuantization: typeof patch.sanaQuantization === 'string' && patch.sanaQuantization.length > 0 ? patch.sanaQuantization : next.sanaQuantization,
     sanaVaeTiling: typeof patch.sanaVaeTiling === 'string' && patch.sanaVaeTiling.length > 0 ? patch.sanaVaeTiling : next.sanaVaeTiling,
     offloadTextEncoderAfterEncode: typeof patch.offloadTextEncoderAfterEncode === 'boolean' ? patch.offloadTextEncoderAfterEncode : next.offloadTextEncoderAfterEncode,
@@ -9286,8 +11162,10 @@ function mergeBootstrapDefaults(
   current: GenerationSettings,
   nextBootstrap: ProBootstrap,
 ): GenerationSettings {
-  const routeModels = modelsForCreationMode(nextBootstrap.models, current.mode)
-  const modelStillExists = routeModels.some((model) => model.id === current.modelId)
+  const knownModelIds = new Set([
+    ...nextBootstrap.models.map((model) => model.id),
+    ...nextBootstrap.blockedModels.map((model) => model.id),
+  ])
   const samplerStillExists = nextBootstrap.samplers.includes(current.sampler)
   const ratioStillExists = nextBootstrap.aspectRatios.some((ratio) => ratio.id === current.aspectRatioId)
   const ratio = ratioStillExists
@@ -9296,7 +11174,11 @@ function mergeBootstrapDefaults(
 
   return {
     ...current,
-    modelId: modelStillExists ? current.modelId : routeModels[0]?.id ?? nextBootstrap.defaults.modelId,
+    // Before the first inventory arrives, a mode/hash effect can change the
+    // fallback settings and make settingsMatch false. Keep a user selection
+    // only when it belongs to the loaded inventory; otherwise restore Pro's
+    // saved default so the selector agrees with startup model loading.
+    modelId: knownModelIds.has(current.modelId) ? current.modelId : nextBootstrap.defaults.modelId,
     sampler: samplerStillExists ? current.sampler : nextBootstrap.defaults.sampler,
     aspectRatioId: ratio?.id ?? nextBootstrap.defaults.aspectRatioId,
     width: ratio?.width ?? current.width,
@@ -9329,6 +11211,12 @@ function applyModelPresetSettings(
   if (Number.isFinite(preset.clipSkip) && Number(preset.clipSkip) >= 1) {
     next.clipSkip = Number(preset.clipSkip)
   }
+  if (Number.isFinite(preset.frames) && Number(preset.frames) >= 9) {
+    next.frames = model?.engineId === 'ltx' ? snapLtxFrames(Number(preset.frames)) : Number(preset.frames)
+  }
+  if (Number.isFinite(preset.fps) && Number(preset.fps) >= 1) {
+    next.fps = Number(preset.fps)
+  }
   const width = Number(preset.width)
   const height = Number(preset.height)
   if (Number.isFinite(width) && width >= 64 && Number.isFinite(height) && height >= 64) {
@@ -9337,6 +11225,69 @@ function applyModelPresetSettings(
     next.aspectRatioId = findMatchingAspectRatio(ratios, width, height)?.id ?? current.aspectRatioId
   }
   return next
+}
+
+function applySelectedModelSettings(
+  current: GenerationSettings,
+  model: ProModelOption | undefined,
+  models: ProModelOption[],
+  ratios: AspectRatioOption[],
+): GenerationSettings {
+  const nextModelId = model?.id ?? current.modelId
+  const modelChanged = nextModelId !== current.modelId
+
+  const previousModel = models.find((candidate) => candidate.id === current.modelId)
+  const next: GenerationSettings = { ...current, modelId: nextModelId }
+
+  const compatibility = getControlNetCompatibility(model, current.controlNetModel)
+  if (!compatibility.supported) {
+    next.controlNetEnabled = false
+    next.controlNetModel = ''
+  }
+
+  const previousEngine = previousModel?.engineId ?? 'unknown'
+  const nextEngine = model?.engineId ?? 'unknown'
+  const previousFamily = modelFamilyKey(previousModel)
+  const nextFamily = modelFamilyKey(model)
+  if (modelChanged && previousFamily !== nextFamily) {
+    // A manually selected VAE is family-specific. Do not carry it across a
+    // base-model switch where the backend may otherwise try an incompatible VAE.
+    next.vaeId = ''
+  }
+  if (modelChanged && nextEngine === 'wan') {
+    const selectedId = String(model?.id ?? '').toLowerCase()
+    const hasHighLowStage = /(?:high|low)[_ .-]*noise/.test(selectedId)
+    next.wanRuntimeMode = hasHighLowStage ? 'high_low' : 'fast_5b'
+  }
+  if (nextEngine === 'ltx') {
+    next.frames = snapLtxFrames(next.frames)
+  }
+  if (modelChanged && (previousEngine === 'wan' || nextEngine === 'wan')) {
+    next.highNoiseModelId = ''
+    next.lowNoiseModelId = ''
+    next.highNoiseLoraId = ''
+    next.lowNoiseLoraId = ''
+    next.vaeId = ''
+    next.textEncoderPath = ''
+  }
+
+  return applyModelPresetSettings(next, model, ratios)
+}
+
+function modelFamilyKey(model: ProModelOption | undefined): string {
+  const architecture = String(model?.architecture ?? '').trim().toLowerCase().replace(/[.\s-]+/g, '_')
+  if (architecture && architecture !== 'other' && architecture !== 'unknown') return architecture
+  const engine = String(model?.engineId ?? '').trim().toLowerCase().replace(/[.\s-]+/g, '_')
+  return engine || 'unknown'
+}
+
+function isDedicatedInpaintModel(model: ProModelOption | undefined): boolean {
+  const architecture = String(model?.architecture ?? '').toLowerCase().replace(/[.\s-]+/g, '_')
+  return architecture === 'inpaint' || architecture === 'sd15_inpaint' || architecture === 'sdxl_inpaint' || architecture === 'flux_fill'
+}
+
+function snapLtxFrames(value: number): number {
+  return clamp(Math.round((value - 1) / 8) * 8 + 1, 9, 257)
 }
 
 function settingsMatch(current: GenerationSettings, expected: GenerationSettings): boolean {
@@ -9357,7 +11308,11 @@ function settingsMatch(current: GenerationSettings, expected: GenerationSettings
     current.batchSize === expected.batchSize &&
     current.batchCount === expected.batchCount &&
     current.sourceImageDataUrl === expected.sourceImageDataUrl &&
-    current.sourceImageName === expected.sourceImageName
+    current.sourceImageName === expected.sourceImageName &&
+    current.ltxImageStrength === expected.ltxImageStrength &&
+    current.ltxOffload === expected.ltxOffload &&
+    current.ltxQuantization === expected.ltxQuantization &&
+    current.ltxEnhancePrompt === expected.ltxEnhancePrompt
   )
 }
 

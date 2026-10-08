@@ -24,8 +24,9 @@ from aiwf.services.segment import SegmentService
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int, str], None]
+StepCompleteCallback = Callable[[int, WorkflowStepResult], None]
 
-_GENERATION_FIELDS = set(GenerationRequest.model_fields.keys()) - {"mode"}
+_GENERATION_FIELDS = set(GenerationRequest.model_fields.keys()) - {"mode", "save_images"}
 
 
 def _generation_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -87,6 +88,7 @@ class WorkflowExecutor:
         *,
         seed_image: Image.Image | None = None,
         on_progress: ProgressCallback | None = None,
+        on_step_complete: StepCompleteCallback | None = None,
     ) -> tuple[WorkflowRunResult, list[Image.Image]]:
         validate_workflow(workflow, has_seed_image=seed_image is not None)
 
@@ -113,6 +115,8 @@ class WorkflowExecutor:
                 result.image_path = artifact.path
 
             step_results.append(result)
+            if on_step_complete:
+                on_step_complete(index + 1, result)
 
         run.steps = step_results
         if step_results:

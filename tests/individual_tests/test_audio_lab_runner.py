@@ -42,6 +42,26 @@ def test_audio_status_does_not_import_dsp_stack_during_studio_startup(tmp_path, 
     assert status.details["deep_self_test"] == "not run during Studio startup"
 
 
+def test_minimum_audio_summary_distinguishes_detected_from_runtime_ready() -> None:
+    from aiwf.web.tabs.audio import _minimum_setup_markdown
+
+    shallow = _minimum_setup_markdown({
+        "runtimeChecksPerformed": False,
+        "components": [{"id": "audio-lab", "label": "Audio Lab DSP", "ready": True}],
+    })
+    deep = _minimum_setup_markdown({
+        "runtimeChecksPerformed": True,
+        "components": [
+            {"id": "audio-lab", "label": "Audio Lab DSP", "ready": True},
+            {"id": "mmaudio", "label": "MMAudio", "ready": False},
+        ],
+    })
+
+    assert "Detected: **Audio Lab DSP**" in shallow
+    assert "Ready: **Audio Lab DSP**" in deep
+    assert "Needs setup: **MMAudio**" in deep
+
+
 @pytest.mark.skipif(not _core_audio_deps_present(), reason="Audio Lab optional dependencies are not installed in this environment")
 def test_audio_runner_regional_pitch_preserves_timeline_for_later_envelopes(tmp_path) -> None:
     import numpy as np
@@ -100,3 +120,52 @@ def test_audio_runner_regional_pitch_preserves_timeline_for_later_envelopes(tmp_
     written = json.loads(manifest.read_text(encoding="utf-8"))
     assert any(item.startswith("Pitch shift:") for item in written["stage_log"])
     assert "Automation / fades" in written["stage_log"]
+
+
+def test_audio_lab_process_rejects_missing_empty_or_misdirected_export(tmp_path, monkeypatch):
+    from aiwf.core.domain.audio_lab import AudioLabSettings
+    from aiwf.services.audio_lab import AudioLabService
+
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"fixture source")
+    service = AudioLabService(tmp_path)
+
+    for behavior in ("missing", "empty", "wrong_path"):
+        def fake_run(_args, *, behavior=behavior, **_kwargs):
+            request_path = Path(_args[1])
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            output = Path(request["output_path"])
+            if behavior != "missing":
+                output.write_bytes(b"" if behavior == "empty" else b"processed fixture")
+            reported = str(output) + ".wrong" if behavior == "wrong_path" else str(output)
+            return {"ok": True, "output_path": reported}
+
+        monkeypatch.setattr(service, "_run", fake_run)
+        with pytest.raises(RuntimeError, match="Audio Lab engine"):
+            service.process(source, AudioLabSettings())
+
+
+def test_audio_lab_process_returns_verified_export(tmp_path, monkeypatch):
+    from aiwf.core.domain.audio_lab import AudioLabSettings
+    from aiwf.services.audio_lab import AudioLabService
+
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"fixture source")
+    service = AudioLabService(tmp_path)
+
+    def fake_run(args, **_kwargs):
+        request_path = Path(args[1])
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        output = Path(request["output_path"])
+        output.write_bytes(b"processed fixture")
+        return {
+            "ok": True,
+            "output_path": str(output),
+            "manifest_path": request["manifest_path"],
+        }
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    result = service.process(source, AudioLabSettings())
+
+    assert Path(result["output_path"]).read_bytes() == b"processed fixture"
+    assert Path(result["request_path"]).is_file()

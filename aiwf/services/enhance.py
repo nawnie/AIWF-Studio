@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -52,6 +53,7 @@ class EnhanceService:
         self.catalog = EnhanceModelCatalog(flags)
         self._loaded: dict[str, Any] = {}
         self.supervisor = supervisor
+        self._model_setup_lock = threading.Lock()
 
     @contextmanager
     def _gpu_tenant(self, reason: str):
@@ -66,6 +68,43 @@ class EnhanceService:
 
     def list_restorers(self) -> list[EnhanceModel]:
         return self.catalog.list_models(kind=EnhanceModelKind.RESTORER)
+
+    def list_model_status(self) -> list[dict[str, Any]]:
+        models = self.list_upscalers() + self.list_restorers()
+        result = []
+        for model in models:
+            path = Path(model.path)
+            try:
+                installed = path.is_file() and path.stat().st_size > 0
+            except OSError:
+                installed = False
+            result.append({
+                "id": model.id,
+                "title": model.title,
+                "filename": model.filename,
+                "kind": model.kind.value,
+                "architecture": model.architecture,
+                "scale": model.scale,
+                "installed": installed,
+                "installAvailable": bool(model.download_url),
+            })
+        return result
+
+    def invalidate_model_catalog(self) -> None:
+        """Rescan model roots without discarding descriptors already loaded in memory."""
+        self.catalog.invalidate()
+
+    def prepare_model(self, model_id: str) -> Path:
+        with self._model_setup_lock:
+            self.catalog.invalidate()
+            model = self.catalog.get_model(model_id)
+            if model is None:
+                raise KeyError(f"Unknown Enhance model: {model_id}")
+            path = self.catalog.ensure_model_path(model)
+            if not path.is_file() or path.stat().st_size <= 0:
+                raise RuntimeError(f"Enhance model setup did not produce a usable file: {path.name}")
+            self.catalog.invalidate()
+            return path
 
     def refresh_catalog(self) -> list[EnhanceModel]:
         self.catalog.invalidate()

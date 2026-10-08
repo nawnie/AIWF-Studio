@@ -65,6 +65,13 @@ def attention_call_context(flags, *, pipe=None):
     if _attention_backend(flags) != "sage_sdpa":
         yield "none"
         return
+    transformer = getattr(pipe, "transformer", None) if pipe is not None else None
+    if type(transformer).__name__ == "QwenImage21Transformer2DModel":
+        # Qwen Image 2.1 has a block-causal native attention path. Its model
+        # owns the tensor layout, so do not replace torch SDPA with the generic
+        # Sage wrapper (which assumes a different layout contract).
+        yield "native"
+        return
     if pipe is not None and getattr(pipe, "unet", None) is not None:
         # SD/SDXL UNet attention already runs through AttnProcessor2_0/torch SDPA.
         # The global SageAttention shim is unsafe here because Diffusers passes
@@ -216,8 +223,11 @@ def resolve_best_diffusers_attention_backend(flags) -> str:
     if _sageattention_usable_in_diffusers() and preference == "sage_sdpa":
         return "sage"
 
-    # Ada 4070 Ti path: PyTorch flash SDPA via Diffusers native dispatch.
-    return "_native_flash"
+    # Let PyTorch select an available SDPA kernel when no optional backend is
+    # installed. Forcing Diffusers' private _native_flash backend can fail on
+    # otherwise valid CUDA builds where FlashAttention kernels are unavailable
+    # for a particular dtype/shape, without trying math/efficient SDPA.
+    return "native"
 
 
 def describe_best_attention_stack(flags) -> str:

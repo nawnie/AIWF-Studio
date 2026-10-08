@@ -1524,7 +1524,7 @@
 .studio-audio-meter-card { display: grid; gap: 6px; }
 .studio-audio-setup {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) auto auto;
+  grid-template-columns: minmax(240px, 1fr) auto auto auto;
   align-items: center;
   gap: 14px;
   margin: 12px 14px 0;
@@ -1579,8 +1579,13 @@
   border-radius: 16px;
   background: rgba(10,17,30,0.82);
 }
-.studio-audio-preview-panel { display: grid; grid-template-rows: auto 1fr auto auto auto; overflow: hidden; }
+.studio-audio-preview-panel { display: grid; grid-template-rows: auto auto 1fr auto auto auto; overflow: hidden; }
 .studio-audio-preview-panel header { display:flex; justify-content:space-between; padding: 14px 16px; border-bottom:1px solid rgba(255,255,255,0.08); }
+.studio-audio-model-select { display:grid; grid-template-columns: 72px minmax(0,1fr); align-items:center; gap:6px 10px; padding:10px 16px; border-bottom:1px solid rgba(255,255,255,0.08); }
+.studio-audio-model-select > span { color:rgba(226,232,240,0.7); font-size:12px; }
+.studio-audio-model-select select { min-width:0; width:100%; }
+.studio-audio-model-select small { grid-column:2; color:rgba(148,163,184,0.8); overflow-wrap:anywhere; }
+.studio-audio-model-select .studio-audio-model-unavailable { color:#fca5a5; }
 .studio-large-waveform {
   display: flex;
   align-items: center;
@@ -1631,7 +1636,6 @@
 @media (max-width: 1420px) {
   .studio-audio-setup { grid-template-columns: minmax(220px, 1fr) auto; }
   .studio-audio-setup-components { justify-content: flex-start; }
-  .studio-audio-setup-button { grid-column: 2; grid-row: 1 / span 2; }
 }
 
 /* Agent */

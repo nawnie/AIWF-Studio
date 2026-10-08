@@ -1210,6 +1210,12 @@ a:hover {
   box-shadow: var(--shadow-panel);
 }
 
+.pro-controlnet-setup-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
 .pro-controlnet-header {
   display: flex;
   align-items: center;

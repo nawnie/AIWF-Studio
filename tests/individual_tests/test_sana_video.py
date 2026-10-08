@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+import sys
 
 import pytest
 from PIL import Image
@@ -15,14 +16,192 @@ from aiwf.core.domain.sana_video import (
     SANA_VIDEO_VAE_TILING_ALWAYS,
     SanaVideoRequest,
 )
+from aiwf.infrastructure.diffusers.checkpoints import sana_video_missing_local_files
 from aiwf.services.sana_video import SanaVideoService, SanaVideoUnavailable, _SanaStageTracker
 
 
-def _model_dir(root: Path) -> Path:
-    model = root / "models" / "sana-video" / "Diffusers" / "SANA-Video_2B_480p_diffusers"
-    model.mkdir(parents=True)
-    (model / "model_index.json").write_text("{}", encoding="utf-8")
+@pytest.fixture(autouse=True)
+def _make_device_memory_probe_deterministic(monkeypatch):
+    # Patch the GPU probe functions, not subprocess.run itself: Diffusers uses
+    # subprocess for optional dependency checks during lazy pipeline imports.
+    monkeypatch.setattr("aiwf.services.gpu_memory.nvidia_smi_free_bytes", lambda *_args: None)
+    monkeypatch.setattr(
+        "aiwf.services.gpu_memory.measured_cuda_free_bytes",
+        lambda *_args, **_kwargs: 8 * 1024**3,
+    )
+
+
+def test_sana_runtime_check_only_requires_selected_pipeline_class(tmp_path: Path, monkeypatch):
+    service = SanaVideoService(RuntimeFlags(data_dir=tmp_path), UserSettings())
+    monkeypatch.setitem(sys.modules, "diffusers", SimpleNamespace(SanaVideoPipeline=object))
+
+    assert service.runtime_available(image_to_video=False)
+    assert not service.runtime_available(image_to_video=True)
+
+
+def _model_dir(root: Path, variant: str = "480p") -> Path:
+    model = root / "models" / "sana-video" / "Diffusers" / f"SANA-Video_2B_{variant}_diffusers"
+    (model / "model_index.json").parent.mkdir(parents=True, exist_ok=True)
+    (model / "model_index.json").write_text(
+        json.dumps({
+            "_class_name": "SanaVideoPipeline",
+            "scheduler": ["diffusers", "DPMSolverMultistepScheduler"],
+            "text_encoder": ["transformers", "Gemma2Model"],
+            "tokenizer": ["transformers", "GemmaTokenizerFast"],
+            "transformer": ["diffusers", "SanaVideoTransformer3DModel"],
+            "vae": ["diffusers", "AutoencoderKLWan"],
+        }),
+        encoding="utf-8",
+    )
+    for component in ("scheduler", "text_encoder", "tokenizer", "transformer", "vae"):
+        (model / component).mkdir(parents=True, exist_ok=True)
+    (model / "scheduler" / "scheduler_config.json").write_text("{}", encoding="utf-8")
+    (model / "text_encoder" / "config.json").write_text("{}", encoding="utf-8")
+    (model / "tokenizer" / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (model / "tokenizer" / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (model / "transformer" / "config.json").write_text("{}", encoding="utf-8")
+    (model / "transformer" / "diffusion_pytorch_model.safetensors").write_bytes(b"transformer")
+    (model / "vae" / "config.json").write_text("{}", encoding="utf-8")
+    (model / "vae" / "diffusion_pytorch_model.safetensors").write_bytes(b"vae")
+    text_encoder = model / "text_encoder"
+    (text_encoder / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"fake.weight": "model-00001-of-00001.safetensors"}}),
+        encoding="utf-8",
+    )
+    (text_encoder / "model-00001-of-00001.safetensors").write_bytes(b"complete")
     return model
+
+
+def test_sana_video_snapshot_requires_all_route_components_and_weights(tmp_path: Path):
+    model = _model_dir(tmp_path)
+
+    assert sana_video_missing_local_files(model) == []
+
+    (model / "transformer" / "diffusion_pytorch_model.safetensors").unlink()
+    missing = sana_video_missing_local_files(model)
+
+    assert model / "transformer" / "diffusion_pytorch_model.safetensors.index.json" in missing
+
+
+def test_sana_video_default_discovers_complete_snapshot_in_shared_root(tmp_path: Path):
+    shared_model = _model_dir(tmp_path / "shared")
+    service = SanaVideoService(
+        RuntimeFlags(
+            data_dir=tmp_path / "app",
+            models_dir=tmp_path / "primary-models",
+            extra_model_dirs=[tmp_path / "shared" / "models"],
+            output_dir=tmp_path / "outputs",
+        ),
+        UserSettings(),
+    )
+
+    assert service.default_model_path() == shared_model.resolve()
+    assert "Model snapshot missing" not in service.status_markdown()
+
+
+def test_sana_video_variant_selects_matching_local_snapshot(tmp_path: Path):
+    model_480 = _model_dir(tmp_path, "480p")
+    model_720 = _model_dir(tmp_path, "720p")
+    service = SanaVideoService(RuntimeFlags(data_dir=tmp_path / "app", models_dir=tmp_path / "models"), UserSettings())
+
+    assert service.default_model_path("480p") == model_480.resolve()
+    assert service.default_model_path("720p") == model_720.resolve()
+    assert SanaVideoRequest(model_variant="720p").model_variant == "720p"
+    with pytest.raises(ValueError, match="model_variant"):
+        SanaVideoRequest(model_variant="1080p")
+
+
+def test_sana_prepare_loads_and_swaps_exact_pipeline_without_inference(tmp_path: Path, monkeypatch):
+    model_480 = _model_dir(tmp_path, "480p")
+    model_720 = _model_dir(tmp_path, "720p")
+    service = SanaVideoService(
+        RuntimeFlags(data_dir=tmp_path / "app", models_dir=tmp_path / "models"),
+        UserSettings(),
+    )
+    monkeypatch.setattr(service, "runtime_available", lambda *_args: True)
+    monkeypatch.setattr(service, "_prepare_headroom_issue", lambda: None)
+    loads = []
+
+    def load(model_path, request, *, image_to_video):
+        pipe = object()
+        loads.append((model_path, request.model_variant, image_to_video, pipe))
+        return pipe, {"quantization": "bf16", "attention_backend": "native"}
+
+    monkeypatch.setattr(service, "_load_pipeline", load)
+
+    first = service.prepare(SanaVideoRequest(model_variant="480p"))
+    repeated = service.prepare(SanaVideoRequest(model_variant="480p"))
+    second = service.prepare(SanaVideoRequest(model_variant="720p"))
+
+    assert first["loaded"] is True
+    assert first["modelPath"] == str(model_480.resolve())
+    assert first["quantization"] == "bf16"
+    assert repeated["loaded"] is True
+    assert second["loaded"] is True
+    assert second["modelPath"] == str(model_720.resolve())
+    assert [entry[1] for entry in loads] == ["480p", "720p"]
+    assert service._prepared_pipeline is loads[-1][3]
+    assert service.unload() is True
+    assert service._prepared_pipeline is None
+
+
+def test_sana_prepare_reloads_when_model_asset_changes_in_place(tmp_path: Path, monkeypatch):
+    model = _model_dir(tmp_path)
+    service = SanaVideoService(
+        RuntimeFlags(data_dir=tmp_path / "app", models_dir=tmp_path / "models"),
+        UserSettings(),
+    )
+    monkeypatch.setattr(service, "runtime_available", lambda *_args: True)
+    monkeypatch.setattr(service, "_prepare_headroom_issue", lambda: None)
+    loads = []
+    monkeypatch.setattr(
+        service,
+        "_load_pipeline",
+        lambda *_args, **_kwargs: (loads.append(object()) or loads[-1], {"quantization": "bf16"}),
+    )
+    request = SanaVideoRequest(model_variant="480p")
+    service.prepare(request)
+    weight = model / "transformer" / "diffusion_pytorch_model.safetensors"
+    original_stat = weight.stat()
+    weight.write_bytes(b"replacement transformer weights")
+    import os
+    os.utime(weight, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000))
+
+    service.prepare(request)
+
+    assert len(loads) == 2
+
+
+def test_sana_prepare_headroom_defers_when_gpu_memory_is_tight(monkeypatch):
+    fake_torch = ModuleType("torch")
+    fake_torch.cuda = SimpleNamespace(
+        is_available=lambda: True,
+        mem_get_info=lambda: (int(1.7 * 1024**3), int(16 * 1024**3)),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(
+        "aiwf.services.gpu_memory.measured_cuda_free_bytes",
+        lambda *_args, **_kwargs: int(1.7 * 1024**3),
+    )
+
+    issue = SanaVideoService._prepare_headroom_issue()
+
+    assert issue is not None
+    assert "1.7 GB VRAM is free" in issue
+    assert "at least 6 GB" in issue
+
+
+def test_sana_video_snapshot_rejects_malformed_metadata_and_wrong_component_classes(tmp_path: Path):
+    model = _model_dir(tmp_path)
+    (model / "scheduler" / "scheduler_config.json").write_text("{broken", encoding="utf-8")
+    index = json.loads((model / "model_index.json").read_text(encoding="utf-8"))
+    index["transformer"] = ["diffusers", "DifferentTransformer"]
+    (model / "model_index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    missing = sana_video_missing_local_files(model)
+
+    assert model / "scheduler" / "scheduler_config.json" in missing
+    assert model / "model_index.json" in missing
 
 
 def test_sana_video_service_blocks_missing_model(tmp_path: Path):
@@ -32,6 +211,40 @@ def test_sana_video_service_blocks_missing_model(tmp_path: Path):
     )
 
     with pytest.raises(SanaVideoUnavailable, match="model_index.json"):
+        service.generate(SanaVideoRequest(prompt="slow camera move"))
+
+
+def test_sana_optional_audio_checks_matching_mmaudio_bundle_before_video_generation(tmp_path: Path, monkeypatch):
+    service = SanaVideoService(
+        RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", output_dir=tmp_path / "outputs"),
+        UserSettings(),
+    )
+    monkeypatch.setattr(service, "_generate_for_request", lambda *_args, **_kwargs: pytest.fail("video generation started"))
+
+    class AudioSetup:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def _mmaudio_variant_ready(self, variant):
+            assert variant == "small_16k"
+            return False
+
+    monkeypatch.setattr("aiwf.services.sana_video.AudioGenerationService", AudioSetup)
+
+    with pytest.raises(SanaVideoUnavailable, match="complete MMAudio small_16k model bundle"):
+        service.generate(SanaVideoRequest(prompt="camera move", generate_audio=True))
+
+
+def test_sana_video_service_blocks_missing_shard_before_pipeline_load(tmp_path: Path, monkeypatch):
+    model = _model_dir(tmp_path)
+    (model / "text_encoder" / "model-00001-of-00001.safetensors").unlink()
+    service = SanaVideoService(
+        RuntimeFlags(data_dir=tmp_path, models_dir=tmp_path / "models", output_dir=tmp_path / "outputs"),
+        UserSettings(),
+    )
+    monkeypatch.setattr(service, "_load_pipeline", lambda *args, **kwargs: pytest.fail("incomplete model loaded"))
+
+    with pytest.raises(SanaVideoUnavailable, match="model-00001-of-00001.safetensors"):
         service.generate(SanaVideoRequest(prompt="slow camera move"))
 
 

@@ -21,6 +21,7 @@ import {
   Wand2,
 } from 'lucide-react'
 import type { LayoutProps } from './LayoutTypes'
+import { formatStudioModelAvailability, formatStudioModelFamily, formatStudioModelLabel } from './modelLabels'
 import { displayDate, selectedImage } from './LayoutTypes'
 import './studioLayouts.css'
 
@@ -45,6 +46,7 @@ const UNAVAILABLE_CONTROL_ID = 'media-foundry-unavailable-controls'
 export function MediaFoundryImageLayout({
   settings,
   bootstrap,
+  selectableModels,
   runtime,
   recentOutputs,
   preview,
@@ -52,6 +54,7 @@ export function MediaFoundryImageLayout({
   statusMessage,
   isGenerating,
   onSettingsChange,
+  onModelSelect,
   onGenerate,
   onSendToWorkflow,
   onPreviewSelect,
@@ -139,8 +142,8 @@ export function MediaFoundryImageLayout({
             <button key={model.id} type="button" className="studio-model-row" onClick={onOpenModels}>
               <span>{index + 1}</span>
               <div>
-                <strong>{model.name}</strong>
-                <small>{model.architecture || model.backend || 'Local model'}</small>
+                <strong>{formatStudioModelLabel(model, bootstrap.models)}</strong>
+                <small>{[formatStudioModelFamily(model), formatStudioModelAvailability(model)].filter(Boolean).join(' · ') || 'Local model'}</small>
               </div>
             </button>
           ))}
@@ -303,8 +306,9 @@ export function MediaFoundryImageLayout({
             </InspectorSection>
             <InspectorSection title="Generation Settings">
               <label>Model
-                <select value={settings.modelId} onChange={(event) => onSettingsChange((current) => ({ ...current, modelId: event.target.value }))}>
-                  {bootstrap.models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+                <select value={settings.modelId} onChange={(event) => onModelSelect?.(event.target.value)}>
+                  {(selectableModels ?? bootstrap.models)
+                    .map((model) => <option key={model.id} value={model.id}>{formatStudioModelLabel(model, bootstrap.models)}</option>)}
                 </select>
               </label>
               <label>Steps

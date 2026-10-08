@@ -1,0 +1,9 @@
+namespace AiwfDesktop
+{
+    // Train: base model weights, package import and the dry-run plan
+    [default_interface]
+    runtimeclass TrainPage : Microsoft.UI.Xaml.Controls.Page
+    {
+        TrainPage();
+    }
+}

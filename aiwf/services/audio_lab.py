@@ -285,6 +285,15 @@ class AudioLabService:
         }
         request_path.write_text(json.dumps(request, indent=2), encoding="utf-8")
         result = self._run(["process", str(request_path)], timeout=7200)
+        reported_output = Path(str(result.get("output_path") or "")).expanduser().resolve()
+        expected_output = output_path.resolve()
+        if reported_output != expected_output:
+            raise RuntimeError("Audio Lab engine reported an unexpected output path.")
+        try:
+            if not output_path.is_file() or output_path.stat().st_size <= 0:
+                raise RuntimeError("Audio Lab engine did not write a non-empty export.")
+        except OSError as exc:
+            raise RuntimeError(f"Audio Lab export could not be verified: {exc}") from exc
         result["request_path"] = str(request_path)
         result["warnings"] = plan.warnings
         return result

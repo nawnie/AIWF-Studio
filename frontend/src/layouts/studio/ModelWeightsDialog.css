@@ -1,0 +1,27 @@
+/* Model weights popup. Uses the Pro shell tokens (--accent, --border, --surface, --text-strong). */
+.model-dialog__backdrop { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 16px; background: rgba(5, 8, 12, .62); }
+.model-dialog { width: min(560px, 100%); max-height: calc(100vh - 32px); overflow: auto; display: grid; gap: 14px; padding: 18px 20px; border: 1px solid var(--border, rgba(255,255,255,.18)); border-radius: 14px; background: var(--surface, #181a20); color: inherit; box-shadow: 0 24px 60px rgba(0,0,0,.5); outline: none; }
+.model-dialog h2 { margin: 0 0 4px; font-size: 18px; color: var(--text-strong, inherit); font-family: inherit; letter-spacing: normal; }
+.model-dialog p { margin: 0 0 8px; font-size: 13px; line-height: 1.5; }
+.model-dialog code { display: inline; padding: 1px 6px; border-radius: 5px; font-size: 12px; color: inherit; background: color-mix(in srgb, var(--accent, #6aa0ff) 14%, transparent); }
+.model-dialog a { color: var(--accent, #6aa0ff); }
+.model-dialog__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.model-dialog__head p { opacity: .72; margin: 0; }
+.model-dialog__close { display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0; border-radius: 8px; }
+.model-dialog__body { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 10px; background: color-mix(in srgb, var(--accent, #6aa0ff) 9%, transparent); }
+.model-dialog__body > svg { margin-top: 2px; }
+.model-dialog__actions, .model-dialog__foot { display: flex; flex-wrap: wrap; gap: 8px; }
+.model-dialog__foot { justify-content: flex-end; padding-top: 4px; }
+.model-dialog button.is-primary { background: var(--accent, #3b82f6); color: #fff; border-color: transparent; font-weight: 600; }
+.model-dialog button { min-height: 34px; padding: 6px 14px; border-radius: 8px; cursor: pointer; }
+.model-dialog button:disabled { opacity: .5; cursor: not-allowed; }
+.model-dialog__key { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin: 10px 0 6px; }
+.model-dialog__key label { display: grid; gap: 4px; flex: 1 1 240px; font-size: 12px; }
+.model-dialog__key label > span { display: inline-flex; align-items: center; gap: 6px; opacity: .75; }
+.model-dialog__key input { min-height: 34px; }
+.model-dialog__fine { font-size: 11px !important; opacity: .62; }
+.model-dialog__progress { display: grid; gap: 8px; padding: 12px; border-radius: 10px; background: color-mix(in srgb, #3fa66b 10%, transparent); }
+.model-dialog__bar { height: 10px; border-radius: 6px; overflow: hidden; background: color-mix(in srgb, var(--border, #555) 70%, transparent); }
+.model-dialog__bar span { display: block; height: 100%; background: #3fa66b; transition: width .4s ease; }
+.model-dialog__error { padding: 8px 12px; border-radius: 9px; background: color-mix(in srgb, #d0503c 16%, transparent); }
+.model-dialog__note { padding: 10px 12px; border-radius: 9px; background: color-mix(in srgb, #3fa66b 12%, transparent); }

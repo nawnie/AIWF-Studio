@@ -55,6 +55,12 @@ def test_flux2_klein_profile_uses_model_page_defaults():
     assert p.recommended_sampler == "euler"
 
 
+def test_generic_flux2_does_not_inherit_klein_generation_profile():
+    p = detect_model_profile("Flux.2 base model")
+    assert p.family == "standard"
+    assert p.recommended_cfg == 7.0
+
+
 def test_z_image_profile_wins_over_flux2_name_prefix():
     p = detect_model_profile("fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4.gguf")
     assert p.family == "z_image"

@@ -6,9 +6,40 @@ from aiwf.services.studio_generation_packet import (
     build_studio_generation_packet,
     gradio_wan_workflow_json,
     model_selection_gate,
+    route_for_packet,
     validate_workflow_code_block_document,
     workflow_document_json_from_packet,
+    infer_model_family,
 )
+
+
+def test_generic_flux2_packet_family_is_not_klein():
+    assert infer_model_family(model_name="Flux.2 base", architecture="flux2", engine_id="flux2") == "flux2"
+    assert infer_model_family(model_id="flux2-base", engine_id="flux2") == "flux2"
+    assert infer_model_family(model_name="Flux.2 Klein 4B", architecture="flux2_klein") == "flux2_klein"
+    assert infer_model_family(model_id="f2k-4b", engine_id="flux2") == "flux2_klein"
+    assert route_for_packet("image", "flux2") == "unsupported-generic-flux2-image"
+    assert route_for_packet("inpaint", "flux2") == "unsupported-generic-flux2-inpaint"
+    assert route_for_packet("image", "flux2_klein") == "flux2-klein-image"
+
+
+def test_unsupported_packet_route_blocks_even_when_model_status_is_ready():
+    gate = model_selection_gate("ready", route="unsupported-generic-flux2-image")
+    assert gate["normalSelectable"] is False
+    assert gate["level"] == "block"
+    packet = build_studio_generation_packet(
+        {"mode": "image", "modelId": "flux2-base", "modelName": "Flux.2 base"},
+        model={
+            "id": "flux2-base",
+            "name": "Flux.2 base",
+            "architecture": "flux2",
+            "engineId": "flux2",
+            "status": "ready",
+        },
+    )
+    assert packet["family"] == "flux2"
+    assert packet["route"] == "unsupported-generic-flux2-image"
+    assert packet["selectionGate"]["normalSelectable"] is False
 
 
 def test_wan_packet_preserves_high_low_lora_and_offload_sidecars() -> None:
@@ -71,6 +102,11 @@ def test_gradio_wan_workflow_json_uses_linear_code_block_schema() -> None:
 def test_model_selection_gate_distinguishes_warning_from_block() -> None:
     assert model_selection_gate("metadata-only")["normalSelectable"] is True
     assert model_selection_gate("metadata-only")["requiresWarning"] is True
+    missing_assets = model_selection_gate("missing-assets")
+    assert missing_assets["normalSelectable"] is False
+    assert missing_assets["level"] == "block"
+    assert missing_assets["status"] == "missing-assets"
+    assert model_selection_gate("ready", route_status="blocked")["normalSelectable"] is False
     assert model_selection_gate("unsupported-no-route")["normalSelectable"] is False
 
 

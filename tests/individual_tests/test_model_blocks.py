@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from aiwf.infrastructure.diffusers.model_blocks import (
     is_non_selectable_image_asset_path,
     known_broken_selectable_image_asset,
@@ -18,6 +20,13 @@ def test_ultralytics_detector_asset_is_not_selectable_checkpoint() -> None:
     assert is_non_selectable_image_asset_path(path)
 
 
+@pytest.mark.parametrize("folder", ["Lora", "Loras"])
+def test_lora_asset_folder_is_not_selectable_as_a_base_checkpoint(folder: str) -> None:
+    path = Path("F:/Ai_Models/AIWF") / folder / "Flux2" / "Realism_Engine_Klein_V2.safetensors"
+
+    assert is_non_selectable_image_asset_path(path)
+
+
 def test_inpaint_named_checkpoint_in_stable_diffusion_dir_stays_selectable() -> None:
     path = Path("models") / "Stable-diffusion" / "realisticVisionV60-inpainting15.safetensors"
 
@@ -32,3 +41,13 @@ def test_known_flux_schema_mismatch_is_blocked() -> None:
     assert block is not None
     assert block.status == "broken-runtime"
     assert "loader-schema mismatch" in block.reason
+
+
+def test_flux_gguf_converter_failure_is_blocked() -> None:
+    path = Path("models") / "flux" / "GGUF" / "unstableRevolutionF2K_AlphaF2K4BQ80.gguf"
+
+    block = known_broken_selectable_image_asset(path)
+
+    assert block is not None
+    assert block.status == "broken-runtime"
+    assert "time_in.in_layer.bias" in block.reason

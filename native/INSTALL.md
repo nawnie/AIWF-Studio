@@ -1,0 +1,11 @@
+# Install AIWF Studio for Windows
+
+Run `native\install.ps1` from an AIWF Studio checkout. It builds the native app in Release mode, copies the executable and Windows App SDK runtime to `native\installed`, and creates a per-user Desktop shortcut. Set `-StudioRoot` to another checkout containing `aiwf\engine_api.py` when needed.
+
+The native shell discovers the project root from its location and starts the bundled checkout's `venv\Scripts\python.exe` for the local engine API. Chat, ComfyUI, Dataset Studio, and ReTrain remain optional external services: the portable manifest can detect them when already running, and their process paths can be supplied in `%LOCALAPPDATA%\AIWF Studio\engines.json` without editing the install. The bridge reads Dataset Studio's token path from `AIWF_DATASET_STUDIO_TOKEN_FILE`, or derives it from `DATASET_STUDIO_STATE`; set one for the target machine because the legacy fallback is `F:\Dataset Studio\api-token.txt`. Service URLs can be changed with the `AIWF_*_URL` environment variables listed in `aiwf\services\unified_bridge.py`.
+
+The installer is per-user and does not request administrator access, download models, install Python dependencies, or modify external engine checkouts. This is an install for an existing AIWF Studio checkout, not a self-contained package: Python dependencies and any optional engine services must already be available. Build prerequisites are Visual Studio 2022 Build Tools with the C++ workload, as documented in `build.ps1`.
+
+The native executable also requires the Microsoft Visual C++ 2015-2022 x64 Redistributable. The installer checks for MSVCP140.dll, VCRUNTIME140.dll, and VCRUNTIME140_1.dll in the build payload or the Windows x64 system directory before copying files. Install the x64 runtime on the target machine if the check reports a missing DLL.
+
+Native engine health checks require a successful HTTP response. Protected Chat and Dataset Studio checks use their local token files. Dataset Studio follows AIWF_DATASET_STUDIO_TOKEN_FILE, then DATASET_STUDIO_STATE/api-token.txt, with the existing F:\Dataset Studio/api-token.txt fallback. A per-user engines.json endpoint named dataset_key_file can override that location.

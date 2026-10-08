@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from pathlib import Path
 from urllib.request import urlretrieve
 
@@ -150,15 +152,33 @@ class EnhanceModelCatalog:
     def ensure_model_path(self, model: EnhanceModel) -> Path:
         existing = Path(model.path)
         if existing.is_file():
-            return existing
+            if existing.stat().st_size > 0:
+                return existing
+            raise RuntimeError(f"Enhance model file is empty and needs manual repair: {existing}")
 
         if model.download_url:
             dest_dir = self.model_dir(model.kind)
             dest = dest_dir / model.filename
-            if not dest.exists():
-                logger.info("Downloading enhance model %s", model.title)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                urlretrieve(model.download_url, dest)
+            if dest.is_file():
+                if dest.stat().st_size > 0:
+                    return dest.resolve()
+                raise RuntimeError(f"Enhance model file is empty and needs manual repair: {dest}")
+            logger.info("Downloading enhance model %s", model.title)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    prefix=f".{dest.name}.", suffix=".download", dir=dest.parent, delete=False
+                ) as temp_file:
+                    temp_path = Path(temp_file.name)
+                urlretrieve(model.download_url, temp_path)
+                if not temp_path.is_file() or temp_path.stat().st_size <= 0:
+                    raise RuntimeError(f"Download for {model.title} returned an empty file.")
+                os.replace(temp_path, dest)
+            except Exception:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+                raise
             return dest.resolve()
 
         raise FileNotFoundError(f"Model file not found for {model.title}: {model.path}")

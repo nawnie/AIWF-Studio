@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { GripVertical, ArrowUp, ArrowDown, X, Copy, Play, Trash2 } from 'lucide-react'
 import type { WorkflowCodeBlock } from '../types'
 import { duplicateWorkflowBlock, renumberWorkflowBlocks, validateWorkflowBlocks } from './workflowBlocks'
+import { WorkflowRunPanel } from './WorkflowRunPanel'
 
 interface WorkflowPanelProps {
   blocks: WorkflowCodeBlock[]
@@ -152,6 +153,7 @@ export function WorkflowPanel({ blocks, onChange, onRun, runLabel = 'Run workflo
       </ol>
 
       {runStatus ? <p className="pro-field-note">{runStatus}</p> : null}
+      <WorkflowRunPanel blocks={blocks} />
     </section>
   )
 }

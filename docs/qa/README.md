@@ -1,5 +1,24 @@
 # QA Pipeline Matrix
 
+## Pro launcher and API readiness (CPU/fake)
+
+These checks validate the Pro launch-status server and its documented health
+surfaces without loading a model or invoking a generation backend:
+
+```powershell
+venv\Scripts\python.exe -m pytest -p no:cacheprovider tests\individual_tests\test_launch.py
+venv\Scripts\python.exe -m pytest -p no:cacheprovider tests\individual_tests\test_pro_api.py -k "startup_endpoint_tracks_window_ready_callback or capabilities_endpoint_reports_gradio_tool_readiness or capabilities_endpoint_reports_pipeline_readiness or capabilities_endpoint_uses_cached_readiness_snapshot or capabilities_endpoint_keeps_working_when_readiness_fails or ping_reports_name_version_and_auth_state"
+```
+
+The launch-status test binds only to loopback on an ephemeral port. It verifies
+that `/api/pro/startup` reports the launcher phase with `launcher: true` and
+`ready: false`, that unknown/API paths return `503` until handoff, and that
+stopping the status server releases its port. The API tests use temporary data
+and fake services to check `/api/pro/startup`, `/api/pro/startup/window-ready`,
+`/api/pro/capabilities`, and `/api/pro/ping`. A pass confirms these launch and
+readiness contracts only; it does not establish model availability or generation
+readiness.
+
 `pipeline_feature_testing_matrix.csv` is an Excel-compatible CSV for route and model QA.
 
 Current release bucket report:

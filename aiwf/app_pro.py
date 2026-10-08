@@ -29,6 +29,8 @@ from aiwf.bootstrap import AppContext, build_context
 from aiwf.core.util.network import find_free_port
 from aiwf.web.pro_api import build_router
 from aiwf.web.ext_api import build_extension_router
+from aiwf.web.civitai_support_api import build_civitai_support_router
+from aiwf.web.unified_api import build_unified_router
 
 logger = logging.getLogger("aiwf")
 
@@ -230,6 +232,50 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="AIWF Studio Pro", middleware=middleware or [])
 
+    @app.on_event("startup")
+    def start_saved_model_load() -> None:
+        """Load the saved, route-ready image model off the startup request path."""
+        if getattr(ctx, "_pro_model_load_started", False):
+            return
+        setattr(ctx, "_pro_model_load_started", True)
+        download_service = getattr(ctx, "model_download", None)
+        recover_snapshots = getattr(download_service, "recover_interrupted_snapshot_replacements", None)
+        if callable(recover_snapshots):
+            try:
+                recover_snapshots()
+            except Exception:
+                logger.exception("Could not recover interrupted model snapshot replacement")
+        from aiwf.services.model_startup import pro_startup_model_loading_enabled
+
+        if not pro_startup_model_loading_enabled():
+            setattr(ctx, "_pro_model_load_state", {
+                "status": "disabled", "modelId": "",
+                "detail": "Startup model loading is disabled by AIWF_PRO_STARTUP_MODEL_LOAD.",
+            })
+            return
+        setattr(ctx, "_pro_model_load_state", {
+            "status": "loading",
+            "modelId": str(getattr(getattr(ctx, "settings", None), "last_checkpoint_id", "") or ""),
+            "detail": "Checking the saved image model and available GPU memory.",
+        })
+
+        def load_saved_model() -> None:
+            try:
+                from aiwf.services.model_startup import preload_pro_image_model
+
+                setattr(ctx, "_pro_model_load_state", preload_pro_image_model(ctx))
+            except Exception as exc:
+                logger.exception("Pro startup model load failed unexpectedly")
+                setattr(ctx, "_pro_model_load_state", {
+                    "status": "failed", "modelId": "", "detail": f"Startup model load failed: {exc}",
+                })
+
+        threading.Thread(
+            target=load_saved_model,
+            name="aiwf-pro-model-startup-load",
+            daemon=True,
+        ).start()
+
     from aiwf.api.security import MobileTokenAuthMiddleware
 
     app.add_middleware(MobileTokenAuthMiddleware, data_dir=Path(ctx.flags.data_dir))
@@ -246,6 +292,9 @@ def create_app(
 
     app.include_router(build_client_log_router(ctx), prefix="/api/v1")
     app.include_router(build_router(ctx))
+    app.include_router(build_civitai_support_router())
+    # Unified workspace bridge: Dataset Studio, ReTrain and Qwen Chat over loopback.
+    app.include_router(build_unified_router(ctx))
     # User extensions: routers registered via ctx.plugins.register_api(id, router)
     # are served under /api/ext/<plugin-id>/. A broken extension must never
     # take the whole app down, so mounting failures are logged and skipped.
@@ -259,6 +308,11 @@ def create_app(
     app.include_router(build_extension_router(ctx))
     _mount_frontend(app, frontend_dist or _frontend_dist())
     return app
+
+
+def _loopback_only_requested() -> bool:
+    """True when the environment asks for a 127.0.0.1-only Pro listener."""
+    return os.environ.get("AIWF_PRO_LOOPBACK_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _log_security_warnings(flags) -> None:
@@ -280,6 +334,13 @@ def run() -> None:
     _configure_logging(flags.data_dir)
     _startup_message("Starting AIWF Studio Pro...")
     _startup_message("Checking your hardware and loading tools...")
+    # Loopback-only profile: AIWF_PRO_LOOPBACK_ONLY=1 forces a 127.0.0.1 bind
+    # even when the saved launch.json has "listen": true. It overrides only the
+    # bind address for this process; launch.json and mobile-pairing settings
+    # are left exactly as they are.
+    if _loopback_only_requested() and flags.listen:
+        flags = flags.model_copy(update={"listen": False})
+        logger.warning("AIWF_PRO_LOOPBACK_ONLY=1: ignoring saved listen=true; binding 127.0.0.1 only.")
     ctx = build_context(flags)
 
     host = "0.0.0.0" if flags.listen else "127.0.0.1"

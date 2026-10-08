@@ -49,7 +49,7 @@ IMAGE_ROUTES: tuple[ImageRoute, ...] = (
     ImageRoute("fluxtraitFLUX2KleinFLUXZ_zImageV2GgufQ4", "Z-Image GGUF", family="z_image"),
     ImageRoute("dreamshaperXL_lightningInpaint", "SDXL inpaint", family="sdxl", mode="inpaint"),
     ImageRoute("realisticVisionV60-inpainting15", "SD 1.5 inpaint", family="sd15", mode="inpaint"),
-    ImageRoute("svdq-int4_r32-qwen-image-lightningv1.0-4steps", "Qwen Nunchaku 4-step", family="qwen_image"),
+    ImageRoute("svdq-int4_r32-qwen-image-lightningv1.0-4steps", "Qwen Nunchaku 4-step", family="qwen_image_nunchaku"),
     ImageRoute("Sana_Sprint_0.6B_1024px_diffusers", "Sana Sprint", family="sana"),
     ImageRoute("FLUX.2-klein-4B", "Flux.2 Klein 4B", family="flux2_klein"),
 )

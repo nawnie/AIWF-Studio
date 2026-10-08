@@ -1,0 +1,70 @@
+{
+  "schema": "aiwf-engines-v1",
+  "note": "Portable defaults. AIWF Studio starts its local API from the nearest project root. Other services are detected when already running; configure their process paths in %LOCALAPPDATA%\\AIWF Studio\\engines.json if you want this app to start them.",
+  "endpoints": {
+    "engine_api": "http://127.0.0.1:7870",
+    "chat": "http://127.0.0.1:8080",
+    "chat_key_file": "%USERPROFILE%\\.llama-chat\\api-key.txt"
+  },
+  "engines": [
+    {
+      "id": "engine-api",
+      "name": "AIWF engine API",
+      "role": "Projects, datasets, training plans and image jobs",
+      "health_url": "http://127.0.0.1:7870/api/pro/unified/describe",
+      "ports": [7870],
+      "color": "#6B8EAD",
+      "uses_gpu": false,
+      "processes": [
+        {
+          "exe": "%AIWF_STUDIO_ROOT%\\venv\\Scripts\\python.exe",
+          "args": ["-m", "aiwf.engine_api", "--port", "7870"],
+          "cwd": "%AIWF_STUDIO_ROOT%",
+          "env": { "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8" },
+          "ready_url": "http://127.0.0.1:7870/api/pro/unified/describe",
+          "ready_timeout_seconds": 60
+        }
+      ]
+    },
+    {
+      "id": "chat",
+      "name": "Chat engine",
+      "role": "External local LLM service",
+      "health_url": "http://127.0.0.1:8080/",
+      "ports": [8080, 8082],
+      "color": "#5BB974",
+      "uses_gpu": true,
+      "processes": []
+    },
+    {
+      "id": "image",
+      "name": "Image engine",
+      "role": "External local ComfyUI service",
+      "health_url": "http://127.0.0.1:8188/system_stats",
+      "ports": [8188],
+      "color": "#3A96DD",
+      "uses_gpu": true,
+      "processes": []
+    },
+    {
+      "id": "datasets",
+      "name": "Dataset engine",
+      "role": "External Dataset Studio service",
+      "health_url": "http://127.0.0.1:8796/api/health",
+      "ports": [8796],
+      "color": "#B146C2",
+      "uses_gpu": false,
+      "processes": []
+    },
+    {
+      "id": "training",
+      "name": "Training engine",
+      "role": "External ReTrain service",
+      "health_url": "http://127.12.6.3:8787/api/retrain/datasets/import-capability",
+      "ports": [8787],
+      "color": "#F7630C",
+      "uses_gpu": true,
+      "processes": []
+    }
+  ]
+}

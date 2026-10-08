@@ -6,6 +6,9 @@ from pydantic import BaseModel, Field, field_validator
 
 SANA_VIDEO_MODEL_REPO_480P = "Efficient-Large-Model/SANA-Video_2B_480p_diffusers"
 SANA_VIDEO_MODEL_REPO_720P = "Efficient-Large-Model/SANA-Video_2B_720p_diffusers"
+SANA_VIDEO_MODEL_VARIANT_480P = "480p"
+SANA_VIDEO_MODEL_VARIANT_720P = "720p"
+SANA_VIDEO_MODEL_VARIANTS = (SANA_VIDEO_MODEL_VARIANT_480P, SANA_VIDEO_MODEL_VARIANT_720P)
 SANA_VIDEO_PIPELINE_T2V = "text_to_video"
 SANA_VIDEO_PIPELINE_I2V = "image_to_video"
 SANA_VIDEO_PIPELINES = (SANA_VIDEO_PIPELINE_T2V, SANA_VIDEO_PIPELINE_I2V)
@@ -39,6 +42,7 @@ class SanaVideoRequest(BaseModel):
     source_image_path: str | None = None
     pipeline: str = SANA_VIDEO_PIPELINE_T2V
     model_path: str = ""
+    model_variant: str = SANA_VIDEO_MODEL_VARIANT_480P
     width: int = Field(default=832, ge=128, le=2048)
     height: int = Field(default=480, ge=128, le=2048)
     frames: int = Field(default=81, ge=1, le=257)
@@ -69,6 +73,14 @@ class SanaVideoRequest(BaseModel):
             normalized = SANA_VIDEO_PIPELINE_I2V
         if normalized not in SANA_VIDEO_PIPELINES:
             raise ValueError(f"pipeline must be one of {SANA_VIDEO_PIPELINES}, got {value!r}")
+        return normalized
+
+    @field_validator("model_variant")
+    @classmethod
+    def _validate_model_variant(cls, value: str) -> str:
+        normalized = (value or SANA_VIDEO_MODEL_VARIANT_480P).strip().lower().replace("_", "")
+        if normalized not in SANA_VIDEO_MODEL_VARIANTS:
+            raise ValueError(f"model_variant must be one of {SANA_VIDEO_MODEL_VARIANTS}, got {value!r}")
         return normalized
 
     @field_validator("quantization")
@@ -153,6 +165,15 @@ class SanaVideoProgressEvent(BaseModel):
 
 def sana_video_model_folder_name(repo_id: str = SANA_VIDEO_MODEL_REPO_480P) -> str:
     return repo_id.split("/", 1)[-1]
+
+
+def sana_video_repo_for_variant(variant: str) -> str:
+    normalized = str(variant or SANA_VIDEO_MODEL_VARIANT_480P).strip().lower().replace("_", "")
+    if normalized == SANA_VIDEO_MODEL_VARIANT_720P:
+        return SANA_VIDEO_MODEL_REPO_720P
+    if normalized == SANA_VIDEO_MODEL_VARIANT_480P:
+        return SANA_VIDEO_MODEL_REPO_480P
+    raise ValueError(f"Unsupported Sana Video model variant: {variant!r}")
 
 
 def resolve_sana_video_path(raw: str | None, default: Path, root: Path) -> Path:

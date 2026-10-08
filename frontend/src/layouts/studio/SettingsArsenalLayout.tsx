@@ -15,6 +15,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import type { LayoutProps, TabsProps } from './LayoutTypes'
 import { saveUserTabs } from './studioApiClient'
+import { formatStudioModelLabel } from './modelLabels'
 import './studioLayouts.css'
 
 type SettingSection = 'generation' | 'samplers' | 'hires' | 'inpaint' | 'control' | 'lora' | 'output' | 'paths' | 'ui-tabs' | 'agent'
@@ -81,7 +82,7 @@ export function SettingsArsenalLayout({
           <SettingsGrid>
             <Field label="Prompt default"><textarea value={settings.prompt} rows={4} onChange={(event) => onSettingsChange((current) => ({ ...current, prompt: event.target.value }))} /></Field>
             <Field label="Negative prompt"><textarea value={settings.negativePrompt} rows={4} onChange={(event) => onSettingsChange((current) => ({ ...current, negativePrompt: event.target.value }))} /></Field>
-            <Field label="Checkpoint"><select value={settings.modelId} onChange={(event) => onSettingsChange((current) => ({ ...current, modelId: event.target.value }))}>{bootstrap.models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></Field>
+            <Field label="Checkpoint"><select value={settings.modelId} onChange={(event) => onSettingsChange((current) => ({ ...current, modelId: event.target.value }))}>{bootstrap.models.map((model) => <option key={model.id} value={model.id}>{formatStudioModelLabel(model, bootstrap.models)}</option>)}</select></Field>
             <Field label="Width"><input type="number" value={settings.width} onChange={(event) => onSettingsChange((current) => ({ ...current, width: Number(event.target.value) }))} /></Field>
             <Field label="Height"><input type="number" value={settings.height} onChange={(event) => onSettingsChange((current) => ({ ...current, height: Number(event.target.value) }))} /></Field>
             <Field label="Batch size"><input type="number" min="1" max="4" value={settings.batchSize} onChange={(event) => onSettingsChange((current) => ({ ...current, batchSize: Number(event.target.value) }))} /></Field>

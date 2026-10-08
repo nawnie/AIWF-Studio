@@ -259,6 +259,8 @@ export function ProjectCenterLayout({
     if (job) {
       setQueue((current) => [job, ...current])
       setMessage('Workflow added to render queue.')
+    } else {
+      setMessage('Could not confirm the workflow was added. Check the queue and server status before retrying.')
     }
   }
 

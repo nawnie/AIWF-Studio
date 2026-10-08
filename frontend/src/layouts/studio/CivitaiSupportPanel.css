@@ -1,0 +1,97 @@
+.studio-civitai-support {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--studio-line, rgba(255, 255, 255, 0.1));
+  border-radius: 18px;
+  background: var(--studio-panel, rgba(12, 20, 26, 0.72));
+}
+
+.studio-civitai-support-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+}
+
+.studio-civitai-support-heading .studio-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.studio-civitai-support-heading h2 {
+  margin: 8px 0 5px;
+  font-size: 1.15rem;
+}
+
+.studio-civitai-support-heading p {
+  max-width: 780px;
+  margin: 0;
+  color: var(--studio-muted, #9eacb2);
+  font-size: 0.88rem;
+}
+
+.studio-civitai-support-heading > small {
+  white-space: nowrap;
+  color: var(--studio-muted, #9eacb2);
+}
+
+.studio-civitai-limitations {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 16px;
+  padding: 12px 14px 12px 32px;
+  border-radius: 12px;
+  background: rgba(219, 166, 79, 0.09);
+  color: var(--studio-muted, #c8c3b3);
+  font-size: 0.8rem;
+}
+
+.studio-civitai-grid {
+  overflow: auto;
+  border: 1px solid var(--studio-line, rgba(255, 255, 255, 0.1));
+  border-radius: 12px;
+}
+
+.studio-civitai-row {
+  display: grid;
+  grid-template-columns: minmax(145px, 0.8fr) minmax(240px, 1.7fr) minmax(240px, 1.7fr) minmax(230px, 1.5fr);
+  gap: 12px;
+  align-items: start;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--studio-line, rgba(255, 255, 255, 0.08));
+}
+
+.studio-civitai-row:last-child { border-bottom: 0; }
+
+.studio-civitai-row-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--studio-panel, #111b22);
+  color: var(--studio-muted, #9eacb2);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.studio-civitai-row strong { font-size: 0.86rem; }
+.studio-civitai-row p { margin: 0; color: var(--studio-muted, #b0bdc2); font-size: 0.8rem; line-height: 1.45; }
+
+.studio-civitai-support-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 110px;
+  color: var(--studio-muted, #9eacb2);
+}
+
+.studio-civitai-spin { animation: studio-civitai-spin 1s linear infinite; }
+@keyframes studio-civitai-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 900px) {
+  .studio-civitai-support-heading { flex-direction: column; }
+  .studio-civitai-row { min-width: 900px; }
+}

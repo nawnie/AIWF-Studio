@@ -68,11 +68,14 @@ def _write_5b_preflight_fixtures(service: WanService) -> tuple[Path, Path]:
     base = service.models_dir() / "Diffusers" / "Wan2.2-TI2V-5B-Diffusers"
     for sub in ("text_encoder", "tokenizer", "scheduler"):
         (base / sub).mkdir(parents=True)
-    (base / "model_index.json").write_text("{}", encoding="utf-8")
-    (base / "text_encoder" / "config.json").write_text("{}", encoding="utf-8")
+    (base / "model_index.json").write_text('{"_class_name": "WanPipeline"}', encoding="utf-8")
+    (base / "text_encoder" / "config.json").write_text('{"hidden_size": 8}', encoding="utf-8")
     (base / "text_encoder" / "model.safetensors").write_bytes(b"fake")
-    (base / "tokenizer" / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (base / "scheduler" / "scheduler_config.json").write_text("{}", encoding="utf-8")
+    (base / "tokenizer" / "tokenizer.json").write_text('{"version": "1.0"}', encoding="utf-8")
+    (base / "scheduler" / "scheduler_config.json").write_text(
+        '{"_class_name": "FlowMatchEulerDiscreteScheduler"}', encoding="utf-8"
+    )
+    assert service._is_components_base(base)
 
     torch = pytest.importorskip("torch")
     safetensors = pytest.importorskip("safetensors.torch")

@@ -68,8 +68,9 @@ def _engine_markdown(status) -> str:
 
 def _minimum_setup_markdown(status: dict) -> str:
     components = status.get("components") or []
+    runtime_checked = bool(status.get("runtimeChecksPerformed"))
     rows = [
-        f"{'Ready' if item.get('ready') else 'Needs setup'}: **{item.get('label', 'Audio component')}**"
+        f"{'Needs setup' if not item.get('ready') else 'Ready' if runtime_checked else 'Detected'}: **{item.get('label', 'Audio component')}**"
         for item in components
     ]
     detail = " · ".join(rows)

@@ -132,8 +132,18 @@ def _foreground_model_work_active(ctx) -> bool:
 def _background_model_warmup(ctx) -> None:
     if os.environ.get("AIWF_BACKGROUND_WARMUP", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
-    checkpoint_id = (ctx.settings.last_checkpoint_id or "").strip()
+    try:
+        # Resolve stale saved selections through the same readiness-aware
+        # choice used by Pro. The backend's model resolver must receive a
+        # concrete catalog ID, never an unknown ID that could select row 0.
+        from aiwf.web.pro_api import _settings_defaults
+
+        checkpoint_id = str(_settings_defaults(ctx).get("checkpointId") or "").strip()
+    except Exception:
+        logger.exception("Background warmup could not resolve a ready startup model")
+        return
     if not checkpoint_id:
+        logger.info("Background warmup skipped because no ready local image model is available.")
         return
     try:
         if _foreground_model_work_active(ctx):

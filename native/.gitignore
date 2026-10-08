@@ -1,0 +1,16 @@
+# build outputs and restored NuGet packages (recreated by build.ps1)
+bin/
+obj/
+packages/
+.vs/
+/_verify/
+/installed/
+*.user
+# copied build payloads kept for acceptance runs (rebuild with build.ps1)
+/mvp-candidate-*/
+
+# The repository root ignores every engines.json and assets/ folder (local engine configs and
+# generated assets). The native app needs these two: the portable engine list shipped next to
+# AIWFStudio.exe, and the app icon compiled into it.
+!AIWF.Desktop/engines.json
+!AIWF.Desktop/Assets/

@@ -5,6 +5,7 @@ from typing import Literal
 
 ModelCategory = Literal[
     "checkpoint",
+    "sd_singlefile_config",
     "lora",
     "vae",
     "controlnet",
@@ -26,10 +27,13 @@ ModelCategory = Literal[
     "flux_unet_gguf",
     "flux_text_encoder",
     "flux_vae",
+    "flux_tokenizer",
     "flux2_unet_safetensor",
     "flux2_unet_gguf",
     "flux2_components",
     "flux2_diffusers",
+    "flux_kontext_diffusers",
+    "flux_kontext_components",
     "z_image_unet_safetensor",
     "z_image_unet_gguf",
     "z_image_components",
@@ -51,6 +55,7 @@ ModelCategory = Literal[
     "ltx_vae",
     "ltx_audio_vae",
     "ltx_text_encoder",
+    "ltx_tokenizer",
     "llm_gguf",
     "llm_safetensor",
     "rife",
@@ -83,6 +88,8 @@ class CatalogEntry:
     # Hugging Face snapshot downloads are directory-shaped assets; ordinary
     # entries resolve to a single file under the category destination.
     snapshot: bool = False
+    # Optional safe subset for large repositories. Empty means whole-repo snapshot.
+    snapshot_allow_patterns: tuple[str, ...] = ()
     coming_soon: bool = False
 
     def choice_label(self, *, installed: bool = False) -> str:

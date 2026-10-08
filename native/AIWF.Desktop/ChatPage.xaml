@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Chat: talk to local models on the chat engine (llama.cpp with CUDA, OpenAI-compatible API).
+  Replies stream token by token; a reasoning model's thinking is shown dimmed above its answer,
+  so a bubble is never blank while the model thinks. "Project context" adds the focused
+  project's context card (IDs and counts only) as a system message. Bubbles are built in code.
+-->
+<Page
+    x:Class="AiwfDesktop.ChatPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AiwfDesktop"
+    NavigationCacheMode="Required">
+    <Grid Padding="{StaticResource PagePadding}" RowSpacing="12" MaxWidth="1240">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- header: the title and a one-line description, then the conversation controls on their own row,
+             so at small window sizes neither squeezes the other and the conversation keeps its height -->
+        <StackPanel Spacing="10">
+            <Grid ColumnSpacing="14">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Chat" Style="{StaticResource TitleTextBlockStyle}" VerticalAlignment="Bottom" />
+                <TextBlock Grid.Column="1" Text="Local language models on your GPU. Conversations never leave this PC."
+                           Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.75" VerticalAlignment="Bottom" Margin="0,0,0,5"
+                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+            </Grid>
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ComboBox x:Name="ModelPicker" MinWidth="180" MaxWidth="460" HorizontalAlignment="Stretch" PlaceholderText="Choose a model"
+                          AutomationProperties.Name="Model" />
+                <ToggleSwitch x:Name="ContextToggle" Grid.Column="1" OnContent="Project context" OffContent="Project context" MinWidth="0"
+                              VerticalAlignment="Center"
+                              ToolTipService.ToolTip="When enabled, the focused project context is sent and your question is saved in that project's local history."
+                              AutomationProperties.Name="Include project context" />
+                <Button x:Name="NewChatButton" Grid.Column="2" Click="NewChat_Click" AutomationProperties.Name="New chat">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE710;" FontSize="14" />
+                        <TextBlock Text="New chat" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+        </StackPanel>
+
+        <!-- shown when the chat engine is off -->
+        <InfoBar x:Name="EngineBar" Grid.Row="1" IsOpen="False" IsClosable="False">
+            <InfoBar.ActionButton>
+                <Button Content="Start chat engine" Click="StartEngine_Click" />
+            </InfoBar.ActionButton>
+        </InfoBar>
+
+        <!-- the conversation -->
+        <Border Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0">
+            <ScrollViewer x:Name="MessagesScroll" Padding="20,16,20,16">
+                <StackPanel x:Name="Messages" Spacing="14">
+                    <StackPanel x:Name="EmptyState" Spacing="8" Margin="0,32,0,0" HorizontalAlignment="Center" MaxWidth="520">
+                        <FontIcon Glyph="&#xE8BD;" FontSize="40" Opacity="0.5" />
+                        <TextBlock Text="Ask anything" Style="{StaticResource SubtitleTextBlockStyle}" HorizontalAlignment="Center" />
+                        <TextBlock Text="Replies stream from the model running on this PC's GPU. Pick a model above; one that is not loaded yet loads on your first message."
+                                   Style="{StaticResource BodyTextBlockStyle}" Opacity="0.7" TextAlignment="Center" TextWrapping="Wrap" />
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <!-- composer -->
+        <Grid Grid.Row="3" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="MessageInput" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="44" MaxHeight="180" MaxLength="4000"
+                     PlaceholderText="Message your local model  (Enter sends, Shift+Enter adds a line)"
+                     PreviewKeyDown="MessageInput_PreviewKeyDown" AutomationProperties.Name="Message" />
+            <Grid Grid.Column="1" VerticalAlignment="Bottom">
+                <Button x:Name="SendButton" Style="{StaticResource AccentButtonStyle}" Click="Send_Click" MinHeight="44" MinWidth="96"
+                        AutomationProperties.Name="Send">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE724;" FontSize="14" />
+                        <TextBlock Text="Send" />
+                    </StackPanel>
+                </Button>
+                <Button x:Name="StopButton" Click="Stop_Click" MinHeight="44" MinWidth="96" Visibility="Collapsed"
+                        AutomationProperties.Name="Stop">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE71A;" FontSize="14" />
+                        <TextBlock Text="Stop" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+        </Grid>
+
+        <TextBlock x:Name="ChatStatus" Grid.Row="4" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.65" TextWrapping="Wrap" />
+    </Grid>
+</Page>

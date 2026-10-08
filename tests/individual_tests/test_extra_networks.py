@@ -120,3 +120,51 @@ def test_apply_loras_reloads_changed_adapter_stack(tmp_path):
     assert pipe.loaded[0][1]["weight_name"] == "style_a.safetensors"
     assert pipe.loaded[1][1]["weight_name"] == "style_b.safetensors"
     assert pipe.adapters == (["aiwf_lora_0"], [0.4])
+
+
+def test_apply_loras_reloads_when_file_changes_at_same_path(tmp_path):
+    path = tmp_path / "style.safetensors"
+    path.write_bytes(b"old")
+    catalog = [LoraInfo(id="style", title="Style", filename=path.name, path=str(path), architecture="sd15")]
+    pipe = FakeLoraPipe()
+    ref = [LoraRef("style", 0.7)]
+    apply_loras(pipe, ref, catalog, base_architecture="sd15")
+    original_stat = path.stat()
+    path.write_bytes(b"replacement")
+    import os
+    os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000))
+
+    apply_loras(pipe, ref, catalog, base_architecture="sd15")
+
+    assert len(pipe.loaded) == 2
+    assert pipe.unloaded == 2
+
+
+def test_apply_loras_fails_clearly_and_clears_old_stack_when_requested_lora_is_missing():
+    pipe = FakeLoraPipe()
+    pipe._aiwf_lora_signature = "previous"
+    pipe._aiwf_lora_adapters = ["old"]
+
+    with pytest.raises(ValueError, match="not found"):
+        apply_loras(pipe, [LoraRef("missing", 1.0)], [])
+
+    assert pipe._aiwf_lora_signature == ""
+    assert pipe._aiwf_lora_adapters == []
+    assert pipe.unloaded == 1
+
+
+def test_apply_loras_does_not_cache_a_failed_load():
+    class BrokenPipe(FakeLoraPipe):
+        def load_lora_weights(self, _path, **_kwargs):
+            raise RuntimeError("bad adapter")
+
+    path = "missing-on-disk.safetensors"
+    lora = LoraInfo(id="style", title="Style", filename=path, path=path, architecture="sd15")
+    pipe = BrokenPipe()
+
+    with pytest.raises(ValueError, match="Failed to load requested LoRA"):
+        apply_loras(pipe, [LoraRef("style", 1.0)], [lora], base_architecture="sd15")
+
+    assert pipe._aiwf_lora_signature == ""
+    assert pipe._aiwf_lora_adapters == []
+    assert pipe.unloaded == 2

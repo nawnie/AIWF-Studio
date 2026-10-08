@@ -44,6 +44,7 @@ class CivitAIModel:
     stats_rating: float = 0.0
     creator: str = ""
     versions: list[CivitAIModelVersion] = field(default_factory=list)
+    supports_generation: bool | None = None
 
     @property
     def url(self) -> str:
@@ -78,6 +79,8 @@ class CivitAIModel:
         v = self.latest_version
         lines: list[str] = [f"### [{self.name}]({self.url})"]
         lines.append(f"*{self.type}*  ·  ⬇ {self.stats_downloads:,}")
+        if self.supports_generation is not None:
+            lines.append(f"Civitai site generation: {'supported' if self.supports_generation else 'not marked supported'}")
         if v:
             lines.append(f"Base: `{v.base_model}`  ·  Size: {v.size_label()}")
             if v.trigger_words:

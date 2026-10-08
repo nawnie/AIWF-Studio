@@ -1,0 +1,64 @@
+.audio-project-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.audio-project-controls button,
+.audio-project-dialog input,
+.audio-project-dialog select {
+  font: inherit;
+}
+
+.audio-project-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(8 12 18 / 72%);
+}
+
+.audio-project-dialog {
+  width: min(100%, 28rem);
+  padding: 1.25rem;
+  border: 1px solid rgb(148 163 184 / 28%);
+  border-radius: 0.9rem;
+  color: #e8eef6;
+  background: #151d27;
+  box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 45%);
+}
+
+.audio-project-dialog h2 {
+  margin: 0 0 1rem;
+  font-size: 1rem;
+}
+
+.audio-project-dialog label {
+  display: grid;
+  gap: 0.45rem;
+  color: #aeb9c7;
+  font-size: 0.8rem;
+}
+
+.audio-project-dialog input,
+.audio-project-dialog select {
+  min-width: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgb(148 163 184 / 32%);
+  border-radius: 0.55rem;
+  color: #e8eef6;
+  background: #0c1219;
+}
+
+.audio-project-dialog [role='alert'] {
+  color: #ffb2a9;
+}
+
+.audio-project-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}

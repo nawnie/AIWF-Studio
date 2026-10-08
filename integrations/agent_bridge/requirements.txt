@@ -1,0 +1,6 @@
+# Runtime for the AIWF Studio MCP server (aiwf_studio_mcp.py).
+# Environment: F:\environments\aiwf-studio-agent-py312 (Python 3.12, created 2026-10-06).
+# Recreate: <python3.12> -m venv F:\environments\aiwf-studio-agent-py312
+#           F:\environments\aiwf-studio-agent-py312\Scripts\python.exe -m pip install -r requirements-lock.txt
+# The CLI (aiwf_studio_cli.py) needs only the Python standard library.
+mcp[cli]>=2.3,<3

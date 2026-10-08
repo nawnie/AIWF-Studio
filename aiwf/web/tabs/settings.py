@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import os
 import platform
-import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
 from collections.abc import Callable
 from pathlib import Path
 
@@ -24,6 +22,7 @@ from aiwf.services.model_path_imports import (
 )
 from aiwf.services.pipeline_registry import PipelineRegistry
 from aiwf.services.worker_probe import WorkerProbeService
+from aiwf.services.ltx_engine_setup import start_ltx_engine_install
 from aiwf.services.worker_tenant import WorkerTenantRegistry
 from aiwf.web.registry import PINNED_TABS, WebRegistry
 from aiwf.web.theme import accent_preset_names
@@ -268,40 +267,15 @@ def _probe_worker_markdown(engine: str) -> str:
 
 def _start_ltx_install_markdown() -> str:
     root = WorkerTenantRegistry().repo_root
-    script = root / "scripts" / "bootstrap_ltx.ps1"
-    if not script.is_file():
-        return f"**LTX install unavailable:** bootstrap script missing at `{script}`"
-
-    log_dir = root / "outputs" / "engine-installs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"ltx-bootstrap-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
-    command = [
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(script),
-        "-Enable",
-    ]
-    out = open(log_path, "w", encoding="utf-8", errors="replace")
-    popen_kwargs = {
-        "cwd": str(root),
-        "stdout": out,
-        "stderr": subprocess.STDOUT,
-        "stdin": subprocess.DEVNULL,
-    }
-    if os.name == "nt":
-        popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
-        subprocess.Popen(command, **popen_kwargs)
-        out.close()
+        result = start_ltx_engine_install(root)
     except Exception as exc:
-        out.close()
         return f"**LTX install failed to start:** `{exc}`"
+    if result["status"] == "already_running":
+        return f"**LTX 2.3 install is already running.**  \nLog: `{result['logPath']}`"
     return (
         "**LTX 2.3 install started.**  \n"
-        f"Log: `{log_path}`  \n"
+        f"Log: `{result['logPath']}`  \n"
         "When the install finishes, refresh this panel and probe the LTX engine."
     )
 
@@ -1019,7 +993,7 @@ def register_settings(registry: WebRegistry) -> None:
                                     label="ONNX models directory",
                                     value=ctx.settings.onnx_model_dir,
                                     placeholder=r"C:\models\onnx  (leave blank → models/onnx inside data_dir)",
-                                    info="Folder with text_encoder/, unet/, and vae_decoder/ subdirs.",
+                                    info="Root folder containing one or more complete ONNX model folders, each with text_encoder/, unet/, vae_decoder/, and tokenizer/.",
                                 )
                                 engine_onnx_provider = gr.Radio(
                                     label="ORT execution provider",

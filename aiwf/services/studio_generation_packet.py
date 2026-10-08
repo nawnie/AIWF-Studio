@@ -100,6 +100,7 @@ def _first(settings: dict[str, Any], *keys: str, default: Any = None) -> Any:
 
 
 def infer_model_family(*, model_id: str = "", model_name: str = "", architecture: str = "", engine_id: str = "", backend: str = "") -> str:
+    normalized_architecture = architecture.strip().lower().replace("-", "_")
     text = " ".join([model_id, model_name, architecture, engine_id, backend]).lower()
     if "wan" in text:
         return "wan"
@@ -107,8 +108,10 @@ def infer_model_family(*, model_id: str = "", model_name: str = "", architecture
         return "sana_video"
     if "ltx" in text:
         return "ltx"
-    if "flux2" in text or "flux.2" in text or "klein" in text:
+    if normalized_architecture == "flux2_klein" or "klein" in text or re.search(r"(?<![a-z0-9])f2k(?![a-z0-9])", text):
         return "flux2_klein"
+    if "flux2" in text or "flux.2" in text:
+        return "flux2"
     if "flux" in text:
         return "flux"
     if "qwen" in text or "nunchaku" in text:
@@ -133,6 +136,10 @@ def infer_model_family(*, model_id: str = "", model_name: str = "", architecture
 def route_for_packet(mode: str, family: str) -> str:
     normalized_mode = (mode or "image").strip().lower()
     normalized_family = (family or "unknown").strip().lower()
+    if normalized_family == "flux2":
+        return f"unsupported-generic-flux2-{normalized_mode}"
+    if normalized_family == "flux_kontext" and normalized_mode != "image":
+        return f"unsupported-flux-kontext-{normalized_mode}"
     if normalized_mode == "inpaint":
         return "flux-fill-inpaint" if normalized_family == "flux" else "inpaint"
     if normalized_mode in {"video", "i2v", "t2v"}:
@@ -144,6 +151,7 @@ def route_for_packet(mode: str, family: str) -> str:
             return "ltx-video"
         return "image-to-video"
     return {
+        "flux2": "unsupported-generic-flux2-image",
         "flux2_klein": "flux2-klein-image",
         "qwen_image": "qwen-image",
         "z_image": "z-image",
@@ -192,13 +200,25 @@ def detect_precision_label(*values: Any) -> str:
     return "auto"
 
 
-def model_selection_gate(status: str | None, *, reason: str = "", suggested_action: str = "") -> dict[str, Any]:
-    normalized = _clean_string(status, "metadata-only").lower()
-    if normalized in BLOCKING_MODEL_STATUSES:
+def model_selection_gate(status: str | None, *, route: str = "", route_status: str = "", reason: str = "", suggested_action: str = "") -> dict[str, Any]:
+    normalized = _clean_string(status, "metadata-only").lower().replace("_", "-").replace(" ", "-")
+    normalized_route = _clean_string(route).lower()
+    normalized_route_status = _clean_string(route_status).lower().replace("_", "-").replace(" ", "-")
+    if normalized_route.startswith("unsupported-"):
         return {
             "normalSelectable": False,
             "level": "block",
             "status": normalized,
+            "route": normalized_route,
+            "reason": reason or "This model family does not have a supported route for the selected generation mode.",
+            "suggestedAction": suggested_action or "Choose a model with a supported route for this mode.",
+        }
+    if normalized in BLOCKING_MODEL_STATUSES or normalized in {"missing-assets", "blocked-runtime"} or normalized_route_status == "blocked":
+        return {
+            "normalSelectable": False,
+            "level": "block",
+            "status": normalized,
+            "routeStatus": normalized_route_status,
             "reason": reason or "This asset is blocked from normal generation selection.",
             "suggestedAction": suggested_action or "Keep it visible for QA, but do not run it until the family route is implemented or fixed.",
         }
@@ -292,6 +312,8 @@ def build_studio_generation_packet(
     status = _clean_string(model_record.get("status") or settings.get("modelStatus") or settings.get("status"), "metadata-only")
     selection_gate = model_selection_gate(
         status,
+        route=route,
+        route_status=_clean_string(model_record.get("routeStatus") or model_record.get("route_status")),
         reason=_clean_string(model_record.get("reason") or settings.get("reason")),
         suggested_action=_clean_string(model_record.get("suggestedAction") or model_record.get("suggested_action") or settings.get("suggestedAction")),
     )
@@ -316,6 +338,7 @@ def build_studio_generation_packet(
             "architecture": architecture,
             "backend": backend,
             "status": status,
+            "routeStatus": _clean_string(model_record.get("routeStatus") or model_record.get("route_status"), "unknown"),
             "reason": _clean_string(model_record.get("reason") or settings.get("reason")),
             "suggestedAction": _clean_string(model_record.get("suggestedAction") or model_record.get("suggested_action") or settings.get("suggestedAction")),
             "assetSummary": _clean_string(model_record.get("assetSummary") or model_record.get("asset_summary") or settings.get("assetSummary")),

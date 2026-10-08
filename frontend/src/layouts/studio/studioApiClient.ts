@@ -51,6 +51,21 @@ export interface ModelFamilyMatrix {
   families: ModelFamily[]
 }
 
+export interface CivitaiResourceSupport {
+  id: string
+  label: string
+  generation: string
+  training: string
+  verification: string
+}
+export interface CivitaiSupportCatalog {
+  schema: string
+  generatedAt: string
+  source: string
+  limitations: string[]
+  resources: CivitaiResourceSupport[]
+}
+
 const USER_TAB_STORAGE_KEY = 'aiwf.userTabs.v4'
 const PROJECT_AUTOSAVE_STORAGE_KEY = 'aiwf.projectAutosave.v4'
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -395,4 +410,8 @@ export function fallbackModelFamilyMatrix(): ModelFamilyMatrix {
 
 export async function fetchModelFamilies(): Promise<ModelFamilyMatrix> {
   return requestJson<ModelFamilyMatrix>('/api/pro/model-families')
+}
+
+export async function fetchCivitaiSupport(): Promise<CivitaiSupportCatalog> {
+  return requestJson<CivitaiSupportCatalog>('/api/pro/civitai/support')
 }

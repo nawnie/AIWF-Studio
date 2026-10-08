@@ -180,3 +180,9 @@ node_modules/
 
 # Local research output (not runtime)
 research runs/
+
+# agent working notes and read-only audits (kept locally and on the AES wiki, not release docs)
+/work/
+/backend-switching.md
+/routes-lifecycle.md
+/codex-*-audit-*.md

@@ -160,7 +160,7 @@ def build_studio_tab(ctx: AppContext, tab: gr.Tab | None = None) -> None:
                         choices=[
                             "All",
                             "Flux",
-                            "Flux 2",
+                            "Flux.2 Klein",
                             "Stable Diffusion 1.5",
                             "Stable Diffusion XL",
                             "Stable Diffusion 3.5",

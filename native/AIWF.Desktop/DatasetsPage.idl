@@ -1,0 +1,9 @@
+namespace AiwfDesktop
+{
+    // Datasets: published text packages and cataloging Studio images
+    [default_interface]
+    runtimeclass DatasetsPage : Microsoft.UI.Xaml.Controls.Page
+    {
+        DatasetsPage();
+    }
+}

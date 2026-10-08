@@ -309,9 +309,10 @@ def load_universal_conditioner(
         from ute.integrations import load_flux_conditioner
     except ImportError as exc:
         raise ModelNotFoundError(
-            "The universal-text-encoder package is not installed in the AIWF "
-            "runtime. Install the reviewed scaffold with `pip install -e <path>` "
-            "before enabling universal mode."
+            "Flux universal conditioning needs the `ute.integrations` runtime "
+            "package, but AIWF does not currently provide a verified installation "
+            "source for it. Do not install a package by name alone. Use Flux "
+            "Teacher or DistillT5-Control until a verified integration is configured."
         ) from exc
 
     return load_flux_conditioner(

@@ -48,6 +48,17 @@ def test_flux_routes_have_bounded_txt2img_smoke_plan():
     assert all(route["command"][:3] == expected_prefix for route in flux_routes)
 
 
+def test_qwen_nunchaku_smoke_plan_keeps_its_distinct_engine_identity():
+    plan = route_smoke_plan(_selected_routes([], []))
+    route = next(
+        route for route in plan["routes"]
+        if route["checkpoint_id"] == "svdq-int4_r32-qwen-image-lightningv1.0-4steps"
+    )
+
+    assert route["label"] == "Qwen Nunchaku 4-step"
+    assert route["family"] == "qwen_image_nunchaku"
+
+
 def test_full_qwen_image_is_large_opt_in_route():
     default_ids = [route.checkpoint_id for route in _selected_routes([], [])]
     large_ids = [route.checkpoint_id for route in _selected_routes([], [], include_large=True)]

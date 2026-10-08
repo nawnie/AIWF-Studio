@@ -14,6 +14,10 @@ should be boring, explicit, and safe to run from PowerShell on Windows.
 - `verify_engine.ps1`: probes an engine worker with a small JSON request.
 - `run_tests.py`: groups pytest files into practical suites so maintainers do
   not need to remember every test filename.
+- `install_aiwf_studio.ps1 -UseBackendLock`: opt into the pinned Windows AMD64
+  CPython 3.12 backend lock. It requires Python `>=3.12.13,<3.13`, uses uv's
+  per-package PyTorch CUDA 13.0 index mapping, and retains extra packages in an
+  existing app venv. The normal installer remains unchanged on other paths.
 
 ## Script Conventions
 
@@ -36,7 +40,13 @@ python scripts/run_tests.py --test test_launch.py --pytest-arg=-x
 .\scripts\bootstrap_engine.ps1 -Name wan
 .\scripts\bootstrap_ltx.ps1 -Enable
 .\scripts\verify_engine.ps1 -Name wan
+.\scripts\install_aiwf_studio.ps1 -Mode express -UseBackendLock
 ```
+
+The locked installer option is Windows AMD64 only. It stops with a clear error
+for an unsupported host or Python version rather than falling back to a
+different lock. The dedicated lock and FilterPy build constraints are under
+`dependencies/windows-py312/`.
 
 When a script installs heavy ML packages, note the expected Python/CUDA target in
 the script or engine README. Dependency changes should also be reflected in

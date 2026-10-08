@@ -14,8 +14,18 @@ from aiwf.infrastructure.diffusers.model_arch import (
     is_sdxl_architecture,
 )
 from aiwf.infrastructure.diffusers.loras import resolve_lora
+from aiwf.services.route_lifecycle import support_revision
 
 logger = logging.getLogger(__name__)
+
+
+def _reset_lora_state(pipe) -> None:
+    clear_loras(pipe)
+    for name, value in (("_aiwf_lora_signature", ""), ("_aiwf_lora_adapters", [])):
+        try:
+            setattr(pipe, name, value)
+        except Exception:
+            pass
 
 
 def lora_compatible_with_base(base_architecture: str | None, lora_architecture: str | None) -> bool:
@@ -44,7 +54,7 @@ def _lora_signature(
         if match is None:
             parts.append(f"missing:{ref.name}:{ref.weight}")
             continue
-        parts.append(f"{match.path}:{ref.weight}")
+        parts.append(f"{match.path}:{support_revision([match.path])}:{ref.weight}")
     return "|".join(parts)
 
 
@@ -57,9 +67,7 @@ def apply_loras(
 ) -> list[str]:
     """Load LoRA adapters onto an active diffusers pipeline. Returns adapter names."""
     if not loras:
-        clear_loras(pipe)
-        pipe._aiwf_lora_signature = ""
-        pipe._aiwf_lora_adapters = []
+        _reset_lora_state(pipe)
         return []
 
     signature = _lora_signature(loras, catalog, base_architecture=base_architecture)
@@ -71,9 +79,10 @@ def apply_loras(
     for ref in loras:
         match = resolve_lora(catalog, ref.name)
         if match is None:
-            logger.warning("LoRA not found: %s", ref.name)
-            continue
+            _reset_lora_state(pipe)
+            raise ValueError(f"Requested LoRA '{ref.name}' was not found in the local model catalog.")
         if not lora_compatible_with_base(base_architecture, match.architecture):
+            _reset_lora_state(pipe)
             raise ValueError(
                 f"LoRA '{match.title}' targets {match.architecture}, "
                 f"but the selected checkpoint is {base_architecture or 'unknown'}."
@@ -98,11 +107,17 @@ def apply_loras(
             adapter_names.append(adapter_name)
             adapter_weights.append(ref.weight)
             logger.info("Loaded LoRA %s at weight %.2f", match.title, ref.weight)
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to load LoRA %s", match.title)
+            _reset_lora_state(pipe)
+            raise ValueError(f"Failed to load requested LoRA '{match.title}': {exc}") from exc
 
     if adapter_names:
-        pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
+        try:
+            pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
+        except Exception as exc:
+            _reset_lora_state(pipe)
+            raise ValueError(f"Failed to activate the requested LoRA stack: {exc}") from exc
 
     pipe._aiwf_lora_signature = signature
     pipe._aiwf_lora_adapters = list(adapter_names)

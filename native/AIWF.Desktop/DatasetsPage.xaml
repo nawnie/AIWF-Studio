@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Datasets: training data lives in the dataset engine (Dataset Studio).
+  - Published text packages: immutable revisions identified by their manifest hash; "Use for
+    training" hands the exact revision to the Train page.
+  - Recent images: pick Studio outputs and catalog them into the dataset engine, tagged with the
+    project in focus. Image assets are cataloged only; training packages are text-only.
+  Package cards and image tiles are built in code.
+-->
+<Page
+    x:Class="AiwfDesktop.DatasetsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AiwfDesktop">
+    <ScrollViewer>
+        <StackPanel Padding="{StaticResource PagePadding}" Spacing="16" MaxWidth="1240" HorizontalAlignment="Stretch">
+            <StackPanel Spacing="2">
+                <TextBlock Text="Datasets" Style="{StaticResource TitleLargeTextBlockStyle}" />
+                <TextBlock Text="Training data lives in the dataset engine. A package never changes once published: each revision is identified by its manifest hash."
+                           Style="{StaticResource BodyTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap" />
+            </StackPanel>
+
+            <InfoBar x:Name="EngineBar" IsOpen="False" IsClosable="False">
+                <InfoBar.ActionButton>
+                    <Button Content="Start engines" Click="StartEngine_Click" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <!-- published packages -->
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Published text packages" Style="{StaticResource SubtitleTextBlockStyle}" VerticalAlignment="Center" />
+                <Button Grid.Column="1" Click="Refresh_Click" AutomationProperties.Name="Refresh">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE72C;" FontSize="14" />
+                        <TextBlock Text="Refresh" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+            <StackPanel x:Name="Packages" Spacing="8" />
+            <TextBlock x:Name="PackagesNote" Style="{StaticResource BodyTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap" />
+
+            <!-- recent images to catalog -->
+            <Grid ColumnSpacing="12" Margin="0,12,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="Add recent images to the catalog" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="CatalogHint" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap"
+                               Text="Select images, then catalog them into the dataset engine with the current project's tag. Their generation prompts become captions." />
+                </StackPanel>
+                <Button x:Name="CatalogButton" Grid.Column="1" Style="{StaticResource AccentButtonStyle}" Click="Catalog_Click" IsEnabled="False"
+                        VerticalAlignment="Center" AutomationProperties.Name="Catalog selected images">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE8F4;" FontSize="14" />
+                        <TextBlock x:Name="CatalogButtonText" Text="Catalog selected" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+            <GridView x:Name="Outputs" SelectionMode="Multiple" SelectionChanged="Outputs_SelectionChanged"
+                      AutomationProperties.Name="Recent images" />
+            <InfoBar x:Name="CatalogResult" IsOpen="False" IsClosable="True" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

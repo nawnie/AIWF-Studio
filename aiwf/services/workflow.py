@@ -7,7 +7,7 @@ from aiwf.core.domain.workflow import WorkflowDefinition, WorkflowRunResult
 from aiwf.services.enhance import EnhanceService
 from aiwf.services.generation import GenerationService
 from aiwf.services.segment import SegmentService
-from aiwf.services.workflow_executor import ProgressCallback, WorkflowExecutor
+from aiwf.services.workflow_executor import ProgressCallback, StepCompleteCallback, WorkflowExecutor
 from aiwf.services.workflow_store import WorkflowStore
 
 
@@ -56,5 +56,11 @@ class WorkflowService:
         *,
         seed_image: Image.Image | None = None,
         on_progress: ProgressCallback | None = None,
+        on_step_complete: StepCompleteCallback | None = None,
     ) -> tuple[WorkflowRunResult, list[Image.Image]]:
-        return self.executor.run(workflow, seed_image=seed_image, on_progress=on_progress)
+        return self.executor.run(
+            workflow,
+            seed_image=seed_image,
+            on_progress=on_progress,
+            on_step_complete=on_step_complete,
+        )

@@ -53,6 +53,7 @@ def _service(ctx: AppContext) -> SanaVideoService:
             ctx.settings,
             ctx.generation.backend.devices,
             supervisor=getattr(ctx, "supervisor", None),
+            unload_image_models=getattr(ctx.generation.backend, "unload", None),
         )
         _SERVICES[id(ctx)] = service
     return service

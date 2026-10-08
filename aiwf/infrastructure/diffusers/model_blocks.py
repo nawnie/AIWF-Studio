@@ -23,6 +23,11 @@ _KNOWN_BROKEN_SELECTABLE_IMAGE_ASSETS: dict[str, BlockedImageAsset] = {
         reason="Known Flux GGUF/NF4 mismatch: metadata/quantization does not match the current image route.",
         suggested_action="Do not expose as a normal Flux checkpoint until a compatible GGUF/NF4 route exists.",
     ),
+    "unstablerevolutionf2k_alphaf2k4bq80.gguf": BlockedImageAsset(
+        status="broken-runtime",
+        reason="Flux GGUF converter rejects this export with a missing `time_in.in_layer.bias` key.",
+        suggested_action="Use a standard Flux safetensors checkpoint or a GGUF export verified with AIWF's Flux route.",
+    ),
     "snofssexnudesandotherfunstuff_distilledv12fp8.safetensors": BlockedImageAsset(
         status="broken-runtime",
         reason="Known Flux/Flux.2 loader-schema mismatch: checkpoint keys do not match the standard Diffusers converter.",
@@ -37,6 +42,8 @@ _KNOWN_BROKEN_SELECTABLE_IMAGE_ASSETS: dict[str, BlockedImageAsset] = {
 
 _NON_SELECTABLE_IMAGE_ASSET_DIRS = {
     "inpaint",
+    "lora",
+    "loras",
     "ultralytics",
     "upscale_models",
 }

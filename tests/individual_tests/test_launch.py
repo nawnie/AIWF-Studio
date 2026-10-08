@@ -1,9 +1,51 @@
 from pathlib import Path
+import json
+import socket
 import sys
+import urllib.error
+import urllib.request
 
 from aiwf.core.config.launch import LaunchSettings, merge_launch_settings, save_launch_settings
 from aiwf.core.config.settings import RuntimeFlags
 import launch
+
+
+def test_launch_status_server_reports_startup_and_releases_port():
+    status = launch.LaunchStatusServer(0)
+    assert status.start()
+    port = status._http.server_address[1]
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        url = f"http://127.0.0.1:{port}/api/pro/startup"
+        with opener.open(url, timeout=5) as response:
+            initial = json.load(response)
+            assert response.status == 200
+            assert response.headers["Access-Control-Allow-Origin"] == "*"
+        assert initial["launcher"] is True
+        assert initial["ready"] is False
+        assert initial["phase"] == "launcher"
+
+        status.update("environment", "CPU fake status")
+        with opener.open(f"{url}?fresh=1", timeout=5) as response:
+            progress = json.load(response)
+        assert progress["phase"] == "environment"
+        assert progress["message"] == "CPU fake status"
+
+        try:
+            opener.open(f"http://127.0.0.1:{port}/api/pro/ping", timeout=5)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 503
+            assert json.load(exc)["detail"] == "AIWF Studio Pro is still starting."
+        else:
+            raise AssertionError("the launcher served a normal API route before backend handoff")
+    finally:
+        status.stop()
+
+    released = socket.socket()
+    try:
+        released.bind(("127.0.0.1", port))
+    finally:
+        released.close()
 
 
 def test_launch_settings_argv_includes_listen_and_port():

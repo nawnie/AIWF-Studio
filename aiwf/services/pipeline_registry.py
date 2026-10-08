@@ -6,6 +6,7 @@ from pathlib import Path
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.infrastructure.diffusers.checkpoints import diffusers_dir_has_required_local_files
+from aiwf.services.model_files import configured_model_roots
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,13 @@ class PipelineRegistry:
     def status_markdown(self) -> str:
         lines = ["**Pipelines**"]
         for pipeline in [*self.image_pipelines(), *self.video_pipelines()]:
-            state = "Ready" if pipeline.ready else "Needs setup"
+            # This is route availability or setup readiness, not a proof that
+            # this route has completed an inference successfully.
+            state = (
+                "Available · generation not verified"
+                if pipeline.ready
+                else "Unavailable · inspect setup/runtime details"
+            )
             lines.append(f"- **{pipeline.label}:** {state} - {pipeline.message}")
             lines.append(f"  - Engine: `{pipeline.engine}`")
             lines.append(f"  - Type: `{pipeline.kind}`")
@@ -101,7 +108,17 @@ class PipelineRegistry:
 
     def _onnx_pipeline(self) -> PipelineInfo:
         root = self._onnx_root()
-        ready = root.exists()
+        from aiwf.services.pipeline_preflight import preflight_onnx_models_root
+
+        preflight = preflight_onnx_models_root(root, provider_preference=self.flags.onnx_provider)
+        ready = preflight.ok
+        if ready:
+            message = f"preflight passed with complete model folder at {preflight.metadata.get('model_dir', root)}"
+        else:
+            blocking = [item.message for item in preflight.items if not item.ok]
+            message = f"ONNX model setup is incomplete at {root}: " + (
+                "; ".join(blocking) or "required local assets or execution provider are missing"
+            )
         return PipelineInfo(
             id="onnx",
             label="ONNX Runtime pipeline",
@@ -109,7 +126,7 @@ class PipelineRegistry:
             engine="Studio Image Engine",
             summary="Alternative image path using AIWF sampler math and ONNX model folders.",
             ready=ready,
-            message=f"model folder found at {root}" if ready else f"model folder missing: {root}",
+            message=message,
             launch_backend="onnx",
         )
 
@@ -146,8 +163,17 @@ class PipelineRegistry:
         class_tokens: tuple[str, ...],
         install_label: str,
     ) -> PipelineInfo:
-        root = (self.flags.resolved_models_dir() / subdir).resolve()
-        ready, message = self._diffusers_snapshot_status(root, class_tokens, install_label)
+        roots = [root / subdir for root in configured_model_roots(self.flags)]
+        checks = [self._diffusers_snapshot_status(root, class_tokens, install_label) for root in roots]
+        ready_message = next((message for ready, message in checks if ready), None)
+        ready = ready_message is not None
+        if ready_message is not None:
+            message = ready_message
+        else:
+            message = next(
+                (message for candidate_ready, message in checks if not candidate_ready),
+                f"install {install_label} under {roots[0] if roots else self.flags.resolved_models_dir() / subdir}",
+            )
         return PipelineInfo(
             id=id,
             label=label,
@@ -176,6 +202,9 @@ class PipelineRegistry:
             except Exception:
                 unreadable.append(folder)
                 continue
+            if not isinstance(payload, dict):
+                unreadable.append(folder)
+                continue
             class_name = str(payload.get("_class_name") or "")
             text = f"{class_name} {folder.name}".lower().replace("_", "")
             if class_tokens and not any(token.replace("_", "").lower() in text for token in class_tokens):
@@ -190,10 +219,10 @@ class PipelineRegistry:
         incomplete: list[Path] = []
         for folder in candidates:
             if diffusers_dir_has_required_local_files(folder):
-                return True, f"ready with model at {folder}"
+                return True, f"preflight passed with model files at {folder}"
             incomplete.append(folder)
 
-        return False, f"incomplete Diffusers snapshot; missing local shard files under {incomplete[0]}"
+        return False, f"incomplete Diffusers snapshot; required local files are missing under {incomplete[0]}"
 
     def _ltx_pipeline(self) -> PipelineInfo:
         from aiwf.core.domain.ltx import LTX_PIPELINE_ONE_STAGE, LtxVideoRequest
@@ -206,10 +235,16 @@ class PipelineRegistry:
         )
         if preflight.ok:
             selected = preflight.metadata.get("selected_pipeline", "default")
-            message = f"ready via isolated LTX worker ({selected})"
+            worker_selected = selected != "diffusers_2b"
+            message = (
+                f"preflight passed via isolated LTX worker ({selected})"
+                if worker_selected
+                else "LTX 2B Diffusers is selected; the isolated LTX 2.3 worker route is not ready."
+            )
             if preflight.warnings:
                 message = f"{message}; {preflight.warnings[0]}"
         else:
+            worker_selected = False
             blocking = [item.message for item in preflight.items if not item.ok]
             message = "; ".join(blocking)
         return PipelineInfo(
@@ -218,7 +253,7 @@ class PipelineRegistry:
             kind="video",
             engine="LTX 2.3 Video Engine",
             summary="Optional Lightricks LTX 2.3 text/image-to-video path in engines/ltx/.venv.",
-            ready=preflight.ok,
+            ready=preflight.ok and worker_selected,
             message=message or "enable/install the LTX worker in Settings",
         )
 
@@ -227,7 +262,7 @@ class PipelineRegistry:
 
         preflight = preflight_wan_pipeline(self.flags, self.settings)
         if preflight.ok:
-            message = f"ready with {preflight.metadata.get('model_id', '')}"
+            message = f"preflight passed with {preflight.metadata.get('model_id', '')}"
         else:
             blocking = [item.message for item in preflight.items if not item.ok]
             message = "; ".join(blocking)
@@ -264,7 +299,7 @@ class PipelineRegistry:
             WanI2VRequest(runtime_mode=WAN_RUNTIME_HIGH_LOW, high_noise_model_id=high, low_noise_model_id=low)
         )
         message = (
-            f"ready with high={Path(high).name}, low={Path(low).name}"
+            f"preflight passed with high={Path(high).name}, low={Path(low).name}"
             if preflight.ok
             else preflight.message() or "Wan GGUF pair preflight failed"
         )
@@ -346,7 +381,7 @@ class PipelineRegistry:
             request=LtxVideoRequest(pipeline=LTX_PIPELINE_DIFFUSERS_2B),
         )
         if preflight.ok:
-            message = f"ready with {preflight.metadata.get('checkpoint_path', '')}"
+            message = f"preflight passed with {preflight.metadata.get('checkpoint_path', '')}"
         else:
             blocking = [item.message for item in preflight.items if not item.ok]
             message = "; ".join(blocking)
@@ -361,24 +396,39 @@ class PipelineRegistry:
         )
 
     def _sana_video_pipeline(self) -> PipelineInfo:
+        from aiwf.core.domain.sana_video import SANA_VIDEO_MODEL_VARIANTS, SanaVideoRequest
         from aiwf.services.pipeline_preflight import preflight_sana_video_pipeline
 
-        preflight = preflight_sana_video_pipeline(self.flags, self.settings)
-        installed = preflight.metadata.get("model_installed") == "true"
-        if not preflight.ok:
-            blocking = [item.message for item in preflight.items if not item.ok]
-            message = "; ".join(blocking)
-        elif installed:
-            message = f"ready with model at {preflight.metadata.get('model_path', '')}"
+        results = [
+            preflight_sana_video_pipeline(
+                self.flags,
+                self.settings,
+                request=SanaVideoRequest(model_variant=variant),
+            )
+            for variant in SANA_VIDEO_MODEL_VARIANTS
+        ]
+        ready_result = next(
+            (
+                result
+                for result in results
+                if result.ok and result.metadata.get("model_installed") == "true"
+            ),
+            None,
+        )
+        if ready_result is not None:
+            message = f"preflight passed with {ready_result.metadata.get('model_variant')} model at {ready_result.metadata.get('model_path', '')}"
         else:
-            message = f"available when the SANA-Video snapshot is installed at {preflight.metadata.get('model_path', '')}"
+            blocking = [item.message for result in results for item in result.items if not item.ok]
+            message = "; ".join(dict.fromkeys(blocking))
+            if not message:
+                message = "SANA-Video 480p or 720p snapshot is not installed"
         return PipelineInfo(
             id="sana-video",
             label="Sana Video Diffusers pipeline",
             kind="video",
             engine="Studio Video Engine",
             summary="Diffusers SANA-Video text/image-to-video route. Audio is a post-process path.",
-            ready=preflight.ok and installed,
+            ready=ready_result is not None,
             message=message,
         )
 
@@ -386,13 +436,17 @@ class PipelineRegistry:
         from aiwf.services.qwen_nunchaku import QwenNunchakuService
 
         status = QwenNunchakuService(self.flags).status()
-        message = "ready via isolated Qwen Nunchaku runtime" if status.ready else "; ".join(status.messages)
+        message = (
+            "Runtime and model assets are present, but generation remains blocked until a real route smoke passes."
+            if status.ready
+            else "; ".join(status.messages)
+        )
         return PipelineInfo(
             id="qwen-nunchaku",
             label="Qwen Image Nunchaku pipeline",
             kind="image",
             engine="Qwen Nunchaku Engine",
             summary="Single-transformer safetensors Qwen Image Lightning route with shared base components.",
-            ready=status.ready,
+            ready=False,
             message=message or "install/download the Nunchaku runtime and transformer",
         )

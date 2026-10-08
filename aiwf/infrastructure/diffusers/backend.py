@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import gc
+import hashlib
 import importlib.util
 import json
 import logging
+import os
 import random
 import threading
 import time
@@ -88,12 +90,17 @@ from aiwf.core.domain.generation import GenerationMode, GenerationRequest, Gener
 from aiwf.core.domain.models import LoraInfo, SAMPLERS, Checkpoint, SamplerInfo, VaeInfo
 from aiwf.core.infotext import format_infotext
 from aiwf.infrastructure.diffusers.checkpoints import scan_from_flags
+from aiwf.infrastructure.diffusers.single_file_config import (
+    SINGLE_FILE_CONFIG_REPOSITORIES,
+    missing_single_file_config_files,
+)
 from aiwf.infrastructure.diffusers.embeddings import find_referenced_embeddings, scan_embeddings
 from aiwf.infrastructure.diffusers.extra_networks import apply_loras, clear_loras
 from aiwf.infrastructure.diffusers.loras import scan_loras
 from aiwf.infrastructure.diffusers.mask import (
     align_to_multiple_of_8,
     align_to_multiple_of_16,
+    align_to_multiple_of_32,
     apply_masked_content,
     blur_mask,
     composite_inpaint_result,
@@ -111,6 +118,7 @@ from aiwf.infrastructure.controlnet.images import decode_control_image
 from aiwf.infrastructure.controlnet.preprocess import PreprocessParams, preprocess_control_image
 from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_FLUX,
+    ARCH_FLUX_FILL,
     ARCH_FLUX_KONTEXT,
     ARCH_FLUX2_KLEIN,
     ARCH_ANIMA,
@@ -121,6 +129,7 @@ from aiwf.infrastructure.diffusers.model_arch import (
     ARCH_SD35,
     ARCH_SDXL,
     ARCH_SDXL_INPAINT,
+    ARCH_SDXL_REFINER,
     ARCH_Z_IMAGE,
     is_inpaint_architecture,
     is_flux2_klein_architecture,
@@ -243,12 +252,22 @@ SAMPLER_CLASSES = {
 
 
 _SINGLE_FILE_CONFIG_REPOS = {
-    StableDiffusionPipeline: "stable-diffusion-v1-5/stable-diffusion-v1-5",
-    StableDiffusionXLPipeline: "stabilityai/stable-diffusion-xl-base-1.0",
-    StableDiffusion3Pipeline: "stabilityai/stable-diffusion-3.5-medium",
-    StableDiffusionInpaintPipeline: "stable-diffusion-v1-5/stable-diffusion-inpainting",
-    StableDiffusionXLInpaintPipeline: "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
-    StableDiffusion3InpaintPipeline: "stabilityai/stable-diffusion-3.5-medium",
+    StableDiffusionPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sd15"],
+    StableDiffusionXLPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sdxl"],
+    StableDiffusion3Pipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sd35"],
+    StableDiffusionInpaintPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sd15_inpaint"],
+    StableDiffusionXLInpaintPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sdxl_inpaint"],
+    StableDiffusionXLImg2ImgPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sdxl_refiner"],
+    StableDiffusion3InpaintPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sd35"],
+}
+_SINGLE_FILE_CONFIG_FAMILIES = {
+    StableDiffusionPipeline: "sd15",
+    StableDiffusionXLPipeline: "sdxl",
+    StableDiffusion3Pipeline: "sd35",
+    StableDiffusionInpaintPipeline: "sd15_inpaint",
+    StableDiffusionXLInpaintPipeline: "sdxl_inpaint",
+    StableDiffusionXLImg2ImgPipeline: "sdxl_refiner",
+    StableDiffusion3InpaintPipeline: "sd35",
 }
 
 _FLUX_TRANSFORMER_CONFIG_BASE = {
@@ -338,7 +357,7 @@ _Z_IMAGE_TRANSFORMER_CONFIG = {
 }
 
 
-def _cached_single_file_config_dir(pipeline_cls) -> str | None:
+def _cached_single_file_config_dir(pipeline_cls, model_roots=()) -> str | None:
     """Return a locally cached Diffusers config directory for single-file loads.
 
     Diffusers downloads a default config repo when ``config`` is omitted from
@@ -346,39 +365,56 @@ def _cached_single_file_config_dir(pipeline_cls) -> str | None:
     cache index directly and never call ``snapshot_download`` here.
     """
     repo_id = _SINGLE_FILE_CONFIG_REPOS.get(pipeline_cls)
-    if not repo_id:
+    family = _SINGLE_FILE_CONFIG_FAMILIES.get(pipeline_cls)
+    if not repo_id or not family:
         return None
-    if _try_to_load_from_cache is None:
-        return None
-    try:
-        cached = _try_to_load_from_cache(repo_id, "model_index.json")
-    except Exception:
-        return None
-    if not isinstance(cached, str):
-        return None
-    model_index = Path(cached)
-    if not model_index.is_file():
-        return None
-    return str(model_index.parent)
+    if _try_to_load_from_cache is not None:
+        try:
+            cached = _try_to_load_from_cache(repo_id, "model_index.json")
+        except Exception:
+            cached = None
+        if isinstance(cached, str):
+            model_index = Path(cached)
+            if not missing_single_file_config_files(model_index.parent, family):
+                return str(model_index.parent)
+
+    repo_name = repo_id.replace("\\", "/").rstrip("/").split("/")[-1]
+    for value in model_roots:
+        try:
+            root = Path(value).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, TypeError):
+            continue
+        for candidate in (
+            root / "Support" / "DiffusersConfigs" / repo_name,
+            root / "Stable-diffusion" / repo_name,
+            root / repo_name,
+        ):
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(root)
+                model_index = resolved / "model_index.json"
+                if not missing_single_file_config_files(resolved, family):
+                    return str(resolved)
+            except (OSError, RuntimeError, ValueError):
+                continue
+    return None
 
 
-def _add_cached_single_file_config(load_kwargs: dict, pipeline_cls) -> None:
-    config_dir = _cached_single_file_config_dir(pipeline_cls)
+def _add_cached_single_file_config(load_kwargs: dict, pipeline_cls, model_roots=()) -> None:
+    config_dir = _cached_single_file_config_dir(pipeline_cls, model_roots)
     if config_dir:
         load_kwargs["config"] = config_dir
-        # Prevent Diffusers from attempting HF hub downloads for sub-components
-        # (tokenizer vocab, feature extractor, etc.) when a local config is already
-        # supplied.  Those download calls internally use tqdm.contrib.concurrent
-        # which crashes with AttributeError: _lock on some tqdm versions.
-        # With local_files_only=True any missing remote asset raises a clean
-        # EnvironmentError that the caller's except-block catches gracefully.
-        load_kwargs["local_files_only"] = True
+    # Single-file loads must never silently resolve pipeline config/tokenizers
+    # from the Hub. The model setup bundles install a scoped local config snapshot.
+    # If it is absent, Diffusers fails with a local missing-asset error instead.
+    load_kwargs["local_files_only"] = True
 
 
 class DiffusersBackend:
     _QWEN_NUNCHAKU_SENTINEL = object()
     _PROMPT_EMBED_CACHE_LIMIT = 32
     _FLUX2_TEXT_ENCODER_BNB_THRESHOLD_GB = 10.0
+    _STATUS_SUPPORT_REVISION_CACHE_SECONDS = 1.5
 
     def __init__(self, flags: RuntimeFlags, devices: DeviceManager) -> None:
         self.flags = flags
@@ -389,8 +425,14 @@ class DiffusersBackend:
         self._inpaint: StableDiffusionInpaintPipeline | None = None
         self._refiner: StableDiffusionXLImg2ImgPipeline | None = None
         self._active: Checkpoint | None = None
+        self._active_support_revision: str | None = None
+        self._active_flux_encoder_revision: str | None = None
+        self._status_support_revision_cache: tuple[tuple[str, str], float, str] | None = None
+        self._status_support_revision_lock = threading.Lock()
         self._inpaint_active: Checkpoint | None = None
         self._refiner_active: Checkpoint | None = None
+        self._inpaint_support_revision: str | None = None
+        self._refiner_support_revision: str | None = None
         self._active_vae_id: str | None = None
         self._lora_catalog: list[LoraInfo] | None = None
         self._vae_catalog: list[VaeInfo] | None = None
@@ -557,6 +599,13 @@ class DiffusersBackend:
         return t5, t5_device
 
     def is_checkpoint_loaded(self, checkpoint_id: str | None = None) -> bool:
+        return self._is_checkpoint_loaded(checkpoint_id, throttle_support_probe=False)
+
+    def is_checkpoint_loaded_for_status(self, checkpoint_id: str | None = None) -> bool:
+        """Poll-friendly residency view; generation/admission checks stay fresh."""
+        return self._is_checkpoint_loaded(checkpoint_id, throttle_support_probe=True)
+
+    def _is_checkpoint_loaded(self, checkpoint_id: str | None, *, throttle_support_probe: bool) -> bool:
         try:
             checkpoint = self._resolve_checkpoint(checkpoint_id)
         except ModelNotFoundError:
@@ -565,6 +614,27 @@ class DiffusersBackend:
             return False
         if self._active.path != checkpoint.path:
             return False
+        if is_qwen_nunchaku_architecture(checkpoint.architecture):
+            # The sentinel represents a ready-on-demand sidecar route rather
+            # than resident weights; every render enforces its own GPU gate.
+            try:
+                return bool(self._qwen_nunchaku.status(checkpoint.path).ready)
+            except Exception:
+                logger.debug("Could not verify Qwen Nunchaku readiness", exc_info=True)
+                return False
+        # Treat residency as valid only when every loader-captured support
+        # fingerprint still matches. This also covers single-file SD/SDXL/SD3
+        # pipelines, whose local VAE or pipeline config can change in place.
+        # Routes such as Qwen Nunchaku do not capture this fingerprint.
+        revision_managed = self._active_support_revision is not None
+        if revision_managed:
+            current_revision = (
+                self._checkpoint_support_revision_for_status(checkpoint)
+                if throttle_support_probe
+                else self._checkpoint_support_revision(checkpoint)
+            )
+            if self._active_support_revision != current_revision:
+                return False
         if is_flux_architecture(checkpoint.architecture):
             if self._flux_prompt_conditioning.mode == FLUX_CONDITIONING_UNIVERSAL:
                 return self._flux_universal_conditioner is not None
@@ -642,6 +712,9 @@ class DiffusersBackend:
             for checkpoint in checkpoints:
                 if checkpoint.id == checkpoint_id or checkpoint.title == checkpoint_id:
                     return checkpoint
+            raise ModelNotFoundError(
+                f"Requested checkpoint '{checkpoint_id}' is not present in the local model catalog."
+            )
 
         if self.flags.default_checkpoint:
             for checkpoint in checkpoints:
@@ -1072,6 +1145,80 @@ class DiffusersBackend:
         )
         return transformer
 
+    def _prepare_flux_transformer_compute(self, transformer, requested_dtype: torch.dtype) -> None:
+        """Keep FP8 Flux storage weights compatible with the pipeline compute dtype."""
+        try:
+            has_fp8_weights = any(
+                parameter.dtype == torch.float8_e4m3fn
+                for parameter in transformer.parameters()
+                if parameter.is_floating_point()
+            )
+        except Exception:
+            logger.debug("Could not inspect Flux transformer dtypes", exc_info=True)
+            return
+        if not has_fp8_weights:
+            return
+        compute_dtype = (
+            self._gguf_compute_dtype(requested_dtype)
+            if requested_dtype == torch.float8_e4m3fn
+            else requested_dtype
+        )
+        enable_casting = getattr(transformer, "enable_layerwise_casting", None)
+        if callable(enable_casting):
+            # Diffusers' default skip patterns include normalization modules.
+            # Some Flux FP8 exports store their timestep-embedding linear layers
+            # inside those modules as FP8 too, which still mismatches BF16 inputs.
+            transformer._skip_layerwise_casting_patterns = None
+            enable_casting(
+                storage_dtype=torch.float8_e4m3fn,
+                compute_dtype=compute_dtype,
+                skip_modules_pattern=(),
+            )
+            # Layerwise hooks wrap linear/conv forwards, but normalization
+            # weights are read directly by torch.ops/functional kernels.
+            # Those kernels cannot promote FP8 weights with BF16 activations.
+            # Norm parameters are tiny relative to the transformer, so keep
+            # them resident in the compute dtype while the large matrices
+            # remain FP8 and are cast layer by layer.
+            named_modules = getattr(transformer, "named_modules", None)
+            if callable(named_modules):
+                for module_name, module in named_modules():
+                    module_kind = type(module).__name__.lower()
+                    if "norm" not in module_name.lower() and "norm" not in module_kind:
+                        continue
+                    for parameter_name, parameter in module.named_parameters(recurse=False):
+                        if parameter.dtype != torch.float8_e4m3fn:
+                            continue
+                        replacement = torch.nn.Parameter(
+                            parameter.detach().to(dtype=compute_dtype),
+                            requires_grad=parameter.requires_grad,
+                        )
+                        module.register_parameter(parameter_name, replacement)
+            logger.info("Flux FP8 transformer uses %s compute with FP8 layerwise storage.", compute_dtype)
+            return
+        # Older Diffusers builds do not expose layerwise casting. A direct cast
+        # is larger in memory but prevents mixed FP8/BF16 matmuls from failing.
+        transformer.to(dtype=compute_dtype)
+        logger.warning("Flux FP8 transformer was cast to %s because layerwise casting is unavailable.", compute_dtype)
+
+    def _prepare_vae_compute(self, vae, compute_dtype: torch.dtype):
+        """Cast FP8 VAE storage before convolution/decode kernels consume it."""
+        if compute_dtype == torch.float8_e4m3fn:
+            compute_dtype = self._gguf_compute_dtype(compute_dtype)
+        try:
+            has_fp8_weights = any(
+                parameter.dtype == torch.float8_e4m3fn
+                for parameter in vae.parameters()
+                if parameter.is_floating_point()
+            )
+        except Exception:
+            logger.debug("Could not inspect VAE parameter dtypes", exc_info=True)
+            return vae
+        if has_fp8_weights:
+            vae.to(dtype=compute_dtype)
+            logger.info("FP8 VAE weights cast to %s for runtime compute.", compute_dtype)
+        return vae
+
     @staticmethod
     def _flux_transformer_has_guidance(path: Path) -> bool:
         suffix = path.suffix.lower()
@@ -1111,10 +1258,45 @@ class DiffusersBackend:
             for root in self._flux_search_roots():
                 for subdir in subdirs:
                     base = root / subdir if subdir else root
-                    candidate = base / filename
-                    if candidate.is_file():
-                        return candidate.resolve()
+                    candidate = self._confined_flux_asset(root, base / filename)
+                    if candidate is not None and candidate.stat().st_size > 0:
+                        return candidate
+
+                    # ComfyUI stores support weights below typed directories
+                    # (for example text_encoders/T5/<variant>/...). Search
+                    # only the matching component category, never the entire
+                    # model library. This also ignores the empty placeholders
+                    # sometimes left by interrupted downloads.
+                    category = "vae" if filename.casefold() == "ae.safetensors" else "text_encoders"
+                    component_root = root / category
+                    if self._confined_flux_asset(root, component_root, require_file=False) is not None:
+                        try:
+                            matches = sorted(
+                                component_root.rglob(filename),
+                                key=lambda path: (len(path.parts), str(path).casefold()),
+                            )
+                        except OSError:
+                            matches = []
+                        for match in matches:
+                            resolved = self._confined_flux_asset(root, match)
+                            if resolved is not None and resolved.stat().st_size > 0:
+                                return resolved
         return None
+
+    @staticmethod
+    def _confined_flux_asset(root: Path, candidate: Path, *, require_file: bool = True) -> Path | None:
+        """Resolve a Flux asset only when it remains inside its configured root."""
+        try:
+            resolved_root = root.resolve(strict=True)
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(resolved_root)
+            if require_file and not resolved.is_file():
+                return None
+            if not require_file and not resolved.is_dir():
+                return None
+            return resolved
+        except (OSError, RuntimeError, ValueError):
+            return None
 
     def _find_flux_component_dir(
         self,
@@ -1126,15 +1308,163 @@ class DiffusersBackend:
                 for subdir in subdirs:
                     base = root / subdir if subdir else root
                     candidate = base / dirname
-                    if candidate.is_dir():
-                        return candidate.resolve()
+                    resolved = self._confined_flux_asset(root, candidate, require_file=False)
+                    if resolved is not None:
+                        return resolved
+        return None
+
+    def _flux_hub_cache_roots(self) -> list[Path]:
+        """Return configured/local Hugging Face cache roots for Flux tokenizer lookup."""
+        roots: list[Path] = []
+        for model_root in self._flux_search_roots():
+            roots.extend((model_root, model_root / "hub", model_root / ".cache" / "huggingface" / "hub"))
+        for variable in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE"):
+            value = os.environ.get(variable)
+            if value:
+                roots.append(Path(value).expanduser())
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+
+            roots.append(Path(HF_HUB_CACHE))
+        except Exception:
+            pass
+
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            try:
+                resolved = root.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            key = str(resolved).casefold()
+            if key not in seen:
+                seen.add(key)
+                unique.append(resolved)
+        return unique
+
+    def _find_flux_tokenizer_snapshot(
+        self,
+        repo_id: str,
+        required_files: tuple[str, ...],
+    ) -> Path | None:
+        """Find one complete, cached tokenizer snapshot without consulting the Hub."""
+        cache_name = "models--" + repo_id.replace("/", "--")
+        for cache_root in self._flux_hub_cache_roots():
+            try:
+                resolved_cache = cache_root.resolve(strict=True)
+                repo_root = cache_root / cache_name
+                snapshots_root = repo_root / "snapshots"
+                resolved_snapshots = snapshots_root.resolve(strict=True)
+                resolved_snapshots.relative_to(resolved_cache)
+                revisions = [path for path in snapshots_root.iterdir() if path.is_dir()]
+                if not revisions:
+                    continue
+                preferred: list[Path] = []
+                ref_main = repo_root / "refs" / "main"
+                if ref_main.is_file():
+                    revision = ref_main.read_text(encoding="utf-8").strip()
+                    if revision:
+                        preferred.append(snapshots_root / revision)
+                ordered = preferred + sorted(
+                    (path for path in revisions if path not in preferred),
+                    key=lambda path: path.name.casefold(),
+                    reverse=True,
+                )
+                for snapshot in ordered:
+                    resolved_snapshot = snapshot.resolve(strict=True)
+                    resolved_snapshot.relative_to(resolved_cache)
+                    if all(
+                        (resolved_file := (snapshot / filename).resolve(strict=True)).is_file()
+                        and resolved_file.stat().st_size > 0
+                        and resolved_file.is_relative_to(resolved_cache)
+                        for filename in required_files
+                    ):
+                        return snapshot
+            except (OSError, RuntimeError, ValueError):
+                continue
+        return None
+
+    def _resolve_flux_clip_tokenizer_path(self) -> Path:
+        clip_tokenizer = self._find_flux_tokenizer_snapshot(
+            "openai/clip-vit-large-patch14",
+            ("vocab.json", "merges.txt", "tokenizer_config.json"),
+        )
+        if clip_tokenizer is None:
+            clip_tokenizer = self._find_flux_installed_tokenizer(
+                "clip-vit-large-patch14",
+                ("vocab.json", "merges.txt", "tokenizer_config.json"),
+            )
+        if clip_tokenizer is None:
+            raise ModelNotFoundError(
+                "Flux prompt conditioning needs a complete local CLIP-L tokenizer snapshot for "
+                "openai/clip-vit-large-patch14. Place it in a configured model root's "
+                "hub/models--<repo>/snapshots/<revision> folder or in the configured "
+                "Hugging Face cache, then retry. Runtime loading is local-only."
+            )
+        return clip_tokenizer
+
+    def _resolve_flux_t5_tokenizer_path(self) -> Path:
+        t5_tokenizer = self._find_flux_tokenizer_snapshot(
+            "google/t5-v1_1-xxl",
+            ("spiece.model", "tokenizer_config.json"),
+        )
+        if t5_tokenizer is None:
+            t5_tokenizer = self._find_flux_installed_tokenizer(
+                "t5-v1_1-xxl",
+                ("spiece.model", "tokenizer_config.json"),
+            )
+        if t5_tokenizer is None:
+            raise ModelNotFoundError(
+                "Flux teacher conditioning needs a complete local T5-XXL tokenizer snapshot for "
+                "google/t5-v1_1-xxl. Place it in a configured model root's "
+                "hub/models--<repo>/snapshots/<revision> folder or in the configured "
+                "Hugging Face cache, then retry. Runtime loading is local-only."
+            )
+        return t5_tokenizer
+
+    def _find_flux_installed_tokenizer(self, repo_folder: str, required_files: tuple[str, ...]) -> Path | None:
+        """Find tokenizer snapshots installed by AIWF's explicit setup bundles."""
+        for root in self._flux_search_roots():
+            candidate = root / "flux" / "tokenizer" / repo_folder
+            resolved = self._confined_flux_asset(root, candidate, require_file=False)
+            if resolved is not None and all(
+                (path := self._confined_flux_asset(root, resolved / name)) is not None and path.stat().st_size > 0
+                for name in required_files
+            ):
+                return resolved
         return None
 
     def _diffusers_component_search_roots(self) -> list[Path]:
         return self._flux_search_roots()
 
     @staticmethod
-    def _looks_like_diffusers_component_dir(path: Path) -> bool:
+    def _looks_like_diffusers_component_dir(path: Path, *, architecture: str = "") -> bool:
+        if is_flux_kontext_architecture(architecture):
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import flux_kontext_missing_local_files
+
+                # For a selected GGUF, the component snapshot supplies only
+                # conditioning assets; transformer weights come from GGUF.
+                return not flux_kontext_missing_local_files(
+                    path, limit=1, require_transformer_weights=False
+                )
+            except Exception:
+                return False
+        if is_z_image_architecture(architecture) or is_flux2_klein_architecture(architecture):
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import (
+                    flux2_klein_components_missing_local_files,
+                    z_image_components_missing_local_files,
+                )
+
+                missing = (
+                    z_image_components_missing_local_files(path)
+                    if is_z_image_architecture(architecture)
+                    else flux2_klein_components_missing_local_files(path)
+                )
+                return not missing
+            except Exception:
+                return False
         try:
             if not (path / "model_index.json").is_file():
                 return False
@@ -1175,14 +1505,26 @@ class DiffusersBackend:
     def _component_dir_candidates(self, architecture: str, checkpoint: Checkpoint) -> list[Path]:
         roots = self._diffusers_component_search_roots()
         candidates: list[Path] = []
-        if is_flux2_klein_architecture(architecture):
+        if is_flux_kontext_architecture(architecture):
+            candidates.extend(
+                root / subdir
+                for root in roots
+                for subdir in (
+                    "flux/Components/flux-kontext-4bit-fp4",
+                    "flux/Components/FLUX.1-Kontext-dev",
+                    "flux/Diffusers/FLUX.1-Kontext-dev",
+                )
+            )
+        elif is_flux2_klein_architecture(architecture):
             repo_name = self._flux2_component_repo_name(checkpoint)
             candidates.extend(
                 root / subdir
                 for root in roots
                 for subdir in (
                     f"flux2/Components/{repo_name}",
+                    f"flux2/Diffusers/{repo_name}",
                     f"flux2/{repo_name}",
+                    f"Flux2/Diffusers/{repo_name}",
                     f"Flux2/{repo_name}",
                     repo_name,
                 )
@@ -1197,7 +1539,9 @@ class DiffusersBackend:
                 for root in roots
                 for subdir in (
                     f"z-image/Components/{repo_name}",
+                    f"z-image/Diffusers/{repo_name}",
                     f"z-image/{repo_name}",
+                    f"Z-Image/Diffusers/{repo_name}",
                     f"Z-Image/{repo_name}",
                     repo_name,
                 )
@@ -1215,12 +1559,29 @@ class DiffusersBackend:
         return unique
 
     def _resolve_component_dir(self, architecture: str, checkpoint: Checkpoint) -> Path:
+        configured_roots = [Path(root).absolute() for root in self._diffusers_component_search_roots()]
         for candidate in self._component_dir_candidates(architecture, checkpoint):
+            # Component candidates built beneath a configured model root must
+            # remain there after resolving junctions/symlinks. HF cache paths
+            # returned by the cache API are intentionally outside these roots.
+            candidate_path = Path(candidate).absolute()
+            originated_in_configured_root = any(
+                candidate_path == root or root in candidate_path.parents
+                for root in configured_roots
+            )
             try:
                 resolved = candidate.resolve()
             except OSError:
                 continue
-            if self._looks_like_diffusers_component_dir(resolved):
+            if originated_in_configured_root and not any(
+                resolved == root.resolve() or root.resolve() in resolved.parents
+                for root in configured_roots
+            ):
+                continue
+            if self._looks_like_diffusers_component_dir(
+                resolved,
+                architecture=architecture,
+            ):
                 return resolved
 
         searched = ", ".join(str(path) for path in self._component_dir_candidates(architecture, checkpoint))
@@ -1235,6 +1596,13 @@ class DiffusersBackend:
                 f"9B components are HF-gated: accept the license and set your Hugging Face token in Settings first. "
                 f"Alternative: place full `{repo_name}` snapshot under `models/flux2/Components/{repo_name}`. "
                 f"Searched: {searched}"
+            )
+        if is_flux_kontext_architecture(architecture):
+            raise ModelNotFoundError(
+                "Flux Kontext GGUF needs a complete local Kontext Diffusers component snapshot, including text encoders, "
+                "tokenizers, scheduler, transformer config, and VAE. Place it under "
+                "models/flux/Components/flux-kontext-4bit-fp4. Searched: "
+                f"{searched}"
             )
         raise ModelNotFoundError(
             "Z-Image needs the Z-Image-Turbo Diffusers component folder: text_encoder, tokenizer, "
@@ -1453,6 +1821,17 @@ class DiffusersBackend:
         cls.forward_native = forward_native
         cls._aiwf_input_dtype_patch = True
 
+    def _validate_flux_prompt_assets(self) -> dict[str, Path]:
+        """Validate conditioning tokenizers as well as Flux weight components."""
+        components = self._resolve_flux_component_paths()
+        conditioning = self._resolved_flux_prompt_conditioning()
+        if conditioning.mode == FLUX_CONDITIONING_UNIVERSAL:
+            return components
+        self._resolve_flux_clip_tokenizer_path()
+        if conditioning.mode == FLUX_CONDITIONING_TEACHER:
+            self._resolve_flux_t5_tokenizer_path()
+        return components
+
     def _resolve_flux_component_paths(self) -> dict[str, Path]:
         conditioning = self._resolved_flux_prompt_conditioning()
         mode = conditioning.mode
@@ -1554,8 +1933,9 @@ class DiffusersBackend:
                 )
             else:
                 recovery = (
-                    "Put CLIP-L and T5-XXL under models/flux/Textencoder and "
-                    "ae.safetensors under models/flux/VAE, or add a shared model "
+                    "Put CLIP-L under Textencoder, T5-XXL under flux/Textencoder, "
+                    "and ae.safetensors under flux/VAE within a configured model "
+                    "root (Auto-sort can place these files), or add a shared model "
                     "root in Settings."
                 )
             raise ModelNotFoundError(
@@ -1570,7 +1950,7 @@ class DiffusersBackend:
         return resolved  # type: ignore[dict-item]
 
     def list_flux_text_encoders(self) -> list[tuple[str, str]]:
-        """Return (label, path) for Flux-compatible T5-XXL text encoders found locally.
+        """Return (label, path) for Flux-compatible safetensors T5-XXL encoders.
 
         UMT5 encoders (Wan video only) are excluded — they are not compatible
         with Flux and would produce broken output if selected.
@@ -1581,7 +1961,7 @@ class DiffusersBackend:
             for record in inventory
             if record.family == "text_encoder"
             and record.architecture == ARCH_FLUX
-            and Path(record.path).suffix.lower() in (".safetensors", ".gguf")
+            and Path(record.path).suffix.lower() == ".safetensors"
         ]
         if text_encoder_records:
             seen: set[str] = set()
@@ -1618,7 +1998,7 @@ class DiffusersBackend:
                 if not directory.is_dir():
                     continue
                 for path in sorted(directory.glob("*"), key=lambda p: p.name.lower()):
-                    if path.suffix.lower() not in (".safetensors", ".gguf"):
+                    if path.suffix.lower() != ".safetensors":
                         continue
                     key = str(path.resolve()).lower()
                     if key in seen:
@@ -1645,7 +2025,10 @@ class DiffusersBackend:
             config.distillt5_tokenizer_path
             or self._find_flux_component_dir(
                 ("t5-v1_1-base", "t5-base"),
-                ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders"),
+                (
+                    "flux/Textencoder", "Textencoder", "textencoder", "text_encoders",
+                    "flux/tokenizer",
+                ),
             )
         )
         return config.updated(
@@ -1774,6 +2157,16 @@ class DiffusersBackend:
         ):
             return
 
+        clip_tokenizer_path: Path | None = None
+        t5_tokenizer_path: Path | None = None
+        if conditioning.mode != FLUX_CONDITIONING_UNIVERSAL:
+            # Resolve tokenizer snapshots before loading the sizeable local
+            # encoders, so a missing tokenizer fails early and cannot trigger a
+            # generation-time Hugging Face download.
+            clip_tokenizer_path = self._resolve_flux_clip_tokenizer_path()
+            if conditioning.mode == FLUX_CONDITIONING_TEACHER:
+                t5_tokenizer_path = self._resolve_flux_t5_tokenizer_path()
+
         from transformers import (
             CLIPTextConfig,
             CLIPTextModel,
@@ -1839,15 +2232,20 @@ class DiffusersBackend:
                 t5_config,
             )
             tokenizer_2 = T5TokenizerFast.from_pretrained(
-                "google/t5-v1_1-xxl",
+                str(t5_tokenizer_path),
                 legacy=True,
+                local_files_only=True,
             )
 
         self._flux_text_encoder = clip
         self._flux_text_encoder_2 = t5
         self._flux_clip_device = clip_device
         self._flux_t5_device = t5_device
-        self._flux_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+        if conditioning.mode != FLUX_CONDITIONING_UNIVERSAL:
+            self._flux_tokenizer = CLIPTokenizer.from_pretrained(
+                str(clip_tokenizer_path),
+                local_files_only=True,
+            )
         self._flux_tokenizer_2 = tokenizer_2
         self._flux_universal_conditioner = None
         self._flux_component_paths = component_signature
@@ -2756,7 +3154,7 @@ class DiffusersBackend:
     def _txt2img_pipeline_cls_for_architecture(architecture: str):
         if is_flux_kontext_architecture(architecture):
             return FluxKontextPipeline
-        if is_flux_architecture(architecture):
+        if architecture in {ARCH_FLUX, ARCH_FLUX_FILL}:
             return FluxPipeline
         if is_sd3_architecture(architecture):
             return StableDiffusion3Pipeline
@@ -2771,6 +3169,20 @@ class DiffusersBackend:
     @staticmethod
     def _is_flux_pipe(pipe) -> bool:
         return isinstance(pipe, FluxPipeline)
+
+    def _single_file_config_roots(self) -> tuple[Path, ...]:
+        flags = getattr(self, "flags", None)
+        roots: list[Path] = []
+        models_dir = getattr(flags, "resolved_models_dir", None)
+        if callable(models_dir):
+            roots.append(models_dir())
+        extra_dirs = getattr(flags, "resolved_extra_model_dirs", None)
+        if callable(extra_dirs):
+            roots.extend(extra_dirs())
+        ckpt_dir = getattr(self, "ckpt_dir", None)
+        if ckpt_dir is not None:
+            roots.append(ckpt_dir)
+        return tuple(roots)
 
     @staticmethod
     def _is_flux2_pipe(pipe) -> bool:
@@ -2790,7 +3202,19 @@ class DiffusersBackend:
 
     @staticmethod
     def _is_qwen_image_pipe(pipe) -> bool:
-        return pipe.__class__.__name__ == "QwenImagePipeline"
+        return pipe.__class__.__name__ in {"QwenImagePipeline", "QwenImage21Pipeline"}
+
+    @staticmethod
+    def _is_qwen_image21_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "QwenImage21Pipeline"
+
+    @classmethod
+    def _is_qwen_image21_checkpoint(cls, checkpoint: Checkpoint) -> bool:
+        return (
+            is_qwen_image_architecture(checkpoint.architecture)
+            and not is_qwen_nunchaku_architecture(checkpoint.architecture)
+            and cls._pipeline_class_name(Path(checkpoint.path)) == "QwenImage21Pipeline"
+        )
 
     @staticmethod
     def _is_sana_pipe(pipe) -> bool:
@@ -2911,7 +3335,7 @@ class DiffusersBackend:
             return 20.0
         if is_qwen_image_architecture(architecture):
             return 20.0 if size_gb >= 12.0 else 16.0
-        if is_flux_architecture(architecture):
+        if architecture in {ARCH_FLUX, ARCH_FLUX_FILL}:
             return 11.0 if getattr(self.flags, "fluxfp8", False) else 20.0
         return 20.0
 
@@ -3060,21 +3484,43 @@ class DiffusersBackend:
     def _apply_vae(self, pipe, vae_id: str | None) -> None:
         # Track the applied VAE per pipeline: txt2img and inpaint are separate
         # pipes, so a single global id would skip applying to the second pipe.
-        if (vae_id or None) == getattr(pipe, "_aiwf_vae_id", None):
-            return
+        if not hasattr(pipe, "_aiwf_base_vae"):
+            pipe._aiwf_base_vae = getattr(pipe, "vae", None)
+
+        def restore_base_vae() -> None:
+            pipe.vae = pipe._aiwf_base_vae
+            pipe._aiwf_vae_id = None
+            pipe._aiwf_vae_revision = None
+            self._active_vae_id = None
+            if pipe is self._txt2img and self._img2img is not None:
+                self._sync_img2img_from_txt2img()
 
         if not vae_id:
-            self._active_vae_id = None
+            restore_base_vae()
             return
 
         vae_info = resolve_vae(self.list_vaes(), vae_id)
         if vae_info is None:
-            logger.warning("VAE %s not found", vae_id)
+            restore_base_vae()
+            raise ValueError(f"Selected VAE '{vae_id}' is not available; restored the checkpoint's base VAE.")
+
+        vae_path = Path(vae_info.path)
+        try:
+            stat = vae_path.stat()
+            vae_revision = (vae_info.id, str(vae_path.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
+        except OSError:
+            restore_base_vae()
+            raise ValueError(
+                f"Selected VAE '{vae_info.title}' is no longer accessible at {vae_path}; "
+                "restored the checkpoint's base VAE."
+            )
+        if vae_revision == getattr(pipe, "_aiwf_vae_revision", None):
             return
 
         logger.info("Loading VAE %s", vae_info.title)
         dtype = self.devices.dtype(self.flags.no_half)
         vae = AutoencoderKL.from_single_file(vae_info.path, torch_dtype=dtype)
+        vae = self._prepare_vae_compute(vae, dtype)
         device = self._execution_device(pipe)
         pipe.vae = vae.to(device)
         if getattr(pipe, "_aiwf_vae_slicing_enabled", False):
@@ -3095,6 +3541,9 @@ class DiffusersBackend:
             include_vae=True,
         )
         pipe._aiwf_vae_id = vae_info.id
+        pipe._aiwf_vae_revision = vae_revision
+        if pipe is self._txt2img and self._img2img is not None:
+            self._img2img._aiwf_base_vae = getattr(pipe, "_aiwf_base_vae", None)
         self._active_vae_id = vae_info.id
         if pipe is self._txt2img:
             self._sync_img2img_from_txt2img()
@@ -3106,46 +3555,194 @@ class DiffusersBackend:
 
     def can_preload_checkpoint_locally(self, checkpoint_id: str | None = None) -> bool:
         checkpoint = self._resolve_checkpoint(checkpoint_id)
+        # Dedicated 9-channel inpaint checkpoints are loaded by the inpaint
+        # generation path, not by the shared txt2img startup/model-switch path.
+        # Keep them selectable for Inpaint while preventing startup from
+        # advertising or attempting a generic image preload.
+        if is_inpaint_architecture(checkpoint.architecture):
+            return False
+        def snapshot_complete(path: Path) -> bool:
+            if not path.is_dir() or not (path / "model_index.json").is_file():
+                return False
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import missing_diffusers_local_files
+
+                return not missing_diffusers_local_files(path, limit=1)
+            except Exception:
+                logger.debug("Could not verify Diffusers snapshot files for %s", path, exc_info=True)
+                return False
+
         if is_flux_kontext_architecture(checkpoint.architecture):
             path = Path(checkpoint.path)
-            return path.is_dir() and (path / "model_index.json").is_file()
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import flux_kontext_missing_local_files
+
+                if path.is_dir():
+                    return not flux_kontext_missing_local_files(path, limit=1)
+                if not self._is_flux_kontext_gguf_transformer(path):
+                    return False
+                self._resolve_component_dir(checkpoint.architecture, checkpoint)
+                return True
+            except Exception:
+                logger.debug("Could not verify Flux Kontext snapshot files for %s", path, exc_info=True)
+                return False
         if is_flux_architecture(checkpoint.architecture):
             try:
-                self._resolve_flux_component_paths()
+                self._validate_flux_prompt_assets()
             except ModelNotFoundError:
                 return False
             return Path(checkpoint.path).is_file()
         if is_flux2_klein_architecture(checkpoint.architecture) or is_z_image_architecture(checkpoint.architecture):
             path = Path(checkpoint.path)
             if path.is_dir():
-                return (path / "model_index.json").is_file()
+                return snapshot_complete(path)
             try:
                 self._resolve_component_dir(checkpoint.architecture, checkpoint)
             except ModelNotFoundError:
                 return False
             return path.is_file()
         if is_krea2_architecture(checkpoint.architecture) or is_anima_architecture(checkpoint.architecture):
-            path = Path(checkpoint.path)
-            return path.is_dir() and (path / "model_index.json").is_file()
+            return snapshot_complete(Path(checkpoint.path))
         if is_qwen_nunchaku_architecture(checkpoint.architecture):
             return self._qwen_nunchaku.status(checkpoint.path).ready
         if is_qwen_image_architecture(checkpoint.architecture) or is_sana_architecture(checkpoint.architecture):
             path = Path(checkpoint.path)
-            return path.is_dir() and (path / "model_index.json").is_file()
-        pipeline_cls = self._txt2img_pipeline_cls_for_architecture(checkpoint.architecture)
+            return snapshot_complete(path)
+        pipeline_cls = (
+            StableDiffusionXLImg2ImgPipeline
+            if checkpoint.architecture == ARCH_SDXL_REFINER
+            else self._txt2img_pipeline_cls_for_architecture(checkpoint.architecture)
+        )
         if Path(checkpoint.path).is_dir():
-            return (Path(checkpoint.path) / "model_index.json").is_file()
-        return _cached_single_file_config_dir(pipeline_cls) is not None
+            return snapshot_complete(Path(checkpoint.path))
+        return _cached_single_file_config_dir(pipeline_cls, self._single_file_config_roots()) is not None
+
+    @staticmethod
+    def _paths_support_revision(support_paths: list[Path]) -> str:
+        from aiwf.infrastructure.file_revision import local_file_revision
+
+        entries: list[tuple[Any, ...]] = []
+        for path in support_paths:
+            try:
+                stat = path.stat()
+            except (OSError, ValueError):
+                entries.append((str(path), "missing"))
+                continue
+            if path.is_dir():
+                entries.append((str(path), "directory", *local_file_revision(path, stat)))
+                try:
+                    for root, dirs, files in os.walk(path, followlinks=False):
+                        dirs.sort()
+                        files.sort()
+                        for filename in files:
+                            child = Path(root) / filename
+                            try:
+                                child_stat = child.stat()
+                            except OSError:
+                                entries.append((str(child), "unavailable"))
+                            else:
+                                entries.append((str(child), "file", *local_file_revision(child, child_stat)))
+                except OSError:
+                    entries.append((str(path), "walk-failed", *local_file_revision(path, stat)))
+            else:
+                entries.append((str(path), "file", *local_file_revision(path, stat)))
+        encoded = json.dumps(sorted(set(entries)), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:16]
+
+    def _flux_encoder_support_revision(self) -> str:
+        support_paths: list[Path] = []
+        try:
+            support_paths.extend(Path(path) for path in self._resolve_flux_component_paths().values())
+        except Exception:
+            support_paths.append(Path("__aiwf_flux_components_unresolved__"))
+        for resolver_name in ("_resolve_flux_clip_tokenizer_path", "_resolve_flux_t5_tokenizer_path"):
+            resolver = getattr(self, resolver_name, None)
+            if callable(resolver):
+                try:
+                    support_paths.append(Path(resolver()))
+                except Exception:
+                    support_paths.append(Path(f"__aiwf_{resolver_name}_unresolved__"))
+        return self._paths_support_revision(support_paths)
+
+    def _checkpoint_support_revision(self, checkpoint: Checkpoint) -> str:
+        """Fingerprint checkpoint and family support files without loading weights."""
+        architecture = str(checkpoint.architecture or "").strip().lower()
+        checkpoint_path = Path(checkpoint.path)
+        support_paths: list[Path] = [checkpoint_path]
+        if checkpoint_path.is_file():
+            try:
+                pipeline_cls = self._txt2img_pipeline_cls_for_architecture(architecture)
+                config_dir = _cached_single_file_config_dir(pipeline_cls, self._single_file_config_roots())
+                if config_dir:
+                    support_paths.append(Path(config_dir))
+            except Exception:
+                # Config resolution is best-effort here; preload/generation
+                # reports actionable missing-config errors at its normal gate.
+                pass
+        vae_path = str(getattr(getattr(self, "flags", None), "vae_path", "") or "").strip()
+        if vae_path:
+            support_paths.append(Path(vae_path).expanduser())
+        if architecture in {ARCH_FLUX, ARCH_FLUX_FILL}:
+            support_paths.append(Path(f"__aiwf_flux_encoder_revision__{self._flux_encoder_support_revision()}"))
+            try:
+                support_paths.extend(Path(path) for path in self._resolve_flux_component_paths().values())
+            except Exception:
+                support_paths.append(Path("__aiwf_flux_components_unresolved__"))
+            for resolver_name in ("_resolve_flux_clip_tokenizer_path", "_resolve_flux_t5_tokenizer_path"):
+                resolver = getattr(self, resolver_name, None)
+                if callable(resolver):
+                    try:
+                        support_paths.append(Path(resolver()))
+                    except Exception:
+                        support_paths.append(Path(f"__aiwf_{resolver_name}_unresolved__"))
+        elif architecture in {ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}:
+            try:
+                support_paths.append(Path(self._resolve_component_dir(architecture, checkpoint)))
+            except Exception:
+                support_paths.append(Path(f"__aiwf_{architecture}_components_unresolved__"))
+        elif is_flux_kontext_architecture(architecture) and checkpoint_path.is_file():
+            try:
+                support_paths.append(Path(self._resolve_component_dir(architecture, checkpoint)))
+            except Exception:
+                support_paths.append(Path("__aiwf_flux_kontext_components_unresolved__"))
+        # Family metadata is part of the selected model identity too. In
+        # particular, base Flux and Flux Fill records can point at the same
+        # path while requiring different inpaint pipeline classes.
+        asset_revision = self._paths_support_revision(support_paths)
+        return hashlib.sha256(f"{architecture or 'unknown'}\0{asset_revision}".encode("utf-8")).hexdigest()[:16]
+
+    def _checkpoint_support_revision_for_status(self, checkpoint: Checkpoint) -> str:
+        """Throttle filesystem probes for polled UI residency status only.
+
+        Model loaders always call the uncached revision method before reusing a
+        pipeline, so this short cache can affect only how quickly the UI notices
+        an external support-file change.
+        """
+        cache_key = (str(checkpoint.path), str(checkpoint.architecture or ""))
+        now = time.monotonic()
+        with self._status_support_revision_lock:
+            cached = self._status_support_revision_cache
+            if cached and cached[0] == cache_key and now - cached[1] < self._STATUS_SUPPORT_REVISION_CACHE_SECONDS:
+                return cached[2]
+        revision = self._checkpoint_support_revision(checkpoint)
+        with self._status_support_revision_lock:
+            self._status_support_revision_cache = (cache_key, now, revision)
+        return revision
 
     def _load_flux_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        encoder_support_revision = self._flux_encoder_support_revision()
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
-            logger.debug("Flux checkpoint already warm: %s", checkpoint.title)
-            return checkpoint
+            if self._active_support_revision == support_revision:
+                logger.debug("Flux checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Flux support assets changed; reloading %s", checkpoint.title)
+            self.unload()
 
         if self._active and self._active.path != checkpoint.path:
             # Switching to another Flux transformer: keep the (identical, ~9.8 GB)
-            # CLIP-L + T5 text encoders resident so we skip the disk reload.
-            self.unload(keep_flux_encoders=True)
+            # CLIP-L + T5 encoders only when the resolved support snapshot is identical.
+            self.unload(keep_flux_encoders=self._active_flux_encoder_revision == encoder_support_revision)
         elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
             self._inpaint = None
             self._inpaint_active = None
@@ -3177,12 +3774,14 @@ class DiffusersBackend:
             dtype=dtype,
             family="Flux",
         )
+        self._prepare_flux_transformer_compute(transformer, dtype)
         vae = AutoencoderKL.from_single_file(
             str(component_paths["vae"]),
             config=vae_config_dir,
             torch_dtype=dtype,
             local_files_only=True,
         )
+        vae = self._prepare_vae_compute(vae, dtype)
 
         pipe = FluxPipeline(
             scheduler=FlowMatchEulerDiscreteScheduler(shift=3.0),
@@ -3210,14 +3809,20 @@ class DiffusersBackend:
         self._load_flux_prompt_models(component_paths)
 
         self._active = checkpoint
+        self._active_support_revision = support_revision
+        self._active_flux_encoder_revision = encoder_support_revision
         self._txt2img = pipe
         self._img2img = None
         return checkpoint
 
     def _load_flux2_klein_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
-            logger.debug("Flux.2 Klein checkpoint already warm: %s", checkpoint.title)
-            return checkpoint
+            if self._active_support_revision == support_revision:
+                logger.debug("Flux.2 Klein checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Flux.2 Klein support assets changed; reloading %s", checkpoint.title)
+            self.unload()
 
         if self._active and self._active.path != checkpoint.path:
             self.unload()
@@ -3329,14 +3934,19 @@ class DiffusersBackend:
         self._flux2_prompt_cache.clear()
         self._z_image_prompt_cache.clear()
         self._active = checkpoint
+        self._active_support_revision = support_revision
         self._txt2img = pipe
         self._img2img = None
         return checkpoint
 
     def _load_z_image_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
-            logger.debug("Z-Image checkpoint already warm: %s", checkpoint.title)
-            return checkpoint
+            if self._active_support_revision == support_revision:
+                logger.debug("Z-Image checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Z-Image support assets changed; reloading %s", checkpoint.title)
+            self.unload()
 
         if self._active and self._active.path != checkpoint.path:
             self.unload()
@@ -3396,6 +4006,7 @@ class DiffusersBackend:
                 torch_dtype=aux_dtype,
                 local_files_only=True,
             )
+            vae = self._prepare_vae_compute(vae, aux_dtype)
             text_encoder = self._load_z_image_text_encoder(component_dir, aux_dtype)
             tokenizer = AutoTokenizer.from_pretrained(str(component_dir / "tokenizer"), local_files_only=True)
             scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
@@ -3422,6 +4033,7 @@ class DiffusersBackend:
 
         self._z_image_prompt_cache.clear()
         self._active = checkpoint
+        self._active_support_revision = support_revision
         self._txt2img = pipe
         self._img2img = None
         return checkpoint
@@ -3482,10 +4094,6 @@ class DiffusersBackend:
             return ""
 
     def _load_qwen_nunchaku_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
-        if self._txt2img is self._QWEN_NUNCHAKU_SENTINEL and self._active and self._active.path == checkpoint.path:
-            logger.debug("Qwen Nunchaku checkpoint already warm: %s", checkpoint.title)
-            return checkpoint
-
         if self._active and self._active.path != checkpoint.path:
             self.unload()
         elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
@@ -3504,15 +4112,25 @@ class DiffusersBackend:
                 f"Details: {details}"
             )
 
+        if self._txt2img is self._QWEN_NUNCHAKU_SENTINEL and self._active and self._active.path == checkpoint.path:
+            self._active_support_revision = None
+            logger.debug("Qwen Nunchaku runtime and support assets remain ready: %s", checkpoint.title)
+            return checkpoint
+
         self._active = checkpoint
         self._txt2img = self._QWEN_NUNCHAKU_SENTINEL
         self._img2img = None
+        self._active_support_revision = None
         return checkpoint
 
     def _load_qwen_image_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
-            logger.debug("Qwen Image checkpoint already warm: %s", checkpoint.title)
-            return checkpoint
+            if self._active_support_revision == support_revision:
+                logger.debug("Qwen Image checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Qwen Image support assets changed; reloading %s", checkpoint.title)
+            self.unload()
 
         if self._active and self._active.path != checkpoint.path:
             self.unload()
@@ -3528,45 +4146,70 @@ class DiffusersBackend:
                 "Single-file Qwen Image checkpoints are not wired in AIWF yet."
             )
 
-        try:
-            from diffusers import QwenImagePipeline
-        except ImportError as exc:
+        class_name = self._pipeline_class_name(path)
+        pipeline_name = class_name or "QwenImagePipeline"
+        if pipeline_name not in {"QwenImagePipeline", "QwenImage21Pipeline"}:
             raise ModelNotFoundError(
-                "Qwen Image support needs a newer Diffusers stack. Install the Qwen Image engine dependencies first."
+                f"'{checkpoint.title}' declares {pipeline_name}, which is not a supported Qwen Image pipeline."
+            )
+        try:
+            import diffusers
+
+            pipeline_cls = getattr(diffusers, pipeline_name, None)
+            if pipeline_cls is None:
+                raise ImportError(f"installed Diffusers does not expose {pipeline_name}")
+        except ImportError as exc:
+            if pipeline_name == "QwenImage21Pipeline":
+                raise ModelNotFoundError(
+                    "Qwen Image 2.1 needs a Diffusers build that provides QwenImage21Pipeline. "
+                    "This route is implemented but cannot run with the installed Diffusers version."
+                ) from exc
+            raise ModelNotFoundError(
+                "Qwen Image support needs a Diffusers stack that provides QwenImagePipeline."
             ) from exc
 
         dtype = self._dtype_for_architecture(ARCH_QWEN_IMAGE)
-        logger.info("Loading Qwen Image checkpoint %s from %s", checkpoint.title, path)
+        logger.info("Loading %s checkpoint %s from %s", pipeline_name, checkpoint.title, path)
         try:
-            pipe = QwenImagePipeline.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+            pipe = pipeline_cls.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
         except TypeError:
-            pipe = QwenImagePipeline.from_pretrained(str(path), dtype=dtype, local_files_only=True)
+            pipe = pipeline_cls.from_pretrained(str(path), dtype=dtype, local_files_only=True)
         except Exception as exc:
             raise ModelNotFoundError(
-                f"'{checkpoint.title}' failed to load as Qwen Image ({type(exc).__name__}: {exc}). "
+                f"'{checkpoint.title}' failed to load as {pipeline_name} ({type(exc).__name__}: {exc}). "
                 "Check that the full Diffusers snapshot downloaded completely."
             ) from exc
 
         self._remember_base_scheduler_config(pipe)
-        apply_attention_optimizations(
-            pipe,
-            self.flags,
-            compile_allowed=self._compile_allowed_for_architecture(ARCH_QWEN_IMAGE),
-        )
+        if pipeline_name == "QwenImage21Pipeline":
+            # Qwen 2.1 uses a block-causal attention processor; keep its native
+            # implementation until an alternate backend has a family smoke.
+            logger.info("Qwen Image 2.1 keeps its native Diffusers attention processor.")
+        else:
+            apply_attention_optimizations(
+                pipe,
+                self.flags,
+                compile_allowed=self._compile_allowed_for_architecture(ARCH_QWEN_IMAGE),
+            )
         pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_QWEN_IMAGE, checkpoint=checkpoint)
         pipe.set_progress_bar_config(disable=True)
         self._tune_vae_memory(pipe, ARCH_QWEN_IMAGE, checkpoint)
 
         self._qwen_prompt_cache.clear()
         self._active = checkpoint
+        self._active_support_revision = support_revision
         self._txt2img = pipe
         self._img2img = None
         return checkpoint
 
     def _load_sana_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
-            logger.debug("Sana checkpoint already warm: %s", checkpoint.title)
-            return checkpoint
+            if self._active_support_revision == support_revision:
+                logger.debug("Sana checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Sana support assets changed; reloading %s", checkpoint.title)
+            self.unload()
 
         if self._active and self._active.path != checkpoint.path:
             self.unload()
@@ -3612,14 +4255,19 @@ class DiffusersBackend:
 
         self._sana_prompt_cache.clear()
         self._active = checkpoint
+        self._active_support_revision = support_revision
         self._txt2img = pipe
         self._img2img = None
         return checkpoint
 
     def _load_krea2_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
-            logger.debug("Krea 2 checkpoint already warm: %s", checkpoint.title)
-            return checkpoint
+            if self._active_support_revision == support_revision:
+                logger.debug("Krea 2 checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Krea 2 support assets changed; reloading %s", checkpoint.title)
+            self.unload()
 
         if self._active and self._active.path != checkpoint.path:
             self.unload()
@@ -3660,6 +4308,7 @@ class DiffusersBackend:
 
         self._krea2_prompt_cache.clear()
         self._active = checkpoint
+        self._active_support_revision = support_revision
         self._txt2img = pipe
         self._img2img = None
         return checkpoint
@@ -3812,20 +4461,45 @@ class DiffusersBackend:
         )
 
     def _load_flux_kontext_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
-        """Load a FluxKontextPipeline checkpoint (image-to-image Kontext variant of
-        Flux.1-Kontext-dev, e.g. eramth/flux-kontext-4bit-fp4).
+        """Load a local Kontext pipeline or selected GGUF with local companion assets.
 
-        Unlike base Flux, AIWF doesn't support this as a single-file .safetensors/.gguf
-        transformer - Kontext checkpoints ship as a full HF-style multi-component
-        directory (transformer/text_encoder/text_encoder_2/vae/tokenizers), already
-        quantized in their own config (e.g. bnb 4-bit fp4), so a plain
-        `from_pretrained()` on the directory is the correct and only load path. This is
-        a probe/smoke-test loader only - no img2img dispatch wiring yet (generate()
-        still raises a clean ValueError for IMG2IMG on transformer-image architectures).
+        For GGUF, the selected transformer is loaded separately and passed as an
+        override; the companion snapshot's bundled transformer is never substituted.
         """
+        support_revision = self._checkpoint_support_revision(checkpoint)
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
-            logger.debug("Flux Kontext checkpoint already warm: %s", checkpoint.title)
-            return checkpoint
+            if self._active_support_revision == support_revision:
+                logger.debug("Flux Kontext checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Flux Kontext support assets changed; reloading %s", checkpoint.title)
+            self.unload()
+
+        path = Path(checkpoint.path)
+        selected_gguf = path.is_file() and path.suffix.lower() == ".gguf"
+        if selected_gguf:
+            if not self._is_flux_kontext_gguf_transformer(path):
+                raise ModelNotFoundError(
+                    f"'{checkpoint.title}' is not a nonempty GGUF with a recognized Flux Kontext transformer header."
+                )
+            component_dir = self._resolve_component_dir(checkpoint.architecture, checkpoint)
+        elif path.is_dir():
+            component_dir = path
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import flux_kontext_missing_local_files
+
+                missing = flux_kontext_missing_local_files(path, limit=8)
+            except Exception as exc:
+                raise ModelNotFoundError(
+                    f"Could not verify the selected Flux Kontext snapshot at {path}: {exc}"
+                ) from exc
+            if missing:
+                raise ModelNotFoundError(
+                    "Selected Flux Kontext snapshot is incomplete: " + ", ".join(str(item) for item in missing)
+                )
+        else:
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' must be a complete local Flux Kontext Diffusers folder or a recognized GGUF transformer."
+            )
 
         if self._active and self._active.path != checkpoint.path:
             self.unload()
@@ -3833,14 +4507,6 @@ class DiffusersBackend:
             self._inpaint = None
             self._inpaint_active = None
             self.devices.empty_cache()
-
-        path = Path(checkpoint.path)
-        if not path.is_dir() or not (path / "model_index.json").is_file():
-            raise ModelNotFoundError(
-                f"'{checkpoint.title}' doesn't look like a FluxKontextPipeline export - "
-                "expected a directory with model_index.json (transformer/text_encoder/"
-                "text_encoder_2/vae/tokenizer components), not a single-file checkpoint."
-            )
 
         dtype = self._dtype_for_architecture(ARCH_FLUX_KONTEXT)
         if dtype is torch.float8_e4m3fn:
@@ -3853,13 +4519,22 @@ class DiffusersBackend:
             # huggingface/transformers#39409). Fall back to the bf16/fp16
             # compute dtype bnb already expects.
             dtype = self._gguf_compute_dtype(dtype)
+        transformer = None
+        if selected_gguf:
+            dtype = self._gguf_compute_dtype(dtype)
+            transformer = self._load_dit_transformer_single_file(
+                FluxTransformer2DModel,
+                path,
+                config_dir=str(component_dir / "transformer"),
+                dtype=dtype,
+                family="Flux Kontext",
+            )
         logger.info("Loading Flux Kontext checkpoint %s from %s", checkpoint.title, path)
         try:
-            pipe = FluxKontextPipeline.from_pretrained(
-                str(path),
-                torch_dtype=dtype,
-                local_files_only=True,
-            )
+            load_kwargs = {"torch_dtype": dtype, "local_files_only": True}
+            if transformer is not None:
+                load_kwargs["transformer"] = transformer
+            pipe = FluxKontextPipeline.from_pretrained(str(component_dir), **load_kwargs)
         except Exception as exc:
             logger.error(
                 "Failed to load Flux Kontext checkpoint '%s': %s: %s",
@@ -3890,9 +4565,25 @@ class DiffusersBackend:
             pipe.safety_checker = None
 
         self._active = checkpoint
+        self._active_support_revision = support_revision
         self._txt2img = pipe
         self._img2img = None
         return checkpoint
+
+    @staticmethod
+    def _is_flux_kontext_gguf_transformer(path: Path) -> bool:
+        """Check a selected GGUF's header identity without loading tensor weights."""
+        path = Path(path)
+        try:
+            if path.suffix.lower() != ".gguf" or not path.is_file() or path.stat().st_size <= 0:
+                return False
+            from aiwf.infrastructure.model_header import ARCH_FLUX_KONTEXT_TRANSFORMER, read_model_info
+
+            info = read_model_info(path)
+            return info.arch == ARCH_FLUX_KONTEXT_TRANSFORMER and info.tensor_count > 0
+        except Exception:
+            logger.debug("Could not verify Flux Kontext GGUF header for %s", path, exc_info=True)
+            return False
 
     @staticmethod
     def _checkpoint_load_hint(exc: Exception) -> str:
@@ -3932,9 +4623,13 @@ class DiffusersBackend:
             return self._load_qwen_image_checkpoint(checkpoint)
         if is_sana_architecture(checkpoint.architecture):
             return self._load_sana_checkpoint(checkpoint)
+        support_revision = self._checkpoint_support_revision(checkpoint)
         if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
-            logger.debug("Checkpoint already warm: %s", checkpoint.title)
-            return checkpoint
+            if self._active_support_revision == support_revision:
+                logger.debug("Checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Checkpoint support assets changed; reloading %s", checkpoint.title)
+            self.unload()
 
         if self._active and self._active.path != checkpoint.path:
             self.unload()
@@ -3945,6 +4640,7 @@ class DiffusersBackend:
 
         if self._txt2img is not None:
             self._active = checkpoint
+            self._active_support_revision = support_revision
             logger.debug("Reusing warm pipeline for checkpoint alias: %s", checkpoint.title)
             return checkpoint
 
@@ -3970,7 +4666,11 @@ class DiffusersBackend:
         if path.is_dir():
             load_kwargs.pop("use_safetensors", None)
         else:
-            _add_cached_single_file_config(load_kwargs, pipeline_cls)
+            _add_cached_single_file_config(
+                load_kwargs,
+                pipeline_cls,
+                self._single_file_config_roots(),
+            )
         if pipeline_cls is StableDiffusionPipeline:
             load_kwargs["requires_safety_checker"] = False
             load_kwargs["low_cpu_mem_usage"] = False
@@ -4035,6 +4735,7 @@ class DiffusersBackend:
             pipe.safety_checker = None
 
         self._active = checkpoint
+        self._active_support_revision = support_revision
         self._txt2img = pipe
         self._sync_img2img_from_txt2img()
         return checkpoint
@@ -4042,8 +4743,14 @@ class DiffusersBackend:
     def _load_inpaint_checkpoint(
         self, checkpoint: Checkpoint
     ) -> StableDiffusionInpaintPipeline | StableDiffusionXLInpaintPipeline | StableDiffusion3InpaintPipeline:
+        support_revision = self._checkpoint_support_revision(checkpoint)
         if self._inpaint and self._inpaint_active and self._inpaint_active.path == checkpoint.path:
-            return self._inpaint
+            if self._inpaint_support_revision == support_revision:
+                return self._inpaint
+            logger.info("Inpaint support assets changed; reloading %s", checkpoint.title)
+            self._inpaint = None
+            self._inpaint_active = None
+            self._inpaint_support_revision = None
 
         if self._inpaint_active and self._inpaint_active.path != checkpoint.path:
             self._inpaint = None
@@ -4090,7 +4797,11 @@ class DiffusersBackend:
         if path.is_dir():
             load_kwargs.pop("use_safetensors", None)
         else:
-            _add_cached_single_file_config(load_kwargs, pipeline_cls)
+            _add_cached_single_file_config(
+                load_kwargs,
+                pipeline_cls,
+                self._single_file_config_roots(),
+            )
         if pipeline_cls is StableDiffusionInpaintPipeline:
             load_kwargs["requires_safety_checker"] = False
         if (
@@ -4125,6 +4836,7 @@ class DiffusersBackend:
 
         self._inpaint = pipe
         self._inpaint_active = checkpoint
+        self._inpaint_support_revision = support_revision
         return pipe
 
     def _load_flux_inpaint_pipeline(self, checkpoint: Checkpoint) -> FluxInpaintPipeline:
@@ -4144,6 +4856,7 @@ class DiffusersBackend:
         pipe._aiwf_cast_vae_decode_dtype = getattr(self._txt2img, "_aiwf_cast_vae_decode_dtype", False)
         self._inpaint = pipe
         self._inpaint_active = checkpoint
+        self._inpaint_support_revision = self._active_support_revision
         return pipe
 
     def _load_flux_fill_pipeline(self, checkpoint: Checkpoint) -> FluxFillPipeline:
@@ -4157,8 +4870,10 @@ class DiffusersBackend:
         if FluxFillPipeline is None:
             raise ModelNotFoundError("Flux Fill needs diffusers >= 0.32 with FluxFillPipeline. Update diffusers.")
 
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        encoder_support_revision = self._flux_encoder_support_revision()
         if self._active and self._active.path != checkpoint.path:
-            self.unload(keep_flux_encoders=True)
+            self.unload(keep_flux_encoders=self._active_flux_encoder_revision == encoder_support_revision)
 
         path = Path(checkpoint.path)
         if path.suffix.lower() not in {".gguf", ".safetensors"}:
@@ -4188,12 +4903,14 @@ class DiffusersBackend:
             dtype=dtype,
             family="Flux Fill",
         )
+        self._prepare_flux_transformer_compute(transformer, dtype)
         vae = AutoencoderKL.from_single_file(
             str(component_paths["vae"]),
             config=vae_config_dir,
             torch_dtype=dtype,
             local_files_only=True,
         )
+        vae = self._prepare_vae_compute(vae, dtype)
 
         pipe = FluxFillPipeline(
             scheduler=FlowMatchEulerDiscreteScheduler(shift=3.0),
@@ -4225,6 +4942,8 @@ class DiffusersBackend:
 
         self._inpaint = pipe
         self._inpaint_active = checkpoint
+        self._inpaint_support_revision = support_revision
+        self._active_flux_encoder_revision = encoder_support_revision
         return pipe
 
     def _load_refiner_checkpoint(self, checkpoint_id: str | None) -> StableDiffusionXLImg2ImgPipeline:
@@ -4233,8 +4952,14 @@ class DiffusersBackend:
         checkpoint = self._resolve_checkpoint(checkpoint_id)
         if not is_sdxl_architecture(checkpoint.architecture) and checkpoint.architecture != "sdxl_refiner":
             raise ValueError("SDXL refiner checkpoint must be an SDXL checkpoint.")
+        support_revision = self._checkpoint_support_revision(checkpoint)
         if self._refiner is not None and self._refiner_active and self._refiner_active.path == checkpoint.path:
-            return self._refiner
+            if self._refiner_support_revision == support_revision:
+                return self._refiner
+            logger.info("Refiner support assets changed; reloading %s", checkpoint.title)
+            self._refiner = None
+            self._refiner_active = None
+            self._refiner_support_revision = None
 
         logger.info("Loading SDXL refiner pipeline for %s", checkpoint.title)
         dtype = self._dtype_for_architecture(checkpoint.architecture)
@@ -4243,7 +4968,11 @@ class DiffusersBackend:
             "torch_dtype": dtype,
             "use_safetensors": path.suffix.lower() == ".safetensors",
         }
-        _add_cached_single_file_config(load_kwargs, StableDiffusionXLImg2ImgPipeline)
+        _add_cached_single_file_config(
+            load_kwargs,
+            StableDiffusionXLImg2ImgPipeline,
+            self._single_file_config_roots(),
+        )
         pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(checkpoint.path, **load_kwargs)
         self._remember_base_scheduler_config(pipe)
         self._apply_fp8_storage(pipe)
@@ -4257,6 +4986,7 @@ class DiffusersBackend:
         self._tune_vae_memory(pipe, checkpoint.architecture)
         self._refiner = pipe
         self._refiner_active = checkpoint
+        self._refiner_support_revision = support_revision
         return pipe
 
     @contextmanager
@@ -4300,8 +5030,11 @@ class DiffusersBackend:
         self._inpaint = None
         self._refiner = None
         self._active = None
+        self._active_support_revision = None
         self._inpaint_active = None
         self._refiner_active = None
+        self._inpaint_support_revision = None
+        self._refiner_support_revision = None
         self._active_vae_id = None
         self._controlnet_cache.clear()
         # The selected FLUX conditioner is shared across compatible FLUX
@@ -4317,6 +5050,7 @@ class DiffusersBackend:
             self._flux_universal_conditioner = None
             self._flux_conditioning_scope = None
             self._flux_prompt_cache.clear()
+            self._active_flux_encoder_revision = None
         self._flux2_prompt_cache.clear()
         self._z_image_prompt_cache.clear()
         self._krea2_prompt_cache.clear()
@@ -4958,6 +5692,39 @@ class DiffusersBackend:
             output_type="pil",
         )
 
+    def _run_qwen_image21_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        image: Image.Image | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        """Use Qwen Image 2.1's own joint prompt/image encoder and pipeline API."""
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        return self._call_pipe(
+            pipe,
+            prompt=parsed_prompt,
+            image=image.convert("RGB") if image is not None else None,
+            negative_prompt=request.negative_prompt or None,
+            true_cfg_scale=float(request.cfg_scale),
+            num_inference_steps=steps,
+            num_images_per_prompt=request.batch_size,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
+            output_type="pil",
+        )
+
     def _run_sana_txt2img_pass(
         self,
         pipe,
@@ -5283,6 +6050,7 @@ class DiffusersBackend:
         is_anima_checkpoint = is_anima_architecture(checkpoint.architecture)
         is_qwen_nunchaku_checkpoint = is_qwen_nunchaku_architecture(checkpoint.architecture)
         is_qwen_image_checkpoint = is_qwen_image_architecture(checkpoint.architecture) and not is_qwen_nunchaku_checkpoint
+        is_qwen_image21_checkpoint = self._is_qwen_image21_checkpoint(checkpoint)
         is_sana_checkpoint = is_sana_architecture(checkpoint.architecture)
         is_transformer_image_checkpoint = is_transformer_image_architecture(checkpoint.architecture)
         if is_sd3_architecture(checkpoint.architecture):
@@ -5295,39 +6063,40 @@ class DiffusersBackend:
                 "The current ControlNet stack is for SD1.5/SDXL. Disable ControlNet for SD3.5."
                 )
         if is_transformer_image_checkpoint:
-            family_label = (
-                "Flux.2 Klein"
-                if is_flux2_checkpoint
-                else (
-                    "Z-Image"
-                    if is_z_image_checkpoint
-                    else (
-                        "Krea 2"
-                        if is_krea2_checkpoint
-                        else (
-                            "Anima"
-                            if is_anima_checkpoint
-                            else (
-                                "Qwen Image Nunchaku"
-                                if is_qwen_nunchaku_checkpoint
-                                else (
-                                    "Qwen Image"
-                                    if is_qwen_image_checkpoint
-                                    else ("Sana" if is_sana_checkpoint else ("Flux Kontext" if is_flux_kontext_checkpoint else "Flux"))
-                                )
-                            )
-                        )
-                    )
-                )
-            )
+            if is_flux2_checkpoint:
+                family_label = "Flux.2 Klein"
+            elif is_z_image_checkpoint:
+                family_label = "Z-Image"
+            elif is_krea2_checkpoint:
+                family_label = "Krea 2"
+            elif is_anima_checkpoint:
+                family_label = "Anima"
+            elif is_qwen_nunchaku_checkpoint:
+                family_label = "Qwen Image Nunchaku"
+            elif is_qwen_image21_checkpoint:
+                family_label = "Qwen Image 2.1"
+            elif is_qwen_image_checkpoint:
+                family_label = "Qwen Image"
+            elif is_sana_checkpoint:
+                family_label = "Sana"
+            elif is_flux_kontext_checkpoint:
+                family_label = "Flux Kontext"
+            else:
+                family_label = "Flux"
             # Plain Flux (not Flux.2 Klein / Z-Image) also supports inpaint via
             # FluxInpaintPipeline, reusing the already-loaded transformer/text
             # encoders. Everything else on this family stays txt2img-only.
             flux_inpaint_allowed = is_flux_checkpoint and request.mode == GenerationMode.INPAINT
-            if request.mode != GenerationMode.TXT2IMG and not flux_inpaint_allowed:
+            qwen21_img2img_allowed = is_qwen_image21_checkpoint and request.mode == GenerationMode.IMG2IMG
+            if request.mode != GenerationMode.TXT2IMG and not flux_inpaint_allowed and not qwen21_img2img_allowed:
                 if is_flux_checkpoint:
                     raise ValueError(
                         "Flux supports txt2img and inpaint only. Use SD/SDXL/SD3.5 for img2img/ControlNet."
+                    )
+                if is_flux_kontext_checkpoint:
+                    raise ValueError(
+                        "Flux Kontext supports txt2img only; image-conditioned editing and inpaint are not wired yet. "
+                        "Use SD/SDXL/SD3.5 for img2img or inpaint."
                     )
                 raise ValueError(
                     f"{family_label} is currently wired for txt2img only. "
@@ -5385,8 +6154,12 @@ class DiffusersBackend:
             if not init_images:
                 raise ValueError("img2img requires init_images")
             self.load_checkpoint(request.checkpoint_id)
-            pipe = self._img2img
-            assert pipe is not None
+            if is_qwen_image21_checkpoint:
+                pipe = self._txt2img
+                assert pipe is not None
+            else:
+                pipe = self._img2img
+                assert pipe is not None
         elif is_qwen_nunchaku_checkpoint:
             self.load_checkpoint(request.checkpoint_id)
             return self._generate_qwen_nunchaku_result(
@@ -5495,16 +6268,18 @@ class DiffusersBackend:
                 generator.manual_seed(seed)
                 width, height = request.width, request.height
                 if is_transformer_image_checkpoint:
-                    # Flux / Flux.2 Klein / Z-Image patchify in 16x16 blocks and
-                    # raise "Height/Width must be divisible by 16" otherwise.
-                    aligned_width, aligned_height = align_to_multiple_of_16(width, height)
+                    # Qwen Image 2.1 truncates dimensions in 32-pixel blocks;
+                    # other transformer image pipelines require 16-pixel blocks.
+                    align_dimensions = align_to_multiple_of_32 if is_qwen_image21_checkpoint else align_to_multiple_of_16
+                    aligned_width, aligned_height = align_dimensions(width, height)
                     if (aligned_width, aligned_height) != (width, height):
                         logger.info(
-                            "Rounding %dx%d to %dx%d for transformer architecture (multiple of 16 required)",
+                            "Rounding %dx%d to %dx%d for %s dimensions",
                             width,
                             height,
                             aligned_width,
                             aligned_height,
+                            "Qwen Image 2.1 (multiple of 32)" if is_qwen_image21_checkpoint else "transformer (multiple of 16)",
                         )
                         width, height = aligned_width, aligned_height
 
@@ -5629,20 +6404,36 @@ class DiffusersBackend:
                         on_progress,
                         should_cancel,
                         total_steps=request.steps,
-                        preview_every_n_steps=preview_every_n_steps,
+                        # Qwen 2.1 exposes packed 3D latents in the callback;
+                        # the shared preview decoder only supports classic 4D latents.
+                        preview_every_n_steps=(0 if is_qwen_image21_checkpoint else preview_every_n_steps),
                     )
-                    output = self._run_qwen_image_txt2img_pass(
-                        pipe,
-                        request,
-                        parsed.prompt,
-                        generator,
-                        callback,
-                        width=width,
-                        height=height,
-                        steps=request.steps,
-                        on_progress=on_progress,
-                        should_cancel=should_cancel,
-                    )
+                    if self._is_qwen_image21_pipe(pipe):
+                        output = self._run_qwen_image21_pass(
+                            pipe,
+                            request,
+                            parsed.prompt,
+                            generator,
+                            callback,
+                            width=width,
+                            height=height,
+                            steps=request.steps,
+                            image=init_images[0] if request.mode == GenerationMode.IMG2IMG and init_images else None,
+                            should_cancel=should_cancel,
+                        )
+                    else:
+                        output = self._run_qwen_image_txt2img_pass(
+                            pipe,
+                            request,
+                            parsed.prompt,
+                            generator,
+                            callback,
+                            width=width,
+                            height=height,
+                            steps=request.steps,
+                            on_progress=on_progress,
+                            should_cancel=should_cancel,
+                        )
                     batch_images = output.images
 
                 elif is_sana_checkpoint:

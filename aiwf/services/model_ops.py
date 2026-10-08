@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -109,8 +110,10 @@ def inspect_model_asset(path: str | Path, *, architecture: str | None = None) ->
         compact = combined.replace("_", "").replace("-", "").replace(" ", "")
         if "z-image" in combined or "zimage" in compact:
             detected_arch = "z_image"
-        elif "flux.2" in combined or "flux2" in compact or "klein" in combined:
+        elif "klein" in combined or re.search(r"(?<![a-z0-9])f2k(?![a-z0-9])", combined):
             detected_arch = "flux2_klein"
+        elif "flux.2" in combined or "flux2" in compact:
+            detected_arch = "flux2"
         elif "sdxl" in combined or "xl" in combined:
             detected_arch = "sdxl"
         elif "sd1" in combined or "sd 1" in combined or "v1-5" in combined or "1.5" in combined:

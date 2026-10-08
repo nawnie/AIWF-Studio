@@ -5,12 +5,15 @@ import logging
 import os
 import random
 import struct
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.engine import EngineTenant
+from aiwf.core.domain.errors import GenerationCancelledError
 from aiwf.core.domain.ltx import (
     LTX_DISTILLED_CHECKPOINT,
     LTX_DIFFUSERS_2B_CHECKPOINT,
@@ -32,6 +35,7 @@ from aiwf.core.domain.ltx import (
 )
 from aiwf.services.engine_supervisor import EngineSupervisor
 from aiwf.infrastructure.video.processing import VideoProcessor
+from aiwf.services.model_files import indexed_safetensors_shards_ready, resolve_model_asset
 from aiwf.services.process_supervisor import ProcessSupervisor, get_process_supervisor
 from aiwf.services.worker_tenant import WorkerTenantRegistry
 
@@ -57,6 +61,33 @@ class LtxService:
         self.registry = registry or WorkerTenantRegistry(self.flags.data_dir)
         self.supervisor = supervisor
         self.process_supervisor = process_supervisor or get_process_supervisor()
+        self._generation_lock = threading.Lock()
+        self._generation_cancel = threading.Event()
+        self._active_worker_id: str | None = None
+        self._generation_prepared = False
+
+    def cancel_active_generation(self) -> bool:
+        """Request cancellation of the current LTX job, stopping worker variants promptly."""
+        self._generation_cancel.set()
+        with self._generation_lock:
+            worker_id = self._active_worker_id
+        if worker_id:
+            def _stop_worker() -> None:
+                # The supervisor registers the subprocess just after start(); allow that
+                # small race to settle before giving up on immediate process-tree stop.
+                for _ in range(20):
+                    if self.process_supervisor.is_running(worker_id):
+                        self.process_supervisor.stop(worker_id)
+                        return
+                    time.sleep(0.05)
+            threading.Thread(target=_stop_worker, name="aiwf-ltx-cancel", daemon=True).start()
+        return True
+
+    def begin_generation(self) -> None:
+        """Clear the prior job's token before publishing a new job as running."""
+        with self._generation_lock:
+            self._generation_cancel.clear()
+            self._generation_prepared = True
 
     def models_root(self) -> Path:
         return self.flags.resolved_models_dir() / "ltx"
@@ -68,29 +99,53 @@ class LtxService:
         elif pipeline == LTX_PIPELINE_DISTILLED:
             name = LTX_DISTILLED_CHECKPOINT
         else:
-            fp8 = root / LTX_FULL_CHECKPOINT_FP8
-            name = LTX_FULL_CHECKPOINT_FP8 if fp8.is_file() else LTX_FULL_CHECKPOINT
-        return root / name
+            fp8 = self._resolve_ltx_asset((Path("checkpoints") / LTX_FULL_CHECKPOINT_FP8,))
+            name = LTX_FULL_CHECKPOINT_FP8 if _nonempty_file(fp8) else LTX_FULL_CHECKPOINT
+        relative = Path("checkpoints") / name
+        return self._resolve_ltx_asset((relative,))
+
+    def _resolve_ltx_asset(self, relative_candidates, *, predicate=None) -> Path:  # noqa: ANN001
+        return resolve_model_asset(
+            self.flags,
+            (Path("ltx") / relative for relative in relative_candidates),
+            predicate=predicate,
+            fallback=self.models_root() / next(iter(relative_candidates)),
+        )
 
     def default_t5_encoder_path(self) -> Path:
-        primary = self.flags.resolved_models_dir() / "flux" / "Textencoder" / LTX_T5XXL_FP16
-        if primary.is_file():
-            return primary
-        return self.flags.resolved_models_dir() / "Textencoder" / LTX_T5XXL_FP16
+        return resolve_model_asset(
+            self.flags,
+            (
+                Path("flux") / "Textencoder" / LTX_T5XXL_FP16,
+                Path("Textencoder") / LTX_T5XXL_FP16,
+                Path("text_encoders") / LTX_T5XXL_FP16,
+            ),
+            fallback=self.flags.resolved_models_dir() / "flux" / "Textencoder" / LTX_T5XXL_FP16,
+        )
+
+    def default_t5_tokenizer_path(self) -> Path:
+        return self._resolve_ltx_asset(
+            (Path("tokenizer") / "t5-v1_1-xxl",),
+            predicate=ltx_t5_tokenizer_ready,
+        )
 
     def default_launch_pipeline(self) -> str:
-        if self.default_checkpoint_path(LTX_PIPELINE_DIFFUSERS_2B).is_file() and self.default_t5_encoder_path().is_file():
+        if (
+            _nonempty_file(self.default_checkpoint_path(LTX_PIPELINE_DIFFUSERS_2B))
+            and _nonempty_file(self.default_t5_encoder_path())
+            and ltx_t5_tokenizer_ready(self.default_t5_tokenizer_path())
+        ):
             return LTX_PIPELINE_DIFFUSERS_2B
         one_stage = self.default_checkpoint_path(LTX_PIPELINE_ONE_STAGE)
         if (
-            one_stage.is_file()
+            _nonempty_file(one_stage)
             and not ltx_checkpoint_openability_error(one_stage)
             and not ltx_native_checkpoint_runtime_blocker(one_stage)
         ):
             return LTX_PIPELINE_ONE_STAGE
         distilled = self.default_checkpoint_path(LTX_PIPELINE_DISTILLED)
         if (
-            distilled.is_file()
+            _nonempty_file(distilled)
             and not ltx_checkpoint_openability_error(distilled)
             and not ltx_native_checkpoint_runtime_blocker(distilled)
         ):
@@ -101,13 +156,19 @@ class LtxService:
         return LtxVideoRequest(pipeline=self.default_launch_pipeline())
 
     def default_spatial_upsampler_path(self) -> Path:
-        return self.models_root() / "upscalers" / LTX_SPATIAL_UPSCALER_X2
+        return self._resolve_ltx_asset((Path("upscalers") / LTX_SPATIAL_UPSCALER_X2,))
 
     def default_official_gemma_root(self) -> Path:
-        return self.models_root() / "text_encoder" / LTX_GEMMA_REPO.split("/", 1)[1]
+        return self._resolve_ltx_asset(
+            (Path("text_encoder") / LTX_GEMMA_REPO.split("/", 1)[1],),
+            predicate=ltx_gemma_hf_assets_ready,
+        )
 
     def default_heretic_converted_gemma_root(self) -> Path:
-        return self.models_root() / "text_encoder" / LTX_HERETIC_Q3_CONVERTED_FOLDER
+        return self._resolve_ltx_asset(
+            (Path("text_encoder") / LTX_HERETIC_Q3_CONVERTED_FOLDER,),
+            predicate=_converted_heretic_gemma_ready,
+        )
 
     def default_gemma_root(self) -> Path:
         heretic = self.default_heretic_converted_gemma_root()
@@ -116,7 +177,15 @@ class LtxService:
         return self.default_official_gemma_root()
 
     def default_gemma_gguf_path(self) -> Path:
-        return self.flags.resolved_models_dir() / "LLM" / "GGUF" / LTX_HERETIC_Q3_GGUF
+        return resolve_model_asset(
+            self.flags,
+            (
+                Path("ltx") / "GGUF" / LTX_HERETIC_Q3_GGUF,
+                Path("LLM") / "GGUF" / LTX_HERETIC_Q3_GGUF,
+                Path("llm") / "gguf" / LTX_HERETIC_Q3_GGUF,
+            ),
+            fallback=self.models_root() / "GGUF" / LTX_HERETIC_Q3_GGUF,
+        )
 
     def output_dir(self) -> Path:
         return self.flags.resolved_output_dir() / "ltx-videos"
@@ -137,10 +206,14 @@ class LtxService:
         lines.append(f"- Default LTX 2B T5XXL: `{self.default_t5_encoder_path()}`")
         return "\n".join(lines)
 
-    def generate(self, request: LtxVideoRequest) -> LtxVideoResult:
+    def generate(self, request: LtxVideoRequest, *, on_progress=None) -> LtxVideoResult:
+        with self._generation_lock:
+            if not self._generation_prepared:
+                self._generation_cancel.clear()
+            self._generation_prepared = False
         normalized = self._resolve_request(request)
         if normalized.get("pipeline") == LTX_PIPELINE_DIFFUSERS_2B:
-            return self._generate_diffusers_2b(normalized)
+            return self._generate_diffusers_2b(normalized, on_progress=on_progress)
 
         status = self.registry.status("ltx")
         if not status.ready:
@@ -151,6 +224,9 @@ class LtxService:
             )
 
         self._validate_request_paths(normalized)
+        headroom_issue = self._ltx_worker_headroom_issue(normalized)
+        if headroom_issue:
+            raise LtxUnavailable(headroom_issue)
 
         job_id = f"ltx_{uuid4().hex[:8]}"
         request_path = self._write_worker_request(job_id, normalized)
@@ -179,10 +255,12 @@ class LtxService:
                     job_id=job_id,
                     allow_wait=False,
                 ):
-                    self._run_worker(job_id, command, events)
+                    self._run_worker(job_id, command, events, on_progress=on_progress)
             else:
-                self._run_worker(job_id, command, events)
+                self._run_worker(job_id, command, events, on_progress=on_progress)
         except Exception as exc:
+            if isinstance(exc, GenerationCancelledError):
+                raise
             error_message = str(exc)
             logger.exception("LTX 2.3 generation failed")
 
@@ -210,13 +288,23 @@ class LtxService:
             audio_mode="native",
         )
 
-    def _generate_diffusers_2b(self, payload: dict) -> LtxVideoResult:
+    def _generate_diffusers_2b(self, payload: dict, *, on_progress=None) -> LtxVideoResult:
         self._validate_request_paths(payload)
         source = payload.get("source_image_path")
         if source:
             raise LtxUnavailable("The local LTX 2B Diffusers route is text-to-video only; clear the source image.")
 
-        from aiwf.services.ltx_diffusers import run_ltx2b_diffusers
+        from aiwf.services.ltx_diffusers import is_ltx2b_pipeline_cached, run_ltx2b_diffusers
+
+        checkpoint = Path(str(payload["checkpoint_path"]))
+        if not is_ltx2b_pipeline_cached(
+            checkpoint=checkpoint,
+            t5_weights=Path(str(payload["t5_encoder_path"])),
+            tokenizer_id=str(payload.get("t5_tokenizer") or LTX_T5_TOKENIZER),
+        ):
+            headroom_issue = self._ltx2b_headroom_issue(checkpoint)
+            if headroom_issue:
+                raise LtxUnavailable(headroom_issue)
 
         job_id = f"ltx2b_{uuid4().hex[:8]}"
         output_path = Path(str(payload["output_path"]))
@@ -235,6 +323,8 @@ class LtxService:
                 fps=int(round(float(payload.get("fps") or 8))),
                 steps=int(payload.get("steps") or 1),
                 seed=int(payload.get("seed") or 0),
+                on_progress=on_progress,
+                should_cancel=self._generation_cancel.is_set,
             )
 
         try:
@@ -250,6 +340,8 @@ class LtxService:
                 result = _run()
         except Exception as exc:
             logger.exception("LTX 2B Diffusers generation failed")
+            if isinstance(exc, GenerationCancelledError):
+                raise
             raise LtxUnavailable(f"LTX 2B Diffusers generation failed: {exc}") from exc
 
         return LtxVideoResult(
@@ -270,6 +362,147 @@ class LtxService:
             has_audio=False,
             audio_mode="none",
         )
+
+    def prepare(self, request: LtxVideoRequest) -> dict:
+        """Load the selected in-process LTX 2B pipeline without starting generation.
+
+        Other LTX variants are worker/subprocess routes and only receive a
+        readiness check here; their worker loads weights when a job starts.
+        """
+        normalized = self._resolve_request(request)
+        if normalized.get("pipeline") != LTX_PIPELINE_DIFFUSERS_2B:
+            self._validate_request_paths(normalized)
+            return {
+                "loaded": False,
+                "resident": None,
+                "detail": "LTX worker route passed local-file checks; its worker loads weights when generation starts.",
+            }
+
+        self._validate_request_paths(normalized)
+        if normalized.get("source_image_path"):
+            raise LtxUnavailable("The local LTX 2B Diffusers route is text-to-video only; clear the source image.")
+        from aiwf.services.ltx_diffusers import is_ltx2b_pipeline_cached, load_ltx2b_pipeline
+
+        checkpoint = Path(str(normalized["checkpoint_path"]))
+        t5_weights = Path(str(normalized["t5_encoder_path"]))
+        tokenizer_id = str(normalized.get("t5_tokenizer") or LTX_T5_TOKENIZER)
+        already_resident = is_ltx2b_pipeline_cached(
+            checkpoint=checkpoint,
+            t5_weights=t5_weights,
+            tokenizer_id=tokenizer_id,
+        )
+        if not already_resident:
+            headroom_issue = self._ltx2b_headroom_issue(checkpoint)
+            if headroom_issue:
+                raise LtxUnavailable(headroom_issue)
+        job_id = f"ltx2b_prepare_{uuid4().hex[:8]}"
+        try:
+            if self.supervisor is not None:
+                with self.supervisor.tenant_session(
+                    EngineTenant.VIDEO,
+                    reason="LTX 2B Diffusers model selection",
+                    job_id=job_id,
+                    allow_wait=False,
+                ):
+                    load_ltx2b_pipeline(
+                        checkpoint=checkpoint,
+                        t5_weights=t5_weights,
+                        tokenizer_id=tokenizer_id,
+                    )
+            else:
+                load_ltx2b_pipeline(
+                    checkpoint=checkpoint,
+                    t5_weights=t5_weights,
+                    tokenizer_id=tokenizer_id,
+                )
+        except Exception as exc:
+            logger.exception("LTX 2B Diffusers selection-time load failed")
+            raise LtxUnavailable(f"LTX 2B Diffusers model load failed: {exc}") from exc
+
+        resident = is_ltx2b_pipeline_cached(
+            checkpoint=checkpoint,
+            t5_weights=t5_weights,
+            tokenizer_id=tokenizer_id,
+        )
+        if not resident:
+            raise LtxUnavailable("LTX 2B Diffusers loader returned without confirming the selected pipeline is resident.")
+        return {
+            "loaded": True,
+            "resident": True,
+            "modelId": str(checkpoint),
+            "detail": "LTX 2B Diffusers pipeline and T5XXL support assets are loaded and resident. No generation was run.",
+        }
+
+    def _ltx2b_headroom_issue(self, checkpoint: Path) -> str | None:
+        """Apply the Studio model-load VRAM policy before an uncached LTX 2B load."""
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return "LTX 2B loading deferred because available GPU memory could not be checked."
+            from aiwf.services.gpu_memory import measured_cuda_free_bytes
+
+            free_bytes = measured_cuda_free_bytes(torch)
+            if free_bytes is None:
+                return "LTX 2B loading deferred because available GPU memory could not be matched to the active CUDA device."
+            size_bytes = max(0, checkpoint.stat().st_size)
+            estimated_gb = size_bytes / 1024**3
+            low_memory_profile = bool(
+                getattr(self.flags, "lowvram", False) or getattr(self.flags, "medvram", False)
+            )
+            required_gb = 3.0 if low_memory_profile else max(3.5, min(12.0, estimated_gb * 0.75 + 1.5))
+            free_gb = float(free_bytes) / 1024**3
+        except Exception:
+            return "LTX 2B loading deferred because available GPU memory could not be checked."
+        if free_gb < required_gb:
+            return (
+                f"LTX 2B loading deferred: {free_gb:.1f} GB VRAM is free; "
+                f"this model needs an estimated {required_gb:.1f} GB headroom."
+            )
+        return None
+
+    def _ltx_worker_headroom_issue(self, payload: dict) -> str | None:
+        """Gate external LTX worker launches on device-wide free VRAM."""
+        try:
+            # The isolated worker has its own CUDA-enabled environment, so the
+            # Studio process's Torch/CUDA visibility is not authoritative here.
+            from aiwf.services.gpu_memory import nvidia_smi_free_bytes
+
+            free_bytes = nvidia_smi_free_bytes()
+        except Exception:
+            free_bytes = None
+        if free_bytes is None:
+            return "LTX worker launch deferred because available GPU memory could not be verified."
+
+        offload = str(payload.get("offload") or "disk").strip().lower()
+        required_gb = 6.0
+        if offload == "none":
+            checkpoint = Path(str(payload.get("checkpoint_path") or ""))
+            try:
+                model_gb = max(0, checkpoint.stat().st_size) / 1024**3
+            except OSError:
+                model_gb = 0.0
+            required_gb = max(6.0, min(14.0, model_gb * 0.75 + 2.0))
+        free_gb = float(free_bytes) / 1024**3
+        if free_gb < required_gb:
+            return (
+                f"LTX worker launch deferred: {free_gb:.1f} GB VRAM is free; "
+                f"the selected {offload} route needs at least {required_gb:.1f} GB headroom."
+            )
+        return None
+
+    def unload(self) -> bool:
+        """Release the retained Diffusers 2B pipeline, if one is cached."""
+        from aiwf.services.ltx_diffusers import unload_ltx2b_diffusers_cache
+        if self.supervisor is None:
+            return unload_ltx2b_diffusers_cache()
+        with self.supervisor.tenant_session(
+            EngineTenant.VIDEO,
+            reason="Release cached LTX 2B Diffusers model",
+            job_id=f"ltx2b_unload_{uuid4().hex[:8]}",
+            allow_wait=False,
+        ):
+            return unload_ltx2b_diffusers_cache()
 
     def probe_gemma_gguf(self, request: LtxVideoRequest | None = None) -> list[dict]:
         """Run the isolated worker's native-GGUF text-encoder feasibility probe.
@@ -366,12 +599,15 @@ class LtxService:
         output_path = self.output_dir() / f"{prefix}-{stamp}-{uuid4().hex[:6]}.mp4"
 
         payload = request.model_dump()
+        tokenizer_id = str(request.t5_tokenizer or LTX_T5_TOKENIZER)
+        if tokenizer_id == LTX_T5_TOKENIZER:
+            tokenizer_id = str(self.default_t5_tokenizer_path())
         payload.update(
             {
                 "pipeline": pipeline,
                 "checkpoint_path": str(checkpoint),
                 "t5_encoder_path": str(t5_encoder_path),
-                "t5_tokenizer": str(request.t5_tokenizer or LTX_T5_TOKENIZER),
+                "t5_tokenizer": tokenizer_id,
                 "spatial_upsampler_path": str(spatial_upsampler),
                 "gemma_root": str(gemma_root),
                 "gemma_backend": gemma_backend,
@@ -386,16 +622,21 @@ class LtxService:
 
     def _validate_request_paths(self, payload: dict) -> None:
         checkpoint = Path(str(payload.get("checkpoint_path") or ""))
-        if not checkpoint.is_file():
-            raise LtxUnavailable(f"LTX checkpoint missing: {checkpoint}")
         if payload.get("pipeline") == LTX_PIPELINE_DIFFUSERS_2B:
+            if not _nonempty_file(checkpoint):
+                raise LtxUnavailable(f"LTX 2B checkpoint missing or empty: {checkpoint}")
             t5_encoder = Path(str(payload.get("t5_encoder_path") or ""))
-            if not t5_encoder.is_file():
-                raise LtxUnavailable(f"LTX 2B T5XXL text encoder missing: {t5_encoder}")
+            if not _nonempty_file(t5_encoder):
+                raise LtxUnavailable(f"LTX 2B T5XXL text encoder missing or empty: {t5_encoder}")
+            tokenizer_path = Path(str(payload.get("t5_tokenizer") or ""))
+            if not ltx_t5_tokenizer_ready(tokenizer_path):
+                raise LtxUnavailable(f"LTX 2B T5 tokenizer is missing or incomplete: {tokenizer_path}")
             source = payload.get("source_image_path")
             if source and not Path(str(source)).is_file():
                 raise LtxUnavailable(f"LTX source image missing: {source}")
             return
+        if not checkpoint.is_file():
+            raise LtxUnavailable(f"LTX checkpoint missing: {checkpoint}")
         openability_error = ltx_checkpoint_openability_error(checkpoint)
         if openability_error:
             raise LtxUnavailable(openability_error)
@@ -415,9 +656,13 @@ class LtxService:
 
     def _validate_gemma_paths(self, payload: dict) -> None:
         gemma_root = Path(str(payload.get("gemma_root") or ""))
-        if not gemma_root.exists():
-            raise LtxUnavailable(f"LTX Gemma tokenizer/processor folder missing: {gemma_root}")
-        if payload.get("gemma_backend") != LTX_GEMMA_BACKEND_GGUF:
+        backend = str(payload.get("gemma_backend") or LTX_GEMMA_BACKEND_HF_SAFETENSORS)
+        missing = ltx_gemma_missing_local_files(gemma_root, backend=backend)
+        if missing:
+            raise LtxUnavailable(
+                "LTX Gemma assets are incomplete: " + ", ".join(str(path) for path in missing[:8])
+            )
+        if backend != LTX_GEMMA_BACKEND_GGUF:
             return
         gguf = Path(str(payload.get("gemma_gguf_path") or ""))
         if not gguf.is_file():
@@ -439,11 +684,24 @@ class LtxService:
         path.write_text(json.dumps(worker_payload, indent=2, sort_keys=True), encoding="utf-8")
         return path
 
-    def _run_worker(self, job_id: str, command, events: list[dict]) -> None:  # noqa: ANN001
-        for line in self.process_supervisor.start(job_id, command, check=True):
-            event = _parse_event(line)
-            if event is not None:
-                events.append(event)
+    def _run_worker(self, job_id: str, command, events: list[dict], *, on_progress=None) -> None:  # noqa: ANN001
+        with self._generation_lock:
+            self._active_worker_id = job_id
+        try:
+            for line in self.process_supervisor.start(job_id, command, check=True):
+                if self._generation_cancel.is_set():
+                    raise GenerationCancelledError("LTX video generation cancelled.")
+                event = _parse_event(line)
+                if event is not None:
+                    events.append(event)
+                    if callable(on_progress):
+                        on_progress(event)
+            if self._generation_cancel.is_set():
+                raise GenerationCancelledError("LTX video generation cancelled.")
+        finally:
+            with self._generation_lock:
+                if self._active_worker_id == job_id:
+                    self._active_worker_id = None
 
 
 def _resolve_path(raw: str | None, default: Path, root: Path) -> Path:
@@ -462,7 +720,7 @@ def _resolve_optional_path(raw: str | None, root: Path) -> Path | None:
 
 def _converted_heretic_gemma_ready(path: Path) -> bool:
     return all(
-        (path / filename).is_file()
+        _nonempty_confined_file(path, path / filename)
         for filename in (
             "model.safetensors",
             "vision_projector.safetensors",
@@ -471,6 +729,96 @@ def _converted_heretic_gemma_ready(path: Path) -> bool:
             "tokenizer.model",
         )
     )
+
+
+def _nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def ltx_t5_tokenizer_ready(path: Path) -> bool:
+    """Validate only the small local T5 tokenizer files used by LTX 2B."""
+    root = Path(path).expanduser()
+    required = (
+        root / "config.json",
+        root / "special_tokens_map.json",
+        root / "spiece.model",
+        root / "tokenizer_config.json",
+    )
+    if not root.is_dir() or any(not _nonempty_file(item) for item in required):
+        return False
+    try:
+        config = json.loads(required[0].read_text(encoding="utf-8"))
+        tokenizer_config = json.loads(required[3].read_text(encoding="utf-8"))
+        special_tokens = json.loads(required[1].read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(config, dict)
+        and config.get("model_type") == "t5"
+        and config.get("vocab_size") == 32128
+        and isinstance(tokenizer_config, dict)
+        and isinstance(special_tokens, dict)
+    )
+
+
+def ltx_gemma_missing_local_files(path: Path, *, backend: str = LTX_GEMMA_BACKEND_HF_SAFETENSORS) -> list[Path]:
+    """Check route-specific Gemma tokenizer/processor and optional HF weights.
+
+    HF generation requires a local Gemma model in either the official indexed
+    safetensors layout or AIWF's recognized converted layout. The experimental
+    GGUF route supplies weights separately, so it only needs tokenizer and
+    processor sidecars here.
+    """
+    root = Path(path).expanduser().resolve()
+    missing: list[Path] = []
+    if not root.is_dir():
+        return [root]
+
+    alternatives = (
+        (root / "tokenizer.json", root / "tokenizer.model"),
+        (root / "processor_config.json", root / "preprocessor_config.json"),
+    )
+    for group in alternatives:
+        if not any(_nonempty_confined_file(root, candidate) for candidate in group):
+            missing.append(group[0])
+    tokenizer_config = root / "tokenizer_config.json"
+    if not _nonempty_confined_file(root, tokenizer_config):
+        missing.append(tokenizer_config)
+
+    if backend == LTX_GEMMA_BACKEND_GGUF:
+        return missing
+
+    if _converted_heretic_gemma_ready(root):
+        return missing
+
+    config = root / "config.json"
+    if not _nonempty_confined_file(root, config):
+        missing.append(config)
+    index = root / "model.safetensors.index.json"
+    monolithic = root / "model.safetensors"
+    if _nonempty_confined_file(root, index):
+        if not indexed_safetensors_shards_ready(root, index):
+            missing.append(index)
+    elif not _nonempty_confined_file(root, monolithic):
+        missing.append(index)
+    return list(dict.fromkeys(missing))
+
+
+def ltx_gemma_hf_assets_ready(path: Path) -> bool:
+    return not ltx_gemma_missing_local_files(path, backend=LTX_GEMMA_BACKEND_HF_SAFETENSORS)
+
+
+def _nonempty_confined_file(root: Path, path: Path) -> bool:
+    try:
+        resolved_root = root.resolve()
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+        return resolved.is_file() and resolved.stat().st_size > 0
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 def ltx_checkpoint_openability_error(path: Path) -> str:

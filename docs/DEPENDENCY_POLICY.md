@@ -68,6 +68,25 @@ The installer should not make optional media stacks look mandatory.
   Pro shell from image runtime setup so the UI can boot before any local image
   backend is installed.
 
+## Optional locked backend on Windows
+
+The opt-in `-UseBackendLock` installer switch uses
+`dependencies/windows-py312/uv.lock` for CPython `>=3.12.13,<3.13` on Windows
+AMD64. It rejects unsupported hosts and interpreters before provisioning the
+locked runtime. The default installer path and `requirements.txt` remain the
+existing range-based path; the lock is not forced on other platforms.
+
+The locked command uses uv's explicit per-package PyTorch CUDA 13.0 source map
+and `uv sync --locked --inexact`. Locked packages are pinned while extra
+packages already in the app venv are retained. Review the lock project's
+README for regeneration and verification commands.
+
+`filterpy==1.4.5` is available as an sdist only. Its archive and build
+requirements (`setuptools==78.1.0`, `wheel==0.48.0`) are pinned in the lock
+project; the build constraint keeps isolated PEP 517 builds on those versions.
+This records build inputs but does not promise bit-for-bit identical wheels
+across toolchains.
+
 ## ED2 Fork
 
 ED2 is the full fine-tune engine. Install Shawn's fork by setting:
