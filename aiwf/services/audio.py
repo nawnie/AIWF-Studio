@@ -118,6 +118,8 @@ _MMAUDIO_16K_FILES = (
 # ---- commercially licensed engines (aiwf/services/audio_licenses.py) ----------------------------------
 ACESTEP_MODEL_ID = "acestep:1.5-turbo"
 MOSS_SFX_MODEL_ID = "moss-sfx:v2.0"
+# video soundtrack: a vision model finds the sounds, MOSS-SoundEffect makes them (aiwf/services/video_soundtrack.py)
+EVENTS_MODEL_ID = "events:moss-sfx"
 # the files that must be complete before a render may start (largest weights of each engine)
 _ACESTEP_REQUIRED_FILES = (
     "acestep-v15-turbo/model.safetensors",
@@ -322,7 +324,7 @@ class AudioGenerationService:
         return self._offered([("MOSS-SoundEffect v2.0", MOSS_SFX_MODEL_ID), *self._mmaudio_choices()])
 
     def video_audio_model_choices(self) -> list[tuple[str, str]]:
-        return self._offered(self._mmaudio_choices())
+        return self._offered([("Video soundtrack: describe scene + MOSS-SoundEffect", EVENTS_MODEL_ID), *self._mmaudio_choices()])
 
     @staticmethod
     def _mmaudio_choices() -> list[tuple[str, str]]:
@@ -349,7 +351,7 @@ class AudioGenerationService:
                 "weights": library / "ACE-Step-1.5",
                 "files": _ACESTEP_REQUIRED_FILES,
             }
-        if str(model_id).startswith("moss-sfx:"):
+        if str(model_id).startswith(("moss-sfx:", "events:")):
             return {
                 "engine": "moss-sfx", "label": "MOSS-SoundEffect v2.0",
                 "python": repo / "engines" / "moss_sfx" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
@@ -365,6 +367,8 @@ class AudioGenerationService:
         if spec is None:
             return [f"Unknown engine for {model_id}"]
         missing = [] if spec["python"].is_file() else [f"{spec['label']} environment ({spec['python']})"]
+        if str(model_id).startswith("events:") and not _resolve_ffmpeg():
+            missing.append("ffmpeg (needed to read video frames)")
         missing += [str(spec["weights"] / name) for name in spec["files"] if not _is_nonempty_file(spec["weights"] / name)]
         return missing
 
@@ -448,6 +452,45 @@ class AudioGenerationService:
         job = {"model_dir": str(self._engine_spec(MOSS_SFX_MODEL_ID)["weights"]), "device": "cuda", "items": items}
         return self._run_engine_worker(MOSS_SFX_MODEL_ID, job, label="MOSS-SoundEffect")["results"]
 
+    def _generate_event_soundtrack(self, video: Path, options: AudioGenerationOptions, dest: Path) -> int:
+        """Describe the video, make each sound with MOSS-SoundEffect, and mix them onto one track."""
+        from scipy.io import wavfile
+
+        from aiwf.services import video_soundtrack as soundtrack
+
+        ffmpeg = _resolve_ffmpeg()
+        if not ffmpeg:
+            raise AudioUnavailable("ffmpeg is required to read frames from the video.")
+        duration = float(options.duration_seconds)
+        describer = getattr(self, "describer", None) or soundtrack.ChatDescriber()
+        # step 1-2: frames, then the vision model lists the sounds
+        try:
+            frames = soundtrack.extract_frames(ffmpeg, video, duration)
+            events = soundtrack.plan_events(describer, frames, duration, hint=options.prompt)
+        except Exception as exc:  # model missing, chat engine off, unusable answer
+            raise AudioUnavailable(f"Could not work out the video's sounds: {exc}") from exc
+        # the vision model no longer needs the GPU; free it so MOSS-SoundEffect has room
+        release = getattr(describer, "release", None)
+        if callable(release):
+            release()
+        # step 3: one MOSS-SoundEffect model load renders every sound
+        with tempfile.TemporaryDirectory(prefix="aiwf-soundtrack-") as scratch:
+            items = [{"prompt": event.prompt, "seconds": min(30.0, event.seconds), "seed": int(options.seed) + index if int(options.seed) >= 0 else -1,
+                      "steps": 50, "cfg_scale": 4.0, "output": str(Path(scratch) / f"event{index}.wav")}
+                     for index, event in enumerate(events)]
+            rendered = self.render_sound_effects(items)
+            clips = []
+            sample_rate = int(rendered[0]["sample_rate"])
+            for event, result in zip(events, rendered):
+                rate, data = wavfile.read(result["output"])
+                data = data.astype(np.float32) / (2147483648.0 if data.dtype == np.int32 else 32768.0 if data.dtype == np.int16 else 1.0)
+                clips.append((event, data if data.ndim == 1 else data.mean(axis=1)))
+        # step 4: place and mix
+        track = soundtrack.mix_events(clips, duration, sample_rate)
+        wavfile.write(str(dest), sample_rate, track)
+        self.last_soundtrack_events = [event.__dict__ for event in events]
+        return sample_rate
+
     def _generate_moss_sfx(self, options: AudioGenerationOptions, dest: Path) -> int:
         results = self.render_sound_effects([{
             "prompt": options.prompt.strip(),
@@ -473,7 +516,8 @@ class AudioGenerationService:
         return [
             choice
             for choice in self.video_audio_model_choices()
-            if self._mmaudio_variant_ready(self._mmaudio_variant(choice[1]))
+            if (self.commercial_engine_ready(choice[1]) if choice[1].startswith("events:")
+                else self._mmaudio_variant_ready(self._mmaudio_variant(choice[1])))
         ]
 
     def setup_status(self, *, deep: bool = False) -> dict[str, Any]:
@@ -530,12 +574,12 @@ class AudioGenerationService:
             "minimumReady": minimum_ready,
             "runtimeChecksPerformed": bool(deep),
             "installing": _MINIMUM_AUDIO_SETUP_LOCK.locked(),
-            "musicReady": music_ready,
+            "musicReady": music_ready or self.commercial_engine_ready(ACESTEP_MODEL_ID),
             "musicDependenciesReady": not missing_dependencies,
-            "sfxReady": mmaudio_ready,
+            "sfxReady": mmaudio_ready or self.commercial_engine_ready(MOSS_SFX_MODEL_ID),
             # Video-audio routes must finish by muxing generated audio back
             # into the source video; model/runtime readiness alone is not enough.
-            "videoAudioReady": mmaudio_ready and mux_ready,
+            "videoAudioReady": (mmaudio_ready or self.commercial_engine_ready(EVENTS_MODEL_ID)) and mux_ready,
             "labReady": lab_ready,
             "muxReady": mux_ready,
             "message": message,
@@ -551,12 +595,12 @@ class AudioGenerationService:
             ),
             "licenses": {
                 model_id: audio_licenses.license_for(model_id)
-                for model_id in ("facebook/musicgen-small", "mmaudio:small_16k", ACESTEP_MODEL_ID, MOSS_SFX_MODEL_ID)
+                for model_id in ("facebook/musicgen-small", "mmaudio:small_16k", ACESTEP_MODEL_ID, MOSS_SFX_MODEL_ID, EVENTS_MODEL_ID)
             },
             "defaults": {
                 "music": ACESTEP_MODEL_ID,
                 "sfx": MOSS_SFX_MODEL_ID,
-                "videoAudio": "mmaudio:small_16k" if self.research_mode() else "",
+                "videoAudio": EVENTS_MODEL_ID,
             },
             "components": [
                 *[
@@ -992,20 +1036,26 @@ class AudioGenerationService:
         output_path: str | Path | None = None,
     ) -> AudioGenerationResult:
         prompt = (options.prompt or "").strip()
-        if not prompt:
+        # the event soundtrack works from the scene itself; its prompt is only an optional hint
+        if not prompt and not str(options.model_id).startswith("events:"):
             raise AudioUnavailable("Enter an audio prompt first.")
         src_video = Path(video_path)
         if not src_video.is_file():
             raise AudioUnavailable(f"Video not found: {src_video}")
         self._require_licensed(options.model_id)
         stem = f"{src_video.stem}_{self._safe_stem(prompt)}"
-        dest = Path(output_path) if output_path else self.output_path(stem=stem, suffix=".flac")
+        # the event soundtrack is mixed here as a float WAV; MMAudio's worker writes FLAC
+        dest_suffix = ".wav" if str(options.model_id).startswith("events:") else ".flac"
+        dest = Path(output_path) if output_path else self.output_path(stem=stem, suffix=dest_suffix)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         with self._staged_output(dest, "Video audio generation") as staged_dest:
             with self._gpu_tenant("Video audio generation"):
                 self._release_image_models()
-                sample_rate = self._generate_mmaudio_video_audio(src_video, options, staged_dest)
+                if str(options.model_id).startswith("events:"):
+                    sample_rate = self._generate_event_soundtrack(src_video, options, staged_dest)
+                else:
+                    sample_rate = self._generate_mmaudio_video_audio(src_video, options, staged_dest)
 
         infotext = (
             f"Video audio {options.model_id}: {options.duration_seconds:.1f}s, "

@@ -87,6 +87,8 @@ records its model's licence.
 | ACE-Step 1.5 (music) | MIT; publisher states licensed, royalty-free and synthetic training music | offered | 2026-10-08 |
 | MOSS-SoundEffect v2.0 (sound effects) | Apache-2.0; training data not documented on the model card | offered | 2026-10-08 |
 
+Video soundtrack: Qwen2.5-VL-7B (Apache-2.0) is the only accepted describer; Qwen2.5-VL-3B (research licence) and Gemma (Google terms) are not used. Measured on an RTX 4070 Ti SUPER: 20 s of music in about 40 s, a 4 s effect in about 80 s (cold load), an 8 s video soundtrack in about 150 s.
+
 Rejected as non-commercial after reading their cards: ThinkSound and PrismAudio
 ("research and educational purposes only"). HunyuanVideo-Foley is not offered: its
 licence excludes the EU, UK and South Korea and forbids using outputs to train other
