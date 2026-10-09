@@ -1017,7 +1017,8 @@ def test_video_audio_accepts_single_alternate_mmaudio_flac(tmp_path: Path):
 def test_mmaudio_minimum_is_the_safe_default():
     service = AudioGenerationService(RuntimeFlags(), UserSettings())
 
-    assert service.sfx_model_choices()[0][1] == "mmaudio:small_16k"
+    assert service.sfx_model_choices()[0][1] == "moss-sfx:v2.0"   # commercial default first
+    assert "mmaudio:small_16k" in [m for _, m in service.sfx_model_choices()]
     assert service.video_audio_model_choices()[0][1] == "mmaudio:small_16k"
 
 

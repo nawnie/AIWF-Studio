@@ -567,8 +567,7 @@ export function AudioStudioLayout({
             </label>
           </div>
           <div className="studio-audio-setup-components" aria-label="Audio setup components">
-            {/* MusicGen and MMAudio are non-commercial: their setup chips appear only in research mode */}
-            {AUDIO_MODELS.filter((item) => setupStatus?.researchMode || (item.id !== 'music' && item.id !== 'sfx')).map((item) => {
+            {AUDIO_MODELS.map((item) => {
               const state = setupStateFor(item.id)
               const ready = state === 'ready'
               const title = state === 'detected'
@@ -583,7 +582,7 @@ export function AudioStudioLayout({
               return (
                 <span key={item.id} data-ready={ready} data-detected={state === 'detected'} title={title}>
                   {ready ? <CheckCircle2 size={13} /> : <AlertCircle size={13} />}
-                  {item.label}{state === 'detected' ? ' · detected' : ''}
+                  {item.id === 'music' ? selectedMusicEngineLabel : item.id === 'sfx' ? selectedSfxEngineLabel : item.label}{state === 'detected' ? ' · detected' : ''}
                 </span>
               )
             })}

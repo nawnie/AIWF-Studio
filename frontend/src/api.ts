@@ -1267,6 +1267,12 @@ export async function installMinimumProAudio(signal?: AbortSignal): Promise<ProA
   return normalizeAudioStatus(payload)
 }
 
+export async function installProCommercialAudioEngine(engine: string, signal?: AbortSignal): Promise<ProAudioStatus> {
+  if (engine !== 'acestep' && engine !== 'moss-sfx') throw new Error(`Unsupported audio engine: ${engine}`)
+  const payload = await requestJson(`/api/pro/audio/setup/engine/${encodeURIComponent(engine)}`, { method: 'POST', signal })
+  return normalizeAudioStatus(payload)
+}
+
 export async function installProMMAudioVariant(variant: string, signal?: AbortSignal): Promise<ProAudioStatus> {
   const allowed = new Set(['small_16k', 'large_44k_v2', 'large_44k', 'medium_44k', 'small_44k'])
   if (!allowed.has(variant)) throw new Error(`Unsupported MMAudio variant: ${variant}`)
@@ -1294,6 +1300,9 @@ export async function runProSetupAction(action: string, selectedModelId = ''): P
   if (action === 'POST /api/pro/audio/setup/minimum') {
     return installMinimumProAudio()
   }
+  // the commercially licensed engines: ACE-Step 1.5 (music) and MOSS-SoundEffect (sound effects)
+  const engineAction = action.match(/^POST \/api\/pro\/audio\/setup\/engine\/(acestep|moss-sfx)$/i)
+  if (engineAction) return installProCommercialAudioEngine(engineAction[1].toLowerCase())
   const variantAction = action.match(/^POST \/api\/pro\/audio\/setup\/(mmaudio|musicgen)\/([a-z0-9_-]+)$/i)
   if (variantAction) {
     const [, family, variant] = variantAction

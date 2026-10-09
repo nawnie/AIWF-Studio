@@ -14,6 +14,7 @@ import { createServer } from 'vite'
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const chromePath = process.env.AIWF_TEST_CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+const commercial = { license: 'MIT', commercial: 'yes', conditions: '', provenance: '', source: 'https://huggingface.co/ACE-Step/Ace-Step1.5' }
 const nonCommercial = { license: 'CC-BY-NC-4.0', commercial: 'no', conditions: 'Non-commercial only.', provenance: '', source: 'https://huggingface.co/facebook/musicgen-small' }
 
 // the status the server sends in each mode
@@ -29,11 +30,14 @@ function audioStatus(researchMode) {
       : 'Commercial-safe mode: only audio models whose licences allow commercial use are offered.',
     defaults: researchMode
       ? { music: 'facebook/musicgen-small', sfx: 'mmaudio:small_16k', videoAudio: 'mmaudio:small_16k' }
-      : { music: '', sfx: '', videoAudio: '' },
+      : { music: 'acestep:1.5-turbo', sfx: '', videoAudio: '' },
     models: {
-      music: researchMode
-        ? [{ label: 'MusicGen small (minimum) · non-commercial (CC-BY-NC-4.0)', id: 'facebook/musicgen-small', available: true, installed: true, installable: true, license: nonCommercial }]
-        : [],
+      music: [
+        { label: 'ACE-Step 1.5 turbo', id: 'acestep:1.5-turbo', available: true, installed: true, installable: true, license: commercial },
+        ...(researchMode
+          ? [{ label: 'MusicGen small (minimum) · non-commercial (CC-BY-NC-4.0)', id: 'facebook/musicgen-small', available: true, installed: true, installable: true, license: nonCommercial }]
+          : []),
+      ],
       sfx: [],
       videoAudio: [],
     },
@@ -95,19 +99,20 @@ createRoot(document.getElementById('root')).render(<AudioStudioLayout
 
   await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'domcontentloaded' })
 
-  // commercial-safe by default: no model offered, a clear empty state, generation disabled
+  // commercial-safe by default: only the commercially licensed engine is offered
   const researchSwitch = page.getByLabel(/Allow non-commercial research models/)
   await researchSwitch.waitFor({ state: 'visible' })
   assert.equal(await researchSwitch.isChecked(), false)
   await page.getByText('Commercial-safe mode: only audio models whose licences allow commercial use are offered.').waitFor({ state: 'visible' })
   const musicModel = page.getByLabel('Music model')
-  assert.equal(await musicModel.isDisabled(), true)
-  assert.match(await musicModel.textContent(), /No commercial-safe model installed yet/)
+  assert.match(await musicModel.textContent(), /ACE-Step 1\.5 turbo/)
+  await page.getByText(/Licence: MIT — commercial use OK/).waitFor({ state: 'visible' })
   assert.equal(await page.getByRole('option', { name: /MusicGen/ }).count(), 0)
 
   // opting in: the switch calls the server (it changes only once the server confirms), and
   // MusicGen appears with its licence line
   await researchSwitch.click()
+  await musicModel.selectOption('facebook/musicgen-small')
   await page.getByText(/Licence: CC-BY-NC-4.0 — non-commercial only/).waitFor({ state: 'visible' })
   assert.deepEqual(switches, [{ enabled: true }])
   assert.equal(await researchSwitch.isChecked(), true)

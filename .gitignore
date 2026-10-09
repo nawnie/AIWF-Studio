@@ -69,6 +69,9 @@ engines/nvidia-vfx-sdk-samples/
 engines/nvidia-vfx-sdk/
 engines/rtx-video-sdk/
 engines/audio/MMAudio/
+# commercial audio engines: upstream clones and their environments (our workers next to them are tracked)
+engines/acestep/ACE-Step-1.5/
+engines/moss_sfx/MOSS-TTS/
 engines/ed2/EveryDream2trainer/
 engines/ltx/LTX-2/
 training/EveryDream2trainer/

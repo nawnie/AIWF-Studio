@@ -7068,10 +7068,19 @@ def _audio_status_payload(ctx: Any, *, deep: bool = False) -> dict[str, Any]:
     service = _audio_service(ctx)
     status = service.setup_status(deep=deep)
     settings = getattr(ctx, "settings", None)
+    # a remembered choice counts only while the licence policy still offers it
+    from aiwf.services import audio_licenses
+
+    research = bool(getattr(settings, "allow_noncommercial_audio_models", False))
+
+    def remembered(field: str, fallback: str) -> str:
+        value = str(getattr(settings, field, "") or "")
+        return value if value and audio_licenses.allowed(value, research_mode=research) else fallback
+
     status["defaults"] = {
-        "music": str(getattr(settings, "last_audio_music_model_id", "") or "") or "facebook/musicgen-small",
-        "sfx": str(getattr(settings, "last_audio_sfx_model_id", "") or "") or "mmaudio:small_16k",
-        "videoAudio": str(getattr(settings, "last_video_audio_model_id", "") or "") or "mmaudio:small_16k",
+        "music": remembered("last_audio_music_model_id", status["defaults"]["music"]),
+        "sfx": remembered("last_audio_sfx_model_id", status["defaults"]["sfx"]),
+        "videoAudio": remembered("last_video_audio_model_id", status["defaults"]["videoAudio"]),
     }
     mmaudio_runtime_check = getattr(service, "_mmaudio_runtime_import_error", None)
     mmaudio_component = next(
@@ -7106,7 +7115,12 @@ def _audio_status_payload(ctx: Any, *, deep: bool = False) -> dict[str, Any]:
                 "unavailableReason": "AudioGen requires AudioCraft, which is not installed in the shared Studio runtime."
                 if not available else "",
             }
-            if model_id.startswith("mmaudio:"):
+            if model_id.startswith(("acestep:", "moss-sfx:")):
+                ready = bool(getattr(service, "commercial_engine_ready", lambda _m: False)(model_id))
+                choice["installed"] = ready
+                choice["installable"] = True
+                choice["ready"] = ready
+            elif model_id.startswith("mmaudio:"):
                 variant = model_id.split(":", 1)[1]
                 is_installed = getattr(service, "_mmaudio_variant_ready", None)
                 choice["installed"] = bool(is_installed(variant)) if callable(is_installed) else (
@@ -7166,6 +7180,8 @@ def _audio_status_payload(ctx: Any, *, deep: bool = False) -> dict[str, Any]:
             choice["license"] = audio_licenses.license_for(model_id)
             choice["resident"] = lifecycle.get("resident")
             setup_route_key = (
+                "pro.audio.acestep.1-5-turbo" if model_id.startswith("acestep:") else
+                "pro.audio.moss-sfx.v2" if model_id.startswith("moss-sfx:") else
                 f"pro.audio.musicgen.{model_id.removeprefix('facebook/musicgen-')}"
                 if model_id.startswith("facebook/musicgen-") else
                 f"pro.audio.mmaudio.{model_id.split(':', 1)[1].replace('_', '-')}"
@@ -8990,6 +9006,21 @@ def build_router(ctx: Any) -> APIRouter:
                 ctx,
                 lambda: _audio_service(ctx).install_minimum(),
             )
+        except HTTPException:
+            raise
+        except AudioUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @router.post("/audio/setup/engine/{engine}")
+    def audio_setup_commercial_engine(engine: str):
+        from aiwf.services.audio import AudioUnavailable
+
+        def install():
+            _audio_service(ctx).install_commercial_engine(engine)
+            return _audio_status_payload(ctx, deep=False)
+
+        try:
+            return _run_exclusive_pro_gpu_operation(ctx, install)
         except HTTPException:
             raise
         except AudioUnavailable as exc:

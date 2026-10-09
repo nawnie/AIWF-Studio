@@ -66,14 +66,15 @@ def test_labels_and_refusal_text_name_the_licence() -> None:
 def test_commercial_mode_offers_no_noncommercial_models(tmp_path: Path) -> None:
     service = _service(tmp_path, research=False)
     assert service.research_mode() is False
-    assert service.music_model_choices() == []
-    assert service.sfx_model_choices() == []
+    # only the commercially licensed engines are offered; no MusicGen or MMAudio
+    assert [m for _, m in service.music_model_choices()] == ["acestep:1.5-turbo"]
+    assert [m for _, m in service.sfx_model_choices()] == ["moss-sfx:v2.0"]
     assert service.video_audio_model_choices() == []
 
 
 def test_research_mode_offers_them_labeled(tmp_path: Path) -> None:
     service = _service(tmp_path, research=True)
-    labels = [label for label, _ in service.music_model_choices()]
+    labels = [label for label, model in service.music_model_choices() if model.startswith("facebook/")]
     assert labels and all("non-commercial (CC-BY-NC-4.0)" in label for label in labels)
     assert ("mmaudio:small_16k" in {model for _, model in service.video_audio_model_choices()})
 
@@ -107,10 +108,10 @@ def test_installers_refuse_noncommercial_weights(tmp_path: Path) -> None:
 def test_status_reports_the_policy(tmp_path: Path) -> None:
     status = _service(tmp_path, research=False).setup_status(deep=False)
     assert status["researchMode"] is False and status["licenseNotice"].startswith("Commercial-safe mode")
-    assert status["defaults"] == {"music": "", "sfx": "", "videoAudio": ""}
+    assert status["defaults"] == {"music": "acestep:1.5-turbo", "sfx": "moss-sfx:v2.0", "videoAudio": ""}
     assert status["licenses"]["facebook/musicgen-small"]["commercial"] == audio_licenses.NO
     research = _service(tmp_path, research=True).setup_status(deep=False)
-    assert research["researchMode"] is True and research["defaults"]["music"] == "facebook/musicgen-small"
+    assert research["researchMode"] is True and research["defaults"]["videoAudio"] == "mmaudio:small_16k"
 
 
 def test_minimum_setup_skips_noncommercial_downloads_in_commercial_mode(tmp_path: Path, monkeypatch) -> None:
@@ -155,7 +156,9 @@ def test_pro_status_lists_licences_and_mode(tmp_path: Path) -> None:
     _, _, client = _pro_client(tmp_path, research=True)
     status = client.get("/api/pro/audio/status").json()
     assert status["researchMode"] is True
-    assert all(choice["license"]["commercial"] == audio_licenses.NO for choice in status["models"]["music"])
+    by_id = {choice["id"]: choice for choice in status["models"]["music"]}
+    assert by_id["facebook/musicgen-small"]["license"]["commercial"] == audio_licenses.NO
+    assert by_id["acestep:1.5-turbo"]["license"]["commercial"] == audio_licenses.YES
 
 
 def test_research_mode_switch_is_local_only_and_saved(tmp_path: Path) -> None:
