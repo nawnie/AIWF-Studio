@@ -71,6 +71,30 @@ MMAudio code is MIT licensed. The released checkpoints are hosted on Hugging
 Face under CC-BY-NC 4.0, so AIWF must treat MMAudio-backed output as
 non-commercial unless the user has separate permission.
 
+## Audio licence policy
+
+AIWF Studio is sold commercially, so audio is commercial-safe by default. The
+licence of every selectable audio model, its source and the date it was checked
+live in `aiwf/services/audio_licenses.py`; the audio service refuses models whose
+licence does not allow commercial use unless the user turns on research mode
+(`allow_noncommercial_audio_models`, off by default), and every audio output
+records its model's licence.
+
+| Model | Licence | Default | Checked |
+|---|---|---|---|
+| MusicGen (all checkpoints, Meta) | CC-BY-NC 4.0 | research mode only | 2026-10-08 |
+| MMAudio (all checkpoints) | CC-BY-NC 4.0 | research mode only | 2026-10-08 |
+| ACE-Step 1.5 (music) | MIT; publisher states licensed, royalty-free and synthetic training music | offered | 2026-10-08 |
+| MOSS-SoundEffect v2.0 (sound effects) | Apache-2.0; training data not documented on the model card | offered | 2026-10-08 |
+
+Video soundtrack: Qwen2.5-VL-7B (Apache-2.0) is the only accepted describer; Qwen2.5-VL-3B (research licence) and Gemma (Google terms) are not used. Measured on an RTX 4070 Ti SUPER: 20 s of music in about 40 s, a 4 s effect in about 80 s (cold load), an 8 s video soundtrack in about 150 s.
+
+Rejected as non-commercial after reading their cards: ThinkSound and PrismAudio
+("research and educational purposes only"). HunyuanVideo-Foley is not offered: its
+licence excludes the EU, UK and South Korea and forbids using outputs to train other
+models. Stable Audio Open is not offered by default: Stability's Community Licence is
+free only below USD 1M total annual revenue.
+
 ## LTX 2.3 video generation
 
 AIWF can optionally call [Lightricks LTX-2](https://github.com/Lightricks/LTX-2)

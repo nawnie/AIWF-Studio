@@ -7,14 +7,16 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from aiwf.core.domain.audio import AudioGenerationOptions
 from aiwf.core.domain.audio_project import AudioProjectManifest, AudioProjectTrack, validate_project_id
+from aiwf.services import audio_licenses
 
 
 _AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}
 _PENDING_MANIFEST = re.compile(r"^\.project\.json\.([0-9a-f]{32})\.tmp$")
+_LICENSE_UNSET = object()
 
 
 class AudioProjectError(RuntimeError):
@@ -61,6 +63,7 @@ class AudioProjectService:
         audio_path: str | Path | None = None,
         project_id: str | None = None,
         license_notice: str | None = None,
+        license: dict[str, Any] | None | object = _LICENSE_UNSET,
         consent_status: str | None = None,
         sample_rate: int = 0,
     ) -> AudioProjectManifest:
@@ -79,16 +82,23 @@ class AudioProjectService:
             project_dir = self._project_dir(project_id)
             previous = self.load_project(project_id)
 
+        if audio_path is None and previous and previous.track and options.model_id != previous.track.model_id:
+            raise ValueError("The audio model cannot change while keeping a project track from another model.")
+
         track = previous.track if previous else None
         try:
             if audio_path is not None:
+                license_record, resolved_license_notice = self._resolve_license_metadata(
+                    options.model_id, license, license_notice
+                )
                 track = self._track_for_audio(
                     audio_path,
                     project_id,
                     project_dir,
                     options,
                     previous.track if previous else None,
-                    license_notice=license_notice,
+                    license_notice=resolved_license_notice,
+                    license_record=license_record,
                     consent_status=consent_status,
                     sample_rate=sample_rate,
                 )
@@ -111,6 +121,28 @@ class AudioProjectService:
             if is_new:
                 self._remove_new_project_if_empty(project_dir)
             raise
+
+    @staticmethod
+    def _resolve_license_metadata(
+        model_id: str,
+        license: dict[str, Any] | None | object,
+        license_notice: str | None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        expected = audio_licenses.license_for(model_id)
+        expected_notice = audio_licenses.notice_for(model_id)
+        if license is _LICENSE_UNSET:
+            if license_notice is not None and license_notice != expected_notice:
+                raise ValueError("The license notice does not match the structured license record.")
+            return expected, expected_notice
+        if license is None:
+            if license_notice is not None:
+                raise ValueError("A license notice cannot be saved without its structured license record.")
+            return None, None
+        if not isinstance(license, dict) or license != expected:
+            raise ValueError("The license record does not match the audio model attributed to this track.")
+        if license_notice is not None and license_notice != expected_notice:
+            raise ValueError("The license notice does not match the structured license record.")
+        return expected, expected_notice
 
     def load_project(self, project_id: str) -> AudioProjectManifest:
         normalized = validate_project_id(project_id)
@@ -302,6 +334,7 @@ class AudioProjectService:
         previous_track: AudioProjectTrack | None,
         *,
         license_notice: str | None,
+        license_record: dict[str, Any] | None,
         consent_status: str | None,
         sample_rate: int,
     ) -> AudioProjectTrack:
@@ -325,7 +358,8 @@ class AudioProjectService:
                         "kind": options.kind,
                         "duration_seconds": options.duration_seconds,
                         "sample_rate": sample_rate if sample_rate > 0 else previous_track.sample_rate,
-                        "license_notice": license_notice if license_notice is not None else previous_track.license_notice,
+                        "license_notice": license_notice,
+                        "license": license_record,
                         "consent_status": consent_status if consent_status is not None else previous_track.consent_status,
                     }
                 )
@@ -349,6 +383,7 @@ class AudioProjectService:
             duration_seconds=options.duration_seconds,
             sample_rate=sample_rate,
             license_notice=license_notice,
+            license=license_record,
             consent_status=consent_status,
         )
         try:

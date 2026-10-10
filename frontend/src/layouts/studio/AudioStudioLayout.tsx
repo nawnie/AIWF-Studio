@@ -28,6 +28,7 @@ import {
   loadProAudioProject,
   saveProAudioProject,
   runProSetupAction,
+  setProAudioResearchMode,
   type ProAudioProjectManifest,
   type ProAudioProjectOptions,
   type ProAudioProjectSummary,
@@ -35,6 +36,7 @@ import {
   type ProAudioStatus,
 } from '../../api'
 import type { LayoutProps } from './LayoutTypes'
+import { audioProjectAttribution } from './audioProjectAttribution'
 import { formatRouteLifecycleStatus } from './modelLabels'
 import { API_BASE } from '../../apiBase'
 import { AudioProjectControls, type AudioProjectSaveRequest } from './AudioProjectControls'
@@ -49,6 +51,10 @@ function storedAudioModel(kind: AudioKind): string {
 
 function saveAudioModel(kind: AudioKind, modelId: string): void {
   try { window.localStorage.setItem(`aiwf.audio-studio.${kind}-model`, modelId) } catch { /* Storage may be disabled. */ }
+}
+
+function clearStoredAudioModel(kind: AudioKind): void {
+  try { window.localStorage.removeItem(`aiwf.audio-studio.${kind}-model`) } catch { /* Storage may be disabled. */ }
 }
 
 const AUDIO_PRESETS: Array<{ label: string; kind: AudioKind | null; note: string; title: string }> = [
@@ -108,19 +114,23 @@ export function AudioStudioLayout({
   const generationBusy = isGenerating || audioBusy
   const selectedAudioReady = (audioKind === 'music' ? setupStatus?.musicReady : setupStatus?.sfxReady)
   const selectedAudioModel = audioModelOverride || (audioKind === 'music' ? setupStatus?.defaults.music : setupStatus?.defaults.sfx)
-  const effectiveAudioModel = selectedAudioModel || (audioKind === 'music' ? 'facebook/musicgen-small' : 'mmaudio:small_16k')
   const audioModelChoices = audioKind === 'music' ? setupStatus?.models.music ?? [] : setupStatus?.models.sfx ?? []
-  const selectedAudioModelLabel = audioModelChoices.find((choice) => choice.id === effectiveAudioModel)?.label || effectiveAudioModel
+  // no hardcoded fallback model: in commercial-safe mode the server offers only commercially
+  // licensed models, and none until one is installed
+  const effectiveAudioModel = selectedAudioModel || audioModelChoices[0]?.id || ''
+  const noModelLabel = setupStatus && !setupStatus.researchMode ? 'No commercial-safe model installed yet' : 'Audio model'
+  const selectedAudioModelLabel = audioModelChoices.find((choice) => choice.id === effectiveAudioModel)?.label || effectiveAudioModel || noModelLabel
   const summaryMusicModelId = audioKind === 'music'
     ? effectiveAudioModel
-    : storedAudioModel('music') || setupStatus?.defaults.music || 'facebook/musicgen-small'
+    : storedAudioModel('music') || setupStatus?.defaults.music || ''
   const summarySfxModelId = audioKind === 'sfx'
     ? effectiveAudioModel
-    : storedAudioModel('sfx') || setupStatus?.defaults.sfx || 'mmaudio:small_16k'
+    : storedAudioModel('sfx') || setupStatus?.defaults.sfx || ''
   const selectedMusicChoice = (setupStatus?.models.music ?? []).find((choice) => choice.id === summaryMusicModelId)
   const selectedSfxChoice = (setupStatus?.models.sfx ?? []).find((choice) => choice.id === summarySfxModelId)
-  const selectedMusicEngineLabel = selectedMusicChoice?.label || 'MusicGen small'
-  const selectedSfxEngineLabel = selectedSfxChoice?.label || 'MMAudio small 16k'
+  const selectedMusicEngineLabel = selectedMusicChoice?.label || noModelLabel
+  const selectedSfxEngineLabel = selectedSfxChoice?.label || noModelLabel
+  const [researchBusy, setResearchBusy] = useState(false)
   const selectedChoice = audioModelChoices.find((choice) => choice.id === effectiveAudioModel)
   const selectedAudioNeedsInstall = Boolean(selectedChoice?.installable && selectedChoice.installed === false)
   const selectedAudioSetupAction = selectedChoice?.setupRoute?.setupAction || ''
@@ -197,6 +207,30 @@ export function AudioStudioLayout({
     saveAudioModel(audioKind, modelId)
     setAudioError('')
   }, [audioKind])
+
+  // research mode on/off: the server saves it and answers with the re-filtered model lists
+  const handleResearchMode = useCallback(async (enabled: boolean) => {
+    setResearchBusy(true)
+    setAudioError('')
+    try {
+      const nextStatus = await setProAudioResearchMode(enabled)
+      setSetupStatus(nextStatus)
+      if (!enabled) {
+        for (const kind of ['music', 'sfx'] as const) {
+          const savedModel = storedAudioModel(kind)
+          const availableModels = nextStatus.models[kind] ?? []
+          if (savedModel && !availableModels.some((choice) => choice.id === savedModel)) {
+            clearStoredAudioModel(kind)
+          }
+        }
+        setAudioModelOverride('')
+      }
+    } catch (error: unknown) {
+      setAudioError(`Could not change research mode: ${formatApiError(error)}`)
+    } finally {
+      setResearchBusy(false)
+    }
+  }, [])
 
   useEffect(() => {
     if (!setupStatus || !selectedChoice?.available || selectedChoice.installed !== true) return
@@ -358,16 +392,20 @@ export function AudioStudioLayout({
   const saveAudioProject = useCallback(async ({ name, projectId }: AudioProjectSaveRequest) => {
     setProjectBusy(true)
     try {
+      const attribution = audioProjectAttribution(audioResult, effectiveAudioModel)
+      const artifactKind = audioResult?.kind === 'music' || audioResult?.kind === 'sfx'
+        ? audioResult.kind
+        : audioKind
       const saved = await saveProAudioProject({
         name,
         project_id: projectId ?? currentProjectId,
         audio_path: audioResult?.outputPath || null,
         options: {
-          prompt: settings.prompt,
-          kind: audioKind,
-          model_id: effectiveAudioModel,
+          prompt: audioResult?.prompt ?? settings.prompt,
+          kind: artifactKind,
+          model_id: attribution.modelId,
           negative_prompt: audioOptionState.negative_prompt,
-          duration_seconds: audioDuration,
+          duration_seconds: audioResult?.durationSeconds ?? audioDuration,
           temperature: audioOptionState.temperature,
           cfg_coef: settings.cfgScale,
           top_k: audioOptionState.top_k,
@@ -375,6 +413,8 @@ export function AudioStudioLayout({
           seed: settings.seed,
         },
         sample_rate: audioResult?.sampleRate ?? 0,
+        license_notice: attribution.licenseNotice,
+        license: attribution.license,
       })
       setCurrentProjectId(saved.project_id)
       setSavedFingerprint(draftFingerprint)
@@ -401,7 +441,7 @@ export function AudioStudioLayout({
       setAudioResult(manifest.audio_url ? {
         status: 'loaded', message: `Loaded project “${manifest.name}”.`, outputPath: '', url: manifest.audio_url,
         prompt: options.prompt, kind, modelId: options.model_id, durationSeconds: manifest.track?.duration_seconds ?? options.duration_seconds,
-        sampleRate: manifest.track?.sample_rate ?? 0, infotext: '',
+        sampleRate: manifest.track?.sample_rate ?? 0, infotext: '', license: manifest.track?.license ?? undefined,
       } : null)
       setSavedFingerprint(JSON.stringify({ prompt: options.prompt, cfgScale: options.cfg_coef, steps: options.steps, seed: options.seed, audioKind: kind, audioDuration: options.duration_seconds, audioOptionState: { negative_prompt: options.negative_prompt, temperature: options.temperature, top_k: options.top_k }, modelId: options.model_id, audioUrl: manifest.audio_url || null, audioPath: null, sampleRate: manifest.audio_url ? manifest.track?.sample_rate ?? 0 : null, audioRevision }))
       setAudioProjects(await fetchProAudioProjects())
@@ -536,6 +576,16 @@ export function AudioStudioLayout({
               {setupStatus?.estimatedDownload || 'Existing local models and environments are reused.'}
               {' '}{setupStatus?.licenseNotice || ''}
             </small>
+            {/* research mode: off = commercial-safe models only; on = non-commercial models too, labeled */}
+            <label className="studio-audio-research-mode">
+              <input
+                type="checkbox"
+                checked={Boolean(setupStatus?.researchMode)}
+                disabled={!setupStatus || researchBusy || generationBusy || setupBusy || audioPrepareBusy}
+                onChange={(event) => void handleResearchMode(event.target.checked)}
+              />
+              <span>Allow non-commercial research models (MusicGen, MMAudio). Their output must not be used commercially.</span>
+            </label>
           </div>
           <div className="studio-audio-setup-components" aria-label="Audio setup components">
             {AUDIO_MODELS.map((item) => {
@@ -553,7 +603,7 @@ export function AudioStudioLayout({
               return (
                 <span key={item.id} data-ready={ready} data-detected={state === 'detected'} title={title}>
                   {ready ? <CheckCircle2 size={13} /> : <AlertCircle size={13} />}
-                  {item.label}{state === 'detected' ? ' · detected' : ''}
+                  {item.id === 'music' ? selectedMusicEngineLabel : item.id === 'sfx' ? selectedSfxEngineLabel : item.label}{state === 'detected' ? ' · detected' : ''}
                 </span>
               )
             })}
@@ -607,7 +657,12 @@ export function AudioStudioLayout({
                   ? <option value={effectiveAudioModel} disabled>{`Unavailable saved model: ${effectiveAudioModel}`}</option>
                   : null}
               </select>
-              {selectedChoice ? <small>Selected: {selectedChoice.label}</small> : <small>{effectiveAudioModel}</small>}
+              {selectedChoice ? <small>Selected: {selectedChoice.label}</small> : <small>{effectiveAudioModel || noModelLabel}</small>}
+              {selectedChoice?.license ? (
+                <small className={selectedChoice.license.commercial === 'yes' ? 'studio-audio-license' : 'studio-audio-license studio-audio-license-restricted'}>
+                  Licence: {selectedChoice.license.license} — {selectedChoice.license.commercial === 'yes' ? 'commercial use OK' : selectedChoice.license.commercial === 'conditional' ? 'commercial use with conditions' : 'non-commercial only'}
+                </small>
+              ) : null}
               {selectedRouteStatus ? <small>Route status: {formatRouteLifecycleStatus(selectedRouteStatus, selectedChoice?.resident ?? null)}.</small> : null}
               {selectedChoice?.unavailableReason ? <small className="studio-audio-model-unavailable">{selectedChoice.unavailableReason}</small> : null}
               {selectedSharedAudioAssets ? <small>Matching MMAudio assets are available in a shared model root. Install copies them into Studio’s audio engine folder.</small> : null}

@@ -970,6 +970,19 @@ export interface ProAudioModelChoice {
   routeStatus?: string
   resident?: boolean | null
   setupRoute?: ProModelOption['setupRoute']
+  // what the model's licence allows (aiwf/services/audio_licenses.py)
+  license?: ProAudioLicense
+}
+
+export interface ProAudioLicense {
+  model_id: string
+  checked: string
+  family: string
+  license: string
+  commercial: 'yes' | 'conditional' | 'no'
+  conditions: string
+  provenance: string
+  source: string
 }
 
 export interface ProAudioStatus {
@@ -985,6 +998,8 @@ export interface ProAudioStatus {
   message: string
   estimatedDownload: string
   licenseNotice: string
+  // false = commercial-safe mode: non-commercial models are hidden and refused
+  researchMode: boolean
   defaults: {
     music: string
     sfx: string
@@ -1022,6 +1037,7 @@ export interface ProAudioGenerateResult {
   durationSeconds: number
   sampleRate: number
   infotext: string
+  license?: ProAudioLicense
 }
 
 export interface ProAudioProjectSummary {
@@ -1062,6 +1078,7 @@ export interface ProAudioProjectManifest {
     duration_seconds: number
     sample_rate: number
     license_notice: string | null
+    license?: ProAudioLicense | null
     consent_status: string | null
   } | null
   audio_url: string
@@ -1074,6 +1091,7 @@ export interface ProAudioProjectSaveRequest {
   options: ProAudioProjectOptions
   sample_rate: number
   license_notice?: string | null
+  license?: ProAudioLicense | null
   consent_status?: string | null
 }
 
@@ -1093,6 +1111,7 @@ function normalizeAudioProject(value: unknown): ProAudioProjectManifest {
       duration_seconds: readNumber(item, ['duration_seconds'], 0),
       sample_rate: readNumber(item, ['sample_rate'], 0),
       license_notice: readProjectNullableString(item, 'license_notice'),
+      license: normalizeAudioLicense(item.license) ?? null,
       consent_status: readProjectNullableString(item, 'consent_status'),
     }
   })()
@@ -1172,10 +1191,12 @@ function normalizeAudioStatus(value: unknown): ProAudioStatus {
     message: readString(record, ['message'], 'Audio setup status is unavailable.'),
     estimatedDownload: readString(record, ['estimatedDownload', 'estimated_download'], ''),
     licenseNotice: readString(record, ['licenseNotice', 'license_notice'], ''),
+    researchMode: readBoolean(record, ['researchMode', 'research_mode'], false),
+    // no fallback model: in commercial-safe mode the server offers none until a commercial model is installed
     defaults: {
-      music: readString(defaults, ['music'], 'facebook/musicgen-small'),
-      sfx: readString(defaults, ['sfx'], 'mmaudio:small_16k'),
-      videoAudio: readString(defaults, ['videoAudio', 'video_audio'], 'mmaudio:small_16k'),
+      music: readString(defaults, ['music'], ''),
+      sfx: readString(defaults, ['sfx'], ''),
+      videoAudio: readString(defaults, ['videoAudio', 'video_audio'], ''),
     },
     models: {
       music: normalizeAudioModelChoices(record.models, 'music'),
@@ -1211,9 +1232,39 @@ function normalizeAudioModelChoices(value: unknown, key: 'music' | 'sfx' | 'vide
       ...(typeof choice.routeStatus === 'string' ? { routeStatus: choice.routeStatus } : {}),
       ...(typeof choice.resident === 'boolean' ? { resident: choice.resident } : ('resident' in choice && choice.resident === null ? { resident: null } : {})),
       ...(normalizeSetupRoute(choice.setupRoute) ? { setupRoute: normalizeSetupRoute(choice.setupRoute) } : {}),
+      ...(normalizeAudioLicense(choice.license) ? { license: normalizeAudioLicense(choice.license) } : {}),
     }
   }).filter((choice) => choice.label && choice.id)
   return choices
+}
+
+function normalizeAudioLicense(value: unknown): ProAudioLicense | undefined {
+  const record = asRecord(value)
+  const license = readString(record, ['license'], '')
+  if (!license) return undefined
+  const commercial = readString(record, ['commercial'], 'no')
+  return {
+    model_id: readString(record, ['model_id', 'modelId'], ''),
+    checked: readString(record, ['checked'], ''),
+    family: readString(record, ['family'], ''),
+    license,
+    commercial: commercial === 'yes' || commercial === 'conditional' ? commercial : 'no',
+    conditions: readString(record, ['conditions'], ''),
+    provenance: readString(record, ['provenance'], ''),
+    source: readString(record, ['source'], ''),
+  }
+}
+
+// Research mode lets non-commercial audio models (MusicGen, MMAudio) run, labeled. The server
+// accepts this only from the local machine.
+export async function setProAudioResearchMode(enabled: boolean, signal?: AbortSignal): Promise<ProAudioStatus> {
+  const payload = await requestJson('/api/pro/audio/research-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+    signal,
+  })
+  return normalizeAudioStatus(payload)
 }
 
 export async function fetchProAudioStatus(signal?: AbortSignal): Promise<ProAudioStatus> {
@@ -1223,6 +1274,12 @@ export async function fetchProAudioStatus(signal?: AbortSignal): Promise<ProAudi
 
 export async function installMinimumProAudio(signal?: AbortSignal): Promise<ProAudioStatus> {
   const payload = await requestJson('/api/pro/audio/setup/minimum', { method: 'POST', signal })
+  return normalizeAudioStatus(payload)
+}
+
+export async function installProCommercialAudioEngine(engine: string, signal?: AbortSignal): Promise<ProAudioStatus> {
+  if (engine !== 'acestep' && engine !== 'moss-sfx') throw new Error(`Unsupported audio engine: ${engine}`)
+  const payload = await requestJson(`/api/pro/audio/setup/engine/${encodeURIComponent(engine)}`, { method: 'POST', signal })
   return normalizeAudioStatus(payload)
 }
 
@@ -1253,6 +1310,9 @@ export async function runProSetupAction(action: string, selectedModelId = ''): P
   if (action === 'POST /api/pro/audio/setup/minimum') {
     return installMinimumProAudio()
   }
+  // the commercially licensed engines: ACE-Step 1.5 (music) and MOSS-SoundEffect (sound effects)
+  const engineAction = action.match(/^POST \/api\/pro\/audio\/setup\/engine\/(acestep|moss-sfx)$/i)
+  if (engineAction) return installProCommercialAudioEngine(engineAction[1].toLowerCase())
   const variantAction = action.match(/^POST \/api\/pro\/audio\/setup\/(mmaudio|musicgen)\/([a-z0-9_-]+)$/i)
   if (variantAction) {
     const [, family, variant] = variantAction
@@ -1304,7 +1364,7 @@ export async function prepareProAudioModel(
 }
 
 export async function prepareVideoLabAudioModel(modelId: string): Promise<ProAudioPrepareResult> {
-  const kind = modelId.startsWith('mmaudio:') ? 'sfx' : 'music'
+  const kind = modelId.startsWith('mmaudio:') || modelId.startsWith('events:') ? 'sfx' : 'music'
   const payload = await requestJson('/api/pro/video-lab/prepare-audio', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1343,6 +1403,7 @@ export async function generateProAudio(
     durationSeconds: readNumber(record, ['durationSeconds', 'duration_seconds'], 0),
     sampleRate: readNumber(record, ['sampleRate', 'sample_rate'], 0),
     infotext: readString(record, ['infotext'], ''),
+    ...(normalizeAudioLicense(record.license) ? { license: normalizeAudioLicense(record.license) } : {}),
   }
 }
 
@@ -1377,6 +1438,9 @@ export interface VideoLabResult {
   url: string
   message: string
   probe: VideoLabProbe
+  audioPath?: string
+  infotext?: string
+  license?: ProAudioLicense
 }
 
 export async function fetchVideoLabStatus(signal?: AbortSignal): Promise<VideoLabStatus> {
@@ -1633,6 +1697,9 @@ export async function runVideoLab(payload: Record<string, unknown>, signal?: Abo
     url: readString(record, ['url'], ''),
     message: readString(record, ['message'], ''),
     probe: normalizeVideoLabProbe(readUnknown(record, ['probe'])),
+    ...(typeof record.audioPath === 'string' ? { audioPath: record.audioPath } : {}),
+    ...(typeof record.infotext === 'string' ? { infotext: record.infotext } : {}),
+    ...(normalizeAudioLicense(record.license) ? { license: normalizeAudioLicense(record.license) } : {}),
   }
 }
 

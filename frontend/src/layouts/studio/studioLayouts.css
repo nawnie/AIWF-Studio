@@ -1536,6 +1536,11 @@
 .studio-audio-setup-copy { display: grid; gap: 3px; min-width: 0; }
 .studio-audio-setup-copy strong { color: #e5e7eb; font-size: 13px; }
 .studio-audio-setup-copy small { color: #94a3b8; line-height: 1.35; }
+/* research-mode switch: off keeps Audio commercial-safe */
+.studio-audio-research-mode { display: flex; align-items: flex-start; gap: 8px; margin-top: 4px; color: #cbd5e1; font-size: 12px; line-height: 1.35; cursor: pointer; }
+/* a checkbox, not a text field: undo the surface-wide 100% input width */
+.studio-full-surface .studio-audio-research-mode input,
+.studio-audio-research-mode input { width: auto; flex: 0 0 auto; margin: 2px 0 0; accent-color: #f59e0b; }
 .studio-audio-setup-components { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .studio-audio-setup-components span {
   display: inline-flex;
@@ -1586,6 +1591,9 @@
 .studio-audio-model-select select { min-width:0; width:100%; }
 .studio-audio-model-select small { grid-column:2; color:rgba(148,163,184,0.8); overflow-wrap:anywhere; }
 .studio-audio-model-select .studio-audio-model-unavailable { color:#fca5a5; }
+/* what the selected model's licence allows; restricted licences stand out */
+.studio-audio-model-select .studio-audio-license { color:#86efac; }
+.studio-audio-model-select .studio-audio-license-restricted { color:#fcd34d; }
 .studio-large-waveform {
   display: flex;
   align-items: center;

@@ -11,11 +11,13 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable
 
 import numpy as np
@@ -24,6 +26,7 @@ from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.audio import AudioGenerationOptions, AudioGenerationResult, AudioMuxResult
 from aiwf.core.domain.engine import EngineTenant
 from aiwf.infrastructure.video.processing import VideoProcessor, _resolve_ffmpeg
+from aiwf.services import audio_licenses
 from aiwf.services.model_files import configured_model_roots
 from aiwf.services.route_lifecycle import support_revision
 
@@ -68,6 +71,8 @@ def _is_complete_safetensors(path: Path) -> bool:
 
 _MINIMUM_AUDIO_SETUP_LOCK = threading.Lock()
 _AUDIO_MODEL_OPERATION_LOCK = threading.Lock()
+_EVENTS_DESCRIBER_READINESS_TIMEOUT_SECONDS = 1.0
+_EVENTS_DESCRIBER_READINESS_CACHE_SECONDS = 2.0
 _MUSICGEN_MINIMUM_FILES = (
     "config.json",
     "generation_config.json",
@@ -113,6 +118,42 @@ _MMAUDIO_16K_FILES = (
     Path("ext_weights") / "best_netG.pt",
     *_MMAUDIO_SHARED_FILES,
 )
+# ---- commercially licensed engines (aiwf/services/audio_licenses.py) ----------------------------------
+ACESTEP_MODEL_ID = "acestep:1.5-turbo"
+MOSS_SFX_MODEL_ID = "moss-sfx:v2.0"
+# video soundtrack: a vision model finds the sounds, MOSS-SoundEffect makes them (aiwf/services/video_soundtrack.py)
+EVENTS_MODEL_ID = "events:moss-sfx"
+# the files that must be complete before a render may start (largest weights of each engine)
+_ACESTEP_REQUIRED_FILES = (
+    "acestep-v15-turbo/model.safetensors",
+    "acestep-v15-turbo/config.json",
+    "vae/diffusion_pytorch_model.safetensors",
+    "Qwen3-Embedding-0.6B/model.safetensors",
+)
+ACESTEP_MIN_DURATION_SECONDS = 10.0
+_MOSS_SFX_REQUIRED_FILES = (
+    "model_index.json",
+    "transformer/diffusion_pytorch_model.safetensors",
+    "text_encoder/model-00001-of-00002.safetensors",
+    "text_encoder/model-00002-of-00002.safetensors",
+    "vae/vae_128d_48k.pth",
+)
+
+
+def _last_json_line(text: str) -> dict[str, Any]:
+    """The last line of a worker's output that parses as a JSON object ({} when there is none)."""
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+    return {}
+
+
 _MMAUDIO_INSTALLABLE_VARIANTS = (
     "small_16k",
     "large_44k_v2",
@@ -203,6 +244,10 @@ class AudioUnavailable(RuntimeError):
     """Raised when optional audio generation dependencies or tools are missing."""
 
 
+class AudioLicenseBlocked(AudioUnavailable):
+    """Raised when a non-commercial model is requested while research mode is off."""
+
+
 class AudioGenerationService:
     """Optional local text-to-audio, video-conditioned audio, and video muxing."""
 
@@ -221,6 +266,8 @@ class AudioGenerationService:
         self.unload_image_models = unload_image_models
         self._model: Any | None = None
         self._model_key: tuple[str, str, str] | None = None
+        self._events_describer_cache_lock = threading.Lock()
+        self._events_describer_model_cache: tuple[float, str | None] | None = None
 
     @contextmanager
     def _gpu_tenant(self, reason: str):
@@ -247,20 +294,46 @@ class AudioGenerationService:
             "pins an older PyTorch stack. Use the minimum setup button before the first audio run."
         )
 
+    # ---- commercial-use policy (aiwf/services/audio_licenses.py) ----------------------------------
+    # By default only models whose licences allow commercial use are offered or run. Research mode
+    # (UserSettings.allow_noncommercial_audio_models) brings back the non-commercial ones, labeled.
+    def research_mode(self) -> bool:
+        return bool(getattr(self.settings, "allow_noncommercial_audio_models", False))
+
+    def _require_licensed(self, model_id: str) -> None:
+        if not audio_licenses.allowed(model_id, research_mode=self.research_mode()):
+            raise AudioLicenseBlocked(audio_licenses.blocked_message(model_id))
+
+    def _offered(self, choices: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        # this loop drops models the policy does not allow and marks non-commercial ones in research mode
+        offered = []
+        for label, model_id in choices:
+            if not audio_licenses.allowed(model_id, research_mode=self.research_mode()):
+                continue
+            if not audio_licenses.commercial_ok(model_id):
+                label = f"{label} · non-commercial ({audio_licenses.license_for(model_id)['license']})"
+            offered.append((label, model_id))
+        return offered
+
     def music_model_choices(self) -> list[tuple[str, str]]:
-        return [
+        return self._offered([
+            ("ACE-Step 1.5 turbo", ACESTEP_MODEL_ID),
             ("MusicGen small (minimum)", "facebook/musicgen-small"),
             ("MusicGen medium", "facebook/musicgen-medium"),
             ("MusicGen melody", "facebook/musicgen-melody"),
             ("MusicGen stereo small", "facebook/musicgen-stereo-small"),
-        ]
+        ])
 
     def sfx_model_choices(self) -> list[tuple[str, str]]:
         # AudioGen currently has no isolated in-app AudioCraft installer or
         # runtime. Keep it out of selectable choices until setup can complete.
-        return self.video_audio_model_choices()
+        return self._offered([("MOSS-SoundEffect v2.0", MOSS_SFX_MODEL_ID), *self._mmaudio_choices()])
 
     def video_audio_model_choices(self) -> list[tuple[str, str]]:
+        return self._offered([("Video soundtrack: describe scene + MOSS-SoundEffect", EVENTS_MODEL_ID), *self._mmaudio_choices()])
+
+    @staticmethod
+    def _mmaudio_choices() -> list[tuple[str, str]]:
         return [
             ("MMAudio small 16k (minimum)", "mmaudio:small_16k"),
             ("MMAudio large 44k v2 (install separately)", "mmaudio:large_44k_v2"),
@@ -269,11 +342,215 @@ class AudioGenerationService:
             ("MMAudio small 44k (install separately)", "mmaudio:small_44k"),
         ]
 
+    # ---- commercially licensed engines: ACE-Step 1.5 (music) and MOSS-SoundEffect v2.0 -----------------
+    # Each runs in its own environment through AIWF's worker script (engines/<engine>/aiwf_worker.py),
+    # one subprocess per render, with weights in Studio's model library. Installed only by its own
+    # Install button (scripts/bootstrap_commercial_audio.py).
+    def _engine_spec(self, model_id: str) -> dict[str, Any] | None:
+        repo = self.flags.data_dir.resolve()
+        library = self.flags.resolved_models_dir() / "audio"
+        if str(model_id).startswith("acestep:"):
+            return {
+                "engine": "acestep", "label": "ACE-Step 1.5",
+                "python": repo / "engines" / "acestep" / "ACE-Step-1.5" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
+                "worker": repo / "engines" / "acestep" / "aiwf_worker.py",
+                "weights": library / "ACE-Step-1.5",
+                "files": _ACESTEP_REQUIRED_FILES,
+            }
+        if str(model_id).startswith(("moss-sfx:", "events:")):
+            return {
+                "engine": "moss-sfx", "label": "MOSS-SoundEffect v2.0",
+                "python": repo / "engines" / "moss_sfx" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
+                "worker": repo / "engines" / "moss_sfx" / "aiwf_worker.py",
+                "weights": library / "MOSS-SoundEffect-v2.0",
+                "files": _MOSS_SFX_REQUIRED_FILES,
+            }
+        return None
+
+    def _events_describer_available_model(self) -> str | None:
+        """Return the local commercial vision model, caching probes for a short interval."""
+        with self._events_describer_cache_lock:
+            now = monotonic()
+            cached = self._events_describer_model_cache
+            if cached is not None and now - cached[0] < _EVENTS_DESCRIBER_READINESS_CACHE_SECONDS:
+                return cached[1]
+
+            try:
+                from aiwf.services.video_soundtrack import ChatDescriber
+
+                model = ChatDescriber().available_model(timeout=_EVENTS_DESCRIBER_READINESS_TIMEOUT_SECONDS)
+            except Exception:
+                model = None
+            self._events_describer_model_cache = (monotonic(), model)
+            return model
+
+    def commercial_engine_missing(self, model_id: str) -> list[str]:
+        """What is still missing for this engine (empty when it can render)."""
+        spec = self._engine_spec(model_id)
+        if spec is None:
+            return [f"Unknown engine for {model_id}"]
+        missing = [] if spec["python"].is_file() else [f"{spec['label']} environment ({spec['python']})"]
+        if str(model_id).startswith("events:") and not _resolve_ffmpeg():
+            missing.append("ffmpeg (needed to read video frames)")
+        missing += [str(spec["weights"] / name) for name in spec["files"] if not _is_nonempty_file(spec["weights"] / name)]
+        if str(model_id).startswith("events:"):
+            # Avoid a local service probe until the event route's own files and
+            # frame reader are ready; it cannot be selected or rendered yet.
+            if missing:
+                return missing
+            if self._events_describer_available_model() is None:
+                missing.append("Qwen2.5-VL-7B vision model in the local chat engine")
+        return missing
+
+    def commercial_engine_ready(self, model_id: str) -> bool:
+        return not self.commercial_engine_missing(model_id)
+
+    def install_commercial_engine(self, engine: str) -> dict[str, Any]:
+        """Install ACE-Step 1.5 or MOSS-SoundEffect (code, environment, weights) and return the new status."""
+        if engine not in {"acestep", "moss-sfx"}:
+            raise AudioUnavailable(f"Unknown audio engine: {engine or '(empty)'}")
+        if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
+            raise AudioUnavailable("An audio render or model setup operation is already running.")
+        if not _MINIMUM_AUDIO_SETUP_LOCK.acquire(blocking=False):
+            _AUDIO_MODEL_OPERATION_LOCK.release()
+            raise AudioUnavailable("Another audio setup operation is already running.")
+        try:
+            root = self.flags.data_dir.resolve()
+            script = root / "scripts" / "bootstrap_commercial_audio.py"
+            command = [sys.executable, str(script), "--engine", engine, "--repo", str(root),
+                       "--models-dir", str(self.flags.resolved_models_dir()), "--json"]
+            try:
+                result = subprocess.run(command, cwd=str(root), capture_output=True, text=True,
+                                        timeout=6 * 60 * 60, env=self._mmaudio_install_environment())
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise AudioUnavailable(f"Could not install {engine}: {exc}") from exc
+            if result.returncode != 0:
+                raise AudioUnavailable((result.stderr or result.stdout or f"{engine} installation failed").strip()[-5000:])
+            status = self.setup_status(deep=False)
+            status["receipt"] = _last_json_line(result.stdout)
+            return status
+        finally:
+            _MINIMUM_AUDIO_SETUP_LOCK.release()
+            _AUDIO_MODEL_OPERATION_LOCK.release()
+
+    def _run_engine_worker(self, model_id: str, job: dict[str, Any], *, label: str) -> dict[str, Any]:
+        """Run one render job in the engine's own environment and return its JSON reply."""
+        spec = self._engine_spec(model_id)
+        missing = self.commercial_engine_missing(model_id)
+        if spec is None or missing:
+            raise AudioUnavailable(f"{label} is not installed yet. Install it from Audio setup first. Missing: {', '.join(missing[:3])}")
+        with tempfile.TemporaryDirectory(prefix=f"aiwf-{spec['engine']}-") as scratch:
+            job_path = Path(scratch) / "job.json"
+            job_path.write_text(json.dumps(job), encoding="utf-8")
+            env = {**os.environ, "HF_HUB_OFFLINE": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+            try:
+                completed = subprocess.run([str(spec["python"]), str(spec["worker"]), "render", str(job_path)],
+                                           cwd=str(spec["worker"].parent), capture_output=True, text=True,
+                                           encoding="utf-8", errors="replace",   # workers print UTF-8, not cp1252
+                                           timeout=60 * 60, env=env)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise AudioUnavailable(f"{label} could not run: {exc}") from exc
+        reply = _last_json_line(completed.stdout)
+        if completed.returncode != 0 or not reply.get("ok"):
+            detail = reply.get("error") or (completed.stderr or completed.stdout or "no output").strip()[-1500:]
+            raise AudioUnavailable(f"{label} failed: {detail}")
+        return reply
+
+    def _generate_acestep(self, options: AudioGenerationOptions, dest: Path) -> int:
+        free_gb = self._free_vram_gb()
+        if free_gb is not None and free_gb < 3.5:
+            raise AudioUnavailable(f"Music generation deferred: {free_gb:.1f} GB VRAM is free; ACE-Step needs at least 3.5 GB.")
+        item = {
+            "caption": options.prompt.strip(),
+            "lyrics": "",
+            "duration": max(
+                ACESTEP_MIN_DURATION_SECONDS,
+                float(options.duration_seconds),
+            ),  # ACE-Step renders 10-600 s
+            "seed": int(options.seed),
+            "steps": 8,                                                # the turbo model is tuned for 8 steps
+            "output": str(dest),
+        }
+        # with less than 7 GB free the weights wait in system RAM and move to the GPU per stage
+        job = {"checkpoints": str(self._engine_spec(ACESTEP_MODEL_ID)["weights"]), "device": "cuda",
+               "offload": free_gb is not None and free_gb < 7.0, "items": [item]}
+        reply = self._run_engine_worker(ACESTEP_MODEL_ID, job, label="ACE-Step 1.5")
+        return int(reply["results"][0]["sample_rate"])
+
+    def render_sound_effects(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Render several MOSS-SoundEffect clips with one model load (used by sound effects and video soundtracks)."""
+        free_gb = self._free_vram_gb()
+        if free_gb is not None and free_gb < 8.0:
+            raise AudioUnavailable(f"Sound effects deferred: {free_gb:.1f} GB VRAM is free; MOSS-SoundEffect needs at least 8 GB.")
+        job = {"model_dir": str(self._engine_spec(MOSS_SFX_MODEL_ID)["weights"]), "device": "cuda", "items": items}
+        return self._run_engine_worker(MOSS_SFX_MODEL_ID, job, label="MOSS-SoundEffect")["results"]
+
+    def _generate_event_soundtrack(self, video: Path, options: AudioGenerationOptions, dest: Path) -> int:
+        """Describe the video, make each sound with MOSS-SoundEffect, and mix them onto one track."""
+        from scipy.io import wavfile
+
+        from aiwf.services import video_soundtrack as soundtrack
+
+        ffmpeg = _resolve_ffmpeg()
+        if not ffmpeg:
+            raise AudioUnavailable("ffmpeg is required to read frames from the video.")
+        duration = float(options.duration_seconds)
+        describer = getattr(self, "describer", None) or soundtrack.ChatDescriber()
+        # step 1-2: frames, then the vision model lists the sounds
+        try:
+            frames = soundtrack.extract_frames(ffmpeg, video, duration)
+            events = soundtrack.plan_events(describer, frames, duration, hint=options.prompt)
+        except Exception as exc:  # model missing, chat engine off, unusable answer
+            raise AudioUnavailable(f"Could not work out the video's sounds: {exc}") from exc
+        # the vision model no longer needs the GPU; free it so MOSS-SoundEffect has room
+        release = getattr(describer, "release", None)
+        if callable(release):
+            release()
+        # step 3: one MOSS-SoundEffect model load renders every sound
+        with tempfile.TemporaryDirectory(prefix="aiwf-soundtrack-") as scratch:
+            items = [{"prompt": event.prompt, "seconds": min(30.0, event.seconds), "seed": int(options.seed) + index if int(options.seed) >= 0 else -1,
+                      "steps": 50, "cfg_scale": 4.0, "output": str(Path(scratch) / f"event{index}.wav")}
+                     for index, event in enumerate(events)]
+            rendered = self.render_sound_effects(items)
+            clips = []
+            sample_rate = int(rendered[0]["sample_rate"])
+            for event, result in zip(events, rendered):
+                rate, data = wavfile.read(result["output"])
+                data = data.astype(np.float32) / (2147483648.0 if data.dtype == np.int32 else 32768.0 if data.dtype == np.int16 else 1.0)
+                clips.append((event, data if data.ndim == 1 else data.mean(axis=1)))
+        # step 4: place and mix
+        track = soundtrack.mix_events(clips, duration, sample_rate)
+        wavfile.write(str(dest), sample_rate, track)
+        self.last_soundtrack_events = [event.__dict__ for event in events]
+        return sample_rate
+
+    def _generate_moss_sfx(self, options: AudioGenerationOptions, dest: Path) -> int:
+        results = self.render_sound_effects([{
+            "prompt": options.prompt.strip(),
+            "seconds": min(30.0, float(options.duration_seconds)),     # MOSS renders up to 30 s
+            "seed": int(options.seed),
+            "steps": max(25, min(100, int(options.steps) * 2)),        # 50 steps by default
+            "cfg_scale": float(options.cfg_coef),
+            "negative_prompt": options.negative_prompt,
+            "output": str(dest),
+        }])
+        return int(results[0]["sample_rate"])
+
+    def _free_vram_gb(self) -> float | None:
+        try:
+            from aiwf.services.gpu_memory import nvidia_smi_free_bytes
+
+            free_bytes = nvidia_smi_free_bytes()
+        except Exception:
+            return None
+        return None if free_bytes is None else float(free_bytes) / (1024**3)
+
     def available_video_audio_model_choices(self) -> list[tuple[str, str]]:
         return [
             choice
             for choice in self.video_audio_model_choices()
-            if self._mmaudio_variant_ready(self._mmaudio_variant(choice[1]))
+            if (self.commercial_engine_ready(choice[1]) if choice[1].startswith("events:")
+                else self._mmaudio_variant_ready(self._mmaudio_variant(choice[1])))
         ]
 
     def setup_status(self, *, deep: bool = False) -> dict[str, Any]:
@@ -311,12 +588,18 @@ class AudioGenerationService:
         ffmpeg = _resolve_ffmpeg()
         ffprobe = self._resolve_ffprobe(ffmpeg) if ffmpeg else None
         mux_ready = bool(ffmpeg and ffprobe)
+        research_mode = self.research_mode()
         mux_missing = []
         if not ffmpeg:
             mux_missing.append("ffmpeg")
         if ffmpeg and not ffprobe:
             mux_missing.append("ffprobe")
-        minimum_ready = music_ready and mmaudio_ready and lab_ready and mux_ready
+        # Commercial-safe minimum setup skips MusicGen/MMAudio. Here minimumReady
+        # covers shared Audio Lab and mux tooling; per-engine readiness remains
+        # in musicReady, sfxReady, and videoAudioReady.
+        minimum_ready = lab_ready and mux_ready and (
+            not research_mode or (music_ready and mmaudio_ready)
+        )
         if minimum_ready and deep:
             message = "Minimum Audio runtime checks passed. Models are not loaded until selected for generation."
         elif minimum_ready:
@@ -330,23 +613,33 @@ class AudioGenerationService:
             "minimumReady": minimum_ready,
             "runtimeChecksPerformed": bool(deep),
             "installing": _MINIMUM_AUDIO_SETUP_LOCK.locked(),
-            "musicReady": music_ready,
+            "musicReady": music_ready or self.commercial_engine_ready(ACESTEP_MODEL_ID),
             "musicDependenciesReady": not missing_dependencies,
-            "sfxReady": mmaudio_ready,
+            "sfxReady": mmaudio_ready or self.commercial_engine_ready(MOSS_SFX_MODEL_ID),
             # Video-audio routes must finish by muxing generated audio back
             # into the source video; model/runtime readiness alone is not enough.
-            "videoAudioReady": mmaudio_ready and mux_ready,
+            "videoAudioReady": (mmaudio_ready or self.commercial_engine_ready(EVENTS_MODEL_ID)) and mux_ready,
             "labReady": lab_ready,
             "muxReady": mux_ready,
             "message": message,
             "estimatedDownload": "Up to about 10 GB on a clean install; existing files are reused.",
+            # the commercial-use policy, so every surface can show it the same way
+            "researchMode": research_mode,
             "licenseNotice": (
-                "MusicGen and MMAudio released model weights are CC-BY-NC 4.0 / non-commercial research assets."
+                "Research mode is on: non-commercial models (MusicGen, MMAudio; CC-BY-NC 4.0) are available and "
+                "labeled. Do not use their output commercially."
+                if research_mode else
+                "Commercial-safe mode: only audio models whose licences allow commercial use are offered. "
+                "Non-commercial models (MusicGen, MMAudio) are hidden; Audio settings can enable them for research."
             ),
+            "licenses": {
+                model_id: audio_licenses.license_for(model_id)
+                for model_id in ("facebook/musicgen-small", "mmaudio:small_16k", ACESTEP_MODEL_ID, MOSS_SFX_MODEL_ID, EVENTS_MODEL_ID)
+            },
             "defaults": {
-                "music": "facebook/musicgen-small",
-                "sfx": "mmaudio:small_16k",
-                "videoAudio": "mmaudio:small_16k",
+                "music": ACESTEP_MODEL_ID,
+                "sfx": MOSS_SFX_MODEL_ID,
+                "videoAudio": EVENTS_MODEL_ID,
             },
             "components": [
                 *[
@@ -388,6 +681,19 @@ class AudioGenerationService:
                     for variant in _MMAUDIO_INSTALLABLE_VARIANTS
                     if variant != "small_16k"
                 ],
+                *[
+                    {
+                        "id": engine_id,
+                        "label": label,
+                        "ready": self.commercial_engine_ready(model_id),
+                        "path": str(self._engine_spec(model_id)["weights"]),
+                        "missing": self.commercial_engine_missing(model_id),
+                    }
+                    for engine_id, label, model_id in (
+                        ("acestep", "ACE-Step 1.5 (music, MIT)", ACESTEP_MODEL_ID),
+                        ("moss-sfx", "MOSS-SoundEffect v2.0 (sound effects, Apache-2.0)", MOSS_SFX_MODEL_ID),
+                    )
+                ],
                 {
                     "id": "audio-lab",
                     "label": "Audio Lab DSP",
@@ -407,6 +713,7 @@ class AudioGenerationService:
 
     def install_musicgen_variant(self, variant: str) -> dict[str, Any]:
         """Install one allowlisted MusicGen model into Studio's local model tree."""
+        self._require_licensed(_MUSICGEN_VARIANTS.get(str(variant or "").strip(), "facebook/musicgen-"))
         normalized = str(variant or "").strip()
         repo_id = _MUSICGEN_VARIANTS.get(normalized)
         if not repo_id:
@@ -446,6 +753,7 @@ class AudioGenerationService:
     def install_mmaudio_variant(self, variant: str) -> dict[str, Any]:
         """Download one allowlisted MMAudio checkpoint into the isolated engine."""
         normalized = str(variant or "").strip()
+        self._require_licensed(f"mmaudio:{normalized}")
         if normalized not in _MMAUDIO_INSTALLABLE_VARIANTS:
             raise AudioUnavailable(f"Unsupported MMAudio variant: {normalized or '(empty)'}")
         if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
@@ -507,6 +815,9 @@ class AudioGenerationService:
                 str(self.flags.resolved_models_dir()),
                 "--json",
             ]
+            # a commercial install never downloads the non-commercial MusicGen/MMAudio weights
+            if not self.research_mode():
+                command.append("--commercial-only")
             command.extend(
                 argument
                 for model_root in self.flags.resolved_extra_model_dirs()
@@ -543,6 +854,11 @@ class AudioGenerationService:
     def video_audio_status(self) -> str:
         status = self.setup_status(deep=False)
         root = self._mmaudio_root()
+        if not self.research_mode():
+            return (
+                "Commercial-safe mode: MMAudio (CC-BY-NC 4.0) is not used. Turn on research mode in Audio settings "
+                "to use it for non-commercial work."
+            )
         if status["videoAudioReady"]:
             return (
                 f"Video audio ready: MMAudio Small 16 kHz at {root}. "
@@ -618,7 +934,11 @@ class AudioGenerationService:
         normalized_model = str(model_id or "").strip()
         if normalized_kind not in {"music", "sfx"}:
             raise AudioUnavailable("Audio kind must be 'music' or 'sfx'.")
-        choices = self.music_model_choices() if normalized_kind == "music" else self.sfx_model_choices()
+        self._require_licensed(normalized_model)
+        if normalized_kind == "sfx" and normalized_model.startswith("events:"):
+            choices = self.video_audio_model_choices()
+        else:
+            choices = self.music_model_choices() if normalized_kind == "music" else self.sfx_model_choices()
         if normalized_model not in {model for _, model in choices}:
             raise AudioUnavailable(f"Choose a supported {normalized_kind} model.")
         if normalized_model == "facebook/audiogen-medium":
@@ -626,6 +946,15 @@ class AudioGenerationService:
         if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
             raise AudioUnavailable("Audio setup or another audio render is already running. Try again when it finishes.")
         try:
+            if normalized_model.startswith(("acestep:", "moss-sfx:", "events:")):
+                missing = self.commercial_engine_missing(normalized_model)
+                if missing:
+                    raise AudioUnavailable(f"{normalized_model} is not installed completely: {', '.join(missing[:3])}")
+                with self._gpu_tenant("Prepare commercial audio engine"):
+                    self._release_image_models()
+                    self.unload()
+                return {"kind": normalized_kind, "modelId": normalized_model, "ready": True, "resident": None,
+                        "detail": "Installed and ready; this engine loads its weights per render, so residency is unreported."}
             if normalized_model.startswith("facebook/musicgen-"):
                 variant = normalized_model.removeprefix("facebook/musicgen-")
                 setup = self.setup_status(deep=False)
@@ -670,6 +999,17 @@ class AudioGenerationService:
             raise AudioUnavailable("Enter an audio prompt first.")
         if str(options.kind or "").lower() == "video_audio":
             raise AudioUnavailable("Video-conditioned audio needs a target video.")
+        self._require_licensed(options.model_id)
+        generation_options = options
+        if str(options.model_id).startswith("acestep:"):
+            generation_options = options.model_copy(
+                update={
+                    "duration_seconds": max(
+                        ACESTEP_MIN_DURATION_SECONDS,
+                        float(options.duration_seconds),
+                    )
+                }
+            )
         mmaudio_text = options.kind == "sfx" and str(options.model_id or "").startswith("mmaudio:")
         suffix = ".flac" if mmaudio_text else ".wav"
         dest = Path(output_path) if output_path else self.output_path(stem=self._safe_stem(prompt), suffix=suffix)
@@ -681,7 +1021,11 @@ class AudioGenerationService:
                 if options.seed is not None and int(options.seed) >= 0:
                     self._set_seed(int(options.seed))
                 try:
-                    if mmaudio_text:
+                    if str(options.model_id).startswith("acestep:"):
+                        sample_rate = self._generate_acestep(generation_options, staged_dest)
+                    elif str(options.model_id).startswith("moss-sfx:"):
+                        sample_rate = self._generate_moss_sfx(options, staged_dest)
+                    elif mmaudio_text:
                         sample_rate = self._generate_mmaudio_text_audio(options, staged_dest)
                     elif options.kind == "sfx":
                         sample_rate = self._generate_audiocraft(options, staged_dest)
@@ -690,16 +1034,20 @@ class AudioGenerationService:
                 finally:
                     self._park_cached_model_on_cpu()
 
-        infotext = f"Audio {options.kind}: {options.model_id}, {options.duration_seconds:.1f}s"
+        infotext = (
+            f"Audio {options.kind}: {options.model_id}, {generation_options.duration_seconds:.1f}s, "
+            f"licence: {audio_licenses.short_label(options.model_id)}"
+        )
         return AudioGenerationResult(
             output_path=str(dest),
             prompt=prompt,
             model_id=options.model_id,
             kind=options.kind,
-            duration_seconds=float(options.duration_seconds),
+            duration_seconds=float(generation_options.duration_seconds),
             sample_rate=sample_rate,
-            message=f"Saved {options.duration_seconds:.1f}s audio -> {dest}",
+            message=f"Saved {generation_options.duration_seconds:.1f}s audio -> {dest}",
             infotext=infotext,
+            license=audio_licenses.license_for(options.model_id),
         )
 
     def generate_for_video(
@@ -740,23 +1088,31 @@ class AudioGenerationService:
         output_path: str | Path | None = None,
     ) -> AudioGenerationResult:
         prompt = (options.prompt or "").strip()
-        if not prompt:
+        # the event soundtrack works from the scene itself; its prompt is only an optional hint
+        if not prompt and not str(options.model_id).startswith("events:"):
             raise AudioUnavailable("Enter an audio prompt first.")
         src_video = Path(video_path)
         if not src_video.is_file():
             raise AudioUnavailable(f"Video not found: {src_video}")
+        self._require_licensed(options.model_id)
         stem = f"{src_video.stem}_{self._safe_stem(prompt)}"
-        dest = Path(output_path) if output_path else self.output_path(stem=stem, suffix=".flac")
+        # the event soundtrack is mixed here as a float WAV; MMAudio's worker writes FLAC
+        dest_suffix = ".wav" if str(options.model_id).startswith("events:") else ".flac"
+        dest = Path(output_path) if output_path else self.output_path(stem=stem, suffix=dest_suffix)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         with self._staged_output(dest, "Video audio generation") as staged_dest:
             with self._gpu_tenant("Video audio generation"):
                 self._release_image_models()
-                sample_rate = self._generate_mmaudio_video_audio(src_video, options, staged_dest)
+                if str(options.model_id).startswith("events:"):
+                    sample_rate = self._generate_event_soundtrack(src_video, options, staged_dest)
+                else:
+                    sample_rate = self._generate_mmaudio_video_audio(src_video, options, staged_dest)
 
         infotext = (
             f"Video audio {options.model_id}: {options.duration_seconds:.1f}s, "
-            f"steps {int(options.steps)}, CFG {float(options.cfg_coef):.2f}"
+            f"steps {int(options.steps)}, CFG {float(options.cfg_coef):.2f}, "
+            f"licence: {audio_licenses.short_label(options.model_id)}"
         )
         return AudioGenerationResult(
             output_path=str(dest),
@@ -767,6 +1123,7 @@ class AudioGenerationService:
             sample_rate=sample_rate,
             message=f"Saved video-conditioned audio -> {dest}",
             infotext=infotext,
+            license=audio_licenses.license_for(options.model_id),
         )
 
     @staticmethod

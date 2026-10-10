@@ -480,7 +480,7 @@ def _build_generate_panel(ctx: AppContext, service: AudioGenerationService) -> N
                 model = gr.Dropdown(
                     label="Model",
                     choices=video_audio_models,
-                    value=video_audio_models[0][1] if video_audio_models else "mmaudio:small_16k",
+                    value=video_audio_models[0][1] if video_audio_models else None,  # none offered in commercial-safe mode until a commercial model is installed
                     allow_custom_value=True,
                 )
             with gr.Row():

@@ -6346,6 +6346,18 @@ def _audio_service(ctx: Any):
     return service
 
 
+# Commercial-use policy for audio (aiwf/services/audio_licenses.py): a non-commercial model asked
+# for outside research mode is refused with 403 and a sentence naming its licence, instead of the
+# generic "choose an available model" that a filtered picker would otherwise produce.
+def _raise_if_audio_license_blocked(ctx: Any, model_id: str) -> None:
+    from aiwf.services import audio_licenses
+
+    # the person's setting is the source of truth, whichever audio service object is in use
+    research = bool(getattr(getattr(ctx, "settings", None), "allow_noncommercial_audio_models", False))
+    if model_id and not audio_licenses.allowed(model_id, research_mode=research):
+        raise HTTPException(status_code=403, detail=audio_licenses.blocked_message(model_id))
+
+
 class ProVideoLabRunPayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -6409,6 +6421,12 @@ class ProAudioGeneratePayload(BaseModel):
         return self
 
 
+class ProAudioResearchModePayload(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    enabled: bool
+
+
 class ProAudioPreparePayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -6438,6 +6456,7 @@ class ProAudioProjectSavePayload(BaseModel):
     options: AudioGenerationOptions = Field(default_factory=AudioGenerationOptions)
     sample_rate: int = Field(default=0, ge=0, le=384000)
     license_notice: str | None = Field(default=None, validation_alias=AliasChoices("licenseNotice", "license_notice"))
+    license: dict[str, Any] | None = None
     consent_status: str | None = Field(default=None, validation_alias=AliasChoices("consentStatus", "consent_status"))
 
 
@@ -6819,15 +6838,29 @@ def _video_lab_run_audio(ctx: Any, src: Path, payload: ProVideoLabRunPayload) ->
     service = _audio_service(ctx)
     available_choices = getattr(service, "available_video_audio_model_choices", service.video_audio_model_choices)
     video_audio_choices = [model_id for _, model_id in (available_choices() or [])]
+    music_choices = [model_id for _, model_id in (service.music_model_choices() or [])]
     model_id = (payload.audio_model or "").strip() or (
-        video_audio_choices[0] if video_audio_choices else "facebook/musicgen-small"
+        video_audio_choices[0] if video_audio_choices else music_choices[0] if music_choices else ""
     )
-    kind = "video_audio" if model_id.startswith("mmaudio:") else "music"
+    if not model_id:
+        raise HTTPException(
+            status_code=409,
+            detail="No commercial-safe soundtrack model is installed yet. Install one in Audio setup, "
+                   "or turn on research mode in Audio settings for non-commercial work.",
+        )
+    _raise_if_audio_license_blocked(ctx, model_id)
+    video_conditioned = model_id.startswith(("mmaudio:", "events:"))
+    kind = "video_audio" if video_conditioned else "music"
     route_id = (
         f"audio.video.audio.{model_id}"
-        if model_id.startswith("mmaudio:") else f"audio.music.{model_id}"
+        if video_conditioned else f"audio.music.{model_id}"
     )
-    if model_id.startswith("mmaudio:"):
+    commercial_engine = model_id.startswith(("acestep:", "moss-sfx:", "events:"))
+    if commercial_engine:
+        # ACE-Step, MOSS-SoundEffect and the event soundtrack run in their own environments
+        variant = ""
+        readiness_check = lambda _variant: bool(service.commercial_engine_ready(model_id))  # noqa: E731
+    elif model_id.startswith("mmaudio:"):
         variant = model_id.split(":", 1)[1]
         readiness_check = getattr(service, "_mmaudio_variant_ready", None)
     elif model_id.startswith("facebook/musicgen-"):
@@ -6881,7 +6914,11 @@ def _video_lab_run_audio(ctx: Any, src: Path, payload: ProVideoLabRunPayload) ->
         ctx,
         muxed.output_path,
         f"Added {kind.replace('_', ' ')} audio -> {Path(muxed.output_path).name}",
-        {"audioPath": audio.output_path, "infotext": audio.infotext},
+        {
+            "audioPath": audio.output_path,
+            "infotext": audio.infotext,
+            "license": getattr(audio, "license", {}),
+        },
     )
 
 
@@ -6971,7 +7008,16 @@ def _video_lab_status_payload(ctx: Any) -> dict[str, Any]:
             audio_setup.get("musicDependenciesReady", audio_setup.get("musicReady", False))
         )
         for label, model_id in [*audio.video_audio_model_choices(), *audio.music_model_choices()]:
-            if model_id.startswith("mmaudio:"):
+            if model_id.startswith(("events:", "acestep:")):
+                # commercially licensed: its own environment and weights, not MMAudio's/MusicGen's
+                conditioning_mode = "video-conditioned" if model_id.startswith("events:") else "prompt-only"
+                installed = bool(audio.commercial_engine_ready(model_id))
+                available = video_audio_mux_ready
+                unavailable_reason = (
+                    "Working FFmpeg and ffprobe are required to mux generated audio into the video."
+                    if not video_audio_mux_ready else ""
+                )
+            elif model_id.startswith("mmaudio:"):
                 conditioning_mode = "video-conditioned"
                 variant = model_id.split(":", 1)[1]
                 ready_check = getattr(audio, "_mmaudio_variant_ready", None)
@@ -6996,7 +7042,7 @@ def _video_lab_status_payload(ctx: Any) -> dict[str, Any]:
                 )
             else:
                 continue
-            audio_model_choices.append({
+            choice = {
                 "label": label,
                 "id": model_id,
                 "conditioningMode": conditioning_mode,
@@ -7005,7 +7051,10 @@ def _video_lab_status_payload(ctx: Any) -> dict[str, Any]:
                 "installed": installed,
                 "installable": available,
                 "ready": available and installed,
-            })
+            }
+            if model_id == "events:moss-sfx":
+                choice["setupRoute"] = _setup_route_descriptor({"routeKey": "pro.audio.moss-sfx.v2"})
+            audio_model_choices.append(choice)
     except Exception:
         video_audio_models = []
         audio_setup = {"videoAudioReady": False}
@@ -7042,10 +7091,19 @@ def _audio_status_payload(ctx: Any, *, deep: bool = False) -> dict[str, Any]:
     service = _audio_service(ctx)
     status = service.setup_status(deep=deep)
     settings = getattr(ctx, "settings", None)
+    # a remembered choice counts only while the licence policy still offers it
+    from aiwf.services import audio_licenses
+
+    research = bool(getattr(settings, "allow_noncommercial_audio_models", False))
+
+    def remembered(field: str, fallback: str) -> str:
+        value = str(getattr(settings, field, "") or "")
+        return value if value and audio_licenses.allowed(value, research_mode=research) else fallback
+
     status["defaults"] = {
-        "music": str(getattr(settings, "last_audio_music_model_id", "") or "") or "facebook/musicgen-small",
-        "sfx": str(getattr(settings, "last_audio_sfx_model_id", "") or "") or "mmaudio:small_16k",
-        "videoAudio": str(getattr(settings, "last_video_audio_model_id", "") or "") or "mmaudio:small_16k",
+        "music": remembered("last_audio_music_model_id", status["defaults"]["music"]),
+        "sfx": remembered("last_audio_sfx_model_id", status["defaults"]["sfx"]),
+        "videoAudio": remembered("last_video_audio_model_id", status["defaults"]["videoAudio"]),
     }
     mmaudio_runtime_check = getattr(service, "_mmaudio_runtime_import_error", None)
     mmaudio_component = next(
@@ -7080,7 +7138,12 @@ def _audio_status_payload(ctx: Any, *, deep: bool = False) -> dict[str, Any]:
                 "unavailableReason": "AudioGen requires AudioCraft, which is not installed in the shared Studio runtime."
                 if not available else "",
             }
-            if model_id.startswith("mmaudio:"):
+            if model_id.startswith(("acestep:", "moss-sfx:", "events:")):
+                ready = bool(getattr(service, "commercial_engine_ready", lambda _m: False)(model_id))
+                choice["installed"] = ready
+                choice["installable"] = True
+                choice["ready"] = ready
+            elif model_id.startswith("mmaudio:"):
                 variant = model_id.split(":", 1)[1]
                 is_installed = getattr(service, "_mmaudio_variant_ready", None)
                 choice["installed"] = bool(is_installed(variant)) if callable(is_installed) else (
@@ -7134,8 +7197,14 @@ def _audio_status_payload(ctx: Any, *, deep: bool = False) -> dict[str, Any]:
                 ),
             )
             choice["routeStatus"] = lifecycle.get("status")
+            # every offered model says what its licence allows (pickers label non-commercial ones)
+            from aiwf.services import audio_licenses
+
+            choice["license"] = audio_licenses.license_for(model_id)
             choice["resident"] = lifecycle.get("resident")
             setup_route_key = (
+                "pro.audio.acestep.1-5-turbo" if model_id.startswith("acestep:") else
+                "pro.audio.moss-sfx.v2" if model_id.startswith(("moss-sfx:", "events:")) else
                 f"pro.audio.musicgen.{model_id.removeprefix('facebook/musicgen-')}"
                 if model_id.startswith("facebook/musicgen-") else
                 f"pro.audio.mmaudio.{model_id.split(':', 1)[1].replace('_', '-')}"
@@ -7166,6 +7235,7 @@ def _generate_audio_response(ctx: Any, payload: ProAudioGeneratePayload) -> dict
     if payload.kind not in {"music", "sfx"}:
         raise HTTPException(status_code=422, detail="Audio kind must be 'music' or 'sfx'.")
     service = _audio_service(ctx)
+    _raise_if_audio_license_blocked(ctx, payload.model_id)
     model_choices = service.music_model_choices() if payload.kind == "music" else service.sfx_model_choices()
     allowed_model_ids = {str(model_id) for _, model_id in model_choices}
     if payload.model_id not in allowed_model_ids:
@@ -7195,6 +7265,9 @@ def _generate_audio_response(ctx: Any, payload: ProAudioGeneratePayload) -> dict
     if payload.model_id.startswith("facebook/musicgen-"):
         variant = payload.model_id.removeprefix("facebook/musicgen-")
         readiness_check = getattr(service, "_musicgen_variant_ready", None)
+    elif payload.model_id.startswith(("acestep:", "moss-sfx:")):
+        variant = ""
+        readiness_check = lambda _variant: bool(service.commercial_engine_ready(payload.model_id))  # noqa: E731
     elif payload.model_id.startswith("mmaudio:"):
         variant = payload.model_id.split(":", 1)[1]
         readiness_check = getattr(service, "_mmaudio_variant_ready", None)
@@ -7210,7 +7283,7 @@ def _generate_audio_response(ctx: Any, payload: ProAudioGeneratePayload) -> dict
             else setup.get("sfxReady") if payload.kind == "sfx" and variant == "small_16k"
             else False
         )
-    if payload.kind == "music":
+    if payload.kind == "music" and not payload.model_id.startswith("acestep:"):
         route_setup_ready = route_setup_ready and bool(
             setup.get("musicDependenciesReady", setup.get("musicReady", False))
         )
@@ -7261,6 +7334,7 @@ def _generate_audio_response(ctx: Any, payload: ProAudioGeneratePayload) -> dict
             "durationSeconds": result.duration_seconds,
             "sampleRate": result.sample_rate,
             "infotext": result.infotext,
+            "license": result.license,
         }
     except Exception as exc:
         finish_route_operation(ctx, route_id, token, success=False, detail=str(exc))
@@ -8932,6 +9006,24 @@ def build_router(ctx: Any) -> APIRouter:
             headers={"Cache-Control": "no-store"},
         )
 
+    # research mode for audio: off by default; on brings back non-commercial models (MusicGen,
+    # MMAudio), labeled. Only the person at this PC can change it, never a paired phone or agent.
+    @router.post("/audio/research-mode")
+    def audio_research_mode(payload: ProAudioResearchModePayload, request: Request):
+        _require_loopback(request)
+        settings = getattr(ctx, "settings", None)
+        save_settings = getattr(ctx, "save_settings", None)
+        if settings is None or not callable(save_settings):
+            raise HTTPException(status_code=500, detail="User settings are unavailable.")
+        previous = bool(getattr(settings, "allow_noncommercial_audio_models", False))
+        settings.allow_noncommercial_audio_models = bool(payload.enabled)
+        try:
+            save_settings()
+        except Exception as exc:
+            settings.allow_noncommercial_audio_models = previous
+            raise HTTPException(status_code=500, detail=f"Could not save the research-mode setting: {exc}") from exc
+        return _audio_status_payload(ctx, deep=False)
+
     @router.post("/audio/setup/minimum")
     def audio_setup_minimum():
         from aiwf.services.audio import AudioUnavailable
@@ -8941,6 +9033,21 @@ def build_router(ctx: Any) -> APIRouter:
                 ctx,
                 lambda: _audio_service(ctx).install_minimum(),
             )
+        except HTTPException:
+            raise
+        except AudioUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @router.post("/audio/setup/engine/{engine}")
+    def audio_setup_commercial_engine(engine: str):
+        from aiwf.services.audio import AudioUnavailable
+
+        def install():
+            _audio_service(ctx).install_commercial_engine(engine)
+            return _audio_status_payload(ctx, deep=False)
+
+        try:
+            return _run_exclusive_pro_gpu_operation(ctx, install)
         except HTTPException:
             raise
         except AudioUnavailable as exc:
@@ -8990,12 +9097,29 @@ def build_router(ctx: Any) -> APIRouter:
         if _pro_video_job_running(ctx) or _image_generation_running(ctx) or _image_generation_pending(ctx) or _pro_workflow_runs_active(ctx):
             raise HTTPException(status_code=409, detail="Wait for active image, video, or workflow work to finish before preparing an audio model.")
         service = _audio_service(ctx)
-        choices = service.music_model_choices() if payload.kind == "music" else service.sfx_model_choices()
+        _raise_if_audio_license_blocked(ctx, payload.model_id)
+        prepare_kind = payload.kind
+        if video_lab:
+            video_audio_choices = service.video_audio_model_choices()
+            video_audio_model_ids = {str(model_id) for _, model_id in video_audio_choices}
+            if payload.model_id in video_audio_model_ids:
+                # Video Lab's video-audio models use the SFX preparation path,
+                # including events:moss-sfx, regardless of the client kind.
+                choices = video_audio_choices
+                prepare_kind = "sfx"
+            elif payload.kind == "music":
+                # Keep prompt-only music choices such as MusicGen available in
+                # Video Lab, while excluding text-only SFX models.
+                choices = service.music_model_choices()
+            else:
+                choices = []
+        else:
+            choices = service.music_model_choices() if payload.kind == "music" else service.sfx_model_choices()
         if payload.model_id not in {str(model_id) for _, model_id in choices}:
             raise HTTPException(status_code=422, detail=f"Choose a supported {payload.kind} model.")
         route_id = (
             f"audio.video.audio.{payload.model_id}"
-            if video_lab and payload.model_id.startswith("mmaudio:")
+            if video_lab and payload.model_id.startswith(("mmaudio:", "events:"))
             else f"audio.music.{payload.model_id}"
             if video_lab
             else f"audio.{payload.kind}.{payload.model_id}"
@@ -9003,7 +9127,9 @@ def build_router(ctx: Any) -> APIRouter:
         support_paths = getattr(service, "model_support_paths", None)
         support_ids = support_paths(payload.model_id) if callable(support_paths) else [payload.model_id]
         setup_ready = False
-        if payload.model_id.startswith("facebook/musicgen-"):
+        if payload.model_id.startswith(("acestep:", "moss-sfx:", "events:")):
+            setup_ready = bool(service.commercial_engine_ready(payload.model_id))
+        elif payload.model_id.startswith("facebook/musicgen-"):
             variant = payload.model_id.removeprefix("facebook/musicgen-")
             is_ready = getattr(service, "_musicgen_variant_ready", None)
             setup = service.setup_status(deep=False)
@@ -9043,7 +9169,7 @@ def build_router(ctx: Any) -> APIRouter:
             raise HTTPException(status_code=409, detail="The selected audio model is not installed and ready. Install it explicitly before preparation.")
         mark_route_running(ctx, route_id, token, "Preparing the selected audio model.")
         try:
-            result = service.prepare(kind=payload.kind, model_id=payload.model_id)
+            result = service.prepare(kind=prepare_kind, model_id=payload.model_id)
         except AudioUnavailable as exc:
             finish_route_operation(ctx, route_id, token, success=False, detail=str(exc))
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -9056,7 +9182,7 @@ def build_router(ctx: Any) -> APIRouter:
             resident=result.get("resident"),
         )
         result["startupDefaultSaved"] = _persist_last_audio_model_id(
-            ctx, payload.model_id, kind=payload.kind, video_lab=video_lab
+            ctx, payload.model_id, kind=prepare_kind, video_lab=video_lab
         )
         return {**result, "routeStatus": next((item.get("status") for item in lifecycle_snapshot(ctx) if item.get("route") == route_id), "setup-ready")}
 
@@ -9143,15 +9269,22 @@ def build_router(ctx: Any) -> APIRouter:
     def audio_projects_save(payload: ProAudioProjectSavePayload):
         service = audio_project_service()
         try:
-            manifest = service.save_project(
-                name=payload.name,
-                project_id=payload.project_id,
-                audio_path=payload.audio_path,
-                options=payload.options,
-                sample_rate=payload.sample_rate,
-                license_notice=payload.license_notice,
-                consent_status=payload.consent_status,
-            )
+            save_options = {
+                "name": payload.name,
+                "project_id": payload.project_id,
+                "audio_path": payload.audio_path,
+                "options": payload.options,
+                "sample_rate": payload.sample_rate,
+                "license_notice": payload.license_notice,
+                "consent_status": payload.consent_status,
+            }
+            if "license" in payload.model_fields_set:
+                save_options["license"] = payload.license
+            elif payload.license_notice is not None:
+                raise ValueError("A legacy save cannot set a license notice without its structured license record.")
+            else:
+                save_options["license"] = None
+            manifest = service.save_project(**save_options)
             return audio_project_payload(service, manifest)
         except (AudioProjectError, ValueError) as exc:
             audio_project_failure(exc)

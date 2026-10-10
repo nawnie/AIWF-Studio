@@ -17,6 +17,14 @@ _audio_headroom_issue = AudioGenerationService._audio_headroom_issue
 
 
 @pytest.fixture(autouse=True)
+def _research_mode_for_noncommercial_model_tests(monkeypatch):
+    # This module tests MusicGen and MMAudio internals. Both are CC-BY-NC 4.0, so Studio offers
+    # them only in research mode (aiwf/services/audio_licenses.py); UserSettings() reads this
+    # variable. The commercial-safe default has its own tests in test_audio_licenses.py.
+    monkeypatch.setenv("ALLOW_NONCOMMERCIAL_AUDIO_MODELS", "1")
+
+
+@pytest.fixture(autouse=True)
 def _keep_audio_route_tests_independent_of_workstation_vram(monkeypatch):
     monkeypatch.setattr(AudioGenerationService, "_audio_headroom_issue", lambda self, *args, **kwargs: None)
 
@@ -1009,8 +1017,10 @@ def test_video_audio_accepts_single_alternate_mmaudio_flac(tmp_path: Path):
 def test_mmaudio_minimum_is_the_safe_default():
     service = AudioGenerationService(RuntimeFlags(), UserSettings())
 
-    assert service.sfx_model_choices()[0][1] == "mmaudio:small_16k"
-    assert service.video_audio_model_choices()[0][1] == "mmaudio:small_16k"
+    assert service.sfx_model_choices()[0][1] == "moss-sfx:v2.0"   # commercial default first
+    assert "mmaudio:small_16k" in [m for _, m in service.sfx_model_choices()]
+    assert service.video_audio_model_choices()[0][1] == "events:moss-sfx"   # commercial default first
+    assert "mmaudio:small_16k" in [m for _, m in service.video_audio_model_choices()]
 
 
 def test_mmaudio_variants_are_individually_installed_and_allowlisted(tmp_path: Path, monkeypatch):
@@ -1245,6 +1255,63 @@ def test_audio_releases_image_backend_before_audio_work(tmp_path: Path, monkeypa
         monkeypatch.setattr(service, "_generate_transformers_musicgen", generate)
         service.generate(AudioGenerationOptions(prompt="soft piano", kind="music"))
     assert events == ["unload-image", "audio"]
+
+
+@pytest.mark.parametrize(("requested_duration", "expected_duration"), [(8, 10.0), (12, 12.0)])
+def test_acestep_normalizes_short_duration_before_render_and_result(
+    tmp_path: Path, monkeypatch, requested_duration: float, expected_duration: float
+):
+    service = AudioGenerationService(RuntimeFlags(data_dir=tmp_path), UserSettings())
+    destination = tmp_path / "music.wav"
+    captured = {}
+
+    def fake_worker(_model_id, job, *, label):
+        captured["duration"] = job["items"][0]["duration"]
+        Path(job["items"][0]["output"]).write_bytes(b"fake audio")
+        return {"results": [{"sample_rate": 44100}]}
+
+    monkeypatch.setattr(service, "_free_vram_gb", lambda: 8.0)
+    monkeypatch.setattr(service, "_run_engine_worker", fake_worker)
+    monkeypatch.setattr(service, "_release_image_models", lambda: None)
+    monkeypatch.setattr(service, "_park_cached_model_on_cpu", lambda: None)
+
+    options = AudioGenerationOptions(
+        prompt="soft piano",
+        model_id="acestep:1.5-turbo",
+        duration_seconds=requested_duration,
+    )
+    result = service.generate(options, output_path=destination)
+
+    assert captured["duration"] == expected_duration
+    assert result.duration_seconds == expected_duration
+    assert f"{expected_duration:.1f}s" in result.message
+    assert f"{expected_duration:.1f}s" in result.infotext
+    assert options.duration_seconds == requested_duration
+
+
+def test_non_acestep_music_keeps_requested_short_duration(tmp_path: Path, monkeypatch):
+    service = AudioGenerationService(RuntimeFlags(data_dir=tmp_path), UserSettings())
+
+    def fake_musicgen(_options, destination):
+        destination.write_bytes(b"fake audio")
+        return 32000
+
+    monkeypatch.setattr(service, "_generate_transformers_musicgen", fake_musicgen)
+    monkeypatch.setattr(service, "_release_image_models", lambda: None)
+    monkeypatch.setattr(service, "_park_cached_model_on_cpu", lambda: None)
+
+    result = service.generate(
+        AudioGenerationOptions(
+            prompt="soft piano",
+            model_id="facebook/musicgen-small",
+            duration_seconds=8,
+        ),
+        output_path=tmp_path / "music.wav",
+    )
+
+    assert result.duration_seconds == 8.0
+    assert "8.0s" in result.message
+    assert "8.0s" in result.infotext
 
 
 def test_mmaudio_text_to_sound_uses_isolated_engine(tmp_path: Path):
