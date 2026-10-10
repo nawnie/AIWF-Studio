@@ -17,6 +17,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable
 
 import numpy as np
@@ -70,6 +71,8 @@ def _is_complete_safetensors(path: Path) -> bool:
 
 _MINIMUM_AUDIO_SETUP_LOCK = threading.Lock()
 _AUDIO_MODEL_OPERATION_LOCK = threading.Lock()
+_EVENTS_DESCRIBER_READINESS_TIMEOUT_SECONDS = 1.0
+_EVENTS_DESCRIBER_READINESS_CACHE_SECONDS = 2.0
 _MUSICGEN_MINIMUM_FILES = (
     "config.json",
     "generation_config.json",
@@ -127,6 +130,7 @@ _ACESTEP_REQUIRED_FILES = (
     "vae/diffusion_pytorch_model.safetensors",
     "Qwen3-Embedding-0.6B/model.safetensors",
 )
+ACESTEP_MIN_DURATION_SECONDS = 10.0
 _MOSS_SFX_REQUIRED_FILES = (
     "model_index.json",
     "transformer/diffusion_pytorch_model.safetensors",
@@ -262,6 +266,8 @@ class AudioGenerationService:
         self.unload_image_models = unload_image_models
         self._model: Any | None = None
         self._model_key: tuple[str, str, str] | None = None
+        self._events_describer_cache_lock = threading.Lock()
+        self._events_describer_model_cache: tuple[float, str | None] | None = None
 
     @contextmanager
     def _gpu_tenant(self, reason: str):
@@ -361,6 +367,23 @@ class AudioGenerationService:
             }
         return None
 
+    def _events_describer_available_model(self) -> str | None:
+        """Return the local commercial vision model, caching probes for a short interval."""
+        with self._events_describer_cache_lock:
+            now = monotonic()
+            cached = self._events_describer_model_cache
+            if cached is not None and now - cached[0] < _EVENTS_DESCRIBER_READINESS_CACHE_SECONDS:
+                return cached[1]
+
+            try:
+                from aiwf.services.video_soundtrack import ChatDescriber
+
+                model = ChatDescriber().available_model(timeout=_EVENTS_DESCRIBER_READINESS_TIMEOUT_SECONDS)
+            except Exception:
+                model = None
+            self._events_describer_model_cache = (monotonic(), model)
+            return model
+
     def commercial_engine_missing(self, model_id: str) -> list[str]:
         """What is still missing for this engine (empty when it can render)."""
         spec = self._engine_spec(model_id)
@@ -370,6 +393,13 @@ class AudioGenerationService:
         if str(model_id).startswith("events:") and not _resolve_ffmpeg():
             missing.append("ffmpeg (needed to read video frames)")
         missing += [str(spec["weights"] / name) for name in spec["files"] if not _is_nonempty_file(spec["weights"] / name)]
+        if str(model_id).startswith("events:"):
+            # Avoid a local service probe until the event route's own files and
+            # frame reader are ready; it cannot be selected or rendered yet.
+            if missing:
+                return missing
+            if self._events_describer_available_model() is None:
+                missing.append("Qwen2.5-VL-7B vision model in the local chat engine")
         return missing
 
     def commercial_engine_ready(self, model_id: str) -> bool:
@@ -433,7 +463,10 @@ class AudioGenerationService:
         item = {
             "caption": options.prompt.strip(),
             "lyrics": "",
-            "duration": max(10.0, float(options.duration_seconds)),   # ACE-Step renders 10-600 s
+            "duration": max(
+                ACESTEP_MIN_DURATION_SECONDS,
+                float(options.duration_seconds),
+            ),  # ACE-Step renders 10-600 s
             "seed": int(options.seed),
             "steps": 8,                                                # the turbo model is tuned for 8 steps
             "output": str(dest),
@@ -555,12 +588,18 @@ class AudioGenerationService:
         ffmpeg = _resolve_ffmpeg()
         ffprobe = self._resolve_ffprobe(ffmpeg) if ffmpeg else None
         mux_ready = bool(ffmpeg and ffprobe)
+        research_mode = self.research_mode()
         mux_missing = []
         if not ffmpeg:
             mux_missing.append("ffmpeg")
         if ffmpeg and not ffprobe:
             mux_missing.append("ffprobe")
-        minimum_ready = music_ready and mmaudio_ready and lab_ready and mux_ready
+        # Commercial-safe minimum setup skips MusicGen/MMAudio. Here minimumReady
+        # covers shared Audio Lab and mux tooling; per-engine readiness remains
+        # in musicReady, sfxReady, and videoAudioReady.
+        minimum_ready = lab_ready and mux_ready and (
+            not research_mode or (music_ready and mmaudio_ready)
+        )
         if minimum_ready and deep:
             message = "Minimum Audio runtime checks passed. Models are not loaded until selected for generation."
         elif minimum_ready:
@@ -585,11 +624,11 @@ class AudioGenerationService:
             "message": message,
             "estimatedDownload": "Up to about 10 GB on a clean install; existing files are reused.",
             # the commercial-use policy, so every surface can show it the same way
-            "researchMode": self.research_mode(),
+            "researchMode": research_mode,
             "licenseNotice": (
                 "Research mode is on: non-commercial models (MusicGen, MMAudio; CC-BY-NC 4.0) are available and "
                 "labeled. Do not use their output commercially."
-                if self.research_mode() else
+                if research_mode else
                 "Commercial-safe mode: only audio models whose licences allow commercial use are offered. "
                 "Non-commercial models (MusicGen, MMAudio) are hidden; Audio settings can enable them for research."
             ),
@@ -896,7 +935,10 @@ class AudioGenerationService:
         if normalized_kind not in {"music", "sfx"}:
             raise AudioUnavailable("Audio kind must be 'music' or 'sfx'.")
         self._require_licensed(normalized_model)
-        choices = self.music_model_choices() if normalized_kind == "music" else self.sfx_model_choices()
+        if normalized_kind == "sfx" and normalized_model.startswith("events:"):
+            choices = self.video_audio_model_choices()
+        else:
+            choices = self.music_model_choices() if normalized_kind == "music" else self.sfx_model_choices()
         if normalized_model not in {model for _, model in choices}:
             raise AudioUnavailable(f"Choose a supported {normalized_kind} model.")
         if normalized_model == "facebook/audiogen-medium":
@@ -904,7 +946,7 @@ class AudioGenerationService:
         if not _AUDIO_MODEL_OPERATION_LOCK.acquire(blocking=False):
             raise AudioUnavailable("Audio setup or another audio render is already running. Try again when it finishes.")
         try:
-            if normalized_model.startswith(("acestep:", "moss-sfx:")):
+            if normalized_model.startswith(("acestep:", "moss-sfx:", "events:")):
                 missing = self.commercial_engine_missing(normalized_model)
                 if missing:
                     raise AudioUnavailable(f"{normalized_model} is not installed completely: {', '.join(missing[:3])}")
@@ -958,6 +1000,16 @@ class AudioGenerationService:
         if str(options.kind or "").lower() == "video_audio":
             raise AudioUnavailable("Video-conditioned audio needs a target video.")
         self._require_licensed(options.model_id)
+        generation_options = options
+        if str(options.model_id).startswith("acestep:"):
+            generation_options = options.model_copy(
+                update={
+                    "duration_seconds": max(
+                        ACESTEP_MIN_DURATION_SECONDS,
+                        float(options.duration_seconds),
+                    )
+                }
+            )
         mmaudio_text = options.kind == "sfx" and str(options.model_id or "").startswith("mmaudio:")
         suffix = ".flac" if mmaudio_text else ".wav"
         dest = Path(output_path) if output_path else self.output_path(stem=self._safe_stem(prompt), suffix=suffix)
@@ -970,7 +1022,7 @@ class AudioGenerationService:
                     self._set_seed(int(options.seed))
                 try:
                     if str(options.model_id).startswith("acestep:"):
-                        sample_rate = self._generate_acestep(options, staged_dest)
+                        sample_rate = self._generate_acestep(generation_options, staged_dest)
                     elif str(options.model_id).startswith("moss-sfx:"):
                         sample_rate = self._generate_moss_sfx(options, staged_dest)
                     elif mmaudio_text:
@@ -983,7 +1035,7 @@ class AudioGenerationService:
                     self._park_cached_model_on_cpu()
 
         infotext = (
-            f"Audio {options.kind}: {options.model_id}, {options.duration_seconds:.1f}s, "
+            f"Audio {options.kind}: {options.model_id}, {generation_options.duration_seconds:.1f}s, "
             f"licence: {audio_licenses.short_label(options.model_id)}"
         )
         return AudioGenerationResult(
@@ -991,9 +1043,9 @@ class AudioGenerationService:
             prompt=prompt,
             model_id=options.model_id,
             kind=options.kind,
-            duration_seconds=float(options.duration_seconds),
+            duration_seconds=float(generation_options.duration_seconds),
             sample_rate=sample_rate,
-            message=f"Saved {options.duration_seconds:.1f}s audio -> {dest}",
+            message=f"Saved {generation_options.duration_seconds:.1f}s audio -> {dest}",
             infotext=infotext,
             license=audio_licenses.license_for(options.model_id),
         )

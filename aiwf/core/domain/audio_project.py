@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -23,6 +23,7 @@ class AudioProjectTrack(BaseModel):
     duration_seconds: float = Field(default=0.0, ge=0.0, le=3600.0)
     sample_rate: int = Field(default=0, ge=0, le=384000)
     license_notice: str | None = None
+    license: dict[str, Any] | None = None
     consent_status: str | None = None
 
     @field_validator("asset_ref")

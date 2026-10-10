@@ -34,6 +34,7 @@ from aiwf.core.domain.generation import GenerationMode, GenerationRequest, Gener
 from aiwf.core.domain.ltx import LtxVideoResult
 from aiwf.core.domain.models import Checkpoint, SamplerInfo
 from aiwf.core.domain.sana_video import SanaVideoProgressEvent, SanaVideoRequest, SanaVideoResult
+from aiwf.services import audio_licenses
 from aiwf.services.model_download import ModelDownloadService
 from aiwf.services.pipeline_readiness import PipelineReadinessRecord
 from aiwf.web import pro_api
@@ -6403,6 +6404,7 @@ class _AudioStub:
             sample_rate=32000,
             message="Audio complete.",
             infotext="Audio music: test",
+            license=audio_licenses.license_for(options.model_id),
         )
 
     def musicgen_model_is_parked_on_cpu(self, model_id):
@@ -6430,6 +6432,31 @@ def test_audio_status_and_minimum_setup_routes_share_one_contract(tmp_path):
     assert installed.status_code == 200
     assert installed.json()["minimumReady"] is True
     assert after.json()["minimumReady"] is True
+
+
+def test_video_audio_status_attaches_install_route_to_events_moss_sfx(tmp_path):
+    ctx = _ctx(tmp_path)
+    audio = _AudioStub(ctx.flags.output_dir)
+    audio.video_audio_model_choices = lambda: [
+        ("Video soundtrack: describe scene + MOSS-SoundEffect", "events:moss-sfx"),
+        ("MMAudio small 16k", "mmaudio:small_16k"),
+        ("Unmapped fixture", "custom:fixture"),
+    ]
+    ctx.audio = audio
+
+    response = _client(ctx).get("/api/pro/audio/status")
+
+    assert response.status_code == 200
+    choices = {item["id"]: item for item in response.json()["models"]["videoAudio"]}
+    events = choices["events:moss-sfx"]
+    assert events["installed"] is False
+    assert events["installable"] is True
+    assert events["setupRoute"]["routeKey"] == "pro.audio.moss-sfx.v2"
+    assert events["setupRoute"]["setupAction"] == "POST /api/pro/audio/setup/engine/moss-sfx"
+
+    # Existing video-audio setup stays mapped, while unrelated choices stay unmapped.
+    assert choices["mmaudio:small_16k"]["setupRoute"]["routeKey"] == "pro.video.audio.mmaudio"
+    assert choices["custom:fixture"]["setupRoute"] is None
 
 
 def test_audio_setup_rejects_while_model_operation_lock_is_held(tmp_path):
@@ -6601,6 +6628,37 @@ def test_video_lab_reports_mmaudio_runtime_recovery_and_blocks_prepare(tmp_path)
     assert audio.prepared == []
 
 
+@pytest.mark.parametrize("mux_ready", [True, False])
+def test_video_lab_status_exposes_uninstalled_events_moss_setup_route(tmp_path, mux_ready):
+    ctx = _ctx(tmp_path)
+    audio = _AudioStub(ctx.flags.output_dir)
+    audio.mux_ready = mux_ready
+    audio.commercial_engine_ready = lambda _model_id: False
+    audio.video_audio_model_choices = lambda: [
+        ("Video soundtrack: describe scene + MOSS-SoundEffect", "events:moss-sfx"),
+    ]
+    audio.music_model_choices = lambda: [("ACE-Step 1.5 turbo", "acestep:1.5-turbo")]
+    ctx.audio = audio
+
+    response = _client(ctx).get("/api/pro/video-lab/status")
+
+    assert response.status_code == 200
+    choices = {item["id"]: item for item in response.json()["audio"]["modelChoices"]}
+    events = choices["events:moss-sfx"]
+    assert events["installed"] is False
+    assert events["installable"] is mux_ready
+    assert events["available"] is mux_ready
+    assert events["ready"] is False
+    control_route = choices["acestep:1.5-turbo"].get("setupRoute") or {}
+    assert control_route.get("routeKey") != "pro.audio.moss-sfx.v2"
+    assert events.get("setupRoute") == pro_api._setup_route_descriptor(
+        {"routeKey": "pro.audio.moss-sfx.v2"}
+    )
+    assert events["setupRoute"]["setupAction"] == "POST /api/pro/audio/setup/engine/moss-sfx"
+    assert audio.generated == []
+    assert audio.prepared == []
+
+
 def test_pro_audio_status_blocks_mmaudio_when_runtime_import_check_fails(tmp_path):
     ctx = _ctx(tmp_path)
     audio = _AudioStub(ctx.flags.output_dir)
@@ -6670,6 +6728,38 @@ def test_video_lab_audio_prepare_uses_video_audio_lifecycle_route(tmp_path):
     assert route["status"] == "prepared"
 
 
+def test_video_lab_event_soundtrack_prepare_uses_video_audio_choices(tmp_path):
+    ctx = _ctx(tmp_path)
+    audio = _AudioStub(ctx.flags.output_dir)
+    audio.installed = True
+    audio.video_audio_model_choices = lambda: [
+        ("Video soundtrack: MOSS-SoundEffect", "events:moss-sfx"),
+        *audio.sfx_model_choices(),
+    ]
+    audio.commercial_engine_ready = lambda model_id: model_id == "events:moss-sfx"
+    ctx.audio = audio
+    ctx.save_settings = lambda: None
+    client = _client(ctx)
+
+    prepared = client.post(
+        "/api/pro/video-lab/prepare-audio",
+        json={"kind": "music", "modelId": "events:moss-sfx"},
+    )
+    ordinary_audio = client.post(
+        "/api/pro/audio/prepare",
+        json={"kind": "sfx", "modelId": "events:moss-sfx"},
+    )
+
+    assert prepared.status_code == 200
+    assert audio.prepared == [("sfx", "events:moss-sfx")]
+    route = next(
+        item for item in client.get("/api/pro/audio/status").json()["routeLifecycle"]
+        if item["route"] == "audio.video.audio.events:moss-sfx"
+    )
+    assert route["status"] == "prepared"
+    assert ordinary_audio.status_code == 422
+
+
 def test_video_lab_musicgen_default_does_not_break_sana_audio_conditioning(tmp_path):
     ctx = _ctx(tmp_path)
     audio = _AudioStub(ctx.flags.output_dir)
@@ -6705,7 +6795,11 @@ def test_video_lab_audio_generation_honors_explicit_musicgen_choice_when_mmaudio
     def generate_and_mux(_src, options):
         captured.append(options)
         return (
-            SimpleNamespace(output_path=str(ctx.flags.output_dir / "audio.wav"), infotext=options.model_id),
+            SimpleNamespace(
+                output_path=str(ctx.flags.output_dir / "audio.wav"),
+                infotext=options.model_id,
+                license=audio_licenses.license_for(options.model_id),
+            ),
             SimpleNamespace(output_path=str(ctx.flags.output_dir / "muxed.mp4")),
         )
 
@@ -6713,7 +6807,10 @@ def test_video_lab_audio_generation_honors_explicit_musicgen_choice_when_mmaudio
     ctx.audio = audio
     src = tmp_path / "input.mp4"
     src.write_bytes(b"video")
-    monkeypatch.setattr(pro_api, "_video_lab_output", lambda *_args, **_kwargs: {"status": "complete"})
+    monkeypatch.setattr(
+        pro_api, "_video_lab_output",
+        lambda *_args, **_kwargs: {"status": "complete", **(_args[3] if len(_args) > 3 else {})},
+    )
 
     result = pro_api._video_lab_run_audio(
         ctx,
@@ -6727,6 +6824,17 @@ def test_video_lab_audio_generation_honors_explicit_musicgen_choice_when_mmaudio
     assert len(captured) == 1
     assert captured[0].model_id == "facebook/musicgen-medium"
     assert captured[0].kind == "music"
+    assert result["license"] == audio_licenses.license_for("facebook/musicgen-medium")
+
+
+def test_video_lab_generic_output_does_not_invent_audio_license(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    monkeypatch.setattr(pro_api, "_video_lab_probe", lambda _path: {})
+
+    result = pro_api._video_lab_output(ctx, tmp_path / "upscaled.mp4", "Upscale complete.")
+
+    assert result["status"] == "completed"
+    assert "license" not in result
 
 
 def test_video_audio_generation_uses_the_status_lifecycle_route_and_support_revision(tmp_path, monkeypatch):

@@ -195,12 +195,12 @@ class ChatDescriber:
             lines = []
         return {"Authorization": f"Bearer {lines[0]}"} if lines else {}
 
-    def available_model(self) -> str | None:
+    def available_model(self, *, timeout: float = 15.0) -> str | None:
         """First commercially licensed vision model the chat engine offers."""
         import httpx
 
         try:
-            response = httpx.get(f"{self.base_url}/v1/models", headers=self._headers(), timeout=15)
+            response = httpx.get(f"{self.base_url}/v1/models", headers=self._headers(), timeout=timeout)
             response.raise_for_status()
         except httpx.HTTPError:
             return None

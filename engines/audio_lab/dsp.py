@@ -131,7 +131,7 @@ def _follow(levels: np.ndarray, block_seconds: float, attack_ms: float, release_
     attack = math.exp(-block_seconds / max(attack_ms / 1000.0, block_seconds))
     release = math.exp(-block_seconds / max(release_ms / 1000.0, block_seconds))
     envelope = np.empty_like(levels)
-    current = float(levels[0]) if levels.size else 0.0
+    current = 0.0
     # this loop runs once per millisecond of audio, not once per sample
     for index, level in enumerate(levels.tolist()):
         coefficient = attack if level > current else release

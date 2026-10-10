@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from aiwf.core.domain.audio import AudioGenerationOptions
+from aiwf.services import audio_licenses
 from aiwf.services.audio_project import AudioProjectService
 from test_pro_api import _AudioStub, _client, _ctx
 
@@ -46,6 +47,8 @@ def _generate_fixture(client):
 def test_generated_fixture_connects_real_route_to_project_service_and_recovery(tmp_path: Path):
     ctx, audio, client = _audio_context(tmp_path)
     generated = _generate_fixture(client)
+    expected_license = audio_licenses.license_for(generated["modelId"])
+    assert generated["license"] == expected_license
     source = Path(generated["outputPath"])
     source_bytes = source.read_bytes()
     service = AudioProjectService.from_audio_service(audio)
@@ -67,6 +70,8 @@ def test_generated_fixture_connects_real_route_to_project_service_and_recovery(t
         audio_path=source,
         sample_rate=generated["sampleRate"],
     )
+    assert manifest.track.license == expected_license
+    assert manifest.track.license_notice == audio_licenses.notice_for(generated["modelId"])
     asset = service.project_root / manifest.project_id / manifest.track.asset_ref
     assert asset.is_file()
     assert asset.read_bytes() == source_bytes
@@ -106,6 +111,8 @@ def test_audio_project_http_routes_save_load_recover_and_enforce_source_boundary
     assert required_routes.issubset(actual_routes), f"Missing audio project routes: {required_routes - actual_routes}"
 
     generated = _generate_fixture(client)
+    expected_license = audio_licenses.license_for(generated["modelId"])
+    assert generated["license"] == expected_license
     source = Path(generated["outputPath"])
     source_bytes = source.read_bytes()
     options = AudioGenerationOptions(
@@ -125,7 +132,8 @@ def test_audio_project_http_routes_save_load_recover_and_enforce_source_boundary
         "audio_path": generated["outputPath"],
         "options": options.model_dump(mode="json"),
         "sample_rate": generated["sampleRate"],
-        "license_notice": None,
+        "license_notice": audio_licenses.notice_for(generated["modelId"]),
+        "license": generated["license"],
         "consent_status": None,
     }
     saved_response = client.post("/api/pro/audio/projects", json=request)
@@ -133,6 +141,8 @@ def test_audio_project_http_routes_save_load_recover_and_enforce_source_boundary
     saved = saved_response.json()
     assert saved["project_id"]
     assert saved["track"]["sample_rate"] == generated["sampleRate"]
+    assert saved["track"]["license"] == expected_license
+    assert saved["track"]["license_notice"] == audio_licenses.notice_for(generated["modelId"])
     assert saved["audio_url"].startswith("/api/pro/outputs/")
     assert client.get(saved["audio_url"]).content == source_bytes
     assert source.read_bytes() == source_bytes
@@ -151,6 +161,8 @@ def test_audio_project_http_routes_save_load_recover_and_enforce_source_boundary
     loaded_response = client.get(f"/api/pro/audio/projects/{saved['project_id']}")
     assert loaded_response.status_code == 200, loaded_response.text
     assert loaded_response.json()["project_id"] == saved["project_id"]
+    assert loaded_response.json()["track"]["license"] == expected_license
+    assert loaded_response.json()["track"]["license_notice"] == saved["track"]["license_notice"]
     assert primary.is_file() and not pending.exists()
     assert client.get(loaded_response.json()["audio_url"]).content == source_bytes
 
@@ -173,3 +185,60 @@ def test_audio_project_http_routes_save_load_recover_and_enforce_source_boundary
         if row["project_id"] == saved["project_id"]
     )
     assert missing_row["audio_missing"] is True
+
+
+@pytest.mark.parametrize("mismatch", ["model", "notice"])
+def test_audio_project_http_rejects_inconsistent_license_attribution(tmp_path: Path, mismatch: str):
+    ctx, _audio, client = _audio_context(tmp_path)
+    generated = _generate_fixture(client)
+    # Simulate changing the model selector to ACE-Step after the MusicGen render.
+    options = AudioGenerationOptions(
+        prompt=generated["prompt"],
+        kind=generated["kind"],
+        model_id="acestep:1.5-turbo" if mismatch == "model" else generated["modelId"],
+        duration_seconds=generated["durationSeconds"],
+    )
+    license_notice = (
+        audio_licenses.notice_for(generated["modelId"])
+        if mismatch == "model"
+        else audio_licenses.notice_for("acestep:1.5-turbo")
+    )
+
+    response = client.post(
+        "/api/pro/audio/projects",
+        json={
+            "name": "Mismatched license fixture",
+            "audio_path": generated["outputPath"],
+            "options": options.model_dump(mode="json"),
+            "sample_rate": generated["sampleRate"],
+            "license_notice": license_notice,
+            "license": generated["license"],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "license" in response.json()["detail"].lower()
+    assert client.get("/api/pro/audio/projects").json()["projects"] == []
+
+
+def test_audio_project_http_keeps_unknown_artifact_unattributed(tmp_path: Path):
+    ctx, _audio, client = _audio_context(tmp_path)
+    source = ctx.flags.output_dir / "audio" / "unknown-fixture.wav"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"unknown audio fixture")
+    options = AudioGenerationOptions(prompt="unknown fixture", model_id="custom:unknown")
+
+    response = client.post(
+        "/api/pro/audio/projects",
+        json={
+            "name": "Unknown artifact fixture",
+            "audio_path": str(source),
+            "options": options.model_dump(mode="json"),
+            "sample_rate": 32000,
+            "license_notice": None,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["track"].get("license") is None
+    assert response.json()["track"].get("license_notice") is None

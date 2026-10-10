@@ -9,13 +9,14 @@ the audio service (pickers, generate, prepare, install), and the Pro API routes.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from aiwf.core.config.settings import RuntimeFlags, UserSettings
 from aiwf.core.domain.audio import AudioGenerationOptions
 from aiwf.services import audio_licenses
-from aiwf.services.audio import AudioGenerationService, AudioLicenseBlocked
+from aiwf.services.audio import AudioGenerationService, AudioLicenseBlocked, AudioUnavailable
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +73,23 @@ def test_commercial_mode_offers_no_noncommercial_models(tmp_path: Path) -> None:
     assert [m for _, m in service.video_audio_model_choices()] == ["events:moss-sfx"]
 
 
+def test_prepare_accepts_event_soundtrack_as_video_audio_sfx(tmp_path: Path, monkeypatch) -> None:
+    from contextlib import nullcontext
+
+    service = _service(tmp_path, research=False)
+    monkeypatch.setattr(service, "commercial_engine_missing", lambda _model_id: [])
+    monkeypatch.setattr(service, "_gpu_tenant", lambda _reason: nullcontext())
+    monkeypatch.setattr(service, "_release_image_models", lambda: None)
+    monkeypatch.setattr(service, "unload", lambda: None)
+
+    result = service.prepare(kind="sfx", model_id="events:moss-sfx")
+
+    assert result["ready"] is True
+    assert result["modelId"] == "events:moss-sfx"
+    with pytest.raises(AudioUnavailable, match="Choose a supported music model"):
+        service.prepare(kind="music", model_id="events:moss-sfx")
+
+
 def test_research_mode_offers_them_labeled(tmp_path: Path) -> None:
     service = _service(tmp_path, research=True)
     labels = [label for label, model in service.music_model_choices() if model.startswith("facebook/")]
@@ -112,6 +130,116 @@ def test_status_reports_the_policy(tmp_path: Path) -> None:
     assert status["licenses"]["facebook/musicgen-small"]["commercial"] == audio_licenses.NO
     research = _service(tmp_path, research=True).setup_status(deep=False)
     assert research["researchMode"] is True and research["defaults"]["videoAudio"] == "events:moss-sfx"
+
+
+def test_event_soundtrack_readiness_requires_commercial_vision_model(tmp_path: Path, monkeypatch) -> None:
+    import aiwf.services.audio as audio_module
+
+    from aiwf.services.audio import EVENTS_MODEL_ID
+    from aiwf.services.video_soundtrack import ChatDescriber
+
+    service = _service(tmp_path, research=False)
+    engine_python = tmp_path / "moss-python.exe"
+    engine_python.write_bytes(b"python")
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "config.json").write_text("{}", encoding="utf-8")
+    spec = {
+        "engine": "moss-sfx",
+        "label": "MOSS-SoundEffect v2.0",
+        "python": engine_python,
+        "weights": weights,
+        "files": ("config.json",),
+    }
+    monkeypatch.setattr(service, "_engine_spec", lambda model_id: spec if model_id == EVENTS_MODEL_ID else None)
+    monkeypatch.setattr("aiwf.services.audio._resolve_ffmpeg", lambda: "ffmpeg")
+    now = [100.0]
+    monkeypatch.setattr(audio_module, "monotonic", lambda: now[0])
+    calls = []
+
+    def timed_out_probe(self, *, timeout):
+        calls.append(timeout)
+        raise TimeoutError("fixture chat model-list timeout")
+
+    monkeypatch.setattr(ChatDescriber, "available_model", timed_out_probe)
+
+    missing_vision = service.commercial_engine_missing(EVENTS_MODEL_ID)
+    assert missing_vision == ["Qwen2.5-VL-7B vision model in the local chat engine"]
+    assert service.commercial_engine_ready(EVENTS_MODEL_ID) is False
+    assert service.available_video_audio_model_choices() == []
+    assert service.commercial_engine_missing(EVENTS_MODEL_ID) == missing_vision
+    assert calls == [audio_module._EVENTS_DESCRIBER_READINESS_TIMEOUT_SECONDS]
+
+    # A cached negative probe expires promptly, then a commercial model makes the route ready.
+    now[0] += audio_module._EVENTS_DESCRIBER_READINESS_CACHE_SECONDS + 0.01
+
+    def available_probe(self, *, timeout):
+        calls.append(timeout)
+        return "Qwen2.5-VL-7B-Instruct"
+
+    monkeypatch.setattr(ChatDescriber, "available_model", available_probe)
+    assert service.commercial_engine_missing(EVENTS_MODEL_ID) == []
+    assert service.commercial_engine_ready(EVENTS_MODEL_ID) is True
+    assert service.available_video_audio_model_choices() == service.video_audio_model_choices()
+    assert calls == [
+        audio_module._EVENTS_DESCRIBER_READINESS_TIMEOUT_SECONDS,
+        audio_module._EVENTS_DESCRIBER_READINESS_TIMEOUT_SECONDS,
+    ]
+
+
+def test_event_readiness_skips_chat_probe_until_local_prerequisites_are_ready(tmp_path: Path, monkeypatch) -> None:
+    from aiwf.services.audio import EVENTS_MODEL_ID
+    from aiwf.services.video_soundtrack import ChatDescriber
+
+    service = _service(tmp_path, research=False)
+    spec = {
+        "engine": "moss-sfx",
+        "label": "MOSS-SoundEffect v2.0",
+        "python": tmp_path / "missing-python.exe",
+        "weights": tmp_path / "weights",
+        "files": ("config.json",),
+    }
+    monkeypatch.setattr(service, "_engine_spec", lambda model_id: spec if model_id == EVENTS_MODEL_ID else None)
+    monkeypatch.setattr("aiwf.services.audio._resolve_ffmpeg", lambda: None)
+    monkeypatch.setattr(
+        ChatDescriber,
+        "available_model",
+        lambda self, **kwargs: pytest.fail("must not probe chat while local prerequisites are missing"),
+    )
+
+    missing = service.commercial_engine_missing(EVENTS_MODEL_ID)
+
+    assert any("MOSS-SoundEffect v2.0 environment" in item for item in missing)
+    assert "ffmpeg (needed to read video frames)" in missing
+    assert str(spec["weights"] / "config.json") in missing
+    assert all("Qwen2.5-VL-7B" not in item for item in missing)
+
+
+def test_minimum_readiness_respects_commercial_policy(tmp_path: Path, monkeypatch) -> None:
+    import aiwf.services.audio as audio_module
+    from aiwf.services.audio_lab import AudioLabService
+
+    monkeypatch.setattr(
+        AudioLabService,
+        "status",
+        lambda _self, *, deep: SimpleNamespace(installed=True, python_path="audio-lab-python", message="ready"),
+    )
+    monkeypatch.setattr(audio_module, "_resolve_ffmpeg", lambda: "ffmpeg")
+
+    commercial = _service(tmp_path / "commercial", research=False)
+    research = _service(tmp_path / "research", research=True)
+    monkeypatch.setattr(commercial, "_resolve_ffprobe", lambda _ffmpeg: "ffprobe")
+    monkeypatch.setattr(research, "_resolve_ffprobe", lambda _ffmpeg: "ffprobe")
+
+    commercial_status = commercial.setup_status(deep=False)
+    research_status = research.setup_status(deep=False)
+
+    assert commercial_status["labReady"] is True and commercial_status["muxReady"] is True
+    assert commercial_status["musicReady"] is False and commercial_status["sfxReady"] is False
+    assert commercial_status["videoAudioReady"] is False
+    assert commercial_status["minimumReady"] is True
+    assert research_status["labReady"] is True and research_status["muxReady"] is True
+    assert research_status["minimumReady"] is False
 
 
 def test_minimum_setup_skips_noncommercial_downloads_in_commercial_mode(tmp_path: Path, monkeypatch) -> None:

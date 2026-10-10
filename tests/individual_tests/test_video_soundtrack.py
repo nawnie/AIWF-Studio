@@ -73,6 +73,22 @@ def test_chat_describer_refuses_non_loopback_addresses() -> None:
         vs.ChatDescriber("http://192.168.1.10:8080")
 
 
+def test_chat_describer_model_probe_uses_bounded_timeout_and_handles_timeout(monkeypatch) -> None:
+    import httpx
+
+    seen = {}
+
+    def fake_get(url, *, headers, timeout):
+        seen.update(url=url, headers=headers, timeout=timeout)
+        raise httpx.ConnectTimeout("fixture timeout", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    assert vs.ChatDescriber().available_model(timeout=0.75) is None
+    assert seen["url"] == "http://127.0.0.1:8080/v1/models"
+    assert seen["timeout"] == 0.75
+
+
 # ---- the mix --------------------------------------------------------------------------------------------------
 def _clip(seconds: float, level: float = 0.2) -> np.ndarray:
     time = np.arange(int(seconds * RATE)) / RATE

@@ -1257,6 +1257,63 @@ def test_audio_releases_image_backend_before_audio_work(tmp_path: Path, monkeypa
     assert events == ["unload-image", "audio"]
 
 
+@pytest.mark.parametrize(("requested_duration", "expected_duration"), [(8, 10.0), (12, 12.0)])
+def test_acestep_normalizes_short_duration_before_render_and_result(
+    tmp_path: Path, monkeypatch, requested_duration: float, expected_duration: float
+):
+    service = AudioGenerationService(RuntimeFlags(data_dir=tmp_path), UserSettings())
+    destination = tmp_path / "music.wav"
+    captured = {}
+
+    def fake_worker(_model_id, job, *, label):
+        captured["duration"] = job["items"][0]["duration"]
+        Path(job["items"][0]["output"]).write_bytes(b"fake audio")
+        return {"results": [{"sample_rate": 44100}]}
+
+    monkeypatch.setattr(service, "_free_vram_gb", lambda: 8.0)
+    monkeypatch.setattr(service, "_run_engine_worker", fake_worker)
+    monkeypatch.setattr(service, "_release_image_models", lambda: None)
+    monkeypatch.setattr(service, "_park_cached_model_on_cpu", lambda: None)
+
+    options = AudioGenerationOptions(
+        prompt="soft piano",
+        model_id="acestep:1.5-turbo",
+        duration_seconds=requested_duration,
+    )
+    result = service.generate(options, output_path=destination)
+
+    assert captured["duration"] == expected_duration
+    assert result.duration_seconds == expected_duration
+    assert f"{expected_duration:.1f}s" in result.message
+    assert f"{expected_duration:.1f}s" in result.infotext
+    assert options.duration_seconds == requested_duration
+
+
+def test_non_acestep_music_keeps_requested_short_duration(tmp_path: Path, monkeypatch):
+    service = AudioGenerationService(RuntimeFlags(data_dir=tmp_path), UserSettings())
+
+    def fake_musicgen(_options, destination):
+        destination.write_bytes(b"fake audio")
+        return 32000
+
+    monkeypatch.setattr(service, "_generate_transformers_musicgen", fake_musicgen)
+    monkeypatch.setattr(service, "_release_image_models", lambda: None)
+    monkeypatch.setattr(service, "_park_cached_model_on_cpu", lambda: None)
+
+    result = service.generate(
+        AudioGenerationOptions(
+            prompt="soft piano",
+            model_id="facebook/musicgen-small",
+            duration_seconds=8,
+        ),
+        output_path=tmp_path / "music.wav",
+    )
+
+    assert result.duration_seconds == 8.0
+    assert "8.0s" in result.message
+    assert "8.0s" in result.infotext
+
+
 def test_mmaudio_text_to_sound_uses_isolated_engine(tmp_path: Path):
     service = AudioGenerationService(RuntimeFlags(data_dir=tmp_path), UserSettings())
     service._mmaudio_runtime_import_error = lambda: ""

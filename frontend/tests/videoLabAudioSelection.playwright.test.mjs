@@ -56,6 +56,7 @@ createRoot(document.getElementById('root')).render(<VideoLabCard wanModels={[]} 
       videoAudioModels: ['mmaudio:small_16k'], defaultModelId: 'mmaudio:small_16k', ready: true, musicGenReady: musicRuntimeReady,
       modelChoices: [
         { label: 'MMAudio small 16k', id: 'mmaudio:small_16k', conditioningMode: 'video-conditioned', available: true, installed: true, installable: true, ready: true },
+        { label: 'Video soundtrack: MOSS-SoundEffect', id: 'events:moss-sfx', conditioningMode: 'video-conditioned', available: true, installed: true, installable: true, ready: true },
         { label: 'MusicGen medium', id: 'facebook/musicgen-medium', conditioningMode: 'prompt-only', available: true, installed: musicGenInstalled, installable: true, ready: musicGenInstalled, setupRoute: { routeKey: 'pro.audio.musicgen.medium', modality: 'audio', supportState: 'supported', preflightKey: 'musicgen', setupAction: 'POST /api/pro/audio/setup/musicgen/medium' } },
         { label: 'MMAudio large 44k v2', id: 'mmaudio:large_44k_v2', conditioningMode: 'video-conditioned', available: true, installed: mmaudioLargeInstalled, installable: true, ready: mmaudioLargeInstalled, setupRoute: { routeKey: 'pro.video.audio.mmaudio', modality: 'video', supportState: 'supported', preflightKey: 'mmaudio', setupAction: 'POST /api/pro/audio/setup/mmaudio/{variant}' } },
       ],
@@ -134,6 +135,10 @@ createRoot(document.getElementById('root')).render(<VideoLabCard wanModels={[]} 
   const finalMusicGenPrepare = requests.filter((request) => request.path === '/api/pro/video-lab/prepare-audio' && request.body.modelId === 'facebook/musicgen-medium').at(-1)
   const finalMusicGenRun = requests.filter((request) => request.path === '/api/pro/video-lab/run').at(-1)
   assert.ok(finalMusicGenPrepare && finalMusicGenRun && requests.indexOf(finalMusicGenPrepare) < requests.indexOf(finalMusicGenRun))
+  await soundtrackModel.selectOption('events:moss-sfx')
+  await page.getByText('Video soundtrack: MOSS-SoundEffect setup is ready. Its weights load on demand for each render.').waitFor({ state: 'visible' })
+  const eventSoundtrackPrepare = requests.findLast((request) => request.path === '/api/pro/video-lab/prepare-audio' && request.body.modelId === 'events:moss-sfx')
+  assert.equal(eventSoundtrackPrepare?.body.kind, 'sfx')
   await page.getByRole('button', { name: 'Find and organize local model files' }).click()
   assert.equal(await page.locator('body').getAttribute('data-model-sorter'), 'opened')
   assert.deepEqual(requests.filter((request) => request.error), [])

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from aiwf.core.domain.audio import AudioGenerationOptions
+from aiwf.services import audio_licenses
 from aiwf.services.audio_project import (
     AudioProjectAssetMissing,
     AudioProjectCorrupt,
@@ -35,7 +36,7 @@ def test_round_trip_preserves_options_asset_and_existing_labels(project_paths):
         name="Idea 1",
         options=options,
         audio_path=source,
-        license_notice="CC-BY-NC 4.0",
+        license_notice=audio_licenses.notice_for(options.model_id),
         consent_status="user-confirmed",
         sample_rate=44100,
     )
@@ -45,22 +46,86 @@ def test_round_trip_preserves_options_asset_and_existing_labels(project_paths):
     assert loaded == saved
     assert loaded.options.prompt == "soft piano"
     assert loaded.options.seed == 44
-    assert loaded.track.license_notice == "CC-BY-NC 4.0"
+    assert loaded.track.license_notice == audio_licenses.notice_for(options.model_id)
     assert loaded.track.consent_status == "user-confirmed"
     assert loaded.track.sample_rate == 44100
     assert saved_asset.read_bytes() == b"fixture audio bytes"
     assert source.read_bytes() == b"fixture audio bytes"
 
 
-def test_save_without_labels_does_not_fabricate_them(project_paths):
+def test_save_without_explicit_license_notice_persists_authoritative_license(project_paths):
     service, source_root, projects = project_paths
     source = source_root / "render.flac"
     source.write_bytes(b"audio")
     saved = service.save_project(name="No labels", options=AudioGenerationOptions(), audio_path=source)
     manifest_text = (projects / saved.project_id / "project.json").read_text(encoding="utf-8")
 
-    assert "license_notice" not in manifest_text
+    expected_license = audio_licenses.license_for("facebook/musicgen-small")
+    assert saved.track.license == expected_license
+    assert saved.track.license_notice == audio_licenses.notice_for("facebook/musicgen-small")
+    assert json.loads(manifest_text)["track"]["license"] == expected_license
     assert "consent_status" not in manifest_text
+
+
+@pytest.mark.parametrize("model_id", ["facebook/musicgen-small", "custom:unknown"])
+def test_service_rejects_mismatched_notice_when_deriving_license(project_paths, model_id):
+    service, source_root, projects = project_paths
+    source = source_root / "render.wav"
+    source.write_bytes(b"audio")
+
+    with pytest.raises(ValueError, match="license notice does not match"):
+        service.save_project(
+            name="Mismatched notice",
+            options=AudioGenerationOptions(model_id=model_id),
+            audio_path=source,
+            license_notice=audio_licenses.notice_for("acestep:default"),
+        )
+    assert service.list_projects() == []
+    assert not list(projects.rglob("project.json"))
+
+
+@pytest.mark.parametrize("model_id", ["facebook/musicgen-small", "custom:unknown"])
+def test_service_accepts_matching_notice_when_deriving_license(project_paths, model_id):
+    service, source_root, _ = project_paths
+    source = source_root / "render.wav"
+    source.write_bytes(b"audio")
+    saved = service.save_project(
+        name="Matching notice",
+        options=AudioGenerationOptions(model_id=model_id),
+        audio_path=source,
+        license_notice=audio_licenses.notice_for(model_id),
+    )
+    loaded = service.load_project(saved.project_id)
+    assert loaded.track.license == audio_licenses.license_for(model_id)
+    assert loaded.track.license_notice == audio_licenses.notice_for(model_id)
+
+
+def test_load_legacy_project_without_structured_license_record(project_paths):
+    service, source_root, projects = project_paths
+    source = source_root / "legacy.wav"
+    source.write_bytes(b"audio")
+    saved = service.save_project(name="Legacy", options=AudioGenerationOptions(), audio_path=source)
+    manifest_path = projects / saved.project_id / "project.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["track"].pop("license")
+    manifest["track"].pop("license_notice")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = service.load_project(saved.project_id)
+
+    assert loaded.track.license is None
+    assert loaded.track.license_notice is None
+    asset = projects / saved.project_id / loaded.track.asset_ref
+    resaved = service.save_project(
+        name="Legacy",
+        project_id=saved.project_id,
+        options=loaded.options,
+        audio_path=asset,
+        license=None,
+        license_notice=None,
+    )
+    assert resaved.track.license is None
+    assert resaved.track.license_notice is None
 
 
 def test_repeated_load_is_read_only_and_repeated_save_reuses_project_asset(project_paths):

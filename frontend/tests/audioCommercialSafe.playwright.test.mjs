@@ -38,7 +38,12 @@ function audioStatus(researchMode) {
           ? [{ label: 'MusicGen small (minimum) · non-commercial (CC-BY-NC-4.0)', id: 'facebook/musicgen-small', available: true, installed: true, installable: true, license: nonCommercial }]
           : []),
       ],
-      sfx: [],
+      sfx: [
+        { label: 'Licensed SFX', id: 'licensed:sfx', available: true, installed: true, installable: true, license: commercial },
+        ...(researchMode
+          ? [{ label: 'MMAudio small 16k', id: 'mmaudio:small_16k', available: true, installed: true, installable: true, license: nonCommercial }]
+          : []),
+      ],
       videoAudio: [],
     },
     components: [],
@@ -109,18 +114,38 @@ createRoot(document.getElementById('root')).render(<AudioStudioLayout
   await page.getByText(/Licence: MIT — commercial use OK/).waitFor({ state: 'visible' })
   assert.equal(await page.getByRole('option', { name: /MusicGen/ }).count(), 0)
 
+  // A commercial-safe saved choice remains valid when research mode is enabled.
+  await musicModel.selectOption('acestep:1.5-turbo')
+  assert.equal(await page.evaluate(() => localStorage.getItem('aiwf.audio-studio.music-model')), 'acestep:1.5-turbo')
+
   // opting in: the switch calls the server (it changes only once the server confirms), and
   // MusicGen appears with its licence line
   await researchSwitch.click()
+  assert.equal(await page.evaluate(() => localStorage.getItem('aiwf.audio-studio.music-model')), 'acestep:1.5-turbo')
   await musicModel.selectOption('facebook/musicgen-small')
   await page.getByText(/Licence: CC-BY-NC-4.0 — non-commercial only/).waitFor({ state: 'visible' })
   assert.deepEqual(switches, [{ enabled: true }])
   assert.equal(await researchSwitch.isChecked(), true)
   assert.match(await musicModel.textContent(), /MusicGen small \(minimum\) · non-commercial \(CC-BY-NC-4\.0\)/)
 
-  // opting out again hides it
+  // Select MMAudio in the separately persisted sound-effects kind.
+  await page.getByLabel('Type').selectOption('sfx')
+  const sfxModel = page.getByLabel('Sound effects model')
+  await sfxModel.selectOption('mmaudio:small_16k')
+  assert.equal(await page.evaluate(() => localStorage.getItem('aiwf.audio-studio.sfx-model')), 'mmaudio:small_16k')
+
+  // Opting out removes both research-only IDs and falls back to choices still offered by the server.
   await researchSwitch.click()
   await page.waitForFunction(() => !document.body.innerText.includes('Licence: CC-BY-NC-4.0'))
   assert.deepEqual(switches, [{ enabled: true }, { enabled: false }])
+  assert.equal(await page.evaluate(() => localStorage.getItem('aiwf.audio-studio.music-model')), null)
+  assert.equal(await page.evaluate(() => localStorage.getItem('aiwf.audio-studio.sfx-model')), null)
+  await page.getByLabel('Type').selectOption('music')
+  assert.equal(await page.getByLabel('Music model').inputValue(), 'acestep:1.5-turbo')
+  await page.getByLabel('Type').selectOption('sfx')
+  assert.equal(await page.getByLabel('Sound effects model').inputValue(), 'licensed:sfx')
+  await page.reload()
+  assert.equal(await page.evaluate(() => localStorage.getItem('aiwf.audio-studio.music-model')), null)
+  assert.equal(await page.evaluate(() => localStorage.getItem('aiwf.audio-studio.sfx-model')), null)
   assert.deepEqual(pageErrors, [])
 })

@@ -111,6 +111,21 @@ def short_label(model_id: str) -> str:
     return f"{record['license']}, {verdict}"
 
 
+def notice_for(model_id: str) -> str:
+    """A readable project notice retaining the fields needed to audit a saved output."""
+    record = license_for(model_id)
+    parts = [
+        str(record["license"]),
+        f"commercial use: {record['commercial']}",
+        f"checked: {record['checked']}",
+    ]
+    if record.get("conditions"):
+        parts.append(f"conditions: {record['conditions']}")
+    if record.get("source"):
+        parts.append(f"source: {record['source']}")
+    return "; ".join(parts)
+
+
 def blocked_message(model_id: str) -> str:
     """The sentence shown when a non-commercial model is requested outside research mode."""
     record = license_for(model_id)

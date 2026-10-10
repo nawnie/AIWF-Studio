@@ -36,6 +36,7 @@ import {
   type ProAudioStatus,
 } from '../../api'
 import type { LayoutProps } from './LayoutTypes'
+import { audioProjectAttribution } from './audioProjectAttribution'
 import { formatRouteLifecycleStatus } from './modelLabels'
 import { API_BASE } from '../../apiBase'
 import { AudioProjectControls, type AudioProjectSaveRequest } from './AudioProjectControls'
@@ -50,6 +51,10 @@ function storedAudioModel(kind: AudioKind): string {
 
 function saveAudioModel(kind: AudioKind, modelId: string): void {
   try { window.localStorage.setItem(`aiwf.audio-studio.${kind}-model`, modelId) } catch { /* Storage may be disabled. */ }
+}
+
+function clearStoredAudioModel(kind: AudioKind): void {
+  try { window.localStorage.removeItem(`aiwf.audio-studio.${kind}-model`) } catch { /* Storage may be disabled. */ }
 }
 
 const AUDIO_PRESETS: Array<{ label: string; kind: AudioKind | null; note: string; title: string }> = [
@@ -208,8 +213,18 @@ export function AudioStudioLayout({
     setResearchBusy(true)
     setAudioError('')
     try {
-      setSetupStatus(await setProAudioResearchMode(enabled))
-      if (!enabled) setAudioModelOverride('')   // a non-commercial choice is no longer offered
+      const nextStatus = await setProAudioResearchMode(enabled)
+      setSetupStatus(nextStatus)
+      if (!enabled) {
+        for (const kind of ['music', 'sfx'] as const) {
+          const savedModel = storedAudioModel(kind)
+          const availableModels = nextStatus.models[kind] ?? []
+          if (savedModel && !availableModels.some((choice) => choice.id === savedModel)) {
+            clearStoredAudioModel(kind)
+          }
+        }
+        setAudioModelOverride('')
+      }
     } catch (error: unknown) {
       setAudioError(`Could not change research mode: ${formatApiError(error)}`)
     } finally {
@@ -377,16 +392,20 @@ export function AudioStudioLayout({
   const saveAudioProject = useCallback(async ({ name, projectId }: AudioProjectSaveRequest) => {
     setProjectBusy(true)
     try {
+      const attribution = audioProjectAttribution(audioResult, effectiveAudioModel)
+      const artifactKind = audioResult?.kind === 'music' || audioResult?.kind === 'sfx'
+        ? audioResult.kind
+        : audioKind
       const saved = await saveProAudioProject({
         name,
         project_id: projectId ?? currentProjectId,
         audio_path: audioResult?.outputPath || null,
         options: {
-          prompt: settings.prompt,
-          kind: audioKind,
-          model_id: effectiveAudioModel,
+          prompt: audioResult?.prompt ?? settings.prompt,
+          kind: artifactKind,
+          model_id: attribution.modelId,
           negative_prompt: audioOptionState.negative_prompt,
-          duration_seconds: audioDuration,
+          duration_seconds: audioResult?.durationSeconds ?? audioDuration,
           temperature: audioOptionState.temperature,
           cfg_coef: settings.cfgScale,
           top_k: audioOptionState.top_k,
@@ -394,6 +413,8 @@ export function AudioStudioLayout({
           seed: settings.seed,
         },
         sample_rate: audioResult?.sampleRate ?? 0,
+        license_notice: attribution.licenseNotice,
+        license: attribution.license,
       })
       setCurrentProjectId(saved.project_id)
       setSavedFingerprint(draftFingerprint)
@@ -420,7 +441,7 @@ export function AudioStudioLayout({
       setAudioResult(manifest.audio_url ? {
         status: 'loaded', message: `Loaded project “${manifest.name}”.`, outputPath: '', url: manifest.audio_url,
         prompt: options.prompt, kind, modelId: options.model_id, durationSeconds: manifest.track?.duration_seconds ?? options.duration_seconds,
-        sampleRate: manifest.track?.sample_rate ?? 0, infotext: '',
+        sampleRate: manifest.track?.sample_rate ?? 0, infotext: '', license: manifest.track?.license ?? undefined,
       } : null)
       setSavedFingerprint(JSON.stringify({ prompt: options.prompt, cfgScale: options.cfg_coef, steps: options.steps, seed: options.seed, audioKind: kind, audioDuration: options.duration_seconds, audioOptionState: { negative_prompt: options.negative_prompt, temperature: options.temperature, top_k: options.top_k }, modelId: options.model_id, audioUrl: manifest.audio_url || null, audioPath: null, sampleRate: manifest.audio_url ? manifest.track?.sample_rate ?? 0 : null, audioRevision }))
       setAudioProjects(await fetchProAudioProjects())

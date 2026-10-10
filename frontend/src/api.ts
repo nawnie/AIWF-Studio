@@ -975,6 +975,9 @@ export interface ProAudioModelChoice {
 }
 
 export interface ProAudioLicense {
+  model_id: string
+  checked: string
+  family: string
   license: string
   commercial: 'yes' | 'conditional' | 'no'
   conditions: string
@@ -1034,6 +1037,7 @@ export interface ProAudioGenerateResult {
   durationSeconds: number
   sampleRate: number
   infotext: string
+  license?: ProAudioLicense
 }
 
 export interface ProAudioProjectSummary {
@@ -1074,6 +1078,7 @@ export interface ProAudioProjectManifest {
     duration_seconds: number
     sample_rate: number
     license_notice: string | null
+    license?: ProAudioLicense | null
     consent_status: string | null
   } | null
   audio_url: string
@@ -1086,6 +1091,7 @@ export interface ProAudioProjectSaveRequest {
   options: ProAudioProjectOptions
   sample_rate: number
   license_notice?: string | null
+  license?: ProAudioLicense | null
   consent_status?: string | null
 }
 
@@ -1105,6 +1111,7 @@ function normalizeAudioProject(value: unknown): ProAudioProjectManifest {
       duration_seconds: readNumber(item, ['duration_seconds'], 0),
       sample_rate: readNumber(item, ['sample_rate'], 0),
       license_notice: readProjectNullableString(item, 'license_notice'),
+      license: normalizeAudioLicense(item.license) ?? null,
       consent_status: readProjectNullableString(item, 'consent_status'),
     }
   })()
@@ -1237,6 +1244,9 @@ function normalizeAudioLicense(value: unknown): ProAudioLicense | undefined {
   if (!license) return undefined
   const commercial = readString(record, ['commercial'], 'no')
   return {
+    model_id: readString(record, ['model_id', 'modelId'], ''),
+    checked: readString(record, ['checked'], ''),
+    family: readString(record, ['family'], ''),
     license,
     commercial: commercial === 'yes' || commercial === 'conditional' ? commercial : 'no',
     conditions: readString(record, ['conditions'], ''),
@@ -1354,7 +1364,7 @@ export async function prepareProAudioModel(
 }
 
 export async function prepareVideoLabAudioModel(modelId: string): Promise<ProAudioPrepareResult> {
-  const kind = modelId.startsWith('mmaudio:') ? 'sfx' : 'music'
+  const kind = modelId.startsWith('mmaudio:') || modelId.startsWith('events:') ? 'sfx' : 'music'
   const payload = await requestJson('/api/pro/video-lab/prepare-audio', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1393,6 +1403,7 @@ export async function generateProAudio(
     durationSeconds: readNumber(record, ['durationSeconds', 'duration_seconds'], 0),
     sampleRate: readNumber(record, ['sampleRate', 'sample_rate'], 0),
     infotext: readString(record, ['infotext'], ''),
+    ...(normalizeAudioLicense(record.license) ? { license: normalizeAudioLicense(record.license) } : {}),
   }
 }
 
@@ -1427,6 +1438,9 @@ export interface VideoLabResult {
   url: string
   message: string
   probe: VideoLabProbe
+  audioPath?: string
+  infotext?: string
+  license?: ProAudioLicense
 }
 
 export async function fetchVideoLabStatus(signal?: AbortSignal): Promise<VideoLabStatus> {
@@ -1683,6 +1697,9 @@ export async function runVideoLab(payload: Record<string, unknown>, signal?: Abo
     url: readString(record, ['url'], ''),
     message: readString(record, ['message'], ''),
     probe: normalizeVideoLabProbe(readUnknown(record, ['probe'])),
+    ...(typeof record.audioPath === 'string' ? { audioPath: record.audioPath } : {}),
+    ...(typeof record.infotext === 'string' ? { infotext: record.infotext } : {}),
+    ...(normalizeAudioLicense(record.license) ? { license: normalizeAudioLicense(record.license) } : {}),
   }
 }
 

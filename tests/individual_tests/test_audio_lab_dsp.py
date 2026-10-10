@@ -108,12 +108,32 @@ def test_compressor_holds_the_expected_level(dsp) -> None:
     assert _change_db(dsp.compressor(quiet, RATE, -20.0, 4.0, 5.0, 100.0), quiet) == pytest.approx(0.0, abs=0.1)
 
 
+def test_compressor_attack_preserves_region_start_transient(dsp) -> None:
+    loud = _tone(440.0, level_db=-6.0, seconds=0.5)
+    processed = dsp.compressor(loud, RATE, -20.0, 4.0, 100.0, 100.0)
+    first_block = int(RATE * 0.001)
+
+    # A long attack starts with unity gain; the same sustained tone is compressed later.
+    assert np.max(np.abs(processed[:, :first_block])) >= 0.95 * np.max(np.abs(loud[:, :first_block]))
+    assert np.max(np.abs(processed[:, 200 * first_block:])) < 0.5 * np.max(np.abs(loud[:, 200 * first_block:]))
+
+
 def test_noise_gate_closes_on_noise_and_opens_for_signal(dsp) -> None:
     rng = np.random.default_rng(3)
     hiss = (0.001 * rng.standard_normal((2, RATE))).astype(np.float32)          # about -60 dBFS
     voice = _tone(220.0, level_db=-10.0)
     assert _change_db(dsp.noise_gate(hiss, RATE, -40.0, 10.0, 1.0, 50.0), hiss) < -30.0
     assert _change_db(dsp.noise_gate(voice, RATE, -40.0, 10.0, 1.0, 50.0), voice) == pytest.approx(0.0, abs=0.2)
+
+
+def test_noise_gate_attack_fades_in_signal_at_region_start(dsp) -> None:
+    voice = _tone(220.0, level_db=-10.0, seconds=0.5)
+    processed = dsp.noise_gate(voice, RATE, -40.0, 10.0, 100.0, 100.0)
+    first_block = int(RATE * 0.001)
+
+    # Starting below threshold closes the gate; the configured attack governs its opening.
+    assert np.max(np.abs(processed[:, :first_block])) < 0.1 * np.max(np.abs(voice[:, :first_block]))
+    assert np.max(np.abs(processed[:, 200 * first_block:])) > 0.9 * np.max(np.abs(voice[:, 200 * first_block:]))
 
 
 def test_limiter_never_lets_peaks_through(dsp) -> None:
