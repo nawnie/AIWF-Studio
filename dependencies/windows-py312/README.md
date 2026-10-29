@@ -41,6 +41,6 @@ resolved lock has been checked, but the complete optional inference install and
 a real inference run still require validation on a clean machine.
 
 The optional lock still includes packages with reported security advisories,
-including Transformers, pypdf, and Jupyter components. The current Transformers
+including Transformers and Jupyter components. The current Transformers
 compatibility range excludes versions containing some fixes.
 Review and resolve these advisories before treating the backend as production-ready.

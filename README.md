@@ -81,7 +81,7 @@ been installed and tested. Its lock is for the native backend and does not
 include the legacy Gradio web interface.
 
 The optional inference lock still has reported advisories affecting packages
-including Transformers, pypdf, and Jupyter components. Some fixes require
+including Transformers and Jupyter components. Some fixes require
 versions outside the backend's current compatibility range. Treat this backend
 as experimental and resolve those advisories before production use.
 
