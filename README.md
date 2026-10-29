@@ -74,14 +74,22 @@ account, a second physical PC, real provider credentials, and complete optional
 Python inference remain unverified. The installer is unsigned.
 
 The v25 installer's optional Python dependency lock differs from the bundled
-API lock. The source lock in this repository has been aligned and checked
-offline, but the complete Python backend has not yet been installed and tested.
-Do not treat the v25 Python provisioning path as validated.
+API lock. The source locks in this repository have been aligned, and their
+Pillow, AnyIO, and certifi pins have been updated to address reported
+vulnerabilities. The complete optional Python inference backend has not yet
+been installed and tested. Its lock is for the native backend and does not
+include the legacy Gradio web interface.
 
-A subsequent installer was assembled with the aligned lock; its offline setup
-and API startup were checked in an isolated directory. Its complete interactive
-installer flow has not yet been tested. The Microsoft Windows App SDK's
-redistribution conditions also need review before a binary is published.
+The optional inference lock still has reported advisories affecting packages
+including Transformers, pypdf, and Jupyter components. Some fixes require
+versions outside the backend's current compatibility range. Treat this backend
+as experimental and resolve those advisories before production use.
+
+An installer assembled before the latest security updates passed an offline
+setup and API startup check in an isolated directory; it still contains older
+dependencies. A security-updated installer and its complete interactive setup
+have not yet been tested. The Microsoft Windows App SDK's redistribution
+conditions also need review before a binary is published.
 
 ## Development
 
