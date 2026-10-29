@@ -5,7 +5,7 @@
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.14.1
-certifi==2026.6.17
+certifi==2026.10.18
 click==8.4.2
 colorama==0.4.6
 fastapi==0.139.0
