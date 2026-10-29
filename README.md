@@ -102,6 +102,7 @@ in `aiwf/`; the preview installer and focused tests are in `packaging/`.
 See [BUILDING.md](BUILDING.md) for build inputs, validation, and the distinction
 between source and the redistributable installer. Do not commit model weights,
 credentials, local user data, or generated installers.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for reporting problems and submitting changes.
 
 ## License
 

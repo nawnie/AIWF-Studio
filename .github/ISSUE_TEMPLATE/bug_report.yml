@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible problem with the Windows preview.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the relevant screen, action, and error message.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Studio build and Windows version
+      placeholder: Preview build, Windows version and build number
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and backend
+      description: For generation issues, include GPU, driver, backend, model family, and file format.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional evidence
+      description: Share relevant logs or screenshots after removing keys, personal paths, prompts, and other private information.
