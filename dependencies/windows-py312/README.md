@@ -16,8 +16,10 @@ inputs to `setuptools==84.2.1` and `wheel==0.48.0`. The locked install therefore
 builds FilterPy from the verified sdist with the recorded builder versions.
 This does not claim bit-for-bit wheel output across Python/toolchain setups.
 
-For the AES Studio preview, close the app and use the optional backend helper
-from the installation root. It requires `uv` and can download several gigabytes:
+For the AES Studio preview, install [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+separately and ensure it is available in PowerShell. Close the app, open
+PowerShell in the Studio installation folder, and run the optional backend
+helper. The helper can download several gigabytes:
 
 ```powershell
 .\scripts\provision_python_backend.ps1 -StudioRoot .

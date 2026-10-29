@@ -59,6 +59,12 @@ preview installer is per-user and allows a custom empty installation folder.
 Its first-run wizard helps select data and model folders. The separate AES
 profile defaults to `%LOCALAPPDATA%\Programs\AES Studio Data`.
 
+The optional Python inference backend requires a separate setup using
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/). It is not
+included in the offline API runtime and can require several gigabytes of
+downloads. See the [backend setup instructions](dependencies/windows-py312/README.md)
+before enabling it.
+
 The installer does not automatically download models. Uninstall preserves
 models, outputs, settings, credentials, and modified files. Remove provider keys
 in Configure Studio or Windows Credential Manager when desired. Back up your
@@ -89,11 +95,12 @@ including Transformers and Jupyter components. Some fixes require
 versions outside the backend's current compatibility range. Treat this backend
 as experimental and resolve those advisories before production use.
 
-An installer assembled before the latest security updates passed an offline
-setup and API startup check in an isolated directory; it still contains older
-dependencies. A security-updated installer and its complete interactive setup
-have not yet been tested. The Microsoft Windows App SDK's redistribution
-conditions also need review before a binary is published.
+An unsigned security-updated installer completed interactive setup in a
+network-disabled Windows Sandbox using the existing test account. The installed
+app opened and displayed guidance for a missing model and the uninstalled
+optional Python backend. No model generation was run in this Sandbox test.
+The Microsoft Windows App SDK's redistribution conditions still need review
+before a binary is published.
 
 ## Development
 
