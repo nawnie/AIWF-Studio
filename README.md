@@ -48,12 +48,16 @@ ComfyUI, its nodes, or an NVIDIA display driver. A CUDA Toolkit developer
 installation is not needed just to run the bundled engine. For source builds,
 see [BUILDING.md](BUILDING.md).
 
+See NVIDIA's [CUDA 13.2 Windows support matrix](https://docs.nvidia.com/cuda/archive/13.2.0/cuda-installation-guide-microsoft-windows/index.html)
+and [driver compatibility guidance](https://docs.nvidia.com/cuda/archive/13.2.0/cuda-toolkit-release-notes/index.html)
+for the current requirements and limitations.
+
 ## Install and data
 
-Use a published preview installer when one is available on the repository's
-Releases page. The installer is per-user and allows a custom empty installation
-folder. Its first-run wizard helps select data and model folders. The separate
-AES profile defaults to `%LOCALAPPDATA%\Programs\AES Studio Data`.
+An installer download has not yet been published to this repository. The
+preview installer is per-user and allows a custom empty installation folder.
+Its first-run wizard helps select data and model folders. The separate AES
+profile defaults to `%LOCALAPPDATA%\Programs\AES Studio Data`.
 
 The installer does not automatically download models. Uninstall preserves
 models, outputs, settings, credentials, and modified files. Remove provider keys
@@ -73,6 +77,11 @@ The v25 installer's optional Python dependency lock differs from the bundled
 API lock. The source lock in this repository has been aligned and checked
 offline, but the complete Python backend has not yet been installed and tested.
 Do not treat the v25 Python provisioning path as validated.
+
+A subsequent installer was assembled with the aligned lock; its offline setup
+and API startup were checked in an isolated directory. Its complete interactive
+installer flow has not yet been tested. The Microsoft Windows App SDK's
+redistribution conditions also need review before a binary is published.
 
 ## Development
 
