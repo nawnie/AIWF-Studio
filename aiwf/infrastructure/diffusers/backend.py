@@ -1,0 +1,6893 @@
+from __future__ import annotations
+
+import copy
+import gc
+import hashlib
+import importlib.util
+import json
+import logging
+import os
+import random
+import threading
+import time
+import warnings
+from collections import OrderedDict
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Callable
+from uuid import uuid4
+
+import torch
+from diffusers import (
+    AutoencoderKL,
+    DDIMScheduler,
+    DEISMultistepScheduler,
+    DPMSolverMultistepScheduler,
+    DPMSolverSDEScheduler,
+    EulerAncestralDiscreteScheduler,
+    EulerDiscreteScheduler,
+    FlowMatchEulerDiscreteScheduler,
+    FluxInpaintPipeline,
+    FluxKontextPipeline,
+    FluxPipeline,
+    FluxTransformer2DModel,
+    GGUFQuantizationConfig,
+    HeunDiscreteScheduler,
+    KDPM2AncestralDiscreteScheduler,
+    KDPM2DiscreteScheduler,
+    LCMScheduler,
+    LMSDiscreteScheduler,
+    SASolverScheduler,
+    TCDScheduler,
+    UniPCMultistepScheduler,
+    StableDiffusion3Img2ImgPipeline,
+    StableDiffusion3InpaintPipeline,
+    StableDiffusion3Pipeline,
+    StableDiffusionImg2ImgPipeline,
+    StableDiffusionInpaintPipeline,
+    StableDiffusionPipeline,
+    StableDiffusionXLImg2ImgPipeline,
+    StableDiffusionXLInpaintPipeline,
+    StableDiffusionXLPipeline,
+)
+from diffusers.utils import logging as diffusers_logging
+
+# FluxFillPipeline needs diffusers >= 0.32; imported defensively so older or
+# stubbed diffusers builds (unit tests) keep every non-Fill route working.
+try:
+    from diffusers import FluxFillPipeline
+except ImportError:  # pragma: no cover - depends on installed diffusers
+    FluxFillPipeline = None
+from PIL import Image
+from safetensors.torch import load_file
+
+# Patch diffusers conversion logic to support custom Flux FP8 weights that use .weight instead of .scale for query/key norms
+try:
+    import diffusers.loaders.single_file_utils
+    _orig_convert_flux = diffusers.loaders.single_file_utils.convert_flux_transformer_checkpoint_to_diffusers
+
+    def _patched_convert_flux(checkpoint, *args, **kwargs):
+        for key in list(checkpoint.keys()):
+            if "query_norm.weight" in key:
+                scale_key = key.replace("query_norm.weight", "query_norm.scale")
+                if scale_key not in checkpoint:
+                    checkpoint[scale_key] = checkpoint[key]
+            elif "key_norm.weight" in key:
+                scale_key = key.replace("key_norm.weight", "key_norm.scale")
+                if scale_key not in checkpoint:
+                    checkpoint[scale_key] = checkpoint[key]
+        return _orig_convert_flux(checkpoint, *args, **kwargs)
+
+    diffusers.loaders.single_file_utils.convert_flux_transformer_checkpoint_to_diffusers = _patched_convert_flux
+except Exception:
+    pass
+
+from aiwf.core.config.settings import RuntimeFlags
+from aiwf.core.domain.errors import GenerationCancelledError, ModelNotFoundError
+from aiwf.core.domain.extra_networks import parse_extra_networks
+from aiwf.core.domain.controlnet import ControlNetUnit
+from aiwf.core.domain.generation import GenerationMode, GenerationRequest, GenerationResult
+from aiwf.core.domain.models import LoraInfo, SAMPLERS, Checkpoint, SamplerInfo, VaeInfo
+from aiwf.core.infotext import format_infotext
+from aiwf.infrastructure.diffusers.checkpoints import scan_from_flags
+from aiwf.infrastructure.diffusers.single_file_config import (
+    SINGLE_FILE_CONFIG_REPOSITORIES,
+    missing_single_file_config_files,
+)
+from aiwf.infrastructure.diffusers.embeddings import find_referenced_embeddings, scan_embeddings
+from aiwf.infrastructure.diffusers.extra_networks import apply_loras, clear_loras
+from aiwf.infrastructure.diffusers.loras import scan_loras
+from aiwf.infrastructure.diffusers.mask import (
+    align_to_multiple_of_8,
+    align_to_multiple_of_16,
+    align_to_multiple_of_32,
+    apply_masked_content,
+    blur_mask,
+    composite_inpaint_result,
+    crop_to_masked,
+    prepare_inpaint_mask,
+    resize_for_inpaint,
+)
+from aiwf.infrastructure.diffusers.controlnet_pipe import (
+    ControlNetModelCache,
+    assert_controlnet_checkpoint_compatible,
+    build_controlnet_pipeline,
+)
+from aiwf.infrastructure.controlnet.catalog import iter_controlnet_model_paths, resolve_controlnet_roots
+from aiwf.infrastructure.controlnet.images import decode_control_image
+from aiwf.infrastructure.controlnet.preprocess import PreprocessParams, preprocess_control_image
+from aiwf.infrastructure.diffusers.model_arch import (
+    ARCH_FLUX,
+    ARCH_FLUX_FILL,
+    ARCH_FLUX_KONTEXT,
+    ARCH_FLUX2_KLEIN,
+    ARCH_ANIMA,
+    ARCH_KREA2,
+    ARCH_QWEN_IMAGE,
+    ARCH_QWEN_IMAGE_NUNCHAKU,
+    ARCH_SANA,
+    ARCH_SD35,
+    ARCH_SDXL,
+    ARCH_SDXL_INPAINT,
+    ARCH_SDXL_REFINER,
+    ARCH_Z_IMAGE,
+    is_inpaint_architecture,
+    is_flux2_klein_architecture,
+    is_flux_architecture,
+    is_flux_fill_architecture,
+    is_flux_kontext_architecture,
+    is_anima_architecture,
+    is_krea2_architecture,
+    is_qwen_image_architecture,
+    is_qwen_nunchaku_architecture,
+    is_sana_architecture,
+    is_sd3_architecture,
+    is_sdxl_architecture,
+    is_transformer_image_architecture,
+    is_z_image_architecture,
+)
+from aiwf.infrastructure.diffusers.prompt_encode import build_prompt_kwargs
+from aiwf.infrastructure.diffusers.vae import resolve_vae, scan_vaes
+from aiwf.infrastructure.model_asset_summary import asset_size_bytes, format_size
+from aiwf.infrastructure.model_inventory import get_model_inventory
+try:
+    from aiwf.infrastructure.torch.attention import (
+        apply_attention_optimizations,
+        apply_image_pipeline_optimizations,
+        attention_call_context,
+    )
+except ImportError:
+    from aiwf.infrastructure.torch.attention import apply_attention_optimizations, apply_image_pipeline_optimizations
+
+    @contextmanager
+    def attention_call_context(_flags):
+        yield "none"
+from aiwf.infrastructure.torch.devices import DeviceManager
+from aiwf.infrastructure.quant.bnb_nf4_format import (
+    build_bnb_4bit_quantization_config,
+    inspect_bnb_4bit_safetensors,
+    normalize_bnb_4bit_compute_dtype,
+    resolve_transformer_load_format,
+)
+from aiwf.infrastructure.diffusers.flux_bnb_loader import load_flux_original_bnb_transformer
+from aiwf.infrastructure.diffusers.flux_prompt_conditioning import (
+    FLUX_CONDITIONING_DISTILLT5_CONTROL,
+    FLUX_CONDITIONING_TEACHER,
+    FLUX_CONDITIONING_UNIVERSAL,
+    FluxPromptConditioningConfig,
+    load_distillt5_control,
+    load_universal_conditioner,
+    validate_flux_conditioning,
+)
+from aiwf.services.qwen_nunchaku import QwenNunchakuService, QwenNunchakuUnavailable
+
+logger = logging.getLogger(__name__)
+
+
+def _supports_runtime_lora_adapters(architecture: str | None) -> bool:
+    """Return whether AIWF can apply prompt LoRA tags at generation time."""
+    architecture = (architecture or "").lower()
+    if architecture in {
+        ARCH_FLUX2_KLEIN,
+        ARCH_Z_IMAGE,
+        ARCH_KREA2,
+        ARCH_ANIMA,
+        ARCH_QWEN_IMAGE,
+        ARCH_QWEN_IMAGE_NUNCHAKU,
+        ARCH_SANA,
+    }:
+        return False
+    return True
+
+
+class _DiffusersSafetyWarningFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "You have disabled the safety checker" not in record.getMessage()
+
+
+diffusers_logging.disable_progress_bar()
+logging.getLogger("diffusers").addFilter(_DiffusersSafetyWarningFilter())
+try:
+    from huggingface_hub.utils import disable_progress_bars
+
+    disable_progress_bars()
+except Exception:
+    pass
+try:
+    from huggingface_hub import try_to_load_from_cache as _try_to_load_from_cache
+except Exception:  # pragma: no cover - huggingface_hub is a runtime dependency
+    _try_to_load_from_cache = None
+warnings.filterwarnings(
+    "ignore",
+    message="You have disabled the safety checker.*",
+    category=UserWarning,
+    module="diffusers.*",
+)
+warnings.filterwarnings(
+    "ignore",
+    message="`upcast_vae` is deprecated.*",
+    category=FutureWarning,
+    module="diffusers.*",
+)
+
+SAMPLER_CLASSES = {
+    "euler": EulerDiscreteScheduler,
+    "euler_a": EulerAncestralDiscreteScheduler,
+    "heun": HeunDiscreteScheduler,
+    "lms": LMSDiscreteScheduler,
+    "ddim": DDIMScheduler,
+    "unipc": UniPCMultistepScheduler,
+    "dpm2": KDPM2DiscreteScheduler,
+    "dpm2_a": KDPM2AncestralDiscreteScheduler,
+    "deis": DEISMultistepScheduler,
+    "dpmpp_2m": DPMSolverMultistepScheduler,
+    "dpmpp_2m_sde": DPMSolverMultistepScheduler,
+    "dpmpp_3m_sde": DPMSolverMultistepScheduler,
+    "dpmpp_sde": DPMSolverSDEScheduler,
+    "dpmpp_2m_karras": DPMSolverMultistepScheduler,
+    "sa_solver": SASolverScheduler,
+    "lcm": LCMScheduler,
+    "tcd": TCDScheduler,
+}
+
+
+_SINGLE_FILE_CONFIG_REPOS = {
+    StableDiffusionPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sd15"],
+    StableDiffusionXLPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sdxl"],
+    StableDiffusion3Pipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sd35"],
+    StableDiffusionInpaintPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sd15_inpaint"],
+    StableDiffusionXLInpaintPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sdxl_inpaint"],
+    StableDiffusionXLImg2ImgPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sdxl_refiner"],
+    StableDiffusion3InpaintPipeline: SINGLE_FILE_CONFIG_REPOSITORIES["sd35"],
+}
+_SINGLE_FILE_CONFIG_FAMILIES = {
+    StableDiffusionPipeline: "sd15",
+    StableDiffusionXLPipeline: "sdxl",
+    StableDiffusion3Pipeline: "sd35",
+    StableDiffusionInpaintPipeline: "sd15_inpaint",
+    StableDiffusionXLInpaintPipeline: "sdxl_inpaint",
+    StableDiffusionXLImg2ImgPipeline: "sdxl_refiner",
+    StableDiffusion3InpaintPipeline: "sd35",
+}
+
+_FLUX_TRANSFORMER_CONFIG_BASE = {
+    "_class_name": "FluxTransformer2DModel",
+    "_diffusers_version": "0.38.0",
+    "patch_size": 1,
+    "in_channels": 64,
+    "out_channels": None,
+    "num_layers": 19,
+    "num_single_layers": 38,
+    "attention_head_dim": 128,
+    "num_attention_heads": 24,
+    "joint_attention_dim": 4096,
+    "pooled_projection_dim": 768,
+    "axes_dims_rope": [16, 56, 56],
+}
+
+_FLUX_VAE_CONFIG = {
+    "_class_name": "AutoencoderKL",
+    "_diffusers_version": "0.38.0",
+    "act_fn": "silu",
+    "block_out_channels": [128, 256, 512, 512],
+    "down_block_types": ["DownEncoderBlock2D"] * 4,
+    "up_block_types": ["UpDecoderBlock2D"] * 4,
+    "force_upcast": True,
+    "in_channels": 3,
+    "out_channels": 3,
+    "latent_channels": 16,
+    "layers_per_block": 2,
+    "mid_block_add_attention": True,
+    "norm_num_groups": 32,
+    "sample_size": 1024,
+    "scaling_factor": 0.3611,
+    "shift_factor": 0.1159,
+    "use_quant_conv": False,
+    "use_post_quant_conv": False,
+}
+
+_FLUX2_KLEIN_9B_TRANSFORMER_CONFIG = {
+    "_class_name": "Flux2Transformer2DModel",
+    "_diffusers_version": "0.38.0",
+    "patch_size": 1,
+    "in_channels": 128,
+    "out_channels": None,
+    "num_layers": 8,
+    "num_single_layers": 48,
+    "attention_head_dim": 128,
+    "num_attention_heads": 48,
+    "joint_attention_dim": 15360,
+    "timestep_guidance_channels": 256,
+    "mlp_ratio": 3.0,
+    "axes_dims_rope": [32, 32, 32, 32],
+    "rope_theta": 2000,
+    "eps": 1e-6,
+    # Distilled Klein variants ignore CFG in the official Diffusers pipeline.
+    # Fluxtrait's model page still recommends CFG 1, which is safe here.
+    "guidance_embeds": False,
+}
+
+_FLUX2_KLEIN_4B_TRANSFORMER_CONFIG = {
+    **_FLUX2_KLEIN_9B_TRANSFORMER_CONFIG,
+    "num_layers": 5,
+    "num_single_layers": 20,
+    "num_attention_heads": 24,
+    "joint_attention_dim": 7680,
+}
+
+_Z_IMAGE_TRANSFORMER_CONFIG = {
+    "_class_name": "ZImageTransformer2DModel",
+    "_diffusers_version": "0.38.0",
+    "all_patch_size": [2],
+    "all_f_patch_size": [1],
+    "in_channels": 16,
+    "dim": 3840,
+    "n_layers": 30,
+    "n_refiner_layers": 2,
+    "n_heads": 30,
+    "n_kv_heads": 30,
+    "norm_eps": 1e-5,
+    "qk_norm": True,
+    "cap_feat_dim": 2560,
+    "siglip_feat_dim": None,
+    "rope_theta": 256.0,
+    "t_scale": 1000.0,
+    "axes_dims": [32, 48, 48],
+    "axes_lens": [1536, 512, 512],
+}
+
+
+def _cached_single_file_config_dir(pipeline_cls, model_roots=()) -> str | None:
+    """Return a locally cached Diffusers config directory for single-file loads.
+
+    Diffusers downloads a default config repo when ``config`` is omitted from
+    ``from_single_file``. Startup preload must stay local-only, so use the HF
+    cache index directly and never call ``snapshot_download`` here.
+    """
+    repo_id = _SINGLE_FILE_CONFIG_REPOS.get(pipeline_cls)
+    family = _SINGLE_FILE_CONFIG_FAMILIES.get(pipeline_cls)
+    if not repo_id or not family:
+        return None
+    if _try_to_load_from_cache is not None:
+        try:
+            cached = _try_to_load_from_cache(repo_id, "model_index.json")
+        except Exception:
+            cached = None
+        if isinstance(cached, str):
+            model_index = Path(cached)
+            if not missing_single_file_config_files(model_index.parent, family):
+                return str(model_index.parent)
+
+    repo_name = repo_id.replace("\\", "/").rstrip("/").split("/")[-1]
+    for value in model_roots:
+        try:
+            root = Path(value).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, TypeError):
+            continue
+        for candidate in (
+            root / "Support" / "DiffusersConfigs" / repo_name,
+            root / "Stable-diffusion" / repo_name,
+            root / repo_name,
+        ):
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(root)
+                model_index = resolved / "model_index.json"
+                if not missing_single_file_config_files(resolved, family):
+                    return str(resolved)
+            except (OSError, RuntimeError, ValueError):
+                continue
+    return None
+
+
+def _add_cached_single_file_config(load_kwargs: dict, pipeline_cls, model_roots=()) -> None:
+    config_dir = _cached_single_file_config_dir(pipeline_cls, model_roots)
+    if config_dir:
+        load_kwargs["config"] = config_dir
+    # Single-file loads must never silently resolve pipeline config/tokenizers
+    # from the Hub. The model setup bundles install a scoped local config snapshot.
+    # If it is absent, Diffusers fails with a local missing-asset error instead.
+    load_kwargs["local_files_only"] = True
+
+
+class DiffusersBackend:
+    _QWEN_NUNCHAKU_SENTINEL = object()
+    _PROMPT_EMBED_CACHE_LIMIT = 32
+    _FLUX2_TEXT_ENCODER_BNB_THRESHOLD_GB = 10.0
+    _STATUS_SUPPORT_REVISION_CACHE_SECONDS = 1.5
+
+    def __init__(self, flags: RuntimeFlags, devices: DeviceManager) -> None:
+        self.flags = flags
+        self.devices = devices
+        self.ckpt_dir = flags.resolved_ckpt_dir()
+        self._txt2img: StableDiffusionPipeline | None = None
+        self._img2img: StableDiffusionImg2ImgPipeline | None = None
+        self._inpaint: StableDiffusionInpaintPipeline | None = None
+        self._refiner: StableDiffusionXLImg2ImgPipeline | None = None
+        self._active: Checkpoint | None = None
+        self._active_support_revision: str | None = None
+        self._active_flux_encoder_revision: str | None = None
+        self._status_support_revision_cache: tuple[tuple[str, str], float, str] | None = None
+        self._status_support_revision_lock = threading.Lock()
+        self._inpaint_active: Checkpoint | None = None
+        self._refiner_active: Checkpoint | None = None
+        self._inpaint_support_revision: str | None = None
+        self._refiner_support_revision: str | None = None
+        self._active_vae_id: str | None = None
+        self._lora_catalog: list[LoraInfo] | None = None
+        self._vae_catalog: list[VaeInfo] | None = None
+        self._checkpoint_catalog: list[Checkpoint] | None = None
+        self._embedding_catalog: list | None = None
+        self._controlnet_cache = ControlNetModelCache()
+        self._offload_active = False
+        self._flux_text_encoder = None
+        self._flux_text_encoder_2 = None
+        self._flux_tokenizer = None
+        self._flux_tokenizer_2 = None
+        self._flux_component_paths: dict[str, str] = {}
+        # User-selected Flux T5 text encoder path (None = auto-pick best available).
+        self._flux_text_encoder_override: str | None = None
+        self._flux_clip_device: torch.device | None = None
+        self._flux_t5_device: torch.device | None = None
+        self._flux_prompt_conditioning = FluxPromptConditioningConfig.from_environment()
+        self._flux_conditioning_scope: str | None = None
+        self._flux_universal_conditioner = None
+        self._flux_prompt_cache: OrderedDict[str, tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
+        self._flux2_prompt_cache: OrderedDict[str, torch.Tensor] = OrderedDict()
+        # Rolling average encode duration per family, used to show a live ETA
+        # while the prompt is being encoded (no per-step granularity exists
+        # inside a single forward pass, so we estimate from past runs instead).
+        self._encode_duration_estimates: dict[str, float] = {}
+        self._z_image_prompt_cache: OrderedDict[
+            tuple[str, str], tuple[list[torch.Tensor], list[torch.Tensor]]
+        ] = OrderedDict()
+        self._qwen_prompt_cache: OrderedDict[
+            tuple[str, str, int, int], tuple[torch.Tensor, torch.Tensor | None]
+        ] = OrderedDict()
+        self._krea2_prompt_cache: OrderedDict[
+            tuple[str, str, int, int], tuple[torch.Tensor, torch.Tensor | None]
+        ] = OrderedDict()
+        self._sana_prompt_cache: OrderedDict[tuple, tuple] = OrderedDict()
+        self._common_prompt_cache_warmed_for: set[str] = set()
+        self._qwen_nunchaku = QwenNunchakuService(flags)
+
+    _COMMON_PROMPT_STARTERS: tuple[str, ...] = (
+        "woman",
+        "portrait",
+        "person",
+        "body",
+        "man",
+        "face",
+        "eyes",
+        "hair",
+        "hands",
+        "full body",
+        "upper body",
+        "close up portrait",
+        "portrait of a woman",
+        "full body portrait of a woman",
+        "beautiful woman",
+        "beautiful woman portrait",
+        "portrait of a person",
+        "full body person",
+        "standing person",
+        "sitting person",
+        "female model",
+        "male model",
+        "young woman",
+        "adult woman",
+        "person standing",
+        "person walking",
+        "woman standing",
+        "woman sitting",
+        "woman looking at camera",
+        "portrait photograph",
+        "professional portrait",
+        "cinematic portrait",
+        "studio portrait",
+        "fashion portrait",
+        "headshot",
+        "profile portrait",
+        "natural skin texture",
+        "detailed face",
+        "detailed eyes",
+        "realistic body",
+        "realistic person",
+        "human anatomy",
+        "full body photograph",
+        "waist up portrait",
+        "soft natural lighting",
+        "cinematic lighting",
+        "studio lighting",
+        "high quality photo",
+    )
+
+    def _flux_config_cache_root(self) -> Path:
+        root = self.flags.data_dir / "cache" / "flux_configs"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _cached_transformer_config_dir(self, family: str, checkpoint_path: Path, config: dict) -> str:
+        """Persist derived GGUF transformer configs so checkpoint switches skip re-derivation."""
+        cache_root = self._flux_config_cache_root() / family / checkpoint_path.stem
+        return self._write_temp_config(cache_root, "transformer", config)
+
+    def is_checkpoint_warm(self, checkpoint_id: str | None = None) -> bool:
+        return self.is_checkpoint_loaded(checkpoint_id)
+
+    def _flux_encoder_device(self, t5_path: Path | None = None) -> torch.device:
+        if self.devices.device().type != "cuda":
+            return torch.device("cpu")
+        try:
+            free_bytes, _total = torch.cuda.mem_get_info(self.devices.device())
+            reserve_bytes = 1024**3
+            if t5_path is not None:
+                t5_name = t5_path.name.lower()
+                t5_bytes = int(5.5 * 1024**3) if "fp8" in t5_name else int(10.5 * 1024**3)
+                if free_bytes < t5_bytes + reserve_bytes:
+                    return torch.device("cpu")
+            elif free_bytes < 6 * 1024**3:
+                return torch.device("cpu")
+            return self.devices.device()
+        except Exception:
+            logger.debug("Could not query CUDA free memory for Flux encoders", exc_info=True)
+        return torch.device("cpu")
+
+    @staticmethod
+    def _load_encoder_state_dict(model, state_dict, *, assign: bool = False) -> None:
+        first_param = next(model.parameters(), None)
+        if first_param is not None and first_param.is_meta:
+            model.load_state_dict(state_dict, strict=True, assign=True)
+            return
+        model.load_state_dict(state_dict, strict=True, assign=assign)
+
+    @staticmethod
+    def _flux_t5_weights_are_fp8(state_dict) -> bool:
+        for tensor in state_dict.values():
+            if getattr(tensor, "dtype", None) == torch.float8_e4m3fn:
+                return True
+        return False
+
+    def _load_flux_t5_encoder(self, t5_path: Path, t5_config) -> tuple["T5EncoderModel", torch.device]:
+        from transformers import T5EncoderModel
+
+        state = load_file(str(t5_path), device="cpu")
+        is_fp8_source = "fp8" in t5_path.name.lower() or self._flux_t5_weights_are_fp8(state)
+        if is_fp8_source:
+            with torch.device("meta"):
+                t5 = T5EncoderModel(t5_config)
+            self._load_encoder_state_dict(t5, state)
+            del state
+            # Transformers T5 cannot execute float8 weights; keep a warm fp16 copy in RAM
+            # so the GPU stays reserved for the Flux transformer.
+            t5_device = torch.device("cpu")
+            t5 = t5.to(dtype=torch.float16, device=t5_device)
+            t5.eval()
+            logger.info(
+                "Flux T5-XXL: %s -> fp16 CPU resident (cached in RAM; GPU left for transformer)",
+                t5_path.name,
+            )
+            return t5, t5_device
+
+        t5 = T5EncoderModel(t5_config)
+        self._load_encoder_state_dict(t5, state)
+        del state
+        t5_device = self._flux_encoder_device(t5_path)
+        t5 = t5.to(dtype=torch.float16, device=t5_device)
+        t5.eval()
+        logger.info("Flux T5-XXL: %s on %s", t5_path.name, t5_device)
+        return t5, t5_device
+
+    def is_checkpoint_loaded(self, checkpoint_id: str | None = None) -> bool:
+        return self._is_checkpoint_loaded(checkpoint_id, throttle_support_probe=False)
+
+    def is_checkpoint_loaded_for_status(self, checkpoint_id: str | None = None) -> bool:
+        """Poll-friendly residency view; generation/admission checks stay fresh."""
+        return self._is_checkpoint_loaded(checkpoint_id, throttle_support_probe=True)
+
+    def _is_checkpoint_loaded(self, checkpoint_id: str | None, *, throttle_support_probe: bool) -> bool:
+        try:
+            checkpoint = self._resolve_checkpoint(checkpoint_id)
+        except ModelNotFoundError:
+            return False
+        if self._txt2img is None or self._active is None:
+            return False
+        if self._active.path != checkpoint.path:
+            return False
+        if is_qwen_nunchaku_architecture(checkpoint.architecture):
+            # The sentinel represents a ready-on-demand sidecar route rather
+            # than resident weights; every render enforces its own GPU gate.
+            try:
+                return bool(self._qwen_nunchaku.status(checkpoint.path).ready)
+            except Exception:
+                logger.debug("Could not verify Qwen Nunchaku readiness", exc_info=True)
+                return False
+        # Treat residency as valid only when every loader-captured support
+        # fingerprint still matches. This also covers single-file SD/SDXL/SD3
+        # pipelines, whose local VAE or pipeline config can change in place.
+        # Routes such as Qwen Nunchaku do not capture this fingerprint.
+        revision_managed = self._active_support_revision is not None
+        if revision_managed:
+            current_revision = (
+                self._checkpoint_support_revision_for_status(checkpoint)
+                if throttle_support_probe
+                else self._checkpoint_support_revision(checkpoint)
+            )
+            if self._active_support_revision != current_revision:
+                return False
+        if is_flux_architecture(checkpoint.architecture):
+            if self._flux_prompt_conditioning.mode == FLUX_CONDITIONING_UNIVERSAL:
+                return self._flux_universal_conditioner is not None
+            return (
+                self._flux_text_encoder is not None
+                and self._flux_text_encoder_2 is not None
+            )
+        return True
+
+    @staticmethod
+    def _snapshot_scheduler_config(scheduler) -> dict:
+        config = getattr(scheduler, "config", None)
+        if config is None:
+            return {}
+        if hasattr(config, "to_dict"):
+            return copy.deepcopy(config.to_dict())
+        return copy.deepcopy(dict(config))
+
+    def _remember_base_scheduler_config(self, pipe) -> None:
+        scheduler = getattr(pipe, "scheduler", None)
+        if scheduler is None:
+            return
+        pipe._aiwf_base_scheduler_config = self._snapshot_scheduler_config(scheduler)
+
+    def _base_scheduler_config_for_pipe(self, pipe) -> dict:
+        stored = getattr(pipe, "_aiwf_base_scheduler_config", None)
+        if stored:
+            return copy.deepcopy(stored)
+        config = self._snapshot_scheduler_config(getattr(pipe, "scheduler", None))
+        if config:
+            pipe._aiwf_base_scheduler_config = copy.deepcopy(config)
+        return config
+
+    def invalidate_checkpoints(self) -> None:
+        self._checkpoint_catalog = None
+
+    def invalidate_embeddings(self) -> None:
+        self._embedding_catalog = None
+
+    def list_embeddings(self):
+        if self._embedding_catalog is None:
+            self._embedding_catalog = scan_embeddings(self.flags)
+        return self._embedding_catalog
+
+    def invalidate_vaes(self) -> None:
+        self._vae_catalog = None
+
+    def invalidate_loras(self) -> None:
+        self._lora_catalog = None
+
+    def list_checkpoints(self) -> list[Checkpoint]:
+        if self._checkpoint_catalog is None:
+            self._checkpoint_catalog = scan_from_flags(self.flags)
+        return self._checkpoint_catalog
+
+    def list_samplers(self) -> list[SamplerInfo]:
+        return list(SAMPLERS)
+
+    def list_loras(self) -> list[LoraInfo]:
+        if self._lora_catalog is None:
+            self._lora_catalog = scan_loras(self.flags)
+        return self._lora_catalog
+
+    def list_vaes(self) -> list[VaeInfo]:
+        if self._vae_catalog is None:
+            self._vae_catalog = scan_vaes(self.flags)
+        return self._vae_catalog
+
+    def _resolve_checkpoint(self, checkpoint_id: str | None) -> Checkpoint:
+        checkpoints = self.list_checkpoints()
+        if not checkpoints:
+            raise ModelNotFoundError(f"No checkpoints in {self.ckpt_dir}")
+
+        if checkpoint_id:
+            for checkpoint in checkpoints:
+                if checkpoint.id == checkpoint_id or checkpoint.title == checkpoint_id:
+                    return checkpoint
+            raise ModelNotFoundError(
+                f"Requested checkpoint '{checkpoint_id}' is not present in the local model catalog."
+            )
+
+        if self.flags.default_checkpoint:
+            for checkpoint in checkpoints:
+                if Path(checkpoint.path) == self.flags.default_checkpoint.resolve():
+                    return checkpoint
+
+        return checkpoints[0]
+
+    _AUTO_OFFLOAD_VRAM_GB = 10.0
+
+    def _high_vram_requested(self) -> bool:
+        profile = self.flags.effective_vram_profile() if hasattr(self.flags, "effective_vram_profile") else ""
+        return profile == "high" or bool(getattr(self.flags, "highvram", False))
+
+    def _krea2_needs_sequential_offload(
+        self,
+        architecture: str | None,
+        checkpoint: Checkpoint | None = None,
+        *,
+        prefer_offload: bool = False,
+    ) -> bool:
+        if architecture != ARCH_KREA2 or not (self.flags.medvram or prefer_offload):
+            return False
+        try:
+            vram = self.devices.total_vram_gb()
+        except Exception:
+            return False
+        return vram < self._offload_threshold_gb(architecture, checkpoint=checkpoint)
+
+    def _place_krea2_group_offload(self, pipe, device: torch.device) -> bool:
+        transformer = getattr(pipe, "transformer", None)
+        if transformer is None or not hasattr(transformer, "enable_group_offload"):
+            return False
+        transformer.enable_group_offload(
+            onload_device=device,
+            offload_device=torch.device("cpu"),
+            offload_type="block_level",
+            num_blocks_per_group=1,
+            use_stream=True,
+            record_stream=False,
+            low_cpu_mem_usage=True,
+        )
+        vae = getattr(pipe, "vae", None)
+        if vae is not None and hasattr(vae, "to"):
+            vae.to(device)
+        self._offload_active = True
+        logger.info("Krea 2 transformer uses streamed group offload; VAE stays resident on %s.", device)
+        return True
+
+    def _place_krea2_fp8_resident(self, pipe, device: torch.device) -> bool:
+        transformer = getattr(pipe, "transformer", None)
+        if transformer is None or not hasattr(transformer, "enable_layerwise_casting"):
+            return False
+        if not hasattr(torch, "float8_e4m3fn"):
+            return False
+        try:
+            vram = self.devices.total_vram_gb()
+        except Exception:
+            vram = 0.0
+        if vram and vram < 15.0:
+            logger.warning("Krea 2 high VRAM FP8 resident mode needs about 15 GB VRAM; using group offload instead.")
+            return False
+        transformer.enable_layerwise_casting(
+            storage_dtype=torch.float8_e4m3fn,
+            compute_dtype=self._dtype_for_architecture(ARCH_KREA2),
+        )
+        transformer.to(device)
+        vae = getattr(pipe, "vae", None)
+        if vae is not None and hasattr(vae, "to"):
+            vae.to(device)
+        if hasattr(pipe, "to"):
+            pipe.to(device)
+        pipe._aiwf_krea2_force_cpu_prompt_encode = True
+        self._offload_active = False
+        logger.info("Krea 2 high VRAM mode stores transformer weights in FP8 and keeps denoiser/VAE on %s.", device)
+        return True
+
+    def _place_pipeline(
+        self,
+        pipe,
+        *,
+        prefer_offload: bool = False,
+        architecture: str | None = None,
+        checkpoint: Checkpoint | None = None,
+    ):
+        if self.devices.device().type not in ("cuda",) and (self.flags.lowvram or self.flags.medvram or prefer_offload):
+            logger.warning("CPU offload modes need a CUDA device; loading fully on %s.", self.devices.device())
+            pipe = pipe.to(self.devices.device())
+            self._offload_active = False
+            return pipe
+        if self._high_vram_requested():
+            prefer_offload = False
+        krea2_sequential = self._krea2_needs_sequential_offload(
+            architecture,
+            checkpoint,
+            prefer_offload=prefer_offload,
+        )
+        if self.flags.lowvram:
+            pipe.enable_sequential_cpu_offload()
+            self._offload_active = True
+        elif architecture == ARCH_KREA2 and (self.flags.medvram or prefer_offload):
+            if not self._place_krea2_group_offload(pipe, self.devices.device()):
+                logger.info("Krea 2 group offload is unavailable; falling back to sequential CPU offload.")
+                pipe.enable_sequential_cpu_offload()
+                self._offload_active = True
+        elif krea2_sequential:
+            if krea2_sequential:
+                threshold = self._offload_threshold_gb(architecture or "", checkpoint=checkpoint)
+                logger.info("Krea 2 on a <%.0f GB GPU uses sequential CPU offload.", threshold)
+            pipe.enable_sequential_cpu_offload()
+            self._offload_active = True
+        elif self.flags.medvram:
+            pipe.enable_model_cpu_offload()
+            self._offload_active = True
+        elif prefer_offload:
+            arch_label = {
+                ARCH_FLUX2_KLEIN: "Flux.2 Klein",
+                ARCH_Z_IMAGE: "Z-Image",
+                ARCH_KREA2: "Krea 2",
+                ARCH_ANIMA: "Anima",
+                ARCH_QWEN_IMAGE: "Qwen Image",
+                ARCH_QWEN_IMAGE_NUNCHAKU: "Qwen Image Nunchaku",
+                ARCH_SANA: "Sana",
+                ARCH_SD35: "SD3.5",
+                ARCH_SDXL: "SDXL",
+                ARCH_SDXL_INPAINT: "SDXL",
+            }.get(architecture or "", "Large model")
+            # Use the *actual* threshold this architecture was evaluated against
+            # (see _offload_threshold_gb) rather than the SDXL-only constant, so
+            # this message can't claim "<10 GB" when the real cutoff was 20 GB.
+            threshold = self._offload_threshold_gb(architecture or "", checkpoint=checkpoint)
+            logger.info(
+                "%s on a <%.0f GB GPU — enabling model CPU offload automatically "
+                "(use Low VRAM mode in Settings if you still hit out-of-memory).",
+                arch_label,
+                threshold,
+            )
+            pipe.enable_model_cpu_offload()
+            self._offload_active = True
+        else:
+            pipe = pipe.to(self.devices.device())
+            self._offload_active = False
+        return pipe
+
+    def _place_transformer_pipeline_keep_text_cpu(
+        self,
+        pipe,
+        *,
+        architecture: str,
+        checkpoint: Checkpoint | None = None,
+    ):
+        """Place image denoising modules on the active device, but keep large
+        text encoders in system RAM.
+
+        Flux.2 Klein, Z-Image, Qwen Image, and Sana pipelines include full
+        language-model text encoders. Moving those encoders with `pipe.to(cuda)`
+        makes cold start feel like a second model load and can consume most of a 16 GB GPU.
+        Prompt encoding can run from CPU once, then only the compact embeddings
+        need to move to the denoise device.
+        """
+        device = self.devices.device()
+        if is_krea2_architecture(architecture) and device.type == "cuda" and self._high_vram_requested():
+            text_encoder = getattr(pipe, "text_encoder", None)
+            if text_encoder is not None:
+                pipe.text_encoder = None
+            try:
+                if not self._place_krea2_fp8_resident(pipe, device):
+                    self._place_krea2_group_offload(pipe, device)
+            finally:
+                if text_encoder is not None:
+                    pipe.text_encoder = text_encoder
+                    try:
+                        text_encoder.to("cpu")
+                    except Exception:
+                        logger.debug("Could not park %s text encoder on CPU", architecture, exc_info=True)
+            logger.info("%s text encoder kept on CPU.", architecture)
+            return pipe
+
+        if is_qwen_image_architecture(architecture) or is_sana_architecture(architecture):
+            return self._place_pipeline(
+                pipe,
+                prefer_offload=self._wants_offload(architecture, checkpoint=checkpoint),
+                architecture=architecture,
+                checkpoint=checkpoint,
+            )
+        prefer_offload = False if self._high_vram_requested() else self._wants_offload(architecture, checkpoint=checkpoint)
+        if device.type != "cuda" or self.flags.lowvram or self.flags.medvram or prefer_offload:
+            # Keep the LM text encoder OUT of the offload hook graph. Model CPU
+            # offload onloads every hooked module to the GPU when its forward
+            # runs — for Flux.2 Klein 9B that's a ~16 GB Qwen3-8B text encoder,
+            # an instant OOM on 16 GB cards. The prompt-encode path manages the
+            # text encoder manually (GPU swap when it fits, CPU otherwise).
+            text_encoder = getattr(pipe, "text_encoder", None)
+            if device.type == "cuda" and text_encoder is not None and hasattr(text_encoder, "to"):
+                pipe.text_encoder = None
+                try:
+                    pipe = self._place_pipeline(
+                        pipe,
+                        prefer_offload=prefer_offload,
+                        architecture=architecture,
+                        checkpoint=checkpoint,
+                    )
+                finally:
+                    pipe.text_encoder = text_encoder
+                    try:
+                        text_encoder.to("cpu")
+                    except Exception:
+                        logger.debug("Could not park %s text encoder on CPU", architecture, exc_info=True)
+                logger.info(
+                    "%s text encoder excluded from CPU-offload hooks; it stays in system RAM.",
+                    architecture,
+                )
+                return pipe
+            return self._place_pipeline(
+                pipe,
+                prefer_offload=prefer_offload,
+                architecture=architecture,
+                checkpoint=checkpoint,
+            )
+
+        for module_name in ("transformer", "vae"):
+            module = getattr(pipe, module_name, None)
+            if module is not None and hasattr(module, "to"):
+                module.to(device)
+        text_encoder = getattr(pipe, "text_encoder", None)
+        if text_encoder is not None and hasattr(text_encoder, "to"):
+            text_encoder.to("cpu")
+        try:
+            pipe._execution_device = device
+        except Exception:
+            logger.debug("Could not set pipeline execution device", exc_info=True)
+        self._offload_active = False
+        logger.info("%s text encoder kept on CPU; denoiser/VAE loaded on %s.", architecture, device)
+        return pipe
+
+    def _ensure_embeddings_for_prompt(
+        self, pipe, prompt: str | None, negative: str | None, architecture: str
+    ) -> None:
+        """On-demand load of only the textual-inversion embeddings referenced in the prompt.
+
+        Embeddings are discovered from the embeddings/ folder but are *not* loaded
+        into the text encoders at checkpoint load time. Instead we inspect the
+        (already style/wildcard processed) prompt and negative for bare token names
+        that match known embedding ids (e.g. "AS-Young"), and load just those.
+
+        This means unused embedding files the user never put in a prompt are never
+        "selected" or loaded — fixing the previous eager behavior.
+        """
+        if is_sd3_architecture(architecture):
+            return
+        items = self.list_embeddings()
+        if not items or not hasattr(pipe, "load_textual_inversion"):
+            return
+
+        refs = find_referenced_embeddings(prompt, negative, items)
+        if not refs:
+            return
+
+        # Track which embeddings have been loaded onto *this* pipe instance.
+        loaded: set[str] = getattr(pipe, "_aiwf_ti_loaded", None) or set()
+        pipe._aiwf_ti_loaded = loaded
+
+        sdxl = is_sdxl_architecture(architecture)
+        newly: list[str] = []
+        for item in refs:
+            if item.id in loaded:
+                continue
+            try:
+                self._load_single_embedding(pipe, item, sdxl=sdxl)
+                loaded.add(item.id)
+                newly.append(item.id)
+            except Exception:
+                # Incompatible for this architecture (e.g. SD1.5 .pt on SDXL pipe).
+                logger.info("Embedding %s not compatible with %s (skipped)", item.id, architecture)
+                loaded.add(item.id)  # avoid retrying on every subsequent generate with same prompt
+        if newly:
+            logger.info("Loaded %d embedding(s) for prompt: %s", len(newly), ", ".join(newly))
+
+    @staticmethod
+    def _load_single_embedding(pipe, item, *, sdxl: bool) -> None:
+        if sdxl:
+            # SDXL embeddings carry separate vectors for both text encoders.
+            from safetensors.torch import load_file
+
+            if not item.path.endswith(".safetensors"):
+                raise ValueError("SDXL needs dual-encoder safetensors embeddings")
+            state = load_file(item.path)
+            if "clip_l" not in state or "clip_g" not in state:
+                raise ValueError("not an SDXL (clip_l/clip_g) embedding")
+            pipe.load_textual_inversion(
+                state["clip_l"], token=item.id, text_encoder=pipe.text_encoder, tokenizer=pipe.tokenizer
+            )
+            pipe.load_textual_inversion(
+                state["clip_g"], token=item.id, text_encoder=pipe.text_encoder_2, tokenizer=pipe.tokenizer_2
+            )
+            return
+        pipe.load_textual_inversion(item.path, token=item.id)
+
+    def _dtype_for_architecture(self, architecture: str) -> torch.dtype:
+        if self.flags.no_half:
+            return torch.float32
+        if (
+            getattr(self.flags, "fluxfp8", False)
+            and is_transformer_image_architecture(architecture)
+            and not is_krea2_architecture(architecture)
+            and not is_anima_architecture(architecture)
+            and not is_qwen_image_architecture(architecture)
+            and not is_sana_architecture(architecture)
+        ):
+            return torch.float8_e4m3fn
+        if (is_sd3_architecture(architecture) or is_transformer_image_architecture(architecture)) and self.devices.device().type == "cuda":
+            try:
+                if torch.cuda.is_bf16_supported():
+                    return torch.bfloat16
+            except Exception:
+                pass
+        return self.devices.dtype(self.flags.no_half)
+
+    def _gguf_compute_dtype(self, requested_dtype: torch.dtype) -> torch.dtype:
+        if requested_dtype != torch.float8_e4m3fn:
+            return requested_dtype
+        if self.devices.device().type == "cuda":
+            try:
+                if torch.cuda.is_bf16_supported():
+                    return torch.bfloat16
+            except Exception:
+                pass
+        return torch.float16
+
+    def _load_dit_transformer_single_file(
+        self,
+        model_cls,
+        path: Path,
+        *,
+        config_dir: str,
+        dtype: torch.dtype,
+        family: str,
+    ):
+        load_kwargs = {
+            "config": config_dir,
+            "torch_dtype": dtype,
+            "local_files_only": True,
+        }
+        load_format = resolve_transformer_load_format(path)
+        if path.suffix.lower() == ".gguf":
+            dtype = self._gguf_compute_dtype(dtype)
+            load_kwargs["torch_dtype"] = dtype
+            load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
+            self._patch_gguf_linear_input_dtype()
+        elif path.suffix.lower() == ".safetensors":
+            bnb_report = inspect_bnb_4bit_safetensors(path)
+            if bnb_report.is_bnb_4bit:
+                if self.devices.device().type != "cuda":
+                    raise ModelNotFoundError(
+                        f"{path.name} is a bitsandbytes {bnb_report.quant_type.upper()} checkpoint; "
+                        "CUDA is required for NF4/FP4 inference."
+                    )
+                if bnb_report.needs_custom_flux_bnb_loader:
+                    if family.lower() != "flux":
+                        raise ModelNotFoundError(
+                            f"{path.name} is a packed Flux bitsandbytes {bnb_report.quant_type.upper()} "
+                            "single-file checkpoint, but this loader was called for a non-Flux family."
+                        )
+                    transformer = load_flux_original_bnb_transformer(
+                        path,
+                        config_dir=config_dir,
+                        dtype=normalize_bnb_4bit_compute_dtype(dtype),
+                        device=self.devices.device(),
+                        quant_type=bnb_report.quant_type or "nf4",
+                    )
+                    load_format = f"{bnb_report.load_format_label}-flux-original"
+                    logger.info(
+                        "Loading %s transformer (%s, %d source quantized layers) from %s",
+                        family,
+                        load_format,
+                        bnb_report.quantized_linear_layers,
+                        path.name,
+                    )
+                    return transformer
+                bnb_compute_dtype = normalize_bnb_4bit_compute_dtype(dtype)
+                load_kwargs["quantization_config"] = build_bnb_4bit_quantization_config(
+                    bnb_report,
+                    compute_dtype=bnb_compute_dtype,
+                )
+                load_kwargs["torch_dtype"] = bnb_compute_dtype
+                load_format = bnb_report.load_format_label
+                logger.info(
+                    "Loading %s transformer (%s, %d quantized layers) from %s",
+                    family,
+                    load_format,
+                    bnb_report.quantized_linear_layers,
+                    path.name,
+                )
+
+        transformer_t0 = time.perf_counter()
+        try:
+            transformer = model_cls.from_single_file(str(path), **load_kwargs)
+        except Exception as exc:
+            # KeyError (missing expected state-dict key, e.g. a QK-norm key the
+            # standard BFL->diffusers converter expects) and RuntimeError from
+            # split_with_sizes (a tensor shaped differently than the converter
+            # assumes) both mean: this file's key layout doesn't match what the
+            # standard converter for this family expects - usually a non-standard
+            # FP8/scaled export rather than a corrupt file. Surface clearly instead
+            # of an unhandled thread crash.
+            logger.error(
+                "%s transformer failed to load from %s (format=%s): %s: %s",
+                family,
+                path.name,
+                load_format,
+                type(exc).__name__,
+                exc,
+            )
+            raise ModelNotFoundError(
+                f"'{path.name}' failed to load as a {family} transformer "
+                f"({type(exc).__name__}: {exc}). The file's internal layout doesn't "
+                "match the standard converter for this architecture - likely a "
+                "non-standard quantization/export. Try a different checkpoint."
+            ) from exc
+        if load_format in {"nf4", "fp4"}:
+            transformer = transformer.to(self.devices.device())
+        logger.info(
+            "%s transformer loaded in %.1fs (format=%s) from %s",
+            family,
+            time.perf_counter() - transformer_t0,
+            load_format,
+            path.name,
+        )
+        return transformer
+
+    def _prepare_flux_transformer_compute(self, transformer, requested_dtype: torch.dtype) -> None:
+        """Keep FP8 Flux storage weights compatible with the pipeline compute dtype."""
+        try:
+            has_fp8_weights = any(
+                parameter.dtype == torch.float8_e4m3fn
+                for parameter in transformer.parameters()
+                if parameter.is_floating_point()
+            )
+        except Exception:
+            logger.debug("Could not inspect Flux transformer dtypes", exc_info=True)
+            return
+        if not has_fp8_weights:
+            return
+        compute_dtype = (
+            self._gguf_compute_dtype(requested_dtype)
+            if requested_dtype == torch.float8_e4m3fn
+            else requested_dtype
+        )
+        enable_casting = getattr(transformer, "enable_layerwise_casting", None)
+        if callable(enable_casting):
+            # Diffusers' default skip patterns include normalization modules.
+            # Some Flux FP8 exports store their timestep-embedding linear layers
+            # inside those modules as FP8 too, which still mismatches BF16 inputs.
+            transformer._skip_layerwise_casting_patterns = None
+            enable_casting(
+                storage_dtype=torch.float8_e4m3fn,
+                compute_dtype=compute_dtype,
+                skip_modules_pattern=(),
+            )
+            # Layerwise hooks wrap linear/conv forwards, but normalization
+            # weights are read directly by torch.ops/functional kernels.
+            # Those kernels cannot promote FP8 weights with BF16 activations.
+            # Norm parameters are tiny relative to the transformer, so keep
+            # them resident in the compute dtype while the large matrices
+            # remain FP8 and are cast layer by layer.
+            named_modules = getattr(transformer, "named_modules", None)
+            if callable(named_modules):
+                for module_name, module in named_modules():
+                    module_kind = type(module).__name__.lower()
+                    if "norm" not in module_name.lower() and "norm" not in module_kind:
+                        continue
+                    for parameter_name, parameter in module.named_parameters(recurse=False):
+                        if parameter.dtype != torch.float8_e4m3fn:
+                            continue
+                        replacement = torch.nn.Parameter(
+                            parameter.detach().to(dtype=compute_dtype),
+                            requires_grad=parameter.requires_grad,
+                        )
+                        module.register_parameter(parameter_name, replacement)
+            logger.info("Flux FP8 transformer uses %s compute with FP8 layerwise storage.", compute_dtype)
+            return
+        # Older Diffusers builds do not expose layerwise casting. A direct cast
+        # is larger in memory but prevents mixed FP8/BF16 matmuls from failing.
+        transformer.to(dtype=compute_dtype)
+        logger.warning("Flux FP8 transformer was cast to %s because layerwise casting is unavailable.", compute_dtype)
+
+    def _prepare_vae_compute(self, vae, compute_dtype: torch.dtype):
+        """Cast FP8 VAE storage before convolution/decode kernels consume it."""
+        if compute_dtype == torch.float8_e4m3fn:
+            compute_dtype = self._gguf_compute_dtype(compute_dtype)
+        try:
+            has_fp8_weights = any(
+                parameter.dtype == torch.float8_e4m3fn
+                for parameter in vae.parameters()
+                if parameter.is_floating_point()
+            )
+        except Exception:
+            logger.debug("Could not inspect VAE parameter dtypes", exc_info=True)
+            return vae
+        if has_fp8_weights:
+            vae.to(dtype=compute_dtype)
+            logger.info("FP8 VAE weights cast to %s for runtime compute.", compute_dtype)
+        return vae
+
+    @staticmethod
+    def _flux_transformer_has_guidance(path: Path) -> bool:
+        suffix = path.suffix.lower()
+        try:
+            if suffix == ".gguf":
+                import gguf
+
+                reader = gguf.GGUFReader(str(path))
+                return any("guidance_in" in tensor.name for tensor in reader.tensors)
+            if suffix == ".safetensors":
+                from safetensors import safe_open
+
+                with safe_open(path, framework="pt", device="cpu") as handle:
+                    return any("guidance_in" in key for key in handle.keys())
+        except Exception:
+            logger.debug("Could not inspect Flux guidance tensors for %s", path, exc_info=True)
+        name = path.name.lower()
+        return not any(token in name for token in ("schnell", "fusion", "turbo", "lightning", "4step", "4-step"))
+
+    def _flux_search_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for root in [self.flags.resolved_models_dir(), *self.flags.resolved_extra_model_dirs()]:
+            try:
+                resolved = root.resolve()
+            except Exception:
+                continue
+            key = str(resolved).lower()
+            if resolved.exists() and key not in seen:
+                seen.add(key)
+                roots.append(resolved)
+        return roots
+
+    def _find_flux_component(self, filenames: tuple[str, ...], subdirs: tuple[str, ...]) -> Path | None:
+        # Prefer the first filename (e.g. fp8 T5) across all search roots before any fallback.
+        for filename in filenames:
+            for root in self._flux_search_roots():
+                for subdir in subdirs:
+                    base = root / subdir if subdir else root
+                    candidate = self._confined_flux_asset(root, base / filename)
+                    if candidate is not None and candidate.stat().st_size > 0:
+                        return candidate
+
+                    # ComfyUI stores support weights below typed directories
+                    # (for example text_encoders/T5/<variant>/...). Search
+                    # only the matching component category, never the entire
+                    # model library. This also ignores the empty placeholders
+                    # sometimes left by interrupted downloads.
+                    category = "vae" if filename.casefold() == "ae.safetensors" else "text_encoders"
+                    component_root = root / category
+                    if self._confined_flux_asset(root, component_root, require_file=False) is not None:
+                        try:
+                            matches = sorted(
+                                component_root.rglob(filename),
+                                key=lambda path: (len(path.parts), str(path).casefold()),
+                            )
+                        except OSError:
+                            matches = []
+                        for match in matches:
+                            resolved = self._confined_flux_asset(root, match)
+                            if resolved is not None and resolved.stat().st_size > 0:
+                                return resolved
+        return None
+
+    @staticmethod
+    def _confined_flux_asset(root: Path, candidate: Path, *, require_file: bool = True) -> Path | None:
+        """Resolve a Flux asset only when it remains inside its configured root."""
+        try:
+            resolved_root = root.resolve(strict=True)
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(resolved_root)
+            if require_file and not resolved.is_file():
+                return None
+            if not require_file and not resolved.is_dir():
+                return None
+            return resolved
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def _find_flux_component_dir(
+        self,
+        dirnames: tuple[str, ...],
+        subdirs: tuple[str, ...],
+    ) -> Path | None:
+        for dirname in dirnames:
+            for root in self._flux_search_roots():
+                for subdir in subdirs:
+                    base = root / subdir if subdir else root
+                    candidate = base / dirname
+                    resolved = self._confined_flux_asset(root, candidate, require_file=False)
+                    if resolved is not None:
+                        return resolved
+        return None
+
+    def _flux_hub_cache_roots(self) -> list[Path]:
+        """Return configured/local Hugging Face cache roots for Flux tokenizer lookup."""
+        roots: list[Path] = []
+        for model_root in self._flux_search_roots():
+            roots.extend((model_root, model_root / "hub", model_root / ".cache" / "huggingface" / "hub"))
+        for variable in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE"):
+            value = os.environ.get(variable)
+            if value:
+                roots.append(Path(value).expanduser())
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+
+            roots.append(Path(HF_HUB_CACHE))
+        except Exception:
+            pass
+
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            try:
+                resolved = root.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            key = str(resolved).casefold()
+            if key not in seen:
+                seen.add(key)
+                unique.append(resolved)
+        return unique
+
+    def _find_flux_tokenizer_snapshot(
+        self,
+        repo_id: str,
+        required_files: tuple[str, ...],
+    ) -> Path | None:
+        """Find one complete, cached tokenizer snapshot without consulting the Hub."""
+        cache_name = "models--" + repo_id.replace("/", "--")
+        for cache_root in self._flux_hub_cache_roots():
+            try:
+                resolved_cache = cache_root.resolve(strict=True)
+                repo_root = cache_root / cache_name
+                snapshots_root = repo_root / "snapshots"
+                resolved_snapshots = snapshots_root.resolve(strict=True)
+                resolved_snapshots.relative_to(resolved_cache)
+                revisions = [path for path in snapshots_root.iterdir() if path.is_dir()]
+                if not revisions:
+                    continue
+                preferred: list[Path] = []
+                ref_main = repo_root / "refs" / "main"
+                if ref_main.is_file():
+                    revision = ref_main.read_text(encoding="utf-8").strip()
+                    if revision:
+                        preferred.append(snapshots_root / revision)
+                ordered = preferred + sorted(
+                    (path for path in revisions if path not in preferred),
+                    key=lambda path: path.name.casefold(),
+                    reverse=True,
+                )
+                for snapshot in ordered:
+                    resolved_snapshot = snapshot.resolve(strict=True)
+                    resolved_snapshot.relative_to(resolved_cache)
+                    if all(
+                        (resolved_file := (snapshot / filename).resolve(strict=True)).is_file()
+                        and resolved_file.stat().st_size > 0
+                        and resolved_file.is_relative_to(resolved_cache)
+                        for filename in required_files
+                    ):
+                        return snapshot
+            except (OSError, RuntimeError, ValueError):
+                continue
+        return None
+
+    def _resolve_flux_clip_tokenizer_path(self) -> Path:
+        clip_tokenizer = self._find_flux_tokenizer_snapshot(
+            "openai/clip-vit-large-patch14",
+            ("vocab.json", "merges.txt", "tokenizer_config.json"),
+        )
+        if clip_tokenizer is None:
+            clip_tokenizer = self._find_flux_installed_tokenizer(
+                "clip-vit-large-patch14",
+                ("vocab.json", "merges.txt", "tokenizer_config.json"),
+            )
+        if clip_tokenizer is None:
+            raise ModelNotFoundError(
+                "Flux prompt conditioning needs a complete local CLIP-L tokenizer snapshot for "
+                "openai/clip-vit-large-patch14. Place it in a configured model root's "
+                "hub/models--<repo>/snapshots/<revision> folder or in the configured "
+                "Hugging Face cache, then retry. Runtime loading is local-only."
+            )
+        return clip_tokenizer
+
+    def _resolve_flux_t5_tokenizer_path(self) -> Path:
+        t5_tokenizer = self._find_flux_tokenizer_snapshot(
+            "google/t5-v1_1-xxl",
+            ("spiece.model", "tokenizer_config.json"),
+        )
+        if t5_tokenizer is None:
+            t5_tokenizer = self._find_flux_installed_tokenizer(
+                "t5-v1_1-xxl",
+                ("spiece.model", "tokenizer_config.json"),
+            )
+        if t5_tokenizer is None:
+            raise ModelNotFoundError(
+                "Flux teacher conditioning needs a complete local T5-XXL tokenizer snapshot for "
+                "google/t5-v1_1-xxl. Place it in a configured model root's "
+                "hub/models--<repo>/snapshots/<revision> folder or in the configured "
+                "Hugging Face cache, then retry. Runtime loading is local-only."
+            )
+        return t5_tokenizer
+
+    def _find_flux_installed_tokenizer(self, repo_folder: str, required_files: tuple[str, ...]) -> Path | None:
+        """Find tokenizer snapshots installed by AIWF's explicit setup bundles."""
+        for root in self._flux_search_roots():
+            candidate = root / "flux" / "tokenizer" / repo_folder
+            resolved = self._confined_flux_asset(root, candidate, require_file=False)
+            if resolved is not None and all(
+                (path := self._confined_flux_asset(root, resolved / name)) is not None and path.stat().st_size > 0
+                for name in required_files
+            ):
+                return resolved
+        return None
+
+    def _diffusers_component_search_roots(self) -> list[Path]:
+        return self._flux_search_roots()
+
+    @staticmethod
+    def _looks_like_diffusers_component_dir(path: Path, *, architecture: str = "") -> bool:
+        if is_flux_kontext_architecture(architecture):
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import flux_kontext_missing_local_files
+
+                # For a selected GGUF, the component snapshot supplies only
+                # conditioning assets; transformer weights come from GGUF.
+                return not flux_kontext_missing_local_files(
+                    path, limit=1, require_transformer_weights=False
+                )
+            except Exception:
+                return False
+        if is_z_image_architecture(architecture) or is_flux2_klein_architecture(architecture):
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import (
+                    flux2_klein_components_missing_local_files,
+                    z_image_components_missing_local_files,
+                )
+
+                missing = (
+                    z_image_components_missing_local_files(path)
+                    if is_z_image_architecture(architecture)
+                    else flux2_klein_components_missing_local_files(path)
+                )
+                return not missing
+            except Exception:
+                return False
+        try:
+            if not (path / "model_index.json").is_file():
+                return False
+            required_dirs = ("scheduler", "text_encoder", "tokenizer", "vae")
+            if not all((path / name).is_dir() for name in required_dirs):
+                return False
+            if not (path / "scheduler" / "scheduler_config.json").is_file():
+                return False
+            if not any((path / "tokenizer" / name).is_file() for name in ("tokenizer.json", "vocab.json")):
+                return False
+            if not any((path / "text_encoder").glob("*.safetensors")) and not any((path / "text_encoder").glob("*.bin")):
+                return False
+            if not any((path / "vae").glob("*.safetensors")) and not any((path / "vae").glob("*.bin")):
+                return False
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _flux2_component_repo_name(checkpoint: Checkpoint) -> str:
+        blob = f"{checkpoint.id} {checkpoint.title} {checkpoint.filename} {checkpoint.path}".lower()
+        if "4b" in blob or "klein-4" in blob:
+            return "FLUX.2-klein-4B"
+        return "FLUX.2-klein-9B"
+
+    def _cached_hf_component_dir(self, repo_id: str) -> Path | None:
+        if _try_to_load_from_cache is None:
+            return None
+        try:
+            cached = _try_to_load_from_cache(repo_id, "model_index.json")
+        except Exception:
+            return None
+        if not isinstance(cached, str):
+            return None
+        path = Path(cached).parent
+        return path if path.is_dir() else None
+
+    def _component_dir_candidates(self, architecture: str, checkpoint: Checkpoint) -> list[Path]:
+        roots = self._diffusers_component_search_roots()
+        candidates: list[Path] = []
+        if is_flux_kontext_architecture(architecture):
+            candidates.extend(
+                root / subdir
+                for root in roots
+                for subdir in (
+                    "flux/Components/flux-kontext-4bit-fp4",
+                    "flux/Components/FLUX.1-Kontext-dev",
+                    "flux/Diffusers/FLUX.1-Kontext-dev",
+                )
+            )
+        elif is_flux2_klein_architecture(architecture):
+            repo_name = self._flux2_component_repo_name(checkpoint)
+            candidates.extend(
+                root / subdir
+                for root in roots
+                for subdir in (
+                    f"flux2/Components/{repo_name}",
+                    f"flux2/Diffusers/{repo_name}",
+                    f"flux2/{repo_name}",
+                    f"Flux2/Diffusers/{repo_name}",
+                    f"Flux2/{repo_name}",
+                    repo_name,
+                )
+            )
+            cached = self._cached_hf_component_dir(f"black-forest-labs/{repo_name}")
+            if cached:
+                candidates.append(cached)
+        elif is_z_image_architecture(architecture):
+            repo_name = "Z-Image-Turbo"
+            candidates.extend(
+                root / subdir
+                for root in roots
+                for subdir in (
+                    f"z-image/Components/{repo_name}",
+                    f"z-image/Diffusers/{repo_name}",
+                    f"z-image/{repo_name}",
+                    f"Z-Image/Diffusers/{repo_name}",
+                    f"Z-Image/{repo_name}",
+                    repo_name,
+                )
+            )
+            cached = self._cached_hf_component_dir("Tongyi-MAI/Z-Image-Turbo")
+            if cached:
+                candidates.append(cached)
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for candidate in candidates:
+            key = str(candidate).lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(candidate)
+        return unique
+
+    def _resolve_component_dir(self, architecture: str, checkpoint: Checkpoint) -> Path:
+        configured_roots = [Path(root).absolute() for root in self._diffusers_component_search_roots()]
+        for candidate in self._component_dir_candidates(architecture, checkpoint):
+            # Component candidates built beneath a configured model root must
+            # remain there after resolving junctions/symlinks. HF cache paths
+            # returned by the cache API are intentionally outside these roots.
+            candidate_path = Path(candidate).absolute()
+            originated_in_configured_root = any(
+                candidate_path == root or root in candidate_path.parents
+                for root in configured_roots
+            )
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if originated_in_configured_root and not any(
+                resolved == root.resolve() or root.resolve() in resolved.parents
+                for root in configured_roots
+            ):
+                continue
+            if self._looks_like_diffusers_component_dir(
+                resolved,
+                architecture=architecture,
+            ):
+                return resolved
+
+        searched = ", ".join(str(path) for path in self._component_dir_candidates(architecture, checkpoint))
+        if is_flux2_klein_architecture(architecture):
+            repo_name = self._flux2_component_repo_name(checkpoint)
+            key = "flux2-klein-4b-components" if repo_name.endswith("4B") else "flux2-klein-9b-components"
+            raise ModelNotFoundError(
+                f"Flux.2 Klein needs the matching Diffusers component folder for {repo_name}: "
+                "text_encoder, tokenizer, scheduler, and VAE. "
+                f"In the Models tab, use the 'Text-to-image Flux.2 Klein' quick-start button "
+                f"(downloads the GGUF + `{key}` components), or manually download `{key}` from the Curated catalog. "
+                f"9B components are HF-gated: accept the license and set your Hugging Face token in Settings first. "
+                f"Alternative: place full `{repo_name}` snapshot under `models/flux2/Components/{repo_name}`. "
+                f"Searched: {searched}"
+            )
+        if is_flux_kontext_architecture(architecture):
+            raise ModelNotFoundError(
+                "Flux Kontext GGUF needs a complete local Kontext Diffusers component snapshot, including text encoders, "
+                "tokenizers, scheduler, transformer config, and VAE. Place it under "
+                "models/flux/Components/flux-kontext-4bit-fp4. Searched: "
+                f"{searched}"
+            )
+        raise ModelNotFoundError(
+            "Z-Image needs the Z-Image-Turbo Diffusers component folder: text_encoder, tokenizer, "
+            "scheduler, and VAE. Download `z-image-turbo-components` from Models, or place the full "
+            f"snapshot under `models/z-image/Components/Z-Image-Turbo`. Searched: {searched}"
+        )
+
+    @staticmethod
+    def _local_config_dir(component_dir: Path, subfolder: str) -> str | None:
+        path = component_dir / subfolder
+        return str(path) if (path / "config.json").is_file() else None
+
+    @staticmethod
+    def _component_dir_matches_repo(component_dir: Path, repo_name: str) -> bool:
+        normalized_path = component_dir.as_posix().lower()
+        normalized_repo = repo_name.lower()
+        return normalized_repo in normalized_path or normalized_repo.replace(".", "-") in normalized_path
+
+    @staticmethod
+    @contextmanager
+    def _gguf_singleton_shape_compat():
+        """Allow GGUF files that omit leading singleton dims on non-linear params.
+
+        Some Comfy-style Z-Image GGUF files store pad tokens as `[dim]`, while
+        Diffusers declares those parameters as `[1, dim]`. Linear weights must
+        stay quantized, so this only reshapes/dequantizes params whose inferred
+        unquantized shape has the same element count but not the exact target
+        shape.
+        """
+        try:
+            import torch
+            from diffusers.quantizers.gguf.gguf_quantizer import GGUFQuantizer
+            from diffusers.quantizers.gguf.utils import GGUFParameter, dequantize_gguf_tensor
+            from diffusers.quantizers.gguf.utils import _quant_shape_from_byte_shape
+            from diffusers.quantizers.gguf.utils import GGML_QUANT_SIZES
+            from diffusers.utils import get_module_from_name
+        except Exception:
+            yield
+            return
+
+        original_check = GGUFQuantizer.check_quantized_param_shape
+        original_create = GGUFQuantizer.create_quantized_param
+
+        def _numel(shape) -> int:
+            total = 1
+            for dim in shape:
+                total *= int(dim)
+            return total
+
+        def _inferred_shape(param):
+            block_size, type_size = GGML_QUANT_SIZES[param.quant_type]
+            return tuple(_quant_shape_from_byte_shape(tuple(param.shape), type_size, block_size))
+
+        def check_quantized_param_shape(self, param_name, current_param, loaded_param):
+            try:
+                return original_check(self, param_name, current_param, loaded_param)
+            except ValueError:
+                if isinstance(loaded_param, GGUFParameter):
+                    inferred = _inferred_shape(loaded_param)
+                    current = tuple(current_param.shape)
+                    if inferred != current and _numel(inferred) == _numel(current):
+                        logger.info(
+                            "Allowing GGUF singleton reshape for %s: %s -> %s",
+                            param_name,
+                            inferred,
+                            current,
+                        )
+                        return True
+                raise
+
+        def create_quantized_param(
+            self,
+            model,
+            param_value,
+            param_name,
+            target_device,
+            state_dict=None,
+            unexpected_keys=None,
+            **kwargs,
+        ):
+            if isinstance(param_value, GGUFParameter):
+                module, tensor_name = get_module_from_name(model, param_name)
+                target = None
+                is_parameter = tensor_name in module._parameters
+                if is_parameter:
+                    target = module._parameters[tensor_name]
+                elif tensor_name in module._buffers:
+                    target = module._buffers[tensor_name]
+                if target is not None:
+                    inferred = _inferred_shape(param_value)
+                    target_shape = tuple(target.shape)
+                    if inferred != target_shape and _numel(inferred) == _numel(target_shape):
+                        value = dequantize_gguf_tensor(param_value).reshape(target_shape).to(target_device)
+                        if is_parameter:
+                            module._parameters[tensor_name] = torch.nn.Parameter(
+                                value,
+                                requires_grad=getattr(target, "requires_grad", False),
+                            )
+                        else:
+                            module._buffers[tensor_name] = value
+                        return
+            return original_create(
+                self,
+                model,
+                param_value,
+                param_name,
+                target_device,
+                state_dict=state_dict,
+                unexpected_keys=unexpected_keys,
+                **kwargs,
+            )
+
+        GGUFQuantizer.check_quantized_param_shape = check_quantized_param_shape
+        GGUFQuantizer.create_quantized_param = create_quantized_param
+        try:
+            yield
+        finally:
+            GGUFQuantizer.check_quantized_param_shape = original_check
+            GGUFQuantizer.create_quantized_param = original_create
+
+    @staticmethod
+    def _flux2_config_from_gguf(path: Path, fallback: dict) -> dict:
+        if path.suffix.lower() != ".gguf":
+            return fallback
+        try:
+            from gguf import GGUFReader
+        except Exception:
+            return fallback
+        try:
+            reader = GGUFReader(str(path))
+            shapes = {tensor.name: [int(dim) for dim in tensor.shape] for tensor in reader.tensors}
+        except Exception:
+            logger.debug("Could not derive Flux.2 config from GGUF header for %s", path, exc_info=True)
+            return fallback
+
+        image_in = shapes.get("img_in.weight")
+        text_in = shapes.get("txt_in.weight")
+        time_in = shapes.get("time_in.in_layer.weight")
+        norm = next(
+            (
+                shape
+                for name, shape in shapes.items()
+                if name.endswith("img_attn.norm.query_norm.weight") and shape
+            ),
+            None,
+        )
+        if not image_in or len(image_in) < 2:
+            return fallback
+        hidden = int(image_in[1])
+        attention_head_dim = int(norm[0]) if norm else int(fallback.get("attention_head_dim", 128))
+        num_attention_heads = max(1, hidden // max(1, attention_head_dim))
+        double_layers = {
+            int(name.split(".", 2)[1])
+            for name in shapes
+            if name.startswith("double_blocks.") and name.split(".", 2)[1].isdigit()
+        }
+        single_layers = {
+            int(name.split(".", 2)[1])
+            for name in shapes
+            if name.startswith("single_blocks.") and name.split(".", 2)[1].isdigit()
+        }
+        derived = dict(fallback)
+        derived.update(
+            {
+                "in_channels": int(image_in[0]),
+                "num_layers": len(double_layers) or int(fallback.get("num_layers", 5)),
+                "num_single_layers": len(single_layers) or int(fallback.get("num_single_layers", 20)),
+                "attention_head_dim": attention_head_dim,
+                "num_attention_heads": num_attention_heads,
+                "joint_attention_dim": int(text_in[0]) if text_in and len(text_in) >= 2 else fallback.get("joint_attention_dim", 7680),
+                "timestep_guidance_channels": int(time_in[0]) if time_in and len(time_in) >= 2 else fallback.get("timestep_guidance_channels", 256),
+                "guidance_embeds": False,
+            }
+        )
+        logger.info(
+            "Derived Flux.2 GGUF config for %s: hidden=%s, heads=%s, double=%s, single=%s, joint=%s",
+            path.name,
+            hidden,
+            num_attention_heads,
+            derived["num_layers"],
+            derived["num_single_layers"],
+            derived["joint_attention_dim"],
+        )
+        return derived
+
+    @staticmethod
+    def _patch_gguf_linear_input_dtype() -> None:
+        try:
+            import torch
+            from diffusers.quantizers.gguf import utils as gguf_utils
+            from diffusers.quantizers.gguf.utils import dequantize_gguf_tensor
+        except Exception:
+            return
+        cls = getattr(gguf_utils, "GGUFLinear", None)
+        if cls is None or getattr(cls, "_aiwf_input_dtype_patch", False):
+            return
+        original = cls.forward_native
+
+        def forward_native(self, inputs: torch.Tensor):
+            compute_dtype = getattr(self, "compute_dtype", None)
+            if compute_dtype is not None and inputs.dtype != compute_dtype:
+                inputs = inputs.to(compute_dtype)
+            try:
+                weight = dequantize_gguf_tensor(self.weight)
+                target_dtype = compute_dtype or weight.dtype
+                weight = weight.to(device=inputs.device, dtype=target_dtype)
+                bias = (
+                    self.bias.to(device=inputs.device, dtype=target_dtype)
+                    if self.bias is not None
+                    else None
+                )
+                return torch.nn.functional.linear(inputs, weight, bias)
+            except Exception:
+                return original(self, inputs)
+
+        cls.forward_native = forward_native
+        cls._aiwf_input_dtype_patch = True
+
+    def _validate_flux_prompt_assets(self) -> dict[str, Path]:
+        """Validate conditioning tokenizers as well as Flux weight components."""
+        components = self._resolve_flux_component_paths()
+        conditioning = self._resolved_flux_prompt_conditioning()
+        if conditioning.mode == FLUX_CONDITIONING_UNIVERSAL:
+            return components
+        self._resolve_flux_clip_tokenizer_path()
+        if conditioning.mode == FLUX_CONDITIONING_TEACHER:
+            self._resolve_flux_t5_tokenizer_path()
+        return components
+
+    def _resolve_flux_component_paths(self) -> dict[str, Path]:
+        conditioning = self._resolved_flux_prompt_conditioning()
+        mode = conditioning.mode
+        clip = self._find_flux_component(
+            ("clip_l.safetensors",),
+            ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders", "Clip", "clip"),
+        )
+        override = self._flux_text_encoder_override
+        if override and Path(override).is_file():
+            t5: Path | None = Path(override).resolve()
+        else:
+            if override:
+                logger.warning(
+                    "Selected Flux text encoder %s no longer exists; falling back to auto-pick.",
+                    override,
+                )
+            t5 = self._find_flux_component(
+                (
+                    "t5xxl_fp8_e4m3fn.safetensors",
+                    "t5xxl_fp8_e4m3fn_scaled.safetensors",
+                    "t5xxl_fp16.safetensors",
+                ),
+                ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders"),
+            )
+        vae = self._find_flux_component(
+            ("ae.safetensors",),
+            ("flux/VAE", "VAE", "vae"),
+        )
+        required = [("Flux VAE", vae)]
+        if mode == FLUX_CONDITIONING_TEACHER:
+            required.extend((("CLIP-L", clip), ("T5-XXL", t5)))
+        elif mode == FLUX_CONDITIONING_DISTILLT5_CONTROL:
+            required.append(("CLIP-L", clip))
+            required.extend(
+                (
+                    ("DistillT5 control", conditioning.distillt5_path),
+                    (
+                        "T5-base control tokenizer",
+                        conditioning.distillt5_tokenizer_path,
+                    ),
+                )
+            )
+        elif mode == FLUX_CONDITIONING_UNIVERSAL:
+            adapter_path = conditioning.universal_adapter_path
+            required.extend(
+                (
+                    (
+                        "universal adapter_config.json",
+                        adapter_path / "adapter_config.json"
+                        if adapter_path is not None
+                        else None,
+                    ),
+                    (
+                        "universal adapter.safetensors",
+                        adapter_path / "adapter.safetensors"
+                        if adapter_path is not None
+                        else None,
+                    ),
+                    (
+                        "local UMT5-base core",
+                        Path(conditioning.universal_core_model).expanduser(),
+                    ),
+                )
+            )
+        directory_requirements = {
+            "DistillT5 control",
+            "T5-base control tokenizer",
+            "local UMT5-base core",
+        }
+        missing = [
+            name
+            for name, value in required
+            if value is None
+            or not (
+                Path(value).is_dir()
+                if name in directory_requirements
+                else Path(value).is_file()
+            )
+        ]
+        if (
+            mode == FLUX_CONDITIONING_UNIVERSAL
+            and importlib.util.find_spec("ute") is None
+        ):
+            missing.append("universal-text-encoder package")
+        if missing:
+            roots = ", ".join(str(root) for root in self._flux_search_roots())
+            if mode == FLUX_CONDITIONING_UNIVERSAL:
+                recovery = (
+                    "Set AIWF_FLUX_UNIVERSAL_ADAPTER_PATH to a trained adapter "
+                    "directory and AIWF_FLUX_UNIVERSAL_CORE_MODEL to a complete "
+                    "local UMT5-base snapshot, then install the reviewed "
+                    "universal-text-encoder package into this runtime."
+                )
+            elif mode == FLUX_CONDITIONING_DISTILLT5_CONTROL:
+                recovery = (
+                    "Install DistillT5 and t5-v1_1-base under "
+                    "models/flux/Textencoder, or set the two AIWF_FLUX_DISTILLT5_* "
+                    "path variables."
+                )
+            else:
+                recovery = (
+                    "Put CLIP-L under Textencoder, T5-XXL under flux/Textencoder, "
+                    "and ae.safetensors under flux/VAE within a configured model "
+                    "root (Auto-sort can place these files), or add a shared model "
+                    "root in Settings."
+                )
+            raise ModelNotFoundError(
+                f"Flux {mode} conditioning is missing required local assets. "
+                f"Missing: {', '.join(missing)}. {recovery} Searched: {roots}"
+            )
+        resolved = {"vae": vae}
+        if clip is not None:
+            resolved["clip_l"] = clip
+        if t5 is not None:
+            resolved["t5xxl"] = t5
+        return resolved  # type: ignore[dict-item]
+
+    def list_flux_text_encoders(self) -> list[tuple[str, str]]:
+        """Return (label, path) for Flux-compatible safetensors T5-XXL encoders.
+
+        UMT5 encoders (Wan video only) are excluded — they are not compatible
+        with Flux and would produce broken output if selected.
+        """
+        inventory = get_model_inventory(self.flags)
+        text_encoder_records = [
+            record
+            for record in inventory
+            if record.family == "text_encoder"
+            and record.architecture == ARCH_FLUX
+            and Path(record.path).suffix.lower() == ".safetensors"
+        ]
+        if text_encoder_records:
+            seen: set[str] = set()
+            out: list[tuple[str, str]] = []
+            for record in sorted(text_encoder_records, key=lambda item: item.filename.lower()):
+                header_arch = (record.header_identifiers or {}).get("header_arch", "")
+                if header_arch and "t5xxl" not in header_arch.lower():
+                    continue
+                if not header_arch and "t5" not in record.filename.lower():
+                    continue
+                path = Path(record.path)
+                key = str(path.resolve()).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    size_label = format_size(path.stat().st_size)
+                except OSError:
+                    size_label = "unknown size"
+                out.append((f"{path.stem}  [{size_label}]", str(path.resolve())))
+            return out
+
+        return self._scan_flux_text_encoders_from_dirs()
+
+    def _scan_flux_text_encoders_from_dirs(self) -> list[tuple[str, str]]:
+        from aiwf.infrastructure.model_header import read_model_info
+
+        subdirs = ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders")
+        seen: set[str] = set()
+        out: list[tuple[str, str]] = []
+        for root in self._flux_search_roots():
+            for sub in subdirs:
+                directory = root / sub
+                if not directory.is_dir():
+                    continue
+                for path in sorted(directory.glob("*"), key=lambda p: p.name.lower()):
+                    if path.suffix.lower() != ".safetensors":
+                        continue
+                    key = str(path.resolve()).lower()
+                    if key in seen:
+                        continue
+                    try:
+                        info = read_model_info(path)
+                    except Exception:
+                        continue
+                    if not info.is_t5xxl():
+                        continue
+                    seen.add(key)
+                    out.append((f"{path.stem}  [{info.size_label()}]", str(path.resolve())))
+        return out
+
+    def _resolved_flux_prompt_conditioning(self) -> FluxPromptConditioningConfig:
+        config = self._flux_prompt_conditioning
+        if config.mode != FLUX_CONDITIONING_DISTILLT5_CONTROL:
+            return config
+        distillt5_path = config.distillt5_path or self._find_flux_component_dir(
+            ("DistillT5", "distillt5"),
+            ("flux/Textencoder", "Textencoder", "textencoder", "text_encoders"),
+        )
+        tokenizer_path = (
+            config.distillt5_tokenizer_path
+            or self._find_flux_component_dir(
+                ("t5-v1_1-base", "t5-base"),
+                (
+                    "flux/Textencoder", "Textencoder", "textencoder", "text_encoders",
+                    "flux/tokenizer",
+                ),
+            )
+        )
+        return config.updated(
+            distillt5_path=distillt5_path,
+            distillt5_tokenizer_path=tokenizer_path,
+        )
+
+    def _clear_flux_prompt_models(self) -> None:
+        self._flux_text_encoder = None
+        self._flux_text_encoder_2 = None
+        self._flux_tokenizer = None
+        self._flux_tokenizer_2 = None
+        self._flux_component_paths = {}
+        self._flux_clip_device = None
+        self._flux_t5_device = None
+        self._flux_universal_conditioner = None
+        self._flux_conditioning_scope = None
+        self._flux_prompt_cache.clear()
+        for pipe in (self._txt2img, self._img2img, self._inpaint):
+            if pipe is not None and hasattr(pipe, "_aiwf_flux_components"):
+                try:
+                    delattr(pipe, "_aiwf_flux_components")
+                except Exception:
+                    logger.debug("Could not clear cached Flux components on pipe", exc_info=True)
+        gc.collect()
+        self.devices.empty_cache()
+
+    def set_flux_prompt_conditioning(
+        self,
+        mode: str,
+        *,
+        distillt5_path: str | Path | None = None,
+        distillt5_tokenizer_path: str | Path | None = None,
+        universal_adapter_path: str | Path | None = None,
+        universal_core_model: str | None = None,
+        universal_core_revision: str | None = None,
+    ) -> None:
+        """Select an explicit FLUX conditioning route and invalidate resident state."""
+
+        changes: dict[str, object] = {"mode": mode}
+        if distillt5_path is not None:
+            changes["distillt5_path"] = Path(distillt5_path)
+        if distillt5_tokenizer_path is not None:
+            changes["distillt5_tokenizer_path"] = Path(distillt5_tokenizer_path)
+        if universal_adapter_path is not None:
+            changes["universal_adapter_path"] = Path(universal_adapter_path)
+        if universal_core_model is not None:
+            changes["universal_core_model"] = universal_core_model
+        if universal_core_revision is not None:
+            changes["universal_core_revision"] = universal_core_revision
+        new_config = self._flux_prompt_conditioning.updated(**changes)
+        if new_config == self._flux_prompt_conditioning:
+            return
+        self._flux_prompt_conditioning = new_config
+        self._clear_flux_prompt_models()
+        logger.info("Flux prompt-conditioning mode set to: %s", new_config.mode)
+
+    def set_flux_text_encoder(self, path: str | None) -> None:
+        """Choose which T5-XXL text encoder Flux uses (None = automatic best).
+
+        Switching drops the resident encoders so the next generation reloads the
+        chosen T5, and clears warm pipes' cached component map so they re-resolve
+        the new path without needing a checkpoint switch.
+        """
+        new = path or None
+        if new == self._flux_text_encoder_override:
+            return
+        self._flux_text_encoder_override = new
+        self._clear_flux_prompt_models()
+        logger.info("Flux text encoder set to: %s", new or "automatic")
+
+    @staticmethod
+    def _write_temp_config(root: Path, name: str, config: dict) -> str:
+        target = root / name
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        return str(target)
+
+    def _load_flux_prompt_models(self, component_paths: dict[str, Path]) -> None:
+        conditioning = self._resolved_flux_prompt_conditioning()
+        component_signature = {
+            key: str(value) for key, value in component_paths.items()
+        }
+        conditioning_scope = conditioning.cache_scope(component_paths)
+        if conditioning.mode == FLUX_CONDITIONING_UNIVERSAL:
+            if (
+                self._flux_universal_conditioner is not None
+                and self._flux_conditioning_scope == conditioning_scope
+            ):
+                return
+            device = (
+                self.devices.device()
+                if self.devices.device().type == "cuda"
+                else torch.device("cpu")
+            )
+            dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+            conditioner = load_universal_conditioner(
+                conditioning,
+                device=device,
+                dtype=dtype,
+            )
+            self._flux_text_encoder = None
+            self._flux_text_encoder_2 = None
+            self._flux_tokenizer = None
+            self._flux_tokenizer_2 = None
+            self._flux_clip_device = None
+            self._flux_t5_device = None
+            self._flux_universal_conditioner = conditioner
+            self._flux_component_paths = component_signature
+            self._flux_conditioning_scope = conditioning_scope
+            self._flux_prompt_cache.clear()
+            logger.info(
+                "Flux universal UMT5 conditioner warm on %s (scope=%s)",
+                device,
+                conditioning_scope[:12],
+            )
+            return
+
+        if (
+            self._flux_text_encoder is not None
+            and self._flux_text_encoder_2 is not None
+            and self._flux_tokenizer is not None
+            and self._flux_tokenizer_2 is not None
+            and self._flux_component_paths == component_signature
+            and self._flux_conditioning_scope == conditioning_scope
+        ):
+            return
+
+        clip_tokenizer_path: Path | None = None
+        t5_tokenizer_path: Path | None = None
+        if conditioning.mode != FLUX_CONDITIONING_UNIVERSAL:
+            # Resolve tokenizer snapshots before loading the sizeable local
+            # encoders, so a missing tokenizer fails early and cannot trigger a
+            # generation-time Hugging Face download.
+            clip_tokenizer_path = self._resolve_flux_clip_tokenizer_path()
+            if conditioning.mode == FLUX_CONDITIONING_TEACHER:
+                t5_tokenizer_path = self._resolve_flux_t5_tokenizer_path()
+
+        from transformers import (
+            CLIPTextConfig,
+            CLIPTextModel,
+            CLIPTokenizer,
+            T5Config,
+            T5TokenizerFast,
+        )
+
+        clip_config = CLIPTextConfig(
+            vocab_size=49408,
+            hidden_size=768,
+            intermediate_size=3072,
+            num_hidden_layers=12,
+            num_attention_heads=12,
+            max_position_embeddings=77,
+            hidden_act="quick_gelu",
+            layer_norm_eps=1e-5,
+            bos_token_id=49406,
+            eos_token_id=49407,
+            pad_token_id=1,
+            projection_dim=768,
+        )
+        clip_device = self.devices.device() if self.devices.device().type == "cuda" else torch.device("cpu")
+
+        clip = CLIPTextModel(clip_config)
+        self._load_encoder_state_dict(clip, load_file(str(component_paths["clip_l"]), device="cpu"))
+        clip.eval()
+        clip = clip.to(dtype=torch.float16, device=clip_device)
+
+        if conditioning.mode == FLUX_CONDITIONING_DISTILLT5_CONTROL:
+            t5_device = (
+                self.devices.device()
+                if self.devices.device().type == "cuda"
+                else torch.device("cpu")
+            )
+            t5_dtype = torch.float16 if t5_device.type == "cuda" else torch.float32
+            t5, tokenizer_2, t5_device = load_distillt5_control(
+                conditioning,
+                device=t5_device,
+                dtype=t5_dtype,
+            )
+        else:
+            t5_config = T5Config(
+                vocab_size=32128,
+                d_model=4096,
+                d_ff=10240,
+                d_kv=64,
+                num_layers=24,
+                num_decoder_layers=24,
+                num_heads=64,
+                relative_attention_num_buckets=32,
+                relative_attention_max_distance=128,
+                dropout_rate=0.0,
+                layer_norm_epsilon=1e-6,
+                feed_forward_proj="gated-gelu",
+                is_encoder_decoder=False,
+                use_cache=False,
+                pad_token_id=0,
+                eos_token_id=1,
+            )
+            t5, t5_device = self._load_flux_t5_encoder(
+                component_paths["t5xxl"],
+                t5_config,
+            )
+            tokenizer_2 = T5TokenizerFast.from_pretrained(
+                str(t5_tokenizer_path),
+                legacy=True,
+                local_files_only=True,
+            )
+
+        self._flux_text_encoder = clip
+        self._flux_text_encoder_2 = t5
+        self._flux_clip_device = clip_device
+        self._flux_t5_device = t5_device
+        if conditioning.mode != FLUX_CONDITIONING_UNIVERSAL:
+            self._flux_tokenizer = CLIPTokenizer.from_pretrained(
+                str(clip_tokenizer_path),
+                local_files_only=True,
+            )
+        self._flux_tokenizer_2 = tokenizer_2
+        self._flux_universal_conditioner = None
+        self._flux_component_paths = component_signature
+        self._flux_conditioning_scope = conditioning_scope
+        self._flux_prompt_cache.clear()
+        logger.info(
+            "Flux %s text encoders warm: CLIP-L on %s, sequence encoder on %s",
+            conditioning.mode,
+            clip_device,
+            t5_device,
+        )
+
+    def _prompt_cache_get(self, cache: dict, key, family: str):
+        cached = cache.get(key)
+        if cached is None:
+            logger.debug("%s prompt cache miss", family)
+            return None
+        move_to_end = getattr(cache, "move_to_end", None)
+        if callable(move_to_end):
+            move_to_end(key)
+        logger.info("%s prompt cache hit", family)
+        return cached
+
+    def _prompt_cache_put(self, cache: dict, key, value, family: str) -> None:
+        cache[key] = value
+        move_to_end = getattr(cache, "move_to_end", None)
+        if callable(move_to_end):
+            move_to_end(key)
+        limit = max(1, int(getattr(self, "_PROMPT_EMBED_CACHE_LIMIT", 32)))
+        evicted = 0
+        while len(cache) > limit:
+            if isinstance(cache, OrderedDict):
+                cache.popitem(last=False)
+            else:
+                cache.pop(next(iter(cache)))
+            evicted += 1
+        if evicted:
+            logger.info("%s prompt cache evicted %d old entr%s", family, evicted, "y" if evicted == 1 else "ies")
+
+    @staticmethod
+    def _cache_tensor(value):
+        return value.detach().cpu() if isinstance(value, torch.Tensor) else None
+
+    @staticmethod
+    def _cached_tensor_to_device(value, device: torch.device):
+        return value.to(device=device) if isinstance(value, torch.Tensor) else None
+
+    def _active_prompt_cache_scope(self) -> str:
+        active = getattr(self, "_active", None)
+        return str(getattr(active, "id", "") or getattr(active, "path", "") or "")
+
+    def _flux2_text_encoder_load_kwargs(self, component_dir: Path, dtype: torch.dtype) -> tuple[dict[str, object], str]:
+        kwargs: dict[str, object] = {
+            "dtype": dtype,
+            "local_files_only": True,
+        }
+        if self.devices.device().type != "cuda":
+            return kwargs, "bf16/fp16 CPU"
+        text_encoder_gb = asset_size_bytes(component_dir / "text_encoder") / (1024.0**3)
+        if text_encoder_gb < self._FLUX2_TEXT_ENCODER_BNB_THRESHOLD_GB:
+            return kwargs, "bf16/fp16"
+        try:
+            from transformers import BitsAndBytesConfig
+        except ImportError as exc:
+            logger.warning(
+                "Flux.2 Klein text encoder is %.1f GB, but bitsandbytes quantization is unavailable: %s",
+                text_encoder_gb,
+                exc,
+            )
+            return kwargs, "bf16/fp16 CPU"
+
+        compute_dtype = normalize_bnb_4bit_compute_dtype(dtype)
+        device = self.devices.device()
+        cuda_index = device.index if device.index is not None else 0
+        kwargs.update(
+            {
+                "dtype": compute_dtype,
+                "device_map": {"": cuda_index},
+                "quantization_config": BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=compute_dtype,
+                    bnb_4bit_use_double_quant=True,
+                ),
+            }
+        )
+        logger.info(
+            "Flux.2 Klein text encoder %.1f GB exceeds %.1f GB; loading Qwen encoder as bnb NF4 on cuda:%s.",
+            text_encoder_gb,
+            self._FLUX2_TEXT_ENCODER_BNB_THRESHOLD_GB,
+            cuda_index,
+        )
+        return kwargs, "bnb_nf4"
+
+    def _flux_prompt_cache_key(
+        self,
+        prompt: str,
+        batch_size: int,
+        max_sequence_length: int,
+    ) -> str:
+        scope = self._flux_conditioning_scope or self._flux_prompt_conditioning.cache_scope(
+            self._flux_component_paths
+        )
+        return f"{scope}|{prompt}|{batch_size}|{max_sequence_length}"
+
+    @staticmethod
+    def _repeat_flux_conditioning(
+        prompt_embeds: torch.Tensor,
+        pooled: torch.Tensor,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if batch_size == 1:
+            return prompt_embeds, pooled
+        if prompt_embeds.shape[0] != 1 or pooled.shape[0] != 1:
+            raise RuntimeError(
+                "FLUX prompt cache stores one conditioning row before batch expansion."
+            )
+        return (
+            prompt_embeds.repeat(batch_size, 1, 1),
+            pooled.repeat(batch_size, 1),
+        )
+
+    def _encode_flux_prompt(
+        self,
+        prompt: str,
+        *,
+        device: torch.device,
+        batch_size: int,
+        max_sequence_length: int = 256,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mode = self._flux_prompt_conditioning.mode
+        cache_key = self._flux_prompt_cache_key(
+            prompt,
+            batch_size,
+            max_sequence_length,
+        )
+        cached = self._prompt_cache_get(self._flux_prompt_cache, cache_key, "Flux")
+        if cached is not None:
+            prompt_embeds, pooled = cached
+            prompt_embeds, pooled = (
+                prompt_embeds.to(dtype=torch.bfloat16, device=device),
+                pooled.to(dtype=torch.bfloat16, device=device),
+            )
+            return self._repeat_flux_conditioning(
+                prompt_embeds,
+                pooled,
+                batch_size,
+            )
+
+        encode_t0 = time.perf_counter()
+        if mode == FLUX_CONDITIONING_UNIVERSAL:
+            if self._flux_universal_conditioner is None:
+                raise RuntimeError(
+                    "FLUX universal conditioner was not loaded before prompt encoding."
+                )
+            conditioning = self._flux_universal_conditioner.encode(prompt)
+            prompt_embeds, pooled = validate_flux_conditioning(
+                conditioning,
+                expected_batch=1,
+                expected_sequence_length=max_sequence_length,
+            )
+            source_devices = str(getattr(self._flux_universal_conditioner, "device", "unknown"))
+        else:
+            assert self._flux_text_encoder is not None
+            assert self._flux_text_encoder_2 is not None
+            assert self._flux_tokenizer is not None
+            assert self._flux_tokenizer_2 is not None
+
+            clip_device = self._flux_clip_device or device
+            t5_device = self._flux_t5_device or device
+            clip_inputs = self._flux_tokenizer(
+                [prompt],
+                padding="max_length",
+                max_length=77,
+                truncation=True,
+                return_tensors="pt",
+            )
+            t5_inputs = self._flux_tokenizer_2(
+                [prompt],
+                padding="max_length",
+                max_length=max_sequence_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            clip_inputs = clip_inputs.to(clip_device)
+            t5_inputs = t5_inputs.to(t5_device)
+            with torch.no_grad():
+                pooled = self._flux_text_encoder(
+                    clip_inputs.input_ids,
+                    output_hidden_states=False,
+                ).pooler_output
+                t5_kwargs = {
+                    "input_ids": t5_inputs.input_ids,
+                    "output_hidden_states": False,
+                }
+                if mode == FLUX_CONDITIONING_DISTILLT5_CONTROL:
+                    t5_kwargs["attention_mask"] = t5_inputs.attention_mask
+                prompt_embeds = self._flux_text_encoder_2(**t5_kwargs)[0]
+            source_devices = f"CLIP {clip_device}, sequence {t5_device}"
+        logger.info(
+            "Flux prompt encoded in %.2fs (%s; mode=%s)",
+            time.perf_counter() - encode_t0,
+            source_devices,
+            mode,
+        )
+        prompt_embeds = prompt_embeds.to(dtype=torch.bfloat16, device=device)
+        pooled = pooled.to(dtype=torch.bfloat16, device=device)
+        self._prompt_cache_put(
+            self._flux_prompt_cache,
+            cache_key,
+            (
+                prompt_embeds.detach().cpu(),
+                pooled.detach().cpu(),
+            ),
+            "Flux",
+        )
+        return self._repeat_flux_conditioning(
+            prompt_embeds,
+            pooled,
+            batch_size,
+        )
+
+    def _encode_flux_prompt_fast(
+        self,
+        pipe,
+        prompt: str,
+        *,
+        device: torch.device,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode the Flux prompt on the GPU when the T5 encoder is pinned to CPU.
+
+        Loading the transformer first leaves no room for the ~9.5 GB T5-XXL, so
+        it falls back to CPU and a single prompt takes ~2 minutes. Here we briefly
+        evict the transformer to system RAM, run CLIP + T5 on the GPU (where T5
+        fp16 has native fast kernels), then restore the transformer for denoising.
+
+        Anything unexpected falls back to the original CPU encode, so this is
+        never slower-than-broken: the worst case is today's behaviour.
+        """
+        if self._flux_prompt_conditioning.mode != FLUX_CONDITIONING_TEACHER:
+            return self._encode_flux_prompt(
+                prompt,
+                device=device,
+                batch_size=batch_size,
+            )
+        cuda = self.devices.device()
+        t5_on_cpu = self._flux_t5_device is not None and self._flux_t5_device.type == "cpu"
+
+        # Cached prompts don't benefit from the swap.
+        cache_key = self._flux_prompt_cache_key(prompt, batch_size, 256)
+        already_cached = self._flux_prompt_cache.get(cache_key) is not None
+        if (
+            cuda.type != "cuda"
+            or not t5_on_cpu
+            or already_cached
+            or self._flux_text_encoder_2 is None
+        ):
+            return self._encode_flux_prompt(prompt, device=device, batch_size=batch_size)
+
+        if self._offload_active:
+            # Under model offload, the transformer is already managed by accelerate.
+            # We only need to swap T5 (and CLIP) to GPU for encoding, then park them back on CPU.
+            try:
+                self._flux_text_encoder_2.to(cuda)
+                self._flux_t5_device = cuda
+                if self._flux_text_encoder is not None:
+                    self._flux_text_encoder.to(cuda)
+                    self._flux_clip_device = cuda
+                logger.info("Flux offloaded encode: T5/CLIP moved to GPU for encoding")
+                return self._encode_flux_prompt(prompt, device=cuda, batch_size=batch_size)
+            except Exception:
+                logger.warning(
+                    "Flux offloaded GPU prompt-encode swap failed; falling back to CPU encode.", exc_info=True
+                )
+                return self._encode_flux_prompt(prompt, device=device, batch_size=batch_size)
+            finally:
+                try:
+                    self._flux_text_encoder_2.to("cpu")
+                    self._flux_t5_device = torch.device("cpu")
+                    if self._flux_text_encoder is not None:
+                        self._flux_text_encoder.to("cpu")
+                        self._flux_clip_device = torch.device("cpu")
+                    self.devices.empty_cache()
+                except Exception:
+                    logger.debug("Could not park T5/CLIP back on CPU under offload", exc_info=True)
+
+        transformer = getattr(pipe, "transformer", None)
+        swap_t0 = time.perf_counter()
+        moved_transformer = False
+        try:
+            if transformer is not None:
+                transformer.to("cpu")
+                moved_transformer = True
+                self.devices.empty_cache()
+            self._flux_text_encoder_2.to(cuda)
+            self._flux_t5_device = cuda
+            if self._flux_text_encoder is not None:
+                self._flux_text_encoder.to(cuda)
+                self._flux_clip_device = cuda
+            logger.info("Flux fast encode: T5 moved to %s for prompt encoding", cuda)
+            return self._encode_flux_prompt(prompt, device=cuda, batch_size=batch_size)
+        except Exception:
+            logger.warning(
+                "Flux GPU prompt-encode swap failed; falling back to CPU encode.", exc_info=True
+            )
+            try:
+                self._flux_text_encoder_2.to("cpu")
+                self._flux_t5_device = torch.device("cpu")
+            except Exception:
+                logger.debug("Could not park T5 back on CPU after failed swap", exc_info=True)
+            return self._encode_flux_prompt(prompt, device=device, batch_size=batch_size)
+        finally:
+            # Always return T5 to CPU and the transformer to the GPU so the
+            # denoise loop and the warm-pipeline cache keep working.
+            try:
+                self._flux_text_encoder_2.to("cpu")
+                self._flux_t5_device = torch.device("cpu")
+                self.devices.empty_cache()
+            except Exception:
+                logger.debug("Could not park T5 back on CPU", exc_info=True)
+            if moved_transformer and transformer is not None:
+                try:
+                    transformer.to(cuda)
+                except Exception:
+                    logger.warning("Failed to restore Flux transformer to GPU after encode", exc_info=True)
+            logger.info("Flux fast encode: transformer restored in %.2fs", time.perf_counter() - swap_t0)
+
+    @staticmethod
+    def _module_param_bytes(module) -> int:
+        """Actual storage bytes of a module's parameters (GGUF/quantized aware)."""
+        total = 0
+        try:
+            for param in module.parameters():
+                nbytes = getattr(param, "nbytes", None)
+                if nbytes is None:
+                    nbytes = param.numel() * param.element_size()
+                total += int(nbytes)
+        except Exception:
+            logger.debug("Could not measure module parameter bytes", exc_info=True)
+            return 0
+        return total
+
+    def _encode_with_text_encoder_gpu_swap(
+        self,
+        pipe,
+        *,
+        architecture: str,
+        device: torch.device,
+        encode: Callable[[torch.device], object],
+    ):
+        text_encoder = getattr(pipe, "text_encoder", None)
+        text_encoder_device = getattr(text_encoder, "device", None)
+        fallback_device = text_encoder_device if isinstance(text_encoder_device, torch.device) else torch.device("cpu")
+        if (
+            device.type != "cuda"
+            or self.flags.lowvram
+            or self.flags.medvram
+            or text_encoder is None
+            or not hasattr(text_encoder, "to")
+            or (isinstance(text_encoder_device, torch.device) and text_encoder_device.type == "cuda")
+        ):
+            return encode(text_encoder_device if isinstance(text_encoder_device, torch.device) else device)
+
+        # Offload hooks (accelerate) own module placement — a manual .to() here
+        # would fight them and produce device-mismatch errors mid-denoise.
+        if self._offload_active or getattr(text_encoder, "_hf_hook", None) is not None:
+            logger.info("%s text encoder encodes on CPU (CPU offload active).", architecture)
+            return encode(fallback_device)
+
+        # Headroom check: only swap the text encoder onto the GPU if it can
+        # actually fit once the denoiser is parked. Flux.2 Klein 9B ships a
+        # ~16 GB Qwen3-8B encoder that can never fit a 16 GB card — attempting
+        # the move used to raise CUDA OOM before the CPU fallback kicked in.
+        text_encoder_has_parameters = hasattr(text_encoder, "parameters")
+        te_bytes = self._module_param_bytes(text_encoder) if text_encoder_has_parameters else 0
+        denoiser_bytes = 0
+        for attr in ("transformer", "unet"):
+            denoiser = getattr(pipe, attr, None)
+            if denoiser is not None and hasattr(denoiser, "parameters"):
+                try:
+                    if next(denoiser.parameters()).device.type == "cuda":
+                        denoiser_bytes += self._module_param_bytes(denoiser)
+                except StopIteration:
+                    pass
+                except Exception:
+                    logger.debug("Could not size %s for encode headroom check", attr, exc_info=True)
+        reserve_bytes = int(1.5 * 1024**3)
+        free_bytes = 0
+        try:
+            free_bytes, _total = torch.cuda.mem_get_info(device)
+        except Exception:
+            logger.debug("Could not query CUDA free memory for encode swap", exc_info=True)
+        if free_bytes <= 0:
+            try:
+                total_vram_gb = float(self.devices.total_vram_gb())
+            except Exception:
+                total_vram_gb = 0.0
+            if total_vram_gb > 0:
+                free_bytes = int(total_vram_gb * 1024**3)
+        if (text_encoder_has_parameters and te_bytes <= 0) or free_bytes <= 0 or te_bytes + reserve_bytes > free_bytes + denoiser_bytes:
+            logger.info(
+                "%s text encoder (%.1f GB) exceeds GPU headroom (%.1f GB free + %.1f GB parkable); encoding on CPU.",
+                architecture,
+                te_bytes / 1024**3,
+                free_bytes / 1024**3,
+                denoiser_bytes / 1024**3,
+            )
+            return encode(fallback_device)
+
+        denoisers_to_restore: list[tuple[str, object]] = []
+        seen_denoisers: set[int] = set()
+        encoded = None
+        failed = False
+        started = time.perf_counter()
+        try:
+            for attr in ("transformer", "unet"):
+                denoiser = getattr(pipe, attr, None)
+                if denoiser is None or not hasattr(denoiser, "to"):
+                    continue
+                denoiser_id = id(denoiser)
+                if denoiser_id in seen_denoisers:
+                    continue
+                seen_denoisers.add(denoiser_id)
+                denoiser.to("cpu")
+                denoisers_to_restore.append((attr, denoiser))
+            if denoisers_to_restore:
+                self.devices.empty_cache()
+            # Re-check REAL free VRAM after parking: quantized (GGUF/BNB)
+            # denoisers often keep buffers resident after .to("cpu"), so the
+            # up-front headroom estimate can credit space that never freed.
+            # Moving the encoder anyway tips the card into driver sysmem
+            # paging. That slowdown looks like a hang to the user.
+            try:
+                free_after_park, _total = torch.cuda.mem_get_info(device)
+            except Exception:
+                free_after_park = 0
+            if free_after_park and te_bytes + reserve_bytes > free_after_park:
+                logger.info(
+                    "%s text encoder (%.1f GB) does not fit the %.1f GB actually free after parking; encoding on CPU.",
+                    architecture,
+                    te_bytes / 1024**3,
+                    free_after_park / 1024**3,
+                )
+                for attr, denoiser in denoisers_to_restore:
+                    try:
+                        denoiser.to(device)
+                    except Exception:
+                        logger.warning("Failed to restore %s %s after aborted encode swap", architecture, attr, exc_info=True)
+                denoisers_to_restore.clear()
+                return encode(fallback_device)
+            text_encoder.to(device)
+            if denoisers_to_restore:
+                logger.info(
+                    "%s parked %s on CPU for prompt encode",
+                    architecture,
+                    ", ".join(attr for attr, _module in denoisers_to_restore),
+                )
+            logger.info("%s text encoder moved to %s for prompt encode", architecture, device)
+            encoded = encode(device)
+        except Exception:
+            failed = True
+            logger.warning("%s GPU prompt-encode swap failed; falling back to CPU encode.", architecture, exc_info=True)
+        finally:
+            try:
+                text_encoder.to("cpu")
+                self.devices.empty_cache()
+            except Exception:
+                logger.debug("Could not park %s text encoder back on CPU", architecture, exc_info=True)
+            for attr, denoiser in denoisers_to_restore:
+                try:
+                    denoiser.to(device)
+                except Exception:
+                    logger.warning("Failed to restore %s %s after prompt encode", architecture, attr, exc_info=True)
+            try:
+                pipe._execution_device = device
+            except Exception:
+                logger.debug("Could not restore %s execution device after prompt encode", architecture, exc_info=True)
+        if failed:
+            return encode(fallback_device)
+        logger.info("%s GPU prompt encode swap finished in %.2fs", architecture, time.perf_counter() - started)
+        return encoded
+
+    def _encode_flux2_prompt(self, pipe, prompt: str, device: torch.device) -> torch.Tensor:
+        """Cache Qwen3 prompt embeddings — Flux.2 Klein re-encodes every call otherwise."""
+        cache_key = prompt
+        cached = self._prompt_cache_get(self._flux2_prompt_cache, cache_key, "Flux.2 Klein")
+        if cached is not None:
+            return cached.to(device=device)
+        try:
+            from diffusers.pipelines.flux2.pipeline_flux2_klein import Flux2KleinPipeline
+        except ImportError as exc:
+            raise ModelNotFoundError("Flux.2 Klein prompt encoding is unavailable.") from exc
+        def encode(target_device: torch.device) -> torch.Tensor:
+            encode_t0 = time.perf_counter()
+            logger.info("Flux.2 Klein: starting prompt encode on %s", target_device)
+            prompt_embeds = Flux2KleinPipeline._get_qwen3_prompt_embeds(
+                text_encoder=pipe.text_encoder,
+                tokenizer=pipe.tokenizer,
+                prompt=prompt,
+                device=target_device,
+            )
+            logger.info("Flux.2 Klein prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+            return prompt_embeds
+
+        prompt_embeds = self._encode_with_text_encoder_gpu_swap(
+            pipe,
+            architecture="Flux.2 Klein",
+            device=device,
+            encode=encode,
+        )
+        self._prompt_cache_put(
+            self._flux2_prompt_cache,
+            cache_key,
+            prompt_embeds.detach().cpu(),
+            "Flux.2 Klein",
+        )
+        return prompt_embeds.to(device=device)
+
+    def _encode_z_image_prompts(
+        self,
+        pipe,
+        prompt: str,
+        negative_prompt: str | None,
+        device: torch.device,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        cache_key = (prompt, negative_prompt or "")
+        cached = self._prompt_cache_get(self._z_image_prompt_cache, cache_key, "Z-Image")
+        if cached is not None:
+            prompt_embeds, negative_embeds = cached
+            return (
+                [tensor.to(device=device) for tensor in prompt_embeds],
+                [tensor.to(device=device) for tensor in negative_embeds],
+            )
+        def encode(target_device: torch.device) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+            encode_t0 = time.perf_counter()
+            prompt_embeds, negative_embeds = pipe.encode_prompt(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                device=target_device,
+                do_classifier_free_guidance=getattr(pipe, "do_classifier_free_guidance", True),
+            )
+            logger.info("Z-Image prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+            return prompt_embeds, negative_embeds
+
+        prompt_embeds, negative_embeds = self._encode_with_text_encoder_gpu_swap(
+            pipe,
+            architecture="Z-Image",
+            device=device,
+            encode=encode,
+        )
+        self._prompt_cache_put(
+            self._z_image_prompt_cache,
+            cache_key,
+            (
+                [tensor.detach().cpu() for tensor in prompt_embeds],
+                [tensor.detach().cpu() for tensor in negative_embeds],
+            ),
+            "Z-Image",
+        )
+        return (
+            [tensor.to(device=device) for tensor in prompt_embeds],
+            [tensor.to(device=device) for tensor in negative_embeds],
+        )
+
+    def _encode_qwen_image_prompt(
+        self,
+        pipe,
+        prompt: str,
+        device: torch.device,
+        *,
+        batch_size: int,
+        max_sequence_length: int = 512,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cache_key = (self._active_prompt_cache_scope(), prompt, int(batch_size), int(max_sequence_length))
+        cached = self._prompt_cache_get(self._qwen_prompt_cache, cache_key, "Qwen Image")
+        if cached is not None:
+            prompt_embeds, prompt_mask = cached
+            return (
+                self._cached_tensor_to_device(prompt_embeds, device),
+                self._cached_tensor_to_device(prompt_mask, device),
+            )
+
+        def encode(target_device: torch.device) -> tuple[torch.Tensor, torch.Tensor | None]:
+            encode_t0 = time.perf_counter()
+            prompt_embeds, prompt_mask = pipe.encode_prompt(
+                prompt=prompt,
+                device=target_device,
+                num_images_per_prompt=batch_size,
+                max_sequence_length=max_sequence_length,
+            )
+            logger.info("Qwen Image prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+            return prompt_embeds, prompt_mask
+
+        prompt_embeds, prompt_mask = self._encode_with_text_encoder_gpu_swap(
+            pipe,
+            architecture="Qwen Image",
+            device=device,
+            encode=encode,
+        )
+        self._prompt_cache_put(
+            self._qwen_prompt_cache,
+            cache_key,
+            (
+                self._cache_tensor(prompt_embeds),
+                self._cache_tensor(prompt_mask),
+            ),
+            "Qwen Image",
+        )
+        return (
+            self._cached_tensor_to_device(prompt_embeds, device),
+            self._cached_tensor_to_device(prompt_mask, device),
+        )
+
+    def _encode_qwen_image_prompts(
+        self,
+        pipe,
+        prompt: str,
+        negative_prompt: str | None,
+        device: torch.device,
+        *,
+        batch_size: int,
+        true_cfg_scale: float,
+        max_sequence_length: int = 512,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        prompt_embeds, prompt_mask = self._encode_qwen_image_prompt(
+            pipe,
+            prompt,
+            device,
+            batch_size=batch_size,
+            max_sequence_length=max_sequence_length,
+        )
+        if true_cfg_scale <= 1.0 or negative_prompt is None:
+            return prompt_embeds, prompt_mask, None, None
+        negative_embeds, negative_mask = self._encode_qwen_image_prompt(
+            pipe,
+            negative_prompt,
+            device,
+            batch_size=batch_size,
+            max_sequence_length=max_sequence_length,
+        )
+        return prompt_embeds, prompt_mask, negative_embeds, negative_mask
+
+    def _encode_krea2_prompt(
+        self,
+        pipe,
+        prompt: str,
+        device: torch.device,
+        *,
+        batch_size: int,
+        max_sequence_length: int = 512,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cache = getattr(self, "_krea2_prompt_cache", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._krea2_prompt_cache = cache
+        cache_key = (self._active_prompt_cache_scope(), prompt, int(batch_size), int(max_sequence_length))
+        cached = self._prompt_cache_get(cache, cache_key, "Krea 2")
+        if cached is not None:
+            prompt_embeds, prompt_mask = cached
+            return (
+                self._cached_tensor_to_device(prompt_embeds, device),
+                self._cached_tensor_to_device(prompt_mask, device),
+            )
+
+        def encode(target_device: torch.device) -> tuple[torch.Tensor, torch.Tensor | None]:
+            encode_t0 = time.perf_counter()
+            prompt_embeds, prompt_mask = pipe.encode_prompt(
+                prompt=prompt,
+                device=target_device,
+                num_images_per_prompt=batch_size,
+                max_sequence_length=max_sequence_length,
+            )
+            logger.info("Krea 2 prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+            return prompt_embeds, prompt_mask
+
+        if getattr(pipe, "_aiwf_krea2_force_cpu_prompt_encode", False):
+            logger.info("Krea 2 text encoder encodes on CPU (resident denoiser mode).")
+            prompt_embeds, prompt_mask = encode(torch.device("cpu"))
+        else:
+            prompt_embeds, prompt_mask = self._encode_with_text_encoder_gpu_swap(
+                pipe,
+                architecture="Krea 2",
+                device=device,
+                encode=encode,
+            )
+        self._prompt_cache_put(
+            cache,
+            cache_key,
+            (
+                self._cache_tensor(prompt_embeds),
+                self._cache_tensor(prompt_mask),
+            ),
+            "Krea 2",
+        )
+        return (
+            self._cached_tensor_to_device(prompt_embeds, device),
+            self._cached_tensor_to_device(prompt_mask, device),
+        )
+
+    def _encode_krea2_prompts(
+        self,
+        pipe,
+        prompt: str,
+        negative_prompt: str | None,
+        device: torch.device,
+        *,
+        batch_size: int,
+        guidance_scale: float,
+        max_sequence_length: int = 512,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        prompt_embeds, prompt_mask = self._encode_krea2_prompt(
+            pipe,
+            prompt,
+            device,
+            batch_size=batch_size,
+            max_sequence_length=max_sequence_length,
+        )
+        if guidance_scale <= 0.0:
+            return prompt_embeds, prompt_mask, None, None
+        negative_embeds, negative_mask = self._encode_krea2_prompt(
+            pipe,
+            negative_prompt or "",
+            device,
+            batch_size=batch_size,
+            max_sequence_length=max_sequence_length,
+        )
+        return prompt_embeds, prompt_mask, negative_embeds, negative_mask
+
+    def _encode_sana_prompts(
+        self,
+        pipe,
+        prompt: str,
+        negative_prompt: str | None,
+        device: torch.device,
+        *,
+        batch_size: int,
+        guidance_scale: float,
+        max_sequence_length: int = 300,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        is_sprint = pipe.__class__.__name__ == "SanaSprintPipeline"
+        do_cfg = (not is_sprint) and guidance_scale > 1.0
+        cache_key = (
+            self._active_prompt_cache_scope(),
+            pipe.__class__.__name__,
+            prompt,
+            negative_prompt or "",
+            bool(do_cfg),
+            int(batch_size),
+            int(max_sequence_length),
+        )
+        cached = self._prompt_cache_get(self._sana_prompt_cache, cache_key, pipe.__class__.__name__)
+        if cached is not None:
+            prompt_embeds, prompt_mask, negative_embeds, negative_mask = cached
+            return (
+                self._cached_tensor_to_device(prompt_embeds, device),
+                self._cached_tensor_to_device(prompt_mask, device),
+                self._cached_tensor_to_device(negative_embeds, device),
+                self._cached_tensor_to_device(negative_mask, device),
+            )
+
+        def encode(target_device: torch.device):
+            encode_t0 = time.perf_counter()
+            if is_sprint:
+                prompt_embeds, prompt_mask = pipe.encode_prompt(
+                    prompt=prompt,
+                    num_images_per_prompt=batch_size,
+                    device=target_device,
+                    clean_caption=False,
+                    max_sequence_length=max_sequence_length,
+                )
+                logger.info("Sana Sprint prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+                return prompt_embeds, prompt_mask, None, None
+            prompt_embeds, prompt_mask, negative_embeds, negative_mask = pipe.encode_prompt(
+                prompt=prompt,
+                do_classifier_free_guidance=do_cfg,
+                negative_prompt=negative_prompt or "",
+                num_images_per_prompt=batch_size,
+                device=target_device,
+                clean_caption=False,
+                max_sequence_length=max_sequence_length,
+            )
+            logger.info("Sana prompt encoded in %.2fs", time.perf_counter() - encode_t0)
+            return prompt_embeds, prompt_mask, negative_embeds, negative_mask
+
+        prompt_embeds, prompt_mask, negative_embeds, negative_mask = self._encode_with_text_encoder_gpu_swap(
+            pipe,
+            architecture="Sana Sprint" if is_sprint else "Sana",
+            device=device,
+            encode=encode,
+        )
+        self._prompt_cache_put(
+            self._sana_prompt_cache,
+            cache_key,
+            (
+                self._cache_tensor(prompt_embeds),
+                self._cache_tensor(prompt_mask),
+                self._cache_tensor(negative_embeds),
+                self._cache_tensor(negative_mask),
+            ),
+            pipe.__class__.__name__,
+        )
+        return (
+            self._cached_tensor_to_device(prompt_embeds, device),
+            self._cached_tensor_to_device(prompt_mask, device),
+            self._cached_tensor_to_device(negative_embeds, device),
+            self._cached_tensor_to_device(negative_mask, device),
+        )
+
+    def prewarm_common_prompt_embeddings(
+        self,
+        *,
+        limit: int = 24,
+        budget_seconds: float = 300.0,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> int:
+        """Prime runtime prompt-embedding caches with short common starters.
+
+        This is intentionally in-memory and bounded. It is meant for the
+        background warmup thread so common portrait/person/body tests do not pay
+        the full text-encoder cost on first use after the model is already warm.
+        """
+        pipe = self._txt2img
+        checkpoint = self._active
+        if pipe is None or checkpoint is None:
+            return 0
+        if checkpoint.id in self._common_prompt_cache_warmed_for:
+            return 0
+        prompts = [p for p in self._COMMON_PROMPT_STARTERS[: max(0, int(limit))] if p]
+        if not prompts:
+            return 0
+
+        device = self._execution_device(pipe)
+        started = time.perf_counter()
+        warmed = 0
+        stopped = False
+
+        def _should_stop() -> bool:
+            try:
+                return bool(should_stop and should_stop())
+            except Exception:
+                logger.debug("Background prompt prewarm stop check failed", exc_info=True)
+                return False
+
+        try:
+            if is_flux2_klein_architecture(checkpoint.architecture):
+                for prompt in prompts:
+                    if _should_stop():
+                        stopped = True
+                        break
+                    if warmed and time.perf_counter() - started >= budget_seconds:
+                        break
+                    if prompt in self._flux2_prompt_cache:
+                        continue
+                    self._encode_flux2_prompt(pipe, prompt, device)
+                    warmed += 1
+            elif is_z_image_architecture(checkpoint.architecture):
+                for prompt in prompts:
+                    if _should_stop():
+                        stopped = True
+                        break
+                    if warmed and time.perf_counter() - started >= budget_seconds:
+                        break
+                    cache_key = (prompt, "")
+                    if cache_key in self._z_image_prompt_cache:
+                        continue
+                    self._encode_z_image_prompts(pipe, prompt, None, device)
+                    warmed += 1
+            elif is_krea2_architecture(checkpoint.architecture):
+                for prompt in prompts:
+                    if _should_stop():
+                        stopped = True
+                        break
+                    if warmed and time.perf_counter() - started >= budget_seconds:
+                        break
+                    cache_key = (self._active_prompt_cache_scope(), prompt, 1, 512)
+                    if cache_key in self._krea2_prompt_cache:
+                        continue
+                    self._encode_krea2_prompt(pipe, prompt, device, batch_size=1)
+                    warmed += 1
+            elif is_flux_architecture(checkpoint.architecture):
+                component_paths = getattr(pipe, "_aiwf_flux_components", None) or self._resolve_flux_component_paths()
+                self._load_flux_prompt_models({key: Path(value) for key, value in component_paths.items()})
+                for prompt in prompts:
+                    if _should_stop():
+                        stopped = True
+                        break
+                    if warmed and time.perf_counter() - started >= budget_seconds:
+                        break
+                    cache_key = self._flux_prompt_cache_key(prompt, 1, 256)
+                    if cache_key in self._flux_prompt_cache:
+                        continue
+                    self._encode_flux_prompt(prompt, device=device, batch_size=1)
+                    warmed += 1
+        finally:
+            if stopped:
+                logger.info("Background prompt prewarm paused because a foreground job is active.")
+                return warmed
+            self._common_prompt_cache_warmed_for.add(checkpoint.id)
+
+        if warmed:
+            logger.info("Prewarmed %d common prompt embeddings for %s.", warmed, checkpoint.title)
+        return warmed
+
+    @staticmethod
+    def _txt2img_pipeline_cls_for_architecture(architecture: str):
+        if is_flux_kontext_architecture(architecture):
+            return FluxKontextPipeline
+        if architecture in {ARCH_FLUX, ARCH_FLUX_FILL}:
+            return FluxPipeline
+        if is_sd3_architecture(architecture):
+            return StableDiffusion3Pipeline
+        if is_sdxl_architecture(architecture):
+            return StableDiffusionXLPipeline
+        return StableDiffusionPipeline
+
+    @staticmethod
+    def _is_sd3_pipe(pipe) -> bool:
+        return hasattr(pipe, "transformer") and hasattr(pipe, "text_encoder_3")
+
+    @staticmethod
+    def _is_flux_pipe(pipe) -> bool:
+        return isinstance(pipe, FluxPipeline)
+
+    def _single_file_config_roots(self) -> tuple[Path, ...]:
+        flags = getattr(self, "flags", None)
+        roots: list[Path] = []
+        models_dir = getattr(flags, "resolved_models_dir", None)
+        if callable(models_dir):
+            roots.append(models_dir())
+        extra_dirs = getattr(flags, "resolved_extra_model_dirs", None)
+        if callable(extra_dirs):
+            roots.extend(extra_dirs())
+        ckpt_dir = getattr(self, "ckpt_dir", None)
+        if ckpt_dir is not None:
+            roots.append(ckpt_dir)
+        return tuple(roots)
+
+    @staticmethod
+    def _is_flux2_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "Flux2KleinPipeline"
+
+    @staticmethod
+    def _is_z_image_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "ZImagePipeline"
+
+    @staticmethod
+    def _is_krea2_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "Krea2Pipeline"
+
+    @staticmethod
+    def _is_anima_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "AnimaPipeline"
+
+    @staticmethod
+    def _is_qwen_image_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ in {"QwenImagePipeline", "QwenImage21Pipeline"}
+
+    @staticmethod
+    def _is_qwen_image21_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "QwenImage21Pipeline"
+
+    @classmethod
+    def _is_qwen_image21_checkpoint(cls, checkpoint: Checkpoint) -> bool:
+        return (
+            is_qwen_image_architecture(checkpoint.architecture)
+            and not is_qwen_nunchaku_architecture(checkpoint.architecture)
+            and cls._pipeline_class_name(Path(checkpoint.path)) == "QwenImage21Pipeline"
+        )
+
+    @staticmethod
+    def _is_sana_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ in {"SanaPipeline", "SanaSprintPipeline", "SanaPAGPipeline"}
+
+    @staticmethod
+    def _is_flux_kontext_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "FluxKontextPipeline"
+
+    def _apply_fp8_storage(self, pipe) -> None:
+        """Store classic UNet weights in FP8 (SD/SDXL VRAM saver — not for GGUF/DiT transformers)."""
+        if not self.flags.fp8:
+            return
+        if self.flags.lowvram:
+            logger.warning("FP8 weight storage is skipped in Low VRAM mode (conflicting offload hooks).")
+            return
+        denoiser = getattr(pipe, "unet", None)
+        if denoiser is None:
+            # Flux / Flux2 / Z-Image / SD3 use transformers or GGUF quants — FP8 storage is not applicable.
+            return
+        if not hasattr(denoiser, "enable_layerwise_casting"):
+            logger.warning("FP8 weight storage not supported by this diffusers version; continuing at fp16.")
+            return
+        try:
+            denoiser.enable_layerwise_casting(
+                storage_dtype=torch.float8_e4m3fn,
+                compute_dtype=getattr(denoiser, "dtype", None) or self.devices.dtype(self.flags.no_half),
+            )
+            logger.info("Denoiser weights stored in FP8 (compute fp16); roughly half the denoiser VRAM.")
+        except Exception:
+            logger.exception("Could not enable FP8 weight storage; continuing at fp16.")
+
+    def _execution_device(self, pipe) -> torch.device:
+        """Device computation actually runs on — never the 'meta' placeholder.
+
+        Offloaded pipelines (lowvram/medvram/SDXL auto-offload) report their
+        device as 'meta'; torch.Generator and .to() need the real one.
+        """
+        if (
+            self._is_flux2_pipe(pipe)
+            or self._is_z_image_pipe(pipe)
+            or self._is_krea2_pipe(pipe)
+            or self._is_anima_pipe(pipe)
+            or self._is_qwen_image_pipe(pipe)
+            or self._is_sana_pipe(pipe)
+        ):
+            transformer = getattr(pipe, "transformer", None)
+            if transformer is not None:
+                try:
+                    transformer_device = next(transformer.parameters()).device
+                    if getattr(transformer_device, "type", None) not in (None, "cpu", "meta"):
+                        return transformer_device
+                except StopIteration:
+                    pass
+                except Exception:
+                    logger.debug("Could not inspect transformer execution device", exc_info=True)
+        try:
+            dev = pipe._execution_device
+        except Exception:
+            dev = getattr(pipe, "device", None)
+        if dev is None or getattr(dev, "type", "meta") == "meta":
+            return self.devices.device()
+        return dev
+
+    def _checkpoint_size_gb(self, checkpoint: Checkpoint | None = None) -> float:
+        if checkpoint is None:
+            return 0.0
+        size_bytes = int(getattr(checkpoint, "size_bytes", 0) or 0)
+        if size_bytes <= 0:
+            try:
+                size_bytes = asset_size_bytes(Path(getattr(checkpoint, "path", "")))
+            except Exception:
+                size_bytes = 0
+        return float(size_bytes) / (1024.0 ** 3) if size_bytes > 0 else 0.0
+
+    @staticmethod
+    def _checkpoint_name_blob(checkpoint: Checkpoint | None = None) -> str:
+        if checkpoint is None:
+            return ""
+        return " ".join(
+            str(getattr(checkpoint, field, "") or "")
+            for field in ("id", "title", "filename", "path")
+        ).lower()
+
+    def _is_sana_sprint_checkpoint(self, checkpoint: Checkpoint | None = None) -> bool:
+        return "sprint" in self._checkpoint_name_blob(checkpoint)
+
+    def _is_krea2_turbo_checkpoint(self, checkpoint: Checkpoint | None = None) -> bool:
+        return "turbo" in self._checkpoint_name_blob(checkpoint)
+
+    @staticmethod
+    def _is_sana_sprint_pipe(pipe) -> bool:
+        return pipe.__class__.__name__ == "SanaSprintPipeline"
+
+    def _transformer_offload_threshold_gb(self, architecture: str, checkpoint: Checkpoint | None = None) -> float:
+        size_gb = self._checkpoint_size_gb(checkpoint)
+        if is_krea2_architecture(architecture):
+            if 0.0 < size_gb <= 13.0:
+                return 18.0
+            return 24.0
+        if is_anima_architecture(architecture):
+            if 0.0 < size_gb <= 5.0:
+                return 8.0
+            return 12.0
+        if is_qwen_nunchaku_architecture(architecture):
+            return 12.0
+        if is_sana_architecture(architecture):
+            if self._is_sana_sprint_checkpoint(checkpoint) or (0.0 < size_gb <= 9.0):
+                return 12.0
+            return 18.0
+        if is_z_image_architecture(architecture):
+            return 12.0 if 0.0 < size_gb <= 8.0 else 16.0
+        if is_flux2_klein_architecture(architecture):
+            if 0.0 < size_gb <= 8.0:
+                return 12.0
+            if 0.0 < size_gb <= 12.0:
+                return 16.0
+            return 20.0
+        if is_qwen_image_architecture(architecture):
+            return 20.0 if size_gb >= 12.0 else 16.0
+        if architecture in {ARCH_FLUX, ARCH_FLUX_FILL}:
+            return 11.0 if getattr(self.flags, "fluxfp8", False) else 20.0
+        return 20.0
+
+    def _offload_threshold_gb(self, architecture: str, *, checkpoint: Checkpoint | None = None) -> float:
+        """The VRAM threshold (GB) actually used to decide CPU offload for `architecture`.
+
+        Kept as a single source of truth so the auto-offload log message
+        (`_place_pipeline`) can never drift from the real decision logic here
+        — it used to hardcode `_AUTO_OFFLOAD_VRAM_GB` (10.0) for every
+        architecture, which is wrong for Flux/Flux.2 Klein/Z-Image (20.0, or
+        11.0 under fluxfp8) and produced misleading log lines like
+        "Flux.2 Klein on a <10 GB GPU" on a 16GB card that was actually
+        evaluated against a 20GB threshold.
+        """
+        if (
+            is_flux_architecture(architecture)
+            or is_flux2_klein_architecture(architecture)
+            or is_z_image_architecture(architecture)
+            or is_krea2_architecture(architecture)
+            or is_anima_architecture(architecture)
+            or is_qwen_image_architecture(architecture)
+            or is_sana_architecture(architecture)
+        ):
+            return self._transformer_offload_threshold_gb(architecture, checkpoint=checkpoint)
+        if is_sd3_architecture(architecture):
+            return 24.0
+        if is_sdxl_architecture(architecture):
+            return 7.0 if self.flags.fp8 else self._AUTO_OFFLOAD_VRAM_GB
+        return self._AUTO_OFFLOAD_VRAM_GB
+
+    def _wants_offload(self, architecture: str, *, checkpoint: Checkpoint | None = None) -> bool:
+        if self._high_vram_requested():
+            return False
+        # DiT image families (Flux / Flux.2 / Z-Image / Qwen / Sana) stay GPU-resident for warm reuse.
+        # CPU offload shuffles weights every generation and feels like a full reload.
+        vram = self.devices.total_vram_gb()
+        if (
+            is_flux_architecture(architecture)
+            or is_flux2_klein_architecture(architecture)
+            or is_z_image_architecture(architecture)
+            or is_krea2_architecture(architecture)
+            or is_anima_architecture(architecture)
+            or is_qwen_image_architecture(architecture)
+            or is_sana_architecture(architecture)
+        ):
+            # On cards with less than 20 GB (e.g. 16 GB, 12 GB, 8 GB), we must offload large DiT models
+            # to avoid VRAM exhaustion / driver-level system memory paging.
+            # If the user runs Flux in FP8, it fits in VRAM on 12/16GB cards, so we don't offload (threshold is 11.0 GB).
+            return vram < self._offload_threshold_gb(architecture, checkpoint=checkpoint)
+        if is_sd3_architecture(architecture):
+            return 0.0 < vram < 24.0
+        if not is_sdxl_architecture(architecture) or vram <= 0.0:
+            return False
+        # FP8 storage halves the active denoiser, so ~8GB cards can keep the whole
+        # pipeline resident — much faster than offloading.
+        return vram < self._offload_threshold_gb(architecture, checkpoint=checkpoint)
+
+    def _compile_allowed_for_architecture(self, architecture: str) -> bool:
+        if is_transformer_image_architecture(architecture):
+            return False
+        return not (self.flags.lowvram or self.flags.medvram or self._wants_offload(architecture))
+
+    def _transformer_vae_needs_tiling(
+        self,
+        pipe,
+        architecture: str,
+        checkpoint: Checkpoint | None = None,
+    ) -> bool:
+        if self._is_sana_sprint_pipe(pipe) or self._is_sana_sprint_checkpoint(checkpoint):
+            return False
+        if self._high_vram_requested():
+            return False
+        if self.flags.lowvram or self.flags.medvram or self._offload_active:
+            return True
+        size_gb = self._checkpoint_size_gb(checkpoint)
+        if size_gb >= 12.0:
+            return True
+        if is_krea2_architecture(architecture):
+            return True
+        return is_qwen_image_architecture(architecture) and not is_qwen_nunchaku_architecture(architecture)
+
+    def _tune_vae_memory(self, pipe, architecture: str, checkpoint: Checkpoint | None = None) -> None:
+        """SDXL's 1024px VAE decode is the peak-VRAM step — slice and tile it."""
+        if not (
+            is_sdxl_architecture(architecture)
+            or is_sd3_architecture(architecture)
+            or is_transformer_image_architecture(architecture)
+        ):
+            return
+        vae = getattr(pipe, "vae", None)
+        if vae is None:
+            return
+        try:
+            should_slice = True
+            should_tile = is_sdxl_architecture(architecture) or is_sd3_architecture(architecture)
+            if is_transformer_image_architecture(architecture):
+                should_tile = self._transformer_vae_needs_tiling(pipe, architecture, checkpoint)
+            if should_slice and hasattr(vae, "enable_slicing"):
+                vae.enable_slicing()
+            if should_tile and hasattr(vae, "enable_tiling"):
+                vae.enable_tiling()
+            elif not should_tile and hasattr(vae, "disable_tiling"):
+                vae.disable_tiling()
+            pipe._aiwf_vae_slicing_enabled = should_slice
+            pipe._aiwf_vae_tiling_enabled = should_tile
+            pipe._aiwf_sdxl = should_tile
+            if should_tile:
+                logger.info("VAE slicing + tiling enabled for %s", architecture)
+            else:
+                logger.info("VAE slicing enabled for %s; tiling left off for faster decode", architecture)
+        except Exception:
+            logger.debug("Could not apply VAE memory policy", exc_info=True)
+
+    def _sync_img2img_from_txt2img(self) -> None:
+        assert self._txt2img is not None
+        pipe = self._txt2img
+        if self._active is not None and is_sd3_architecture(self._active.architecture):
+            self._img2img = StableDiffusion3Img2ImgPipeline.from_pipe(pipe)
+        elif hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
+            self._img2img = StableDiffusionXLImg2ImgPipeline(
+                vae=pipe.vae,
+                text_encoder=pipe.text_encoder,
+                text_encoder_2=pipe.text_encoder_2,
+                tokenizer=pipe.tokenizer,
+                tokenizer_2=pipe.tokenizer_2,
+                unet=pipe.unet,
+                scheduler=pipe.scheduler,
+            )
+        else:
+            self._img2img = StableDiffusionImg2ImgPipeline(
+                vae=pipe.vae,
+                text_encoder=pipe.text_encoder,
+                tokenizer=pipe.tokenizer,
+                unet=pipe.unet,
+                scheduler=pipe.scheduler,
+                safety_checker=None,
+                feature_extractor=None,
+                requires_safety_checker=False,
+            )
+        if not self._offload_active:
+            self._img2img = self._img2img.to(self.devices.device())
+        base_config = self._base_scheduler_config_for_pipe(pipe)
+        if self._img2img is not None and base_config:
+            self._img2img._aiwf_base_scheduler_config = copy.deepcopy(base_config)
+
+    def _apply_vae(self, pipe, vae_id: str | None) -> None:
+        # Track the applied VAE per pipeline: txt2img and inpaint are separate
+        # pipes, so a single global id would skip applying to the second pipe.
+        if not hasattr(pipe, "_aiwf_base_vae"):
+            pipe._aiwf_base_vae = getattr(pipe, "vae", None)
+
+        def restore_base_vae() -> None:
+            pipe.vae = pipe._aiwf_base_vae
+            pipe._aiwf_vae_id = None
+            pipe._aiwf_vae_revision = None
+            self._active_vae_id = None
+            if pipe is self._txt2img and self._img2img is not None:
+                self._sync_img2img_from_txt2img()
+
+        if not vae_id:
+            restore_base_vae()
+            return
+
+        vae_info = resolve_vae(self.list_vaes(), vae_id)
+        if vae_info is None:
+            restore_base_vae()
+            raise ValueError(f"Selected VAE '{vae_id}' is not available; restored the checkpoint's base VAE.")
+
+        vae_path = Path(vae_info.path)
+        try:
+            stat = vae_path.stat()
+            vae_revision = (vae_info.id, str(vae_path.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
+        except OSError:
+            restore_base_vae()
+            raise ValueError(
+                f"Selected VAE '{vae_info.title}' is no longer accessible at {vae_path}; "
+                "restored the checkpoint's base VAE."
+            )
+        if vae_revision == getattr(pipe, "_aiwf_vae_revision", None):
+            return
+
+        logger.info("Loading VAE %s", vae_info.title)
+        dtype = self.devices.dtype(self.flags.no_half)
+        vae = AutoencoderKL.from_single_file(vae_info.path, torch_dtype=dtype)
+        vae = self._prepare_vae_compute(vae, dtype)
+        device = self._execution_device(pipe)
+        pipe.vae = vae.to(device)
+        if getattr(pipe, "_aiwf_vae_slicing_enabled", False):
+            try:
+                pipe.vae.enable_slicing()
+            except Exception:
+                logger.debug("Could not re-enable VAE slicing", exc_info=True)
+        if getattr(pipe, "_aiwf_vae_tiling_enabled", False):
+            try:
+                pipe.vae.enable_tiling()
+            except Exception:
+                logger.debug("Could not re-enable VAE tiling", exc_info=True)
+        apply_image_pipeline_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=not self._offload_active,
+            include_unet=False,
+            include_vae=True,
+        )
+        pipe._aiwf_vae_id = vae_info.id
+        pipe._aiwf_vae_revision = vae_revision
+        if pipe is self._txt2img and self._img2img is not None:
+            self._img2img._aiwf_base_vae = getattr(pipe, "_aiwf_base_vae", None)
+        self._active_vae_id = vae_info.id
+        if pipe is self._txt2img:
+            self._sync_img2img_from_txt2img()
+            if self._img2img is not None:
+                self._img2img._aiwf_vae_id = vae_info.id
+
+    def resolve_checkpoint(self, checkpoint_id: str | None = None) -> Checkpoint:
+        return self._resolve_checkpoint(checkpoint_id)
+
+    def can_preload_checkpoint_locally(self, checkpoint_id: str | None = None) -> bool:
+        checkpoint = self._resolve_checkpoint(checkpoint_id)
+        # Dedicated 9-channel inpaint checkpoints are loaded by the inpaint
+        # generation path, not by the shared txt2img startup/model-switch path.
+        # Keep them selectable for Inpaint while preventing startup from
+        # advertising or attempting a generic image preload.
+        if is_inpaint_architecture(checkpoint.architecture):
+            return False
+        def snapshot_complete(path: Path) -> bool:
+            if not path.is_dir() or not (path / "model_index.json").is_file():
+                return False
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import missing_diffusers_local_files
+
+                return not missing_diffusers_local_files(path, limit=1)
+            except Exception:
+                logger.debug("Could not verify Diffusers snapshot files for %s", path, exc_info=True)
+                return False
+
+        if is_flux_kontext_architecture(checkpoint.architecture):
+            path = Path(checkpoint.path)
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import flux_kontext_missing_local_files
+
+                if path.is_dir():
+                    return not flux_kontext_missing_local_files(path, limit=1)
+                if not self._is_flux_kontext_gguf_transformer(path):
+                    return False
+                self._resolve_component_dir(checkpoint.architecture, checkpoint)
+                return True
+            except Exception:
+                logger.debug("Could not verify Flux Kontext snapshot files for %s", path, exc_info=True)
+                return False
+        if is_flux_architecture(checkpoint.architecture):
+            try:
+                self._validate_flux_prompt_assets()
+            except ModelNotFoundError:
+                return False
+            return Path(checkpoint.path).is_file()
+        if is_flux2_klein_architecture(checkpoint.architecture) or is_z_image_architecture(checkpoint.architecture):
+            path = Path(checkpoint.path)
+            if path.is_dir():
+                return snapshot_complete(path)
+            try:
+                self._resolve_component_dir(checkpoint.architecture, checkpoint)
+            except ModelNotFoundError:
+                return False
+            return path.is_file()
+        if is_krea2_architecture(checkpoint.architecture) or is_anima_architecture(checkpoint.architecture):
+            return snapshot_complete(Path(checkpoint.path))
+        if is_qwen_nunchaku_architecture(checkpoint.architecture):
+            return self._qwen_nunchaku.status(checkpoint.path).ready
+        if is_qwen_image_architecture(checkpoint.architecture) or is_sana_architecture(checkpoint.architecture):
+            path = Path(checkpoint.path)
+            return snapshot_complete(path)
+        pipeline_cls = (
+            StableDiffusionXLImg2ImgPipeline
+            if checkpoint.architecture == ARCH_SDXL_REFINER
+            else self._txt2img_pipeline_cls_for_architecture(checkpoint.architecture)
+        )
+        if Path(checkpoint.path).is_dir():
+            return snapshot_complete(Path(checkpoint.path))
+        return _cached_single_file_config_dir(pipeline_cls, self._single_file_config_roots()) is not None
+
+    @staticmethod
+    def _paths_support_revision(support_paths: list[Path]) -> str:
+        from aiwf.infrastructure.file_revision import local_file_revision
+
+        entries: list[tuple[Any, ...]] = []
+        for path in support_paths:
+            try:
+                stat = path.stat()
+            except (OSError, ValueError):
+                entries.append((str(path), "missing"))
+                continue
+            if path.is_dir():
+                entries.append((str(path), "directory", *local_file_revision(path, stat)))
+                try:
+                    for root, dirs, files in os.walk(path, followlinks=False):
+                        dirs.sort()
+                        files.sort()
+                        for filename in files:
+                            child = Path(root) / filename
+                            try:
+                                child_stat = child.stat()
+                            except OSError:
+                                entries.append((str(child), "unavailable"))
+                            else:
+                                entries.append((str(child), "file", *local_file_revision(child, child_stat)))
+                except OSError:
+                    entries.append((str(path), "walk-failed", *local_file_revision(path, stat)))
+            else:
+                entries.append((str(path), "file", *local_file_revision(path, stat)))
+        encoded = json.dumps(sorted(set(entries)), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:16]
+
+    def _flux_encoder_support_revision(self) -> str:
+        support_paths: list[Path] = []
+        try:
+            support_paths.extend(Path(path) for path in self._resolve_flux_component_paths().values())
+        except Exception:
+            support_paths.append(Path("__aiwf_flux_components_unresolved__"))
+        for resolver_name in ("_resolve_flux_clip_tokenizer_path", "_resolve_flux_t5_tokenizer_path"):
+            resolver = getattr(self, resolver_name, None)
+            if callable(resolver):
+                try:
+                    support_paths.append(Path(resolver()))
+                except Exception:
+                    support_paths.append(Path(f"__aiwf_{resolver_name}_unresolved__"))
+        return self._paths_support_revision(support_paths)
+
+    def _checkpoint_support_revision(self, checkpoint: Checkpoint) -> str:
+        """Fingerprint checkpoint and family support files without loading weights."""
+        architecture = str(checkpoint.architecture or "").strip().lower()
+        checkpoint_path = Path(checkpoint.path)
+        support_paths: list[Path] = [checkpoint_path]
+        if checkpoint_path.is_file():
+            try:
+                pipeline_cls = self._txt2img_pipeline_cls_for_architecture(architecture)
+                config_dir = _cached_single_file_config_dir(pipeline_cls, self._single_file_config_roots())
+                if config_dir:
+                    support_paths.append(Path(config_dir))
+            except Exception:
+                # Config resolution is best-effort here; preload/generation
+                # reports actionable missing-config errors at its normal gate.
+                pass
+        vae_path = str(getattr(getattr(self, "flags", None), "vae_path", "") or "").strip()
+        if vae_path:
+            support_paths.append(Path(vae_path).expanduser())
+        if architecture in {ARCH_FLUX, ARCH_FLUX_FILL}:
+            support_paths.append(Path(f"__aiwf_flux_encoder_revision__{self._flux_encoder_support_revision()}"))
+            try:
+                support_paths.extend(Path(path) for path in self._resolve_flux_component_paths().values())
+            except Exception:
+                support_paths.append(Path("__aiwf_flux_components_unresolved__"))
+            for resolver_name in ("_resolve_flux_clip_tokenizer_path", "_resolve_flux_t5_tokenizer_path"):
+                resolver = getattr(self, resolver_name, None)
+                if callable(resolver):
+                    try:
+                        support_paths.append(Path(resolver()))
+                    except Exception:
+                        support_paths.append(Path(f"__aiwf_{resolver_name}_unresolved__"))
+        elif architecture in {ARCH_FLUX2_KLEIN, ARCH_Z_IMAGE}:
+            try:
+                support_paths.append(Path(self._resolve_component_dir(architecture, checkpoint)))
+            except Exception:
+                support_paths.append(Path(f"__aiwf_{architecture}_components_unresolved__"))
+        elif is_flux_kontext_architecture(architecture) and checkpoint_path.is_file():
+            try:
+                support_paths.append(Path(self._resolve_component_dir(architecture, checkpoint)))
+            except Exception:
+                support_paths.append(Path("__aiwf_flux_kontext_components_unresolved__"))
+        # Family metadata is part of the selected model identity too. In
+        # particular, base Flux and Flux Fill records can point at the same
+        # path while requiring different inpaint pipeline classes.
+        asset_revision = self._paths_support_revision(support_paths)
+        return hashlib.sha256(f"{architecture or 'unknown'}\0{asset_revision}".encode("utf-8")).hexdigest()[:16]
+
+    def _checkpoint_support_revision_for_status(self, checkpoint: Checkpoint) -> str:
+        """Throttle filesystem probes for polled UI residency status only.
+
+        Model loaders always call the uncached revision method before reusing a
+        pipeline, so this short cache can affect only how quickly the UI notices
+        an external support-file change.
+        """
+        cache_key = (str(checkpoint.path), str(checkpoint.architecture or ""))
+        now = time.monotonic()
+        with self._status_support_revision_lock:
+            cached = self._status_support_revision_cache
+            if cached and cached[0] == cache_key and now - cached[1] < self._STATUS_SUPPORT_REVISION_CACHE_SECONDS:
+                return cached[2]
+        revision = self._checkpoint_support_revision(checkpoint)
+        with self._status_support_revision_lock:
+            self._status_support_revision_cache = (cache_key, now, revision)
+        return revision
+
+    def _load_flux_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        encoder_support_revision = self._flux_encoder_support_revision()
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            if self._active_support_revision == support_revision:
+                logger.debug("Flux checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Flux support assets changed; reloading %s", checkpoint.title)
+            self.unload()
+
+        if self._active and self._active.path != checkpoint.path:
+            # Switching to another Flux transformer: keep the (identical, ~9.8 GB)
+            # CLIP-L + T5 encoders only when the resolved support snapshot is identical.
+            self.unload(keep_flux_encoders=self._active_flux_encoder_revision == encoder_support_revision)
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        path = Path(checkpoint.path)
+        if path.suffix.lower() not in {".gguf", ".safetensors"}:
+            raise ModelNotFoundError("Flux generation currently expects a .gguf or .safetensors transformer file.")
+        component_paths = self._resolve_flux_component_paths()
+        guidance_embeds = self._flux_transformer_has_guidance(path)
+        dtype = self._dtype_for_architecture(ARCH_FLUX)
+        if path.suffix.lower() == ".gguf":
+            dtype = self._gguf_compute_dtype(dtype)
+        elif path.suffix.lower() == ".safetensors":
+            bnb_report = inspect_bnb_4bit_safetensors(path)
+            if bnb_report.is_bnb_4bit:
+                dtype = normalize_bnb_4bit_compute_dtype(dtype)
+
+        transformer_config = dict(_FLUX_TRANSFORMER_CONFIG_BASE)
+        transformer_config["guidance_embeds"] = guidance_embeds
+
+        config_root = self._flux_config_cache_root()
+        transformer_config_dir = self._write_temp_config(config_root, "transformer", transformer_config)
+        vae_config_dir = self._write_temp_config(config_root, "vae", _FLUX_VAE_CONFIG)
+        transformer = self._load_dit_transformer_single_file(
+            FluxTransformer2DModel,
+            path,
+            config_dir=transformer_config_dir,
+            dtype=dtype,
+            family="Flux",
+        )
+        self._prepare_flux_transformer_compute(transformer, dtype)
+        vae = AutoencoderKL.from_single_file(
+            str(component_paths["vae"]),
+            config=vae_config_dir,
+            torch_dtype=dtype,
+            local_files_only=True,
+        )
+        vae = self._prepare_vae_compute(vae, dtype)
+
+        pipe = FluxPipeline(
+            scheduler=FlowMatchEulerDiscreteScheduler(shift=3.0),
+            vae=vae,
+            text_encoder=None,
+            tokenizer=None,
+            text_encoder_2=None,
+            tokenizer_2=None,
+            transformer=transformer,
+        )
+        pipe._aiwf_flux_guidance_embeds = guidance_embeds
+        pipe._aiwf_flux_components = {key: str(value) for key, value in component_paths.items()}
+        if getattr(transformer, "_aiwf_bnb_original_layout", False):
+            pipe._aiwf_cast_vae_decode_dtype = True
+        pipe = pipe.to(self.devices.device())
+        pipe.set_progress_bar_config(disable=True)
+        self._remember_base_scheduler_config(pipe)
+        apply_attention_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=self._compile_allowed_for_architecture(ARCH_FLUX),
+        )
+        self._tune_vae_memory(pipe, ARCH_FLUX, checkpoint)
+
+        self._load_flux_prompt_models(component_paths)
+
+        self._active = checkpoint
+        self._active_support_revision = support_revision
+        self._active_flux_encoder_revision = encoder_support_revision
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
+    def _load_flux2_klein_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            if self._active_support_revision == support_revision:
+                logger.debug("Flux.2 Klein checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Flux.2 Klein support assets changed; reloading %s", checkpoint.title)
+            self.unload()
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        try:
+            from diffusers import AutoencoderKLFlux2, Flux2KleinPipeline, Flux2Transformer2DModel
+            from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Flux.2 Klein support needs a newer Diffusers/Transformers stack. "
+                "Install the optional Flux.2 Klein engine dependencies first."
+            ) from exc
+
+        dtype = self._dtype_for_architecture(ARCH_FLUX2_KLEIN)
+        path = Path(checkpoint.path)
+        if path.suffix.lower() == ".gguf":
+            dtype = self._gguf_compute_dtype(dtype)
+        if path.is_dir():
+            if dtype is torch.float8_e4m3fn:
+                dtype = self._gguf_compute_dtype(dtype)
+            pipe = Flux2KleinPipeline.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+        else:
+            if path.suffix.lower() not in {".gguf", ".safetensors"}:
+                raise ModelNotFoundError("Flux.2 Klein expects a .gguf or .safetensors transformer file.")
+            component_dir = self._resolve_component_dir(ARCH_FLUX2_KLEIN, checkpoint)
+            repo_name = self._flux2_component_repo_name(checkpoint)
+            fallback_config = (
+                _FLUX2_KLEIN_4B_TRANSFORMER_CONFIG
+                if repo_name.endswith("4B")
+                else _FLUX2_KLEIN_9B_TRANSFORMER_CONFIG
+            )
+            fallback_config = self._flux2_config_from_gguf(path, fallback_config)
+            transformer_config_dir = (
+                (
+                    self._local_config_dir(component_dir, "transformer")
+                    if path.suffix.lower() != ".gguf"
+                    and self._component_dir_matches_repo(component_dir, repo_name)
+                    else None
+                )
+                or self._cached_transformer_config_dir("flux2", path, fallback_config)
+            )
+            transformer = self._load_dit_transformer_single_file(
+                Flux2Transformer2DModel,
+                path,
+                config_dir=transformer_config_dir,
+                dtype=dtype,
+                family="Flux.2 Klein",
+            )
+
+            # VAE and text encoder must never inherit FP8 storage — there is no
+            # FP8 matmul path for them; keep them in bf16/fp16.
+            aux_dtype = self._gguf_compute_dtype(dtype)
+            text_encoder_kwargs, text_encoder_precision = self._flux2_text_encoder_load_kwargs(
+                component_dir,
+                aux_dtype,
+            )
+            vae = AutoencoderKLFlux2.from_pretrained(
+                str(component_dir / "vae"),
+                torch_dtype=aux_dtype,
+                local_files_only=True,
+            )
+            try:
+                text_encoder = Qwen3ForCausalLM.from_pretrained(
+                    str(component_dir / "text_encoder"),
+                    **text_encoder_kwargs,
+                )
+            except Exception:
+                if text_encoder_precision != "bnb_nf4":
+                    raise
+                logger.warning(
+                    "Flux.2 Klein bnb NF4 text encoder load failed; falling back to full precision CPU encode.",
+                    exc_info=True,
+                )
+                text_encoder_precision = "bf16/fp16 CPU"
+                text_encoder = Qwen3ForCausalLM.from_pretrained(
+                    str(component_dir / "text_encoder"),
+                    dtype=aux_dtype,
+                    local_files_only=True,
+                )
+            text_encoder._aiwf_precision = text_encoder_precision
+            tokenizer = Qwen2TokenizerFast.from_pretrained(str(component_dir / "tokenizer"), local_files_only=True)
+            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                str(component_dir / "scheduler"),
+                local_files_only=True,
+            )
+            pipe = Flux2KleinPipeline(
+                scheduler=scheduler,
+                vae=vae,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                transformer=transformer,
+                is_distilled=True,
+            )
+
+        self._remember_base_scheduler_config(pipe)
+        apply_attention_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=self._compile_allowed_for_architecture(ARCH_FLUX2_KLEIN),
+        )
+        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_FLUX2_KLEIN, checkpoint=checkpoint)
+        pipe.set_progress_bar_config(disable=True)
+        self._tune_vae_memory(pipe, ARCH_FLUX2_KLEIN, checkpoint)
+
+        self._flux2_prompt_cache.clear()
+        self._z_image_prompt_cache.clear()
+        self._active = checkpoint
+        self._active_support_revision = support_revision
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
+    def _load_z_image_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            if self._active_support_revision == support_revision:
+                logger.debug("Z-Image checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Z-Image support assets changed; reloading %s", checkpoint.title)
+            self.unload()
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        try:
+            from diffusers import ZImagePipeline, ZImageTransformer2DModel
+            from transformers import AutoModel, AutoTokenizer
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Z-Image support needs a newer Diffusers/Transformers stack. "
+                "Install the optional Z-Image engine dependencies first."
+            ) from exc
+
+        dtype = self._dtype_for_architecture(ARCH_Z_IMAGE)
+        path = Path(checkpoint.path)
+        if path.suffix.lower() == ".gguf":
+            dtype = self._gguf_compute_dtype(dtype)
+        if path.is_dir():
+            if dtype is torch.float8_e4m3fn:
+                dtype = self._gguf_compute_dtype(dtype)
+            pipe = ZImagePipeline.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+        else:
+            if path.suffix.lower() not in {".gguf", ".safetensors"}:
+                raise ModelNotFoundError("Z-Image expects a .gguf or .safetensors transformer file.")
+            component_dir = self._resolve_component_dir(ARCH_Z_IMAGE, checkpoint)
+            transformer_config_dir = (
+                self._local_config_dir(component_dir, "transformer")
+                or self._cached_transformer_config_dir("z_image", path, _Z_IMAGE_TRANSFORMER_CONFIG)
+            )
+            load_kwargs = {
+                "config": transformer_config_dir,
+                "torch_dtype": dtype,
+                "local_files_only": True,
+            }
+            if path.suffix.lower() == ".gguf":
+                load_kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=dtype)
+                self._patch_gguf_linear_input_dtype()
+                with self._gguf_singleton_shape_compat():
+                    transformer_t0 = time.perf_counter()
+                    transformer = ZImageTransformer2DModel.from_single_file(str(path), **load_kwargs)
+            else:
+                transformer_t0 = time.perf_counter()
+                transformer = ZImageTransformer2DModel.from_single_file(str(path), **load_kwargs)
+            logger.info(
+                "Z-Image transformer loaded in %.1fs from %s",
+                time.perf_counter() - transformer_t0,
+                path.name,
+            )
+
+            aux_dtype = self._gguf_compute_dtype(dtype)
+            vae = AutoencoderKL.from_pretrained(
+                str(component_dir / "vae"),
+                torch_dtype=aux_dtype,
+                local_files_only=True,
+            )
+            vae = self._prepare_vae_compute(vae, aux_dtype)
+            text_encoder = self._load_z_image_text_encoder(component_dir, aux_dtype)
+            tokenizer = AutoTokenizer.from_pretrained(str(component_dir / "tokenizer"), local_files_only=True)
+            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                str(component_dir / "scheduler"),
+                local_files_only=True,
+            )
+            pipe = ZImagePipeline(
+                scheduler=scheduler,
+                vae=vae,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                transformer=transformer,
+            )
+
+        self._remember_base_scheduler_config(pipe)
+        apply_attention_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=self._compile_allowed_for_architecture(ARCH_Z_IMAGE),
+        )
+        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_Z_IMAGE, checkpoint=checkpoint)
+        pipe.set_progress_bar_config(disable=True)
+        self._tune_vae_memory(pipe, ARCH_Z_IMAGE, checkpoint)
+
+        self._z_image_prompt_cache.clear()
+        self._active = checkpoint
+        self._active_support_revision = support_revision
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
+    def _load_z_image_text_encoder(self, component_dir: Path, aux_dtype):
+        """Load the Z-Image Qwen3 text encoder, 4-bit on CUDA when possible.
+
+        The bf16 encoder is ~7.5 GB. Swapping it onto a 16 GB GPU next to the
+        resident transformer tips the card into driver sysmem paging (minutes
+        per prompt), and CPU encode measures ~80 s. NF4 shrinks it to ~2.5 GB
+        so it can stay resident on the GPU and avoids the repeated component
+        swap around prompt encoding.
+        """
+        from transformers import AutoModel
+
+        use_4bit = False
+        if torch.cuda.is_available():
+            try:
+                import bitsandbytes  # noqa: F401
+
+                use_4bit = True
+            except Exception:
+                use_4bit = False
+        if use_4bit:
+            try:
+                from transformers import BitsAndBytesConfig
+
+                encoder = AutoModel.from_pretrained(
+                    str(component_dir / "text_encoder"),
+                    quantization_config=BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_compute_dtype=aux_dtype,
+                    ),
+                    device_map={"": 0},
+                    local_files_only=True,
+                )
+                encoder._aiwf_bnb_resident = True
+                logger.info("Z-Image text encoder loaded 4-bit NF4, resident on GPU.")
+                return encoder
+            except Exception:
+                logger.warning(
+                    "Z-Image 4-bit text encoder load failed; falling back to CPU bf16 encoder.",
+                    exc_info=True,
+                )
+        return AutoModel.from_pretrained(
+            str(component_dir / "text_encoder"),
+            dtype=aux_dtype,
+            local_files_only=True,
+        )
+
+    @staticmethod
+    def _pipeline_class_name(path: Path) -> str:
+        try:
+            payload = json.loads((path / "model_index.json").read_text(encoding="utf-8"))
+            return str(payload.get("_class_name") or "")
+        except Exception:
+            return ""
+
+    def _load_qwen_nunchaku_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        try:
+            status = self._qwen_nunchaku.status(checkpoint.path)
+        except Exception as exc:
+            raise ModelNotFoundError(f"Qwen Nunchaku runtime probe failed: {exc}") from exc
+        if not status.ready:
+            details = "; ".join(status.messages) if status.messages else "runtime not ready"
+            raise ModelNotFoundError(
+                "Qwen Nunchaku needs its isolated engine runtime and local base assets. "
+                f"Details: {details}"
+            )
+
+        if self._txt2img is self._QWEN_NUNCHAKU_SENTINEL and self._active and self._active.path == checkpoint.path:
+            self._active_support_revision = None
+            logger.debug("Qwen Nunchaku runtime and support assets remain ready: %s", checkpoint.title)
+            return checkpoint
+
+        self._active = checkpoint
+        self._txt2img = self._QWEN_NUNCHAKU_SENTINEL
+        self._img2img = None
+        self._active_support_revision = None
+        return checkpoint
+
+    def _load_qwen_image_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            if self._active_support_revision == support_revision:
+                logger.debug("Qwen Image checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Qwen Image support assets changed; reloading %s", checkpoint.title)
+            self.unload()
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        path = Path(checkpoint.path)
+        if not path.is_dir() or not (path / "model_index.json").is_file():
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' must be a full QwenImagePipeline folder with model_index.json. "
+                "Single-file Qwen Image checkpoints are not wired in AIWF yet."
+            )
+
+        class_name = self._pipeline_class_name(path)
+        pipeline_name = class_name or "QwenImagePipeline"
+        if pipeline_name not in {"QwenImagePipeline", "QwenImage21Pipeline"}:
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' declares {pipeline_name}, which is not a supported Qwen Image pipeline."
+            )
+        try:
+            import diffusers
+
+            pipeline_cls = getattr(diffusers, pipeline_name, None)
+            if pipeline_cls is None:
+                raise ImportError(f"installed Diffusers does not expose {pipeline_name}")
+        except ImportError as exc:
+            if pipeline_name == "QwenImage21Pipeline":
+                raise ModelNotFoundError(
+                    "Qwen Image 2.1 needs a Diffusers build that provides QwenImage21Pipeline. "
+                    "This route is implemented but cannot run with the installed Diffusers version."
+                ) from exc
+            raise ModelNotFoundError(
+                "Qwen Image support needs a Diffusers stack that provides QwenImagePipeline."
+            ) from exc
+
+        dtype = self._dtype_for_architecture(ARCH_QWEN_IMAGE)
+        logger.info("Loading %s checkpoint %s from %s", pipeline_name, checkpoint.title, path)
+        try:
+            pipe = pipeline_cls.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+        except TypeError:
+            pipe = pipeline_cls.from_pretrained(str(path), dtype=dtype, local_files_only=True)
+        except Exception as exc:
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' failed to load as {pipeline_name} ({type(exc).__name__}: {exc}). "
+                "Check that the full Diffusers snapshot downloaded completely."
+            ) from exc
+
+        self._remember_base_scheduler_config(pipe)
+        if pipeline_name == "QwenImage21Pipeline":
+            # Qwen 2.1 uses a block-causal attention processor; keep its native
+            # implementation until an alternate backend has a family smoke.
+            logger.info("Qwen Image 2.1 keeps its native Diffusers attention processor.")
+        else:
+            apply_attention_optimizations(
+                pipe,
+                self.flags,
+                compile_allowed=self._compile_allowed_for_architecture(ARCH_QWEN_IMAGE),
+            )
+        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_QWEN_IMAGE, checkpoint=checkpoint)
+        pipe.set_progress_bar_config(disable=True)
+        self._tune_vae_memory(pipe, ARCH_QWEN_IMAGE, checkpoint)
+
+        self._qwen_prompt_cache.clear()
+        self._active = checkpoint
+        self._active_support_revision = support_revision
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
+    def _load_sana_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            if self._active_support_revision == support_revision:
+                logger.debug("Sana checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Sana support assets changed; reloading %s", checkpoint.title)
+            self.unload()
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        path = Path(checkpoint.path)
+        if not path.is_dir() or not (path / "model_index.json").is_file():
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' must be a full SanaPipeline/SanaSprintPipeline folder with model_index.json. "
+                "Single-file Sana checkpoints are not wired in AIWF yet."
+            )
+
+        class_name = self._pipeline_class_name(path)
+        try:
+            from diffusers import SanaPipeline, SanaSprintPipeline
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Sana support needs a newer Diffusers stack. Install the Sana engine dependencies first."
+            ) from exc
+        pipeline_cls = SanaSprintPipeline if class_name == "SanaSprintPipeline" else SanaPipeline
+
+        dtype = self._dtype_for_architecture(ARCH_SANA)
+        logger.info("Loading %s checkpoint %s from %s", pipeline_cls.__name__, checkpoint.title, path)
+        try:
+            pipe = pipeline_cls.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+        except TypeError:
+            pipe = pipeline_cls.from_pretrained(str(path), dtype=dtype, local_files_only=True)
+        except Exception as exc:
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' failed to load as Sana ({type(exc).__name__}: {exc}). "
+                "Check that the full Diffusers snapshot downloaded completely."
+            ) from exc
+
+        self._remember_base_scheduler_config(pipe)
+        # Sana uses a custom linear attention layout; the generic AttnProcessor2_0
+        # swap used for SD/SDXL corrupts its q/k/v tensor shapes.
+        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_SANA, checkpoint=checkpoint)
+        pipe.set_progress_bar_config(disable=True)
+        self._tune_vae_memory(pipe, ARCH_SANA, checkpoint)
+
+        self._sana_prompt_cache.clear()
+        self._active = checkpoint
+        self._active_support_revision = support_revision
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
+    def _load_krea2_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            if self._active_support_revision == support_revision:
+                logger.debug("Krea 2 checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Krea 2 support assets changed; reloading %s", checkpoint.title)
+            self.unload()
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        path = Path(checkpoint.path)
+        if not path.is_dir() or not (path / "model_index.json").is_file():
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' must be a full Krea2Pipeline Diffusers folder with model_index.json. "
+                "The Comfy split Krea 2 files are catalog/preflight assets until AIWF has a split-file Krea2 loader."
+            )
+
+        try:
+            from diffusers import Krea2Pipeline
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Krea 2 support needs a Diffusers build that exposes Krea2Pipeline. "
+                "This install does not provide it yet; update the image runtime dependencies, then restart AIWF."
+            ) from exc
+
+        dtype = self._dtype_for_architecture(ARCH_KREA2)
+        logger.info("Loading Krea 2 checkpoint %s from %s", checkpoint.title, path)
+        try:
+            pipe = self._load_krea2_pipeline(path, dtype)
+        except Exception as exc:
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' failed to load as Krea 2 ({type(exc).__name__}: {exc}). "
+                "Check that the full Diffusers snapshot downloaded completely."
+            ) from exc
+
+        self._remember_base_scheduler_config(pipe)
+        pipe = self._place_transformer_pipeline_keep_text_cpu(pipe, architecture=ARCH_KREA2, checkpoint=checkpoint)
+        pipe.set_progress_bar_config(disable=True)
+        self._tune_vae_memory(pipe, ARCH_KREA2, checkpoint)
+
+        self._krea2_prompt_cache.clear()
+        self._active = checkpoint
+        self._active_support_revision = support_revision
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
+    @staticmethod
+    def _component_from_pretrained(model_cls, path: Path, dtype: torch.dtype):
+        try:
+            return model_cls.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
+        except TypeError:
+            return model_cls.from_pretrained(str(path), dtype=dtype, local_files_only=True)
+
+    def _load_krea2_pipeline(self, path: Path, dtype: torch.dtype):
+        from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, Krea2Pipeline, Krea2Transformer2DModel
+
+        model_index_path = path / "model_index.json"
+        model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
+        text_encoder = self._load_krea2_text_encoder(path, dtype)
+        tokenizer = self._load_krea2_tokenizer(path)
+        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            str(path / "scheduler"),
+            local_files_only=True,
+        )
+        vae = self._component_from_pretrained(AutoencoderKLQwenImage, path / "vae", dtype)
+        transformer = self._component_from_pretrained(Krea2Transformer2DModel, path / "transformer", dtype)
+        return Krea2Pipeline(
+            scheduler=scheduler,
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            transformer=transformer,
+            text_encoder_select_layers=model_index.get("text_encoder_select_layers"),
+            is_distilled=bool(model_index.get("is_distilled", False)),
+            patch_size=int(model_index.get("patch_size") or 2),
+        )
+
+    @staticmethod
+    def _normalize_qwen3vl_rope_config(config) -> bool:
+        text_config = getattr(config, "text_config", None)
+        if text_config is None or getattr(text_config, "rope_scaling", None) is not None:
+            return False
+        rope_parameters = getattr(text_config, "rope_parameters", None)
+        if not isinstance(rope_parameters, dict):
+            return False
+        text_config.rope_scaling = dict(rope_parameters)
+        return True
+
+    def _load_krea2_text_encoder(self, path: Path, dtype: torch.dtype):
+        text_encoder_path = path / "text_encoder"
+        try:
+            from transformers import Qwen3VLConfig, Qwen3VLModel
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Krea 2 support needs a Transformers build that exposes Qwen3VLModel. "
+                "Update the image runtime dependencies, then restart AIWF."
+            ) from exc
+
+        config = Qwen3VLConfig.from_pretrained(str(text_encoder_path), local_files_only=True)
+        if self._normalize_qwen3vl_rope_config(config):
+            logger.info("Krea 2 Qwen3-VL config normalized rope_parameters for this Transformers build.")
+        try:
+            return Qwen3VLModel.from_pretrained(
+                str(text_encoder_path),
+                config=config,
+                torch_dtype=dtype,
+                local_files_only=True,
+            )
+        except TypeError:
+            return Qwen3VLModel.from_pretrained(
+                str(text_encoder_path),
+                config=config,
+                dtype=dtype,
+                local_files_only=True,
+            )
+
+    def _load_krea2_tokenizer(self, path: Path):
+        tokenizer_path = path / "tokenizer"
+        config_path = tokenizer_path / "tokenizer_config.json"
+        tokenizer_file = tokenizer_path / "tokenizer.json"
+        try:
+            from transformers import Qwen2TokenizerFast
+        except ImportError as exc:
+            raise ModelNotFoundError(
+                "Krea 2 support needs a Transformers build that exposes Qwen2TokenizerFast. "
+                "Update the image runtime dependencies, then restart AIWF."
+            ) from exc
+
+        try:
+            tokenizer_config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ModelNotFoundError(f"Krea 2 tokenizer config could not be read: {config_path}") from exc
+
+        extra_tokens = tokenizer_config.get("extra_special_tokens") or []
+        if not isinstance(extra_tokens, list):
+            extra_tokens = []
+        kwargs = {
+            "tokenizer_file": str(tokenizer_file),
+            "additional_special_tokens": extra_tokens,
+            "model_max_length": int(tokenizer_config.get("model_max_length") or 262144),
+            "clean_up_tokenization_spaces": bool(tokenizer_config.get("clean_up_tokenization_spaces", False)),
+        }
+        for key in ("bos_token", "eos_token", "pad_token", "unk_token"):
+            value = tokenizer_config.get(key)
+            if value is not None:
+                kwargs[key] = value
+        return Qwen2TokenizerFast(**kwargs)
+
+    def _load_anima_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        raise ModelNotFoundError(
+            "Anima assets are recognized and preflighted, but AIWF does not have a native Anima loader yet. "
+            "The current upstream release is ComfyUI-native split files; add a split-file Anima runtime before selecting it for generation."
+        )
+
+    def _run_flux_kontext_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        """Text-only generation through a FluxKontextPipeline (no init image).
+
+        Unlike base Flux, this pipeline loads its own text_encoder/text_encoder_2/
+        tokenizer/tokenizer_2 directly via from_pretrained (not the AIWF single-file
+        CLIP/T5 cache-encode path), so prompts are passed straight through and
+        diffusers handles encoding internally - no _aiwf_flux_components lookup.
+        This is the smoke-test path only; real Kontext image-conditioned editing
+        (passing `image=`) is not wired into generate() yet.
+        """
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        return self._call_pipe(
+            pipe,
+            prompt=parsed_prompt,
+            num_inference_steps=steps,
+            guidance_scale=float(request.cfg_scale),
+            num_images_per_prompt=1,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
+            max_sequence_length=512,
+            output_type="pil",
+        )
+
+    def _load_flux_kontext_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        """Load a local Kontext pipeline or selected GGUF with local companion assets.
+
+        For GGUF, the selected transformer is loaded separately and passed as an
+        override; the companion snapshot's bundled transformer is never substituted.
+        """
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            if self._active_support_revision == support_revision:
+                logger.debug("Flux Kontext checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Flux Kontext support assets changed; reloading %s", checkpoint.title)
+            self.unload()
+
+        path = Path(checkpoint.path)
+        selected_gguf = path.is_file() and path.suffix.lower() == ".gguf"
+        if selected_gguf:
+            if not self._is_flux_kontext_gguf_transformer(path):
+                raise ModelNotFoundError(
+                    f"'{checkpoint.title}' is not a nonempty GGUF with a recognized Flux Kontext transformer header."
+                )
+            component_dir = self._resolve_component_dir(checkpoint.architecture, checkpoint)
+        elif path.is_dir():
+            component_dir = path
+            try:
+                from aiwf.infrastructure.diffusers.checkpoints import flux_kontext_missing_local_files
+
+                missing = flux_kontext_missing_local_files(path, limit=8)
+            except Exception as exc:
+                raise ModelNotFoundError(
+                    f"Could not verify the selected Flux Kontext snapshot at {path}: {exc}"
+                ) from exc
+            if missing:
+                raise ModelNotFoundError(
+                    "Selected Flux Kontext snapshot is incomplete: " + ", ".join(str(item) for item in missing)
+                )
+        else:
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' must be a complete local Flux Kontext Diffusers folder or a recognized GGUF transformer."
+            )
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        dtype = self._dtype_for_architecture(ARCH_FLUX_KONTEXT)
+        if dtype is torch.float8_e4m3fn:
+            # Kontext checkpoints ship pre-quantized via bitsandbytes (bnb 4-bit
+            # fp4); the global --fluxfp8 cast is meant for raw/unquantized Flux
+            # weights and doesn't apply here. Forcing torch_dtype=float8_e4m3fn
+            # makes transformers call _set_default_dtype(float8_e4m3fn), which
+            # crashes with "couldn't find storage object Float8_e4m3fnStorage"
+            # regardless of the checkpoint's actual tensor dtypes (see
+            # huggingface/transformers#39409). Fall back to the bf16/fp16
+            # compute dtype bnb already expects.
+            dtype = self._gguf_compute_dtype(dtype)
+        transformer = None
+        if selected_gguf:
+            dtype = self._gguf_compute_dtype(dtype)
+            transformer = self._load_dit_transformer_single_file(
+                FluxTransformer2DModel,
+                path,
+                config_dir=str(component_dir / "transformer"),
+                dtype=dtype,
+                family="Flux Kontext",
+            )
+        logger.info("Loading Flux Kontext checkpoint %s from %s", checkpoint.title, path)
+        try:
+            load_kwargs = {"torch_dtype": dtype, "local_files_only": True}
+            if transformer is not None:
+                load_kwargs["transformer"] = transformer
+            pipe = FluxKontextPipeline.from_pretrained(str(component_dir), **load_kwargs)
+        except Exception as exc:
+            logger.error(
+                "Failed to load Flux Kontext checkpoint '%s': %s: %s",
+                checkpoint.title,
+                type(exc).__name__,
+                exc,
+            )
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' failed to load ({type(exc).__name__}: {exc}). "
+                "This is a FluxKontextPipeline export - check that all components "
+                "(transformer/text_encoder/text_encoder_2/vae) downloaded completely."
+            ) from exc
+
+        self._remember_base_scheduler_config(pipe)
+        apply_attention_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=self._compile_allowed_for_architecture(ARCH_FLUX_KONTEXT),
+        )
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(ARCH_FLUX_KONTEXT),
+            architecture=ARCH_FLUX_KONTEXT,
+        )
+        pipe.set_progress_bar_config(disable=True)
+        self._tune_vae_memory(pipe, ARCH_FLUX_KONTEXT)
+        if hasattr(pipe, "safety_checker"):
+            pipe.safety_checker = None
+
+        self._active = checkpoint
+        self._active_support_revision = support_revision
+        self._txt2img = pipe
+        self._img2img = None
+        return checkpoint
+
+    @staticmethod
+    def _is_flux_kontext_gguf_transformer(path: Path) -> bool:
+        """Check a selected GGUF's header identity without loading tensor weights."""
+        path = Path(path)
+        try:
+            if path.suffix.lower() != ".gguf" or not path.is_file() or path.stat().st_size <= 0:
+                return False
+            from aiwf.infrastructure.model_header import ARCH_FLUX_KONTEXT_TRANSFORMER, read_model_info
+
+            info = read_model_info(path)
+            return info.arch == ARCH_FLUX_KONTEXT_TRANSFORMER and info.tensor_count > 0
+        except Exception:
+            logger.debug("Could not verify Flux Kontext GGUF header for %s", path, exc_info=True)
+            return False
+
+    @staticmethod
+    def _checkpoint_load_hint(exc: Exception) -> str:
+        message = f"{type(exc).__name__}: {exc}".lower()
+        if "gatedrepoerror" in message or "cannot access gated repo" in message or "access to model" in message:
+            return (
+                "This checkpoint needs gated Hugging Face config files. Authenticate with an HF token that has access "
+                "to the model, or provide a complete local diffusers config/pipeline folder for this checkpoint."
+            )
+        if "401 client error" in message or "unauthorized" in message:
+            return (
+                "The model config request was unauthorized. Check Hugging Face login/access or use a complete local "
+                "config cache for this checkpoint."
+            )
+        return (
+            "This usually means the file uses a quantization or key layout that isn't supported for this architecture "
+            "yet, for example a non-standard FP8 export. Try a different checkpoint, or report this one with its name."
+        )
+
+    def load_checkpoint(self, checkpoint_id: str | None = None) -> Checkpoint:
+        checkpoint = self._resolve_checkpoint(checkpoint_id)
+        if is_flux_kontext_architecture(checkpoint.architecture):
+            return self._load_flux_kontext_checkpoint(checkpoint)
+        if is_flux_architecture(checkpoint.architecture):
+            return self._load_flux_checkpoint(checkpoint)
+        if is_flux2_klein_architecture(checkpoint.architecture):
+            return self._load_flux2_klein_checkpoint(checkpoint)
+        if is_z_image_architecture(checkpoint.architecture):
+            return self._load_z_image_checkpoint(checkpoint)
+        if is_krea2_architecture(checkpoint.architecture):
+            return self._load_krea2_checkpoint(checkpoint)
+        if is_anima_architecture(checkpoint.architecture):
+            return self._load_anima_checkpoint(checkpoint)
+        if is_qwen_nunchaku_architecture(checkpoint.architecture):
+            return self._load_qwen_nunchaku_checkpoint(checkpoint)
+        if is_qwen_image_architecture(checkpoint.architecture):
+            return self._load_qwen_image_checkpoint(checkpoint)
+        if is_sana_architecture(checkpoint.architecture):
+            return self._load_sana_checkpoint(checkpoint)
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        if self._txt2img is not None and self._active and self._active.path == checkpoint.path:
+            if self._active_support_revision == support_revision:
+                logger.debug("Checkpoint and support assets already warm: %s", checkpoint.title)
+                return checkpoint
+            logger.info("Checkpoint support assets changed; reloading %s", checkpoint.title)
+            self.unload()
+
+        if self._active and self._active.path != checkpoint.path:
+            self.unload()
+        elif self._txt2img is None and self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+            self.devices.empty_cache()
+
+        if self._txt2img is not None:
+            self._active = checkpoint
+            self._active_support_revision = support_revision
+            logger.debug("Reusing warm pipeline for checkpoint alias: %s", checkpoint.title)
+            return checkpoint
+
+        logger.info("Loading checkpoint %s (%s)", checkpoint.title, checkpoint.architecture)
+
+        dtype = self._dtype_for_architecture(checkpoint.architecture)
+        path = Path(checkpoint.path)
+        # An inpaint checkpoint has a 9-channel UNet conv_in; loading it through the
+        # 4-channel txt2img pipeline raises a cryptic
+        # "conv_in.weight expected [320,4,3,3], got [320,9,3,3]" ValueError. Detection
+        # already happened at scan time — branch on it and give an actionable message
+        # instead. (Inpaint checkpoints load via _load_inpaint_checkpoint in Inpaint mode.)
+        if is_inpaint_architecture(checkpoint.architecture):
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' is an inpaint checkpoint (9-channel UNet) and can't be "
+                "loaded for txt2img/img2img. Switch to Inpaint mode, or pick a standard checkpoint."
+            )
+        pipeline_cls = self._txt2img_pipeline_cls_for_architecture(checkpoint.architecture)
+        load_kwargs = {
+            "torch_dtype": dtype,
+            "use_safetensors": path.suffix.lower() == ".safetensors",
+        }
+        if path.is_dir():
+            load_kwargs.pop("use_safetensors", None)
+        else:
+            _add_cached_single_file_config(
+                load_kwargs,
+                pipeline_cls,
+                self._single_file_config_roots(),
+            )
+        if pipeline_cls is StableDiffusionPipeline:
+            load_kwargs["requires_safety_checker"] = False
+            load_kwargs["low_cpu_mem_usage"] = False
+        # AIWF loads local single-file checkpoints with app-level controls around
+        # requests and file selection. Diffusers' optional safety checker needs
+        # extra model assets and is disabled here so backend selection stays
+        # deterministic/offline.
+        if path.is_dir() and not (path / "model_index.json").exists():
+            # A directory checkpoint without model_index.json isn't a full pipeline -
+            # it's almost always a bare component folder (a ControlNet/VAE/text-encoder
+            # export that ended up under the checkpoints scan path). Loading it through
+            # a full pipeline class raises a cryptic
+            # "OSError: ... does not appear to have a file named model_index.json" deep
+            # inside from_pretrained. Fail clearly instead.
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' doesn't look like a full model pipeline (no "
+                "model_index.json) - it's likely a ControlNet, VAE, or other component "
+                "export. If it's a ControlNet model, move it under models/ControlNet "
+                "and pick it from the ControlNet panel instead."
+            )
+        try:
+            if path.is_dir():
+                pipe = pipeline_cls.from_pretrained(checkpoint.path, **load_kwargs)
+            else:
+                pipe = pipeline_cls.from_single_file(checkpoint.path, **load_kwargs)
+        except ModelNotFoundError:
+            raise
+        except Exception as exc:
+            # Surface a clear, actionable error instead of letting a raw KeyError/
+            # RuntimeError/NotImplementedError from deep inside diffusers' converter
+            # propagate as an unhandled thread crash. Most commonly this means the
+            # checkpoint uses a quantization/key layout (e.g. a non-bnb FP8 export,
+            # or a state dict with renamed/missing keys) that the standard single-file
+            # converter for this architecture doesn't recognize.
+            logger.error(
+                "Failed to load '%s' (%s): %s: %s",
+                checkpoint.title,
+                checkpoint.architecture,
+                type(exc).__name__,
+                exc,
+            )
+            hint = self._checkpoint_load_hint(exc)
+            raise ModelNotFoundError(
+                f"'{checkpoint.title}' failed to load ({type(exc).__name__}: {exc}). "
+                f"{hint}"
+            ) from exc
+        self._remember_base_scheduler_config(pipe)
+        self._apply_fp8_storage(pipe)
+
+        compile_allowed = self._compile_allowed_for_architecture(checkpoint.architecture)
+        apply_attention_optimizations(pipe, self.flags, compile_allowed=compile_allowed)
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(checkpoint.architecture),
+            architecture=checkpoint.architecture,
+        )
+        self._tune_vae_memory(pipe, checkpoint.architecture)
+        # Embeddings are now loaded on-demand in generate() only for those referenced
+        # by the actual prompt (see _ensure_embeddings_for_prompt). Unused ones are
+        # never loaded even if present in the embeddings/ folder.
+        if hasattr(pipe, "safety_checker"):
+            pipe.safety_checker = None
+
+        self._active = checkpoint
+        self._active_support_revision = support_revision
+        self._txt2img = pipe
+        self._sync_img2img_from_txt2img()
+        return checkpoint
+
+    def _load_inpaint_checkpoint(
+        self, checkpoint: Checkpoint
+    ) -> StableDiffusionInpaintPipeline | StableDiffusionXLInpaintPipeline | StableDiffusion3InpaintPipeline:
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        if self._inpaint and self._inpaint_active and self._inpaint_active.path == checkpoint.path:
+            if self._inpaint_support_revision == support_revision:
+                return self._inpaint
+            logger.info("Inpaint support assets changed; reloading %s", checkpoint.title)
+            self._inpaint = None
+            self._inpaint_active = None
+            self._inpaint_support_revision = None
+
+        if self._inpaint_active and self._inpaint_active.path != checkpoint.path:
+            self._inpaint = None
+            self._inpaint_active = None
+
+        if is_flux_fill_architecture(checkpoint.architecture):
+            # Flux.1-Fill is a dedicated inpaint transformer (384-channel image
+            # input); it gets its own pipeline instead of the from_pipe blend.
+            return self._load_flux_fill_pipeline(checkpoint)
+
+        if is_flux_architecture(checkpoint.architecture):
+            # Flux inpaint reuses the loaded txt2img pipeline's components via
+            # from_pipe (no dedicated inpaint UNet exists for base Flux), so it
+            # must not fall through to the generic SD/SDXL/SD3.5 loading below.
+            return self._load_flux_inpaint_pipeline(checkpoint)
+
+        if self._active and self._active.path != checkpoint.path:
+            self._txt2img = None
+            self._img2img = None
+            self._active = None
+            self._active_vae_id = None
+            self.devices.empty_cache()
+
+        logger.info("Loading inpaint pipeline for %s (%s)", checkpoint.title, checkpoint.architecture)
+        dtype = self._dtype_for_architecture(checkpoint.architecture)
+        path = Path(checkpoint.path)
+        if is_sd3_architecture(checkpoint.architecture):
+            pipeline_cls = StableDiffusion3InpaintPipeline
+        elif checkpoint.architecture == ARCH_SDXL_INPAINT:
+            pipeline_cls = StableDiffusionXLInpaintPipeline
+        elif checkpoint.architecture == ARCH_SDXL:
+            logger.warning(
+                "Checkpoint %s is SDXL base, not an inpaint model — using XL inpaint pipeline anyway.",
+                checkpoint.title,
+            )
+            pipeline_cls = StableDiffusionXLInpaintPipeline
+        else:
+            pipeline_cls = StableDiffusionInpaintPipeline
+
+        load_kwargs = {
+            "torch_dtype": dtype,
+            "use_safetensors": path.suffix.lower() == ".safetensors",
+        }
+        if path.is_dir():
+            load_kwargs.pop("use_safetensors", None)
+        else:
+            _add_cached_single_file_config(
+                load_kwargs,
+                pipeline_cls,
+                self._single_file_config_roots(),
+            )
+        if pipeline_cls is StableDiffusionInpaintPipeline:
+            load_kwargs["requires_safety_checker"] = False
+        if (
+            pipeline_cls is StableDiffusion3InpaintPipeline
+            and self._txt2img is not None
+            and self._active
+            and self._active.path == checkpoint.path
+        ):
+            pipe = StableDiffusion3InpaintPipeline.from_pipe(self._txt2img)
+        elif path.is_dir():
+            pipe = pipeline_cls.from_pretrained(checkpoint.path, **load_kwargs)
+        else:
+            if pipeline_cls is StableDiffusionInpaintPipeline:
+                load_kwargs["low_cpu_mem_usage"] = False
+            pipe = pipeline_cls.from_single_file(checkpoint.path, **load_kwargs)
+        self._remember_base_scheduler_config(pipe)
+        self._apply_fp8_storage(pipe)
+
+        compile_allowed = self._compile_allowed_for_architecture(checkpoint.architecture)
+        apply_attention_optimizations(pipe, self.flags, compile_allowed=compile_allowed)
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(checkpoint.architecture),
+            architecture=checkpoint.architecture,
+        )
+        self._tune_vae_memory(pipe, checkpoint.architecture)
+        # Embeddings are now loaded on-demand in generate() only for those referenced
+        # by the actual prompt (see _ensure_embeddings_for_prompt). Unused ones are
+        # never loaded even if present in the embeddings/ folder.
+        if hasattr(pipe, "safety_checker"):
+            pipe.safety_checker = None
+
+        self._inpaint = pipe
+        self._inpaint_active = checkpoint
+        self._inpaint_support_revision = support_revision
+        return pipe
+
+    def _load_flux_inpaint_pipeline(self, checkpoint: Checkpoint) -> FluxInpaintPipeline:
+        """Wrap the loaded Flux txt2img pipeline's components into a
+        FluxInpaintPipeline via from_pipe — no extra weights are loaded since
+        base Flux has no dedicated inpaint transformer (that's Flux.1-Fill,
+        a different checkpoint). Quality/behavior is strength-based blending,
+        like SD img2img-style inpaint, not a purpose-built inpaint model."""
+        self.load_checkpoint(checkpoint.id)
+        assert self._txt2img is not None
+        pipe = FluxInpaintPipeline.from_pipe(self._txt2img)
+        # from_pipe only copies registered modules/config, not the custom
+        # attributes _run_flux_txt2img_pass (mirrored by the inpaint pass)
+        # relies on for fast prompt encoding and guidance-embed detection.
+        pipe._aiwf_flux_components = getattr(self._txt2img, "_aiwf_flux_components", None)
+        pipe._aiwf_flux_guidance_embeds = getattr(self._txt2img, "_aiwf_flux_guidance_embeds", False)
+        pipe._aiwf_cast_vae_decode_dtype = getattr(self._txt2img, "_aiwf_cast_vae_decode_dtype", False)
+        self._inpaint = pipe
+        self._inpaint_active = checkpoint
+        self._inpaint_support_revision = self._active_support_revision
+        return pipe
+
+    def _load_flux_fill_pipeline(self, checkpoint: Checkpoint) -> FluxFillPipeline:
+        """Build a FluxFillPipeline from a standalone Flux.1-Fill transformer.
+
+        Mirrors ``_load_flux_checkpoint`` (single-file transformer + shared
+        CLIP-L/T5 components) but with the Fill transformer's 384-channel
+        image input and the dedicated fill pipeline. Registered as the inpaint
+        pipeline, never as txt2img — Fill cannot generate from scratch.
+        """
+        if FluxFillPipeline is None:
+            raise ModelNotFoundError("Flux Fill needs diffusers >= 0.32 with FluxFillPipeline. Update diffusers.")
+
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        encoder_support_revision = self._flux_encoder_support_revision()
+        if self._active and self._active.path != checkpoint.path:
+            self.unload(keep_flux_encoders=self._active_flux_encoder_revision == encoder_support_revision)
+
+        path = Path(checkpoint.path)
+        if path.suffix.lower() not in {".gguf", ".safetensors"}:
+            raise ModelNotFoundError("Flux Fill expects a .gguf or .safetensors transformer file.")
+        component_paths = self._resolve_flux_component_paths()
+        guidance_embeds = self._flux_transformer_has_guidance(path)
+        dtype = self._dtype_for_architecture(ARCH_FLUX)
+        if path.suffix.lower() == ".gguf":
+            dtype = self._gguf_compute_dtype(dtype)
+        elif path.suffix.lower() == ".safetensors":
+            bnb_report = inspect_bnb_4bit_safetensors(path)
+            if bnb_report.is_bnb_4bit:
+                dtype = normalize_bnb_4bit_compute_dtype(dtype)
+
+        transformer_config = dict(_FLUX_TRANSFORMER_CONFIG_BASE)
+        transformer_config["in_channels"] = 384
+        transformer_config["out_channels"] = 64
+        transformer_config["guidance_embeds"] = guidance_embeds
+
+        config_root = self._flux_config_cache_root()
+        transformer_config_dir = self._write_temp_config(config_root, "transformer_fill", transformer_config)
+        vae_config_dir = self._write_temp_config(config_root, "vae", _FLUX_VAE_CONFIG)
+        transformer = self._load_dit_transformer_single_file(
+            FluxTransformer2DModel,
+            path,
+            config_dir=transformer_config_dir,
+            dtype=dtype,
+            family="Flux Fill",
+        )
+        self._prepare_flux_transformer_compute(transformer, dtype)
+        vae = AutoencoderKL.from_single_file(
+            str(component_paths["vae"]),
+            config=vae_config_dir,
+            torch_dtype=dtype,
+            local_files_only=True,
+        )
+        vae = self._prepare_vae_compute(vae, dtype)
+
+        pipe = FluxFillPipeline(
+            scheduler=FlowMatchEulerDiscreteScheduler(shift=3.0),
+            vae=vae,
+            text_encoder=None,
+            tokenizer=None,
+            text_encoder_2=None,
+            tokenizer_2=None,
+            transformer=transformer,
+        )
+        pipe._aiwf_flux_guidance_embeds = guidance_embeds
+        pipe._aiwf_flux_components = {key: str(value) for key, value in component_paths.items()}
+        if getattr(transformer, "_aiwf_bnb_original_layout", False):
+            pipe._aiwf_cast_vae_decode_dtype = True
+        pipe.set_progress_bar_config(disable=True)
+        self._remember_base_scheduler_config(pipe)
+        apply_attention_optimizations(
+            pipe,
+            self.flags,
+            compile_allowed=self._compile_allowed_for_architecture(ARCH_FLUX),
+        )
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(ARCH_FLUX),
+            architecture=ARCH_FLUX,
+        )
+        self._tune_vae_memory(pipe, ARCH_FLUX, checkpoint)
+        self._load_flux_prompt_models(component_paths)
+
+        self._inpaint = pipe
+        self._inpaint_active = checkpoint
+        self._inpaint_support_revision = support_revision
+        self._active_flux_encoder_revision = encoder_support_revision
+        return pipe
+
+    def _load_refiner_checkpoint(self, checkpoint_id: str | None) -> StableDiffusionXLImg2ImgPipeline:
+        if not checkpoint_id:
+            raise ValueError("SDXL refiner is enabled but no refiner checkpoint is selected.")
+        checkpoint = self._resolve_checkpoint(checkpoint_id)
+        if not is_sdxl_architecture(checkpoint.architecture) and checkpoint.architecture != "sdxl_refiner":
+            raise ValueError("SDXL refiner checkpoint must be an SDXL checkpoint.")
+        support_revision = self._checkpoint_support_revision(checkpoint)
+        if self._refiner is not None and self._refiner_active and self._refiner_active.path == checkpoint.path:
+            if self._refiner_support_revision == support_revision:
+                return self._refiner
+            logger.info("Refiner support assets changed; reloading %s", checkpoint.title)
+            self._refiner = None
+            self._refiner_active = None
+            self._refiner_support_revision = None
+
+        logger.info("Loading SDXL refiner pipeline for %s", checkpoint.title)
+        dtype = self._dtype_for_architecture(checkpoint.architecture)
+        path = Path(checkpoint.path)
+        load_kwargs = {
+            "torch_dtype": dtype,
+            "use_safetensors": path.suffix.lower() == ".safetensors",
+        }
+        _add_cached_single_file_config(
+            load_kwargs,
+            StableDiffusionXLImg2ImgPipeline,
+            self._single_file_config_roots(),
+        )
+        pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(checkpoint.path, **load_kwargs)
+        self._remember_base_scheduler_config(pipe)
+        self._apply_fp8_storage(pipe)
+        compile_allowed = self._compile_allowed_for_architecture(checkpoint.architecture)
+        apply_attention_optimizations(pipe, self.flags, compile_allowed=compile_allowed)
+        pipe = self._place_pipeline(
+            pipe,
+            prefer_offload=self._wants_offload(checkpoint.architecture),
+            architecture=checkpoint.architecture,
+        )
+        self._tune_vae_memory(pipe, checkpoint.architecture)
+        self._refiner = pipe
+        self._refiner_active = checkpoint
+        self._refiner_support_revision = support_revision
+        return pipe
+
+    @contextmanager
+    def _vae_decode_dtype_context(self, pipe):
+        vae = getattr(pipe, "vae", None)
+        if vae is None or not getattr(pipe, "_aiwf_cast_vae_decode_dtype", False):
+            yield
+            return
+        original_decode = vae.decode
+
+        def decode_with_matching_dtype(latents, *args, **decode_kwargs):
+            target_dtype = getattr(vae, "dtype", None)
+            target_device = getattr(vae, "device", None)
+            if isinstance(latents, torch.Tensor) and target_dtype is not None and latents.dtype != target_dtype:
+                latents = latents.to(device=target_device or latents.device, dtype=target_dtype)
+            return original_decode(latents, *args, **decode_kwargs)
+
+        vae.decode = decode_with_matching_dtype
+        try:
+            yield
+        finally:
+            vae.decode = original_decode
+
+    def _call_pipe(self, pipe, **kwargs):
+        with attention_call_context(getattr(self, "flags", None), pipe=pipe):
+            with self._vae_decode_dtype_context(pipe):
+                return pipe(**kwargs)
+
+    @staticmethod
+    def _hr_resample_filter(upscaler: str) -> int:
+        normalized = (upscaler or "lanczos").strip().lower().replace(" ", "_")
+        if normalized == "bicubic":
+            return Image.Resampling.BICUBIC
+        if normalized == "nearest":
+            return Image.Resampling.NEAREST
+        return Image.Resampling.LANCZOS
+
+    def unload(self, *, keep_flux_encoders: bool = False) -> None:
+        self._txt2img = None
+        self._img2img = None
+        self._inpaint = None
+        self._refiner = None
+        self._active = None
+        self._active_support_revision = None
+        self._inpaint_active = None
+        self._refiner_active = None
+        self._inpaint_support_revision = None
+        self._refiner_support_revision = None
+        self._active_vae_id = None
+        self._controlnet_cache.clear()
+        # The selected FLUX conditioner is shared across compatible FLUX
+        # transformers, so checkpoint switches may retain it for warm reuse.
+        if not keep_flux_encoders:
+            self._flux_text_encoder = None
+            self._flux_text_encoder_2 = None
+            self._flux_tokenizer = None
+            self._flux_tokenizer_2 = None
+            self._flux_component_paths = {}
+            self._flux_clip_device = None
+            self._flux_t5_device = None
+            self._flux_universal_conditioner = None
+            self._flux_conditioning_scope = None
+            self._flux_prompt_cache.clear()
+            self._active_flux_encoder_revision = None
+        self._flux2_prompt_cache.clear()
+        self._z_image_prompt_cache.clear()
+        self._krea2_prompt_cache.clear()
+        self._qwen_prompt_cache.clear()
+        self._sana_prompt_cache.clear()
+        gc.collect()
+        self.devices.empty_cache()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+        except Exception:
+            logger.debug("CUDA cache cleanup after image unload failed", exc_info=True)
+
+    _SAMPLER_EXTRA_KWARGS = {
+        "dpmpp_2m_sde": {"algorithm_type": "sde-dpmsolver++"},
+        "dpmpp_3m_sde": {"algorithm_type": "sde-dpmsolver++", "solver_order": 3},
+        "dpmpp_2m_karras": {"use_karras_sigmas": True},
+    }
+
+    def _apply_sampler(self, pipe, sampler_id: str, schedule_type: str = "automatic") -> None:
+        scheduler_signature = f"{sampler_id}|{schedule_type}"
+        if getattr(pipe, "_aiwf_scheduler_signature", None) == scheduler_signature:
+            return
+        if self._is_flux_pipe(pipe):
+            logger.info("Flux uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
+            return
+        if self._is_flux_kontext_pipe(pipe):
+            logger.info("Flux Kontext uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
+            return
+        if self._is_flux2_pipe(pipe):
+            logger.info("Flux.2 Klein uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
+            return
+        if self._is_z_image_pipe(pipe):
+            logger.info("Z-Image uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
+            return
+        if self._is_krea2_pipe(pipe):
+            logger.info("Krea 2 uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
+            return
+        if self._is_qwen_image_pipe(pipe):
+            logger.info("Qwen Image uses its Diffusers scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
+            return
+        if self._is_sana_pipe(pipe):
+            logger.info("Sana uses its Diffusers scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
+            return
+        if self._is_sd3_pipe(pipe):
+            logger.info("SD3.5 uses its Diffusers FlowMatch scheduler; Studio sampler selection is ignored.")
+            pipe._aiwf_scheduler_signature = scheduler_signature
+            return
+        cls = SAMPLER_CLASSES.get(sampler_id, EulerAncestralDiscreteScheduler)
+        base_config = self._base_scheduler_config_for_pipe(pipe)
+        kwargs = dict(self._SAMPLER_EXTRA_KWARGS.get(sampler_id, {}))
+        # Sigma schedule must be passed at construction — the scheduler's
+        # config is frozen, so mutating it afterwards has no effect.
+        if schedule_type == "karras":
+            kwargs.update(use_karras_sigmas=True, use_exponential_sigmas=False, use_beta_sigmas=False)
+        elif schedule_type == "exponential":
+            kwargs.update(use_karras_sigmas=False, use_exponential_sigmas=True, use_beta_sigmas=False)
+        elif schedule_type == "beta":
+            kwargs.update(use_karras_sigmas=False, use_exponential_sigmas=False, use_beta_sigmas=True)
+        elif schedule_type == "sgm_uniform":
+            kwargs.update(
+                use_karras_sigmas=False,
+                use_exponential_sigmas=False,
+                use_beta_sigmas=False,
+                timestep_spacing="trailing",
+            )
+        elif schedule_type == "uniform":
+            kwargs.update(use_karras_sigmas=False, use_exponential_sigmas=False, use_beta_sigmas=False)
+        # "automatic" keeps the sampler's own default schedule.
+        try:
+            scheduler = cls.from_config(base_config, **kwargs)
+        except TypeError:
+            # Scheduler doesn't accept sigma-schedule kwargs (e.g. DDIM).
+            scheduler = cls.from_config(base_config)
+        except ImportError as exc:
+            # e.g. DPM++ SDE needs the torchsde package.
+            logger.warning("Sampler %s unavailable (%s); keeping current scheduler.", sampler_id, exc)
+            return
+        except Exception as exc:
+            logger.warning(
+                "Sampler/schedule combo %s/%s unavailable (%s); falling back to sampler defaults.",
+                sampler_id,
+                schedule_type,
+                exc,
+            )
+            try:
+                scheduler = cls.from_config(base_config)
+            except ImportError as import_exc:
+                logger.warning("Sampler %s unavailable (%s); keeping current scheduler.", sampler_id, import_exc)
+                return
+            except Exception as fallback_exc:
+                logger.warning(
+                    "Sampler %s could not be restored with default settings (%s); keeping current scheduler.",
+                    sampler_id,
+                    fallback_exc,
+                )
+                return
+        pipe.scheduler = scheduler
+        pipe._aiwf_scheduler_signature = scheduler_signature
+
+    def _decode_latent_preview(self, pipe, latents) -> Image.Image:
+        latents = latents.to(dtype=pipe.vae.dtype, device=pipe.vae.device)
+        latents = latents / pipe.vae.config.scaling_factor
+        with torch.no_grad():
+            decoded = pipe.vae.decode(latents, return_dict=False)[0]
+        return pipe.image_processor.postprocess(decoded, output_type="pil")[0]
+
+    def _make_callback(
+        self,
+        pipe,
+        request: GenerationRequest,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None,
+        should_cancel: Callable[[], bool] | None,
+        *,
+        step_offset: int = 0,
+        total_steps: int | None = None,
+        preview_every_n_steps: int = 0,
+    ):
+        total = total_steps or request.steps
+
+        def callback(pipe_obj, step_index, _timestep, callback_kwargs):
+            if should_cancel and should_cancel():
+                setattr(pipe_obj, "_interrupt", True)
+
+            preview: Image.Image | None = None
+            if (
+                on_progress
+                and preview_every_n_steps > 0
+                and (step_index + 1) % preview_every_n_steps == 0
+                and "latents" in callback_kwargs
+            ):
+                try:
+                    preview = self._decode_latent_preview(pipe, callback_kwargs["latents"])
+                except Exception:
+                    logger.debug("Live preview decode failed at step %s", step_index, exc_info=True)
+
+            if on_progress:
+                current = step_offset + step_index + 1
+                on_progress(current, total, f"Step {current}/{total}", preview)
+
+            if should_cancel and should_cancel():
+                raise GenerationCancelledError()
+            return callback_kwargs
+
+        return callback
+
+    def _run_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+    ):
+        prompt_kwargs = build_prompt_kwargs(
+            pipe,
+            parsed_prompt,
+            request.negative_prompt,
+            request.clip_skip,
+        )
+        return self._call_pipe(
+            pipe,
+            **prompt_kwargs,
+            num_inference_steps=steps,
+            guidance_scale=request.cfg_scale,
+            num_images_per_prompt=request.batch_size,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
+        )
+
+    def _encode_with_progress(
+        self,
+        family: str,
+        encode_fn: Callable[[], object],
+        *,
+        steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None,
+        tick_seconds: float = 0.4,
+    ):
+        """Run a blocking prompt-encode call while emitting a live elapsed/ETA
+        progress message, so "Encoding prompt" doesn't sit frozen at 0% for
+        models with a slow text encoder (e.g. Flux's T5). There's no real
+        sub-step granularity inside a single encode forward pass, so the ETA
+        is estimated from this family's rolling average of past encode runs
+        on this machine - it gets more accurate after the first generation."""
+        total = max(1, int(steps))
+        if on_progress is None:
+            return encode_fn()
+
+        known_avg = self._encode_duration_estimates.get(family)
+        start = time.perf_counter()
+        stop_event = threading.Event()
+
+        def _tick() -> None:
+            while not stop_event.wait(tick_seconds):
+                elapsed = time.perf_counter() - start
+                if known_avg:
+                    remaining = max(0.0, known_avg - elapsed)
+                    message = f"Encoding prompt… {elapsed:.1f}s (~{remaining:.1f}s left)"
+                else:
+                    message = f"Encoding prompt… {elapsed:.1f}s"
+                try:
+                    on_progress(0, total, message, None)
+                except Exception:
+                    logger.debug("Encode progress callback failed", exc_info=True)
+
+        on_progress(0, total, "Encoding prompt…", None)
+        ticker = threading.Thread(target=_tick, name=f"encode-eta-{family}", daemon=True)
+        ticker.start()
+        try:
+            result = encode_fn()
+        finally:
+            stop_event.set()
+            ticker.join(timeout=1.0)
+
+        elapsed_total = time.perf_counter() - start
+        if known_avg is None:
+            self._encode_duration_estimates[family] = elapsed_total
+        else:
+            self._encode_duration_estimates[family] = (known_avg * 0.7) + (elapsed_total * 0.3)
+        logger.info("Prompt encode (%s) took %.2fs", family, elapsed_total)
+        return result
+
+    def _run_flux_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        component_paths = getattr(pipe, "_aiwf_flux_components", None) or self._resolve_flux_component_paths()
+        self._load_flux_prompt_models({key: Path(value) for key, value in component_paths.items()})
+        device = self._execution_device(pipe)
+        prompt_embeds, pooled_prompt_embeds = self._encode_with_progress(
+            "flux",
+            lambda: self._encode_flux_prompt_fast(
+                pipe,
+                parsed_prompt,
+                device=device,
+                batch_size=request.batch_size,
+            ),
+            steps=steps,
+            on_progress=on_progress,
+        )
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        guidance_embeds = bool(getattr(pipe, "_aiwf_flux_guidance_embeds", False))
+        guidance_scale = float(request.cfg_scale) if guidance_embeds else 0.0
+        if not guidance_embeds and request.cfg_scale != 0:
+            logger.info("Flux distilled transformer has no guidance block; CFG/guidance is forced to 0.0.")
+        return self._call_pipe(
+            pipe,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            num_images_per_prompt=1,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
+            max_sequence_length=256,
+            output_type="pil",
+        )
+
+    def _run_flux_inpaint_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        image: Image.Image,
+        mask_image: Image.Image,
+        width: int,
+        height: int,
+        steps: int,
+        strength: float,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        """Flux inpaint via FluxInpaintPipeline: strength-based blending against
+        the masked region, same prompt encoding path as Flux txt2img. There's
+        no dedicated inpaint transformer for base Flux (that's Flux.1-Fill, a
+        different checkpoint) so quality is closer to SD img2img-style inpaint
+        than a purpose-built inpaint model — still genuinely useful, just don't
+        expect Fill-model-grade seams on tricky masks."""
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        component_paths = getattr(pipe, "_aiwf_flux_components", None) or self._resolve_flux_component_paths()
+        self._load_flux_prompt_models({key: Path(value) for key, value in component_paths.items()})
+        device = self._execution_device(pipe)
+        prompt_embeds, pooled_prompt_embeds = self._encode_with_progress(
+            "flux",
+            lambda: self._encode_flux_prompt_fast(
+                pipe,
+                parsed_prompt,
+                device=device,
+                batch_size=request.batch_size,
+            ),
+            steps=steps,
+            on_progress=on_progress,
+        )
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        guidance_embeds = bool(getattr(pipe, "_aiwf_flux_guidance_embeds", False))
+        guidance_scale = float(request.cfg_scale) if guidance_embeds else 0.0
+        if not guidance_embeds and request.cfg_scale != 0:
+            logger.info("Flux distilled transformer has no guidance block; CFG/guidance is forced to 0.0.")
+        strength_kwargs: dict[str, float] = {}
+        if FluxFillPipeline is None or not isinstance(pipe, FluxFillPipeline):
+            # FluxFillPipeline is a purpose-built inpaint model: it always fully
+            # regenerates the masked region and takes no strength argument.
+            strength_kwargs["strength"] = strength
+        return self._call_pipe(
+            pipe,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            image=image,
+            mask_image=mask_image,
+            **strength_kwargs,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            num_images_per_prompt=1,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
+            max_sequence_length=256,
+            output_type="pil",
+        )
+
+    def _run_flux2_klein_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        device = self._execution_device(pipe)
+        prompt_embeds = self._encode_with_progress(
+            "flux2_klein",
+            lambda: self._encode_flux2_prompt(pipe, parsed_prompt, device),
+            steps=steps,
+            on_progress=on_progress,
+        )
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        text_encoder = getattr(pipe, "text_encoder", None)
+        try:
+            pipe.text_encoder = None
+            return self._call_pipe(
+                pipe,
+                prompt_embeds=prompt_embeds,
+                num_inference_steps=steps,
+                guidance_scale=float(request.cfg_scale),
+                num_images_per_prompt=request.batch_size,
+                generator=generator,
+                callback_on_step_end=callback,
+                callback_on_step_end_tensor_inputs=["latents"],
+                width=width,
+                height=height,
+                output_type="pil",
+            )
+        finally:
+            pipe.text_encoder = text_encoder
+
+    def _run_z_image_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        device = self._execution_device(pipe)
+        prompt_embeds, negative_prompt_embeds = self._encode_with_progress(
+            "z_image",
+            lambda: self._encode_z_image_prompts(
+                pipe,
+                parsed_prompt,
+                request.negative_prompt or None,
+                device,
+            ),
+            steps=steps,
+            on_progress=on_progress,
+        )
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        text_encoder = getattr(pipe, "text_encoder", None)
+        try:
+            pipe.text_encoder = None
+            return self._call_pipe(
+                pipe,
+                prompt_embeds=prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                num_inference_steps=steps,
+                guidance_scale=float(request.cfg_scale),
+                num_images_per_prompt=request.batch_size,
+                generator=generator,
+                callback_on_step_end=callback,
+                callback_on_step_end_tensor_inputs=["latents"],
+                width=width,
+                height=height,
+                output_type="pil",
+            )
+        finally:
+            pipe.text_encoder = text_encoder
+
+    def _run_krea2_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        device = self._execution_device(pipe)
+        guidance_scale = float(request.cfg_scale)
+        prompt_embeds, prompt_mask, negative_embeds, negative_mask = self._encode_with_progress(
+            "krea2",
+            lambda: self._encode_krea2_prompts(
+                pipe,
+                parsed_prompt,
+                request.negative_prompt or None,
+                device,
+                batch_size=request.batch_size,
+                guidance_scale=guidance_scale,
+                max_sequence_length=512,
+            ),
+            steps=steps,
+            on_progress=on_progress,
+        )
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        text_encoder = getattr(pipe, "text_encoder", None)
+        try:
+            pipe.text_encoder = None
+            return self._call_pipe(
+                pipe,
+                prompt=None,
+                negative_prompt=None,
+                prompt_embeds=prompt_embeds,
+                prompt_embeds_mask=prompt_mask,
+                negative_prompt_embeds=negative_embeds,
+                negative_prompt_embeds_mask=negative_mask,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                num_images_per_prompt=request.batch_size,
+                generator=generator,
+                callback_on_step_end=callback,
+                callback_on_step_end_tensor_inputs=["latents"],
+                width=width,
+                height=height,
+                max_sequence_length=512,
+                output_type="pil",
+            )
+        finally:
+            pipe.text_encoder = text_encoder
+
+    def _generate_qwen_nunchaku_result(
+        self,
+        checkpoint: Checkpoint,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        on_progress,
+        should_cancel,
+    ) -> GenerationResult:
+        job_id = uuid4()
+        images: list[Image.Image] = []
+        seeds: list[int] = []
+        infotexts: list[str] = []
+
+        width, height = align_to_multiple_of_16(request.width, request.height)
+        if (width, height) != (request.width, request.height):
+            logger.info(
+                "Rounding %dx%d to %dx%d for Qwen Nunchaku (multiple of 16 required)",
+                request.width,
+                request.height,
+                width,
+                height,
+            )
+
+        total_batches = max(1, int(request.batch_count))
+        total_images = max(1, int(request.batch_size))
+        for batch_index in range(total_batches):
+            batch_images: list[Image.Image] = []
+            batch_seeds: list[int] = []
+            for image_index in range(total_images):
+                if should_cancel and should_cancel():
+                    raise GenerationCancelledError()
+                seed = self._qwen_nunchaku.suggested_seed(request, batch_index=batch_index, image_index=image_index)
+                image, _output_path = self._qwen_nunchaku.generate(
+                    checkpoint,
+                    request,
+                    prompt=parsed_prompt,
+                    width=width,
+                    height=height,
+                    steps=int(request.steps),
+                    seed=seed,
+                    should_cancel=should_cancel,
+                )
+                images.append(image)
+                seeds.append(seed)
+                batch_images.append(image)
+                batch_seeds.append(seed)
+                infotexts.append(
+                    format_infotext(
+                        request,
+                        seed=seed,
+                        checkpoint=checkpoint,
+                        output_width=width,
+                        output_height=height,
+                    )
+                )
+            if on_progress and batch_images:
+                on_progress(
+                    batch_index + 1,
+                    total_batches,
+                    f"Batch {batch_index + 1}/{request.batch_count} complete",
+                    batch_images[-1],
+                    batch_images,
+                    batch_seeds,
+                )
+
+        return GenerationResult(
+            job_id=job_id,
+            images=images,
+            seeds=seeds,
+            infotexts=infotexts,
+            before_hires_images=[],
+            mode=request.mode,
+        )
+
+    def _run_qwen_image_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        device = self._execution_device(pipe)
+        true_cfg_scale = float(request.cfg_scale)
+        prompt_embeds, prompt_mask, negative_embeds, negative_mask = self._encode_with_progress(
+            "qwen_image",
+            lambda: self._encode_qwen_image_prompts(
+                pipe,
+                parsed_prompt,
+                request.negative_prompt or None,
+                device,
+                batch_size=request.batch_size,
+                true_cfg_scale=true_cfg_scale,
+                max_sequence_length=512,
+            ),
+            steps=steps,
+            on_progress=on_progress,
+        )
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        return self._call_pipe(
+            pipe,
+            prompt=None,
+            negative_prompt=None,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_mask,
+            negative_prompt_embeds=negative_embeds,
+            negative_prompt_embeds_mask=negative_mask,
+            true_cfg_scale=true_cfg_scale,
+            num_inference_steps=steps,
+            num_images_per_prompt=request.batch_size,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
+            max_sequence_length=512,
+            output_type="pil",
+        )
+
+    def _run_qwen_image21_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        image: Image.Image | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        """Use Qwen Image 2.1's own joint prompt/image encoder and pipeline API."""
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        return self._call_pipe(
+            pipe,
+            prompt=parsed_prompt,
+            image=image.convert("RGB") if image is not None else None,
+            negative_prompt=request.negative_prompt or None,
+            true_cfg_scale=float(request.cfg_scale),
+            num_inference_steps=steps,
+            num_images_per_prompt=request.batch_size,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
+            output_type="pil",
+        )
+
+    def _run_sana_txt2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ):
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        device = self._execution_device(pipe)
+        prompt_embeds, prompt_mask, negative_embeds, negative_mask = self._encode_with_progress(
+            "sana",
+            lambda: self._encode_sana_prompts(
+                pipe,
+                parsed_prompt,
+                request.negative_prompt or None,
+                device,
+                batch_size=request.batch_size,
+                guidance_scale=float(request.cfg_scale),
+                max_sequence_length=300,
+            ),
+            steps=steps,
+            on_progress=on_progress,
+        )
+        if should_cancel and should_cancel():
+            raise GenerationCancelledError()
+        common = dict(
+            prompt=None,
+            prompt_embeds=prompt_embeds,
+            prompt_attention_mask=prompt_mask,
+            num_inference_steps=steps,
+            guidance_scale=float(request.cfg_scale),
+            num_images_per_prompt=request.batch_size,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            width=width,
+            height=height,
+            output_type="pil",
+            clean_caption=False,
+            use_resolution_binning=True,
+        )
+        if pipe.__class__.__name__ == "SanaSprintPipeline":
+            if steps != 2:
+                common["intermediate_timesteps"] = None
+        else:
+            common["negative_prompt"] = None
+            common["negative_prompt_embeds"] = negative_embeds
+            common["negative_prompt_attention_mask"] = negative_mask
+        return self._call_pipe(pipe, **common)
+
+    def _run_img2img_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        image: Image.Image,
+        *,
+        steps: int,
+        strength: float,
+    ):
+        prompt_kwargs = build_prompt_kwargs(
+            pipe,
+            parsed_prompt,
+            request.negative_prompt,
+            request.clip_skip,
+        )
+        return self._call_pipe(
+            pipe,
+            **prompt_kwargs,
+            num_inference_steps=steps,
+            guidance_scale=request.cfg_scale,
+            num_images_per_prompt=request.batch_size,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            image=image.convert("RGB"),
+            strength=strength,
+        )
+
+    def _run_controlnet_pass(
+        self,
+        pipe,
+        request: GenerationRequest,
+        parsed_prompt: str,
+        generator,
+        callback,
+        units: list[ControlNetUnit],
+        control_images: list[Image.Image],
+        init_images: list[Image.Image] | None,
+        mask_images: list[Image.Image] | None = None,
+    ):
+        if not units or not control_images:
+            raise ValueError("ControlNet requires at least one active unit and control image.")
+        multi = len(units) > 1
+        scales = [float(unit.weight) for unit in units]
+        starts = [float(unit.guidance_start) for unit in units]
+        ends = [float(unit.guidance_end) for unit in units]
+        prompt_kwargs = build_prompt_kwargs(
+            pipe,
+            parsed_prompt,
+            request.negative_prompt,
+            request.clip_skip,
+        )
+        common = dict(
+            **prompt_kwargs,
+            num_inference_steps=request.steps,
+            guidance_scale=request.cfg_scale,
+            num_images_per_prompt=request.batch_size,
+            generator=generator,
+            callback_on_step_end=callback,
+            callback_on_step_end_tensor_inputs=["latents"],
+            controlnet_conditioning_scale=scales if multi else scales[0],
+            control_guidance_start=starts if multi else starts[0],
+            control_guidance_end=ends if multi else ends[0],
+        )
+        if request.mode == GenerationMode.INPAINT:
+            assert init_images is not None and mask_images is not None
+            orig = init_images[0].convert("RGB")
+            raw_mask = mask_images[0]
+            only_masked = bool(getattr(request, "inpaint_only_masked", False))
+            pad = int(getattr(request, "inpaint_masked_padding", 32))
+            content = getattr(request, "inpaint_mask_content", "original") or "original"
+
+            if only_masked:
+                src, msk, crop_box = crop_to_masked(orig, raw_mask, padding=pad)
+                src = apply_masked_content(src, msk, content)
+                if request.mask_blur > 0:
+                    msk = blur_mask(msk, request.mask_blur)
+                pipeline_src, pipeline_msk, width, height = resize_for_inpaint(src, msk)
+                controls = [
+                    image.crop(crop_box).resize((width, height), Image.Resampling.LANCZOS)
+                    for image in control_images
+                ]
+                output = self._call_pipe(
+                    pipe,
+                    **common,
+                    image=pipeline_src,
+                    mask_image=pipeline_msk,
+                    control_image=controls if multi else controls[0],
+                    strength=request.denoising_strength,
+                    width=width,
+                    height=height,
+                )
+                full_mask = prepare_inpaint_mask(raw_mask, size=orig.size)
+                pw = crop_box[2] - crop_box[0]
+                ph = crop_box[3] - crop_box[1]
+                seam_erode = int(getattr(request, "seam_erode", 0) or 0)
+                composites = []
+                for gen in output.images:
+                    full_gen = orig.copy()
+                    gen_r = gen.resize((pw, ph), Image.Resampling.LANCZOS) if gen.size != (pw, ph) else gen
+                    full_gen.paste(gen_r, (crop_box[0], crop_box[1]))
+                    composites.append(
+                        composite_inpaint_result(
+                            full_gen,
+                            orig,
+                            full_mask,
+                            mask_blur=request.mask_blur,
+                            seam_erode=seam_erode,
+                        )
+                    )
+                output.images = composites
+                return output, orig.width, orig.height
+
+            source, mask, width, height = resize_for_inpaint(orig, raw_mask)
+            source = apply_masked_content(source, mask, content)
+            if request.mask_blur > 0:
+                mask = blur_mask(mask, request.mask_blur)
+            controls = [
+                image.resize((width, height), Image.Resampling.LANCZOS)
+                for image in control_images
+            ]
+            output = self._call_pipe(
+                pipe,
+                **common,
+                image=source,
+                mask_image=mask,
+                control_image=controls if multi else controls[0],
+                strength=request.denoising_strength,
+                width=width,
+                height=height,
+            )
+            seam_erode = int(getattr(request, "seam_erode", 0) or 0)
+            paste_mask = prepare_inpaint_mask(raw_mask, size=orig.size)
+            output.images = [
+                composite_inpaint_result(
+                    img if img.size == orig.size else img.resize(orig.size, Image.Resampling.LANCZOS),
+                    orig,
+                    paste_mask,
+                    mask_blur=request.mask_blur,
+                    seam_erode=seam_erode,
+                )
+                for img in output.images
+            ]
+            return output, orig.width, orig.height
+
+        if request.mode == GenerationMode.IMG2IMG:
+            assert init_images is not None
+            base = init_images[0].convert("RGB")
+            width, height = align_to_multiple_of_8(base.width, base.height)
+            if base.size != (width, height):
+                base = base.resize((width, height), Image.Resampling.LANCZOS)
+            controls = [
+                image.resize((width, height), Image.Resampling.LANCZOS)
+                for image in control_images
+            ]
+            output = self._call_pipe(
+                pipe,
+                **common,
+                image=base,
+                control_image=controls if multi else controls[0],
+                strength=request.denoising_strength,
+            )
+            return output, width, height
+
+        width, height = align_to_multiple_of_8(request.width, request.height)
+        controls = [
+            image.resize((width, height), Image.Resampling.LANCZOS)
+            for image in control_images
+        ]
+        output = self._call_pipe(
+            pipe,
+            **common,
+            image=controls if multi else controls[0],
+            width=width,
+            height=height,
+        )
+        return output, width, height
+
+    def _controlnet_dir(self) -> Path:
+        return self.flags.resolved_models_dir() / "ControlNet"
+
+    def _resolve_controlnet_path(self, model_id: str | None) -> Path | None:
+        if not model_id:
+            return None
+        for path in iter_controlnet_model_paths(self.flags):
+            if path.stem == model_id or path.name == model_id:
+                return path
+        return None
+
+    def _prepare_controlnets(
+        self,
+        request: GenerationRequest,
+        control_images: list[Image.Image] | None,
+    ) -> list[tuple[ControlNetUnit, Image.Image, Path]]:
+        """Resolve usable ControlNet units into (unit, control_image, path) tuples.
+
+        Returns an empty list when ControlNet is not active or cannot be satisfied.
+        Missing optional units are skipped here; generate() turns an explicitly
+        enabled-but-empty ControlNet request into a user-facing error.
+        """
+        if request.mode not in (GenerationMode.TXT2IMG, GenerationMode.IMG2IMG, GenerationMode.INPAINT):
+            return []
+        supplied = list(control_images or [])
+        supplied_index = 0
+        prepared: list[tuple[ControlNetUnit, Image.Image, Path]] = []
+        for unit in request.controlnet_units or []:
+            if not unit.enabled or not unit.model:
+                continue
+            supplied_control = supplied[supplied_index] if supplied_index < len(supplied) else None
+            supplied_index += 1
+            path = self._resolve_controlnet_path(unit.model)
+            if path is None:
+                roots = ", ".join(str(root) for root in resolve_controlnet_roots(self.flags)) or str(self._controlnet_dir())
+                logger.warning("ControlNet model %s not found in %s", unit.model, roots)
+                continue
+            control = supplied_control or decode_control_image(unit.image)
+            if control is None:
+                logger.warning("ControlNet unit %s has no control image; skipping.", unit.model)
+                continue
+            if unit.module and unit.module not in ("none", "passthrough"):
+                control = preprocess_control_image(
+                    control,
+                    unit.module,
+                    PreprocessParams(
+                        processor_res=unit.processor_res,
+                        threshold_a=unit.threshold_a,
+                        threshold_b=unit.threshold_b,
+                        annotator_dir=str(self._controlnet_dir() / "Annotators"),
+                    ),
+                )
+            prepared.append((unit, control.convert("RGB"), path))
+        return prepared
+
+    def generate(
+        self,
+        request: GenerationRequest,
+        init_images: list[Image.Image] | None = None,
+        mask_images: list[Image.Image] | None = None,
+        control_images: list[Image.Image] | None = None,
+        on_progress: Callable[[int, int, str, Image.Image | None], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+        preview_every_n_steps: int = 0,
+    ) -> GenerationResult:
+        checkpoint = self._resolve_checkpoint(request.checkpoint_id)
+        job_id = uuid4()
+        images: list[Image.Image] = []
+        seeds: list[int] = []
+        infotexts: list[str] = []
+        before_hires_images: list[Image.Image] = []
+
+        parsed = parse_extra_networks(request.prompt)
+        is_flux_checkpoint = is_flux_architecture(checkpoint.architecture)
+        is_flux_fill_checkpoint = is_flux_fill_architecture(checkpoint.architecture)
+        if is_flux_fill_checkpoint and request.mode != GenerationMode.INPAINT:
+            raise ValueError(
+                "Flux Fill is an inpaint-only checkpoint. Use the Inpaint tab, or pick a regular Flux model for txt2img."
+            )
+        is_flux_kontext_checkpoint = is_flux_kontext_architecture(checkpoint.architecture)
+        is_flux2_checkpoint = is_flux2_klein_architecture(checkpoint.architecture)
+        is_z_image_checkpoint = is_z_image_architecture(checkpoint.architecture)
+        is_krea2_checkpoint = is_krea2_architecture(checkpoint.architecture)
+        is_anima_checkpoint = is_anima_architecture(checkpoint.architecture)
+        is_qwen_nunchaku_checkpoint = is_qwen_nunchaku_architecture(checkpoint.architecture)
+        is_qwen_image_checkpoint = is_qwen_image_architecture(checkpoint.architecture) and not is_qwen_nunchaku_checkpoint
+        is_qwen_image21_checkpoint = self._is_qwen_image21_checkpoint(checkpoint)
+        is_sana_checkpoint = is_sana_architecture(checkpoint.architecture)
+        is_transformer_image_checkpoint = is_transformer_image_architecture(checkpoint.architecture)
+        if is_sd3_architecture(checkpoint.architecture):
+            if request.vae_id:
+                raise ValueError("External SD1.5/SDXL VAE selection is not supported with SD3.5 checkpoints.")
+            if request.sdxl_refiner_enabled:
+                raise ValueError("SDXL refiner only works with SDXL checkpoints, not SD3.5.")
+            if any(unit.enabled for unit in (request.controlnet_units or [])):
+                raise ValueError(
+                "The current ControlNet stack is for SD1.5/SDXL. Disable ControlNet for SD3.5."
+                )
+        if is_transformer_image_checkpoint:
+            if is_flux2_checkpoint:
+                family_label = "Flux.2 Klein"
+            elif is_z_image_checkpoint:
+                family_label = "Z-Image"
+            elif is_krea2_checkpoint:
+                family_label = "Krea 2"
+            elif is_anima_checkpoint:
+                family_label = "Anima"
+            elif is_qwen_nunchaku_checkpoint:
+                family_label = "Qwen Image Nunchaku"
+            elif is_qwen_image21_checkpoint:
+                family_label = "Qwen Image 2.1"
+            elif is_qwen_image_checkpoint:
+                family_label = "Qwen Image"
+            elif is_sana_checkpoint:
+                family_label = "Sana"
+            elif is_flux_kontext_checkpoint:
+                family_label = "Flux Kontext"
+            else:
+                family_label = "Flux"
+            # Plain Flux (not Flux.2 Klein / Z-Image) also supports inpaint via
+            # FluxInpaintPipeline, reusing the already-loaded transformer/text
+            # encoders. Everything else on this family stays txt2img-only.
+            flux_inpaint_allowed = is_flux_checkpoint and request.mode == GenerationMode.INPAINT
+            qwen21_img2img_allowed = is_qwen_image21_checkpoint and request.mode == GenerationMode.IMG2IMG
+            if request.mode != GenerationMode.TXT2IMG and not flux_inpaint_allowed and not qwen21_img2img_allowed:
+                if is_flux_checkpoint:
+                    raise ValueError(
+                        "Flux supports txt2img and inpaint only. Use SD/SDXL/SD3.5 for img2img/ControlNet."
+                    )
+                if is_flux_kontext_checkpoint:
+                    raise ValueError(
+                        "Flux Kontext supports txt2img only; image-conditioned editing and inpaint are not wired yet. "
+                        "Use SD/SDXL/SD3.5 for img2img or inpaint."
+                    )
+                raise ValueError(
+                    f"{family_label} is currently wired for txt2img only. "
+                    "Use SD/SDXL/SD3.5 for img2img or inpaint."
+                )
+            if request.vae_id:
+                raise ValueError(f"External SD VAE selection is not supported with {family_label}.")
+            if request.enable_hr:
+                raise ValueError(
+                    f"Hires fix is not wired for {family_label} yet. Generate at the target resolution directly."
+                )
+            if request.sdxl_refiner_enabled:
+                raise ValueError(f"SDXL refiner only works with SDXL checkpoints, not {family_label}.")
+            if any(unit.enabled for unit in (request.controlnet_units or [])):
+                raise ValueError(
+                    f"ControlNet is not wired for {family_label} yet. Disable ControlNet or use an SD/SDXL model."
+                )
+            if parsed.loras and not _supports_runtime_lora_adapters(checkpoint.architecture):
+                raise ValueError(f"{family_label} LoRA application is not wired yet. Remove LoRAs for this pass.")
+
+        masked_crop_img2img = (
+            request.mode == GenerationMode.INPAINT
+            and bool(getattr(request, "inpaint_only_masked", False))
+            and not is_inpaint_architecture(checkpoint.architecture)
+            and not is_sd3_architecture(checkpoint.architecture)
+            and not is_flux_architecture(checkpoint.architecture)
+        )
+        if request.mode == GenerationMode.INPAINT:
+            if not init_images:
+                raise ValueError("inpaint requires init_images")
+            if not mask_images:
+                raise ValueError("inpaint requires mask_images")
+            if masked_crop_img2img:
+                logger.info(
+                    "Loading img2img pipeline for masked-crop inpaint on %s (%s)",
+                    checkpoint.title,
+                    checkpoint.architecture,
+                )
+                self.load_checkpoint(request.checkpoint_id)
+                pipe = self._img2img
+                assert pipe is not None
+            else:
+                if (
+                    not is_inpaint_architecture(checkpoint.architecture)
+                    and not is_sd3_architecture(checkpoint.architecture)
+                    and not is_flux_architecture(checkpoint.architecture)
+                ):
+                    logger.warning(
+                        "Checkpoint %s is not an inpaint model (%s); results may be poor or fail.",
+                        checkpoint.title,
+                        checkpoint.architecture,
+                    )
+                pipe = self._load_inpaint_checkpoint(checkpoint)
+        elif request.mode == GenerationMode.IMG2IMG:
+            if not init_images:
+                raise ValueError("img2img requires init_images")
+            self.load_checkpoint(request.checkpoint_id)
+            if is_qwen_image21_checkpoint:
+                pipe = self._txt2img
+                assert pipe is not None
+            else:
+                pipe = self._img2img
+                assert pipe is not None
+        elif is_qwen_nunchaku_checkpoint:
+            self.load_checkpoint(request.checkpoint_id)
+            return self._generate_qwen_nunchaku_result(
+                checkpoint,
+                request,
+                parsed.prompt,
+                on_progress,
+                should_cancel,
+            )
+        else:
+            self.load_checkpoint(request.checkpoint_id)
+            pipe = self._txt2img
+            assert pipe is not None
+
+        if not is_transformer_image_checkpoint:
+            self._apply_vae(pipe, request.vae_id)
+            if request.mode != GenerationMode.INPAINT and self._img2img is not None:
+                self._apply_vae(self._img2img, request.vae_id)
+
+        self._apply_sampler(pipe, request.sampler, request.scheduler)
+        if self._img2img is not None and request.mode == GenerationMode.TXT2IMG and request.enable_hr:
+            self._apply_sampler(self._img2img, request.sampler, request.scheduler)
+
+        adapter_names = []
+        if _supports_runtime_lora_adapters(checkpoint.architecture):
+            adapter_names = apply_loras(
+                pipe,
+                parsed.loras,
+                self.list_loras(),
+                base_architecture=checkpoint.architecture,
+            )
+            if self._img2img is not None and adapter_names:
+                apply_loras(
+                    self._img2img,
+                    parsed.loras,
+                    self.list_loras(),
+                    base_architecture=checkpoint.architecture,
+                )
+
+        controlnets = self._prepare_controlnets(request, control_images)
+        if any(unit.enabled for unit in (request.controlnet_units or [])) and not controlnets:
+            raise ValueError(
+                "ControlNet was enabled but could not run — check that the model file exists "
+                "under models/ControlNet and a control image was provided."
+            )
+        cn_pipe = None
+        cn_units: list[ControlNetUnit] = []
+        cn_images: list[Image.Image] = []
+        if controlnets:
+            cn_units = [unit for unit, _image, _path in controlnets]
+            cn_images = [image for _unit, image, _path in controlnets]
+            cn_paths = [path for _unit, _image, path in controlnets]
+            # Validate every branch before building the combined pipeline so a
+            # mixed SD1.5/SDXL stack fails cleanly before any heavy reload work.
+            for cn_path in cn_paths:
+                assert_controlnet_checkpoint_compatible(cn_path, checkpoint.architecture)
+            if request.enable_hr:
+                logger.warning("Hires fix is ignored while ControlNet is active.")
+            dtype = self.devices.dtype(self.flags.no_half)
+            cn_models = [self._controlnet_cache.load(str(path), dtype=dtype) for path in cn_paths]
+            cn_model_arg = cn_models if len(cn_models) > 1 else cn_models[0]
+            cn_pipe = build_controlnet_pipeline(
+                pipe,
+                cn_model_arg,
+                mode=request.mode.value,
+            )
+            cn_pipe = self._place_pipeline(
+                cn_pipe,
+                prefer_offload=self._wants_offload(checkpoint.architecture),
+                architecture=checkpoint.architecture,
+            )
+
+        # Load textual inversions referenced by the (processed) prompt/negative.
+        # Only embeddings the user actually uses in the prompt text are loaded here;
+        # the rest stay on disk and are never injected into the text encoders.
+        if not is_transformer_image_checkpoint:
+            self._ensure_embeddings_for_prompt(
+                pipe, request.prompt, request.negative_prompt, checkpoint.architecture
+            )
+            if self._img2img is not None:
+                self._ensure_embeddings_for_prompt(
+                    self._img2img, request.prompt, request.negative_prompt, checkpoint.architecture
+                )
+            if cn_pipe is not None:
+                self._ensure_embeddings_for_prompt(
+                    cn_pipe, request.prompt, request.negative_prompt, checkpoint.architecture
+                )
+
+        try:
+            run_pipe = cn_pipe if cn_pipe is not None else pipe
+            if is_sana_checkpoint:
+                generator = torch.Generator()
+            else:
+                try:
+                    generator = torch.Generator(device=self._execution_device(run_pipe))
+                except Exception:
+                    # DirectML (and other non-CUDA backends) reject device generators.
+                    generator = torch.Generator()
+            base_step_count = request.steps + (request.hr_steps if request.enable_hr and cn_pipe is None else 0)
+            total_steps = base_step_count
+            if request.sdxl_refiner_enabled and request.mode in (GenerationMode.TXT2IMG, GenerationMode.IMG2IMG):
+                total_steps += request.sdxl_refiner_steps
+
+            for batch_index in range(request.batch_count):
+                seed = request.seed if batch_index == 0 and request.seed >= 0 else random.randint(0, 2**32 - 1)
+                generator.manual_seed(seed)
+                width, height = request.width, request.height
+                if is_transformer_image_checkpoint:
+                    # Qwen Image 2.1 truncates dimensions in 32-pixel blocks;
+                    # other transformer image pipelines require 16-pixel blocks.
+                    align_dimensions = align_to_multiple_of_32 if is_qwen_image21_checkpoint else align_to_multiple_of_16
+                    aligned_width, aligned_height = align_dimensions(width, height)
+                    if (aligned_width, aligned_height) != (width, height):
+                        logger.info(
+                            "Rounding %dx%d to %dx%d for %s dimensions",
+                            width,
+                            height,
+                            aligned_width,
+                            aligned_height,
+                            "Qwen Image 2.1 (multiple of 32)" if is_qwen_image21_checkpoint else "transformer (multiple of 16)",
+                        )
+                        width, height = aligned_width, aligned_height
+
+                if is_flux_checkpoint and request.mode == GenerationMode.TXT2IMG:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_flux_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=width,
+                        height=height,
+                        steps=request.steps,
+                        on_progress=on_progress,
+                        should_cancel=should_cancel,
+                    )
+                    batch_images = output.images
+
+                elif is_flux_kontext_checkpoint:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_flux_kontext_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=width,
+                        height=height,
+                        steps=request.steps,
+                        should_cancel=should_cancel,
+                    )
+                    batch_images = output.images
+
+                elif is_flux2_checkpoint:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_flux2_klein_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=width,
+                        height=height,
+                        steps=request.steps,
+                        on_progress=on_progress,
+                        should_cancel=should_cancel,
+                    )
+                    batch_images = output.images
+
+                elif is_z_image_checkpoint:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_z_image_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=width,
+                        height=height,
+                        steps=request.steps,
+                        on_progress=on_progress,
+                        should_cancel=should_cancel,
+                    )
+                    batch_images = output.images
+
+                elif is_krea2_checkpoint:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_krea2_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=width,
+                        height=height,
+                        steps=request.steps,
+                        on_progress=on_progress,
+                        should_cancel=should_cancel,
+                    )
+                    batch_images = output.images
+
+                elif is_qwen_image_checkpoint:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        # Qwen 2.1 exposes packed 3D latents in the callback;
+                        # the shared preview decoder only supports classic 4D latents.
+                        preview_every_n_steps=(0 if is_qwen_image21_checkpoint else preview_every_n_steps),
+                    )
+                    if self._is_qwen_image21_pipe(pipe):
+                        output = self._run_qwen_image21_pass(
+                            pipe,
+                            request,
+                            parsed.prompt,
+                            generator,
+                            callback,
+                            width=width,
+                            height=height,
+                            steps=request.steps,
+                            image=init_images[0] if request.mode == GenerationMode.IMG2IMG and init_images else None,
+                            should_cancel=should_cancel,
+                        )
+                    else:
+                        output = self._run_qwen_image_txt2img_pass(
+                            pipe,
+                            request,
+                            parsed.prompt,
+                            generator,
+                            callback,
+                            width=width,
+                            height=height,
+                            steps=request.steps,
+                            on_progress=on_progress,
+                            should_cancel=should_cancel,
+                        )
+                    batch_images = output.images
+
+                elif is_sana_checkpoint:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_sana_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=width,
+                        height=height,
+                        steps=request.steps,
+                        on_progress=on_progress,
+                        should_cancel=should_cancel,
+                    )
+                    batch_images = output.images
+
+                elif (is_flux_checkpoint or is_flux_fill_checkpoint) and request.mode == GenerationMode.INPAINT:
+                    assert mask_images is not None and init_images is not None
+                    orig = init_images[0].convert("RGB")
+                    raw_mask = mask_images[0]
+                    only_masked = bool(getattr(request, "inpaint_only_masked", False))
+                    pad = int(getattr(request, "inpaint_masked_padding", 32))
+                    content = getattr(request, "inpaint_mask_content", "original") or "original"
+
+                    if only_masked:
+                        src, msk, crop_box = crop_to_masked(orig, raw_mask, padding=pad)
+                        src = apply_masked_content(src, msk, content)
+                        if request.mask_blur > 0:
+                            msk = blur_mask(msk, request.mask_blur)
+                        pipeline_src, pipeline_msk, pipe_w, pipe_h = resize_for_inpaint(src, msk)
+                        pipe_w, pipe_h = align_to_multiple_of_16(pipe_w, pipe_h)
+                        callback = self._make_callback(
+                            pipe,
+                            request,
+                            on_progress,
+                            should_cancel,
+                            total_steps=request.steps,
+                            preview_every_n_steps=preview_every_n_steps,
+                        )
+                        output = self._run_flux_inpaint_pass(
+                            pipe,
+                            request,
+                            parsed.prompt,
+                            generator,
+                            callback,
+                            image=pipeline_src,
+                            mask_image=pipeline_msk,
+                            width=pipe_w,
+                            height=pipe_h,
+                            steps=request.steps,
+                            strength=request.denoising_strength,
+                            on_progress=on_progress,
+                            should_cancel=should_cancel,
+                        )
+                        full_mask = prepare_inpaint_mask(raw_mask, size=orig.size)
+                        pw = crop_box[2] - crop_box[0]
+                        ph = crop_box[3] - crop_box[1]
+                        seam_erode = int(getattr(request, "seam_erode", 0) or 0)
+                        batch_images = []
+                        for gen in output.images:
+                            full_gen = orig.copy()
+                            gen_r = (
+                                gen.resize((pw, ph), Image.Resampling.LANCZOS)
+                                if gen.size != (pw, ph)
+                                else gen
+                            )
+                            full_gen.paste(gen_r, (crop_box[0], crop_box[1]))
+                            comp = composite_inpaint_result(
+                                full_gen,
+                                orig,
+                                full_mask,
+                                mask_blur=request.mask_blur,
+                                seam_erode=seam_erode,
+                            )
+                            batch_images.append(comp)
+                        width, height = orig.size
+                    else:
+                        source, mask, width, height = resize_for_inpaint(orig, raw_mask)
+                        width, height = align_to_multiple_of_16(width, height)
+                        source = apply_masked_content(source, mask, content)
+                        if request.mask_blur > 0:
+                            mask = blur_mask(mask, request.mask_blur)
+                        callback = self._make_callback(
+                            pipe,
+                            request,
+                            on_progress,
+                            should_cancel,
+                            total_steps=request.steps,
+                            preview_every_n_steps=preview_every_n_steps,
+                        )
+                        output = self._run_flux_inpaint_pass(
+                            pipe,
+                            request,
+                            parsed.prompt,
+                            generator,
+                            callback,
+                            image=source,
+                            mask_image=mask,
+                            width=width,
+                            height=height,
+                            steps=request.steps,
+                            strength=request.denoising_strength,
+                            on_progress=on_progress,
+                            should_cancel=should_cancel,
+                        )
+                        seam_erode = int(getattr(request, "seam_erode", 0) or 0)
+                        paste_mask = prepare_inpaint_mask(raw_mask, size=orig.size)
+                        batch_images = [
+                            composite_inpaint_result(
+                                img if img.size == orig.size else img.resize(orig.size, Image.Resampling.LANCZOS),
+                                orig,
+                                paste_mask,
+                                mask_blur=request.mask_blur,
+                                seam_erode=seam_erode,
+                            )
+                            for img in output.images
+                        ]
+                        width, height = orig.size
+
+                elif cn_pipe is not None:
+                    callback = self._make_callback(
+                        run_pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output, width, height = self._run_controlnet_pass(
+                        run_pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        cn_units,
+                        cn_images,
+                        init_images,
+                        mask_images,
+                    )
+                    batch_images = output.images
+
+                elif request.mode == GenerationMode.INPAINT:
+                    assert mask_images is not None and init_images is not None
+                    orig = init_images[0].convert("RGB")
+                    raw_mask = mask_images[0]
+                    only_masked = bool(getattr(request, "inpaint_only_masked", False))
+                    pad = int(getattr(request, "inpaint_masked_padding", 32))
+                    content = getattr(request, "inpaint_mask_content", "original") or "original"
+
+                    if only_masked:
+                        src, msk, crop_box = crop_to_masked(orig, raw_mask, padding=pad)
+                        src = apply_masked_content(src, msk, content)
+                        if request.mask_blur > 0:
+                            msk = blur_mask(msk, request.mask_blur)
+                        pipeline_src, pipeline_msk, pipe_w, pipe_h = resize_for_inpaint(src, msk)
+                        callback = self._make_callback(
+                            pipe,
+                            request,
+                            on_progress,
+                            should_cancel,
+                            total_steps=request.steps,
+                            preview_every_n_steps=preview_every_n_steps,
+                        )
+                        if masked_crop_img2img:
+                            output = self._run_img2img_pass(
+                                pipe,
+                                request,
+                                parsed.prompt,
+                                generator,
+                                callback,
+                                pipeline_src,
+                                steps=request.steps,
+                                strength=request.denoising_strength,
+                            )
+                        else:
+                            prompt_kwargs = build_prompt_kwargs(
+                                pipe,
+                                parsed.prompt,
+                                request.negative_prompt,
+                                request.clip_skip,
+                            )
+                            output = self._call_pipe(
+                                pipe,
+                                **prompt_kwargs,
+                                num_inference_steps=request.steps,
+                                guidance_scale=request.cfg_scale,
+                                num_images_per_prompt=request.batch_size,
+                                generator=generator,
+                                callback_on_step_end=callback,
+                                callback_on_step_end_tensor_inputs=["latents"],
+                                image=pipeline_src,
+                                mask_image=pipeline_msk,
+                                strength=request.denoising_strength,
+                                width=pipe_w,
+                                height=pipe_h,
+                            )
+                        # Paste generated crop back, then composite with seam control.
+                        full_mask = prepare_inpaint_mask(raw_mask, size=orig.size)
+                        pw = crop_box[2] - crop_box[0]
+                        ph = crop_box[3] - crop_box[1]
+                        seam_erode = int(getattr(request, "seam_erode", 0) or 0)
+                        batch_images = []
+                        for gen in output.images:
+                            full_gen = orig.copy()
+                            gen_r = (
+                                gen.resize((pw, ph), Image.Resampling.LANCZOS)
+                                if gen.size != (pw, ph)
+                                else gen
+                            )
+                            full_gen.paste(gen_r, (crop_box[0], crop_box[1]))
+                            comp = composite_inpaint_result(
+                                full_gen,
+                                orig,
+                                full_mask,
+                                mask_blur=request.mask_blur,
+                                seam_erode=seam_erode,
+                            )
+                            batch_images.append(comp)
+                        width, height = orig.size
+                    else:
+                        # Whole picture (classic): prefill masked region, run at (aligned) full size,
+                        # then composite to keep unmasked pixels pixel-exact.
+                        source, mask, width, height = resize_for_inpaint(orig, raw_mask)
+                        source = apply_masked_content(source, mask, content)
+                        if request.mask_blur > 0:
+                            mask = blur_mask(mask, request.mask_blur)
+                        callback = self._make_callback(
+                            pipe,
+                            request,
+                            on_progress,
+                            should_cancel,
+                            total_steps=request.steps,
+                            preview_every_n_steps=preview_every_n_steps,
+                        )
+                        prompt_kwargs = build_prompt_kwargs(
+                            pipe,
+                            parsed.prompt,
+                            request.negative_prompt,
+                            request.clip_skip,
+                        )
+                        output = self._call_pipe(
+                            pipe,
+                            **prompt_kwargs,
+                            num_inference_steps=request.steps,
+                            guidance_scale=request.cfg_scale,
+                            num_images_per_prompt=request.batch_size,
+                            generator=generator,
+                            callback_on_step_end=callback,
+                            callback_on_step_end_tensor_inputs=["latents"],
+                            image=source,
+                            mask_image=mask,
+                            strength=request.denoising_strength,
+                            width=width,
+                            height=height,
+                        )
+                        seam_erode = int(getattr(request, "seam_erode", 0) or 0)
+                        paste_mask = prepare_inpaint_mask(raw_mask, size=orig.size)
+                        batch_images = [
+                            composite_inpaint_result(
+                                img if img.size == orig.size else img.resize(orig.size, Image.Resampling.LANCZOS),
+                                orig,
+                                paste_mask,
+                                mask_blur=request.mask_blur,
+                                seam_erode=seam_erode,
+                            )
+                            for img in output.images
+                        ]
+                        width, height = orig.size
+
+                elif request.mode == GenerationMode.IMG2IMG:
+                    assert init_images is not None
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_img2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        init_images[0],
+                        steps=request.steps,
+                        strength=request.denoising_strength,
+                    )
+                    batch_images = output.images
+                    width, height = init_images[0].size
+
+                elif request.enable_hr:
+                    callback_pass1 = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=total_steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    first = self._run_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback_pass1,
+                        width=request.width,
+                        height=request.height,
+                        steps=request.steps,
+                    )
+                    hr_width, hr_height = align_to_multiple_of_8(
+                        int(request.width * request.hr_scale),
+                        int(request.height * request.hr_scale),
+                    )
+                    if request.save_before_hires:
+                        before_hires_images.extend(first.images)
+                    assert self._img2img is not None
+                    callback_pass2 = self._make_callback(
+                        self._img2img,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        step_offset=request.steps,
+                        total_steps=total_steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    resample = self._hr_resample_filter(request.hr_upscaler)
+                    upscaled_images = []
+                    for image in first.images:
+                        upscaled_images.append(image.resize((hr_width, hr_height), resample))
+                    batch_images = []
+                    hr_request = request.model_copy(update={"batch_size": 1})
+                    for image in upscaled_images:
+                        hr_output = self._run_img2img_pass(
+                            self._img2img,
+                            hr_request,
+                            parsed.prompt,
+                            generator,
+                            callback_pass2,
+                            image,
+                            steps=request.hr_steps,
+                            strength=request.hr_denoising_strength,
+                        )
+                        batch_images.extend(hr_output.images)
+                    width, height = hr_width, hr_height
+
+                else:
+                    callback = self._make_callback(
+                        pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        total_steps=request.steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    output = self._run_txt2img_pass(
+                        pipe,
+                        request,
+                        parsed.prompt,
+                        generator,
+                        callback,
+                        width=request.width,
+                        height=request.height,
+                        steps=request.steps,
+                    )
+                    batch_images = output.images
+
+                if request.sdxl_refiner_enabled and request.mode != GenerationMode.INPAINT:
+                    if not is_sdxl_architecture(checkpoint.architecture):
+                        raise ValueError("SDXL refiner can only run with an SDXL base checkpoint.")
+                    refiner_pipe = self._load_refiner_checkpoint(request.sdxl_refiner_checkpoint_id)
+                    self._apply_vae(refiner_pipe, request.vae_id)
+                    self._apply_sampler(refiner_pipe, request.sampler, request.scheduler)
+                    self._ensure_embeddings_for_prompt(
+                        refiner_pipe,
+                        request.prompt,
+                        request.negative_prompt,
+                        checkpoint.architecture,
+                    )
+                    callback_refiner = self._make_callback(
+                        refiner_pipe,
+                        request,
+                        on_progress,
+                        should_cancel,
+                        step_offset=base_step_count,
+                        total_steps=total_steps,
+                        preview_every_n_steps=preview_every_n_steps,
+                    )
+                    refiner_request = request.model_copy(update={"batch_size": 1})
+                    refined_images: list[Image.Image] = []
+                    for image in batch_images:
+                        refined = self._run_img2img_pass(
+                            refiner_pipe,
+                            refiner_request,
+                            parsed.prompt,
+                            generator,
+                            callback_refiner,
+                            image,
+                            steps=request.sdxl_refiner_steps,
+                            strength=request.sdxl_refiner_strength,
+                        )
+                        refined_images.extend(refined.images)
+                    batch_images = refined_images
+
+                images.extend(batch_images)
+                batch_seeds = [seed] * len(batch_images)
+                seeds.extend(batch_seeds)
+                for img in batch_images:
+                    infotexts.append(
+                        format_infotext(
+                            request,
+                            seed=seed,
+                            checkpoint=checkpoint,
+                            output_width=width,
+                            output_height=height,
+                        )
+                    )
+                if on_progress and batch_images:
+                    on_progress(
+                        batch_index + 1,
+                        max(1, int(request.batch_count)),
+                        f"Batch {batch_index + 1}/{request.batch_count} complete",
+                        batch_images[-1],
+                        batch_images,
+                        batch_seeds,
+                    )
+
+        except (KeyboardInterrupt, StopIteration):
+            raise
+        except GenerationCancelledError:
+            # User clicked Stop (or the stall watchdog force-failed this
+            # job) — expected, not a bug. Log it quietly instead of an
+            # ERROR-level traceback that looks like a crash.
+            logger.info("Generation cancelled (user stop or watchdog force-fail)")
+            raise
+        except Exception as exc:
+            logger.error("Generation failed: %s", exc, exc_info=True)
+            raise
+
+        return GenerationResult(
+            job_id=job_id,
+            images=images,
+            seeds=seeds,
+            infotexts=infotexts,
+            before_hires_images=before_hires_images,
+            mode=request.mode,
+        )

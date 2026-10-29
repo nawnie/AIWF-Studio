@@ -1,0 +1,1 @@
+"""Process-level runtime bootstrap (env before torch)."""

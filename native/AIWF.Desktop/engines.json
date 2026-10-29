@@ -1,0 +1,83 @@
+{
+  "schema": "aiwf-engines-v1",
+  "note": "AES Studio uses an isolated local API and profile. Optional services are off until configured.",
+  "endpoints": {
+    "engine_api": "http://127.0.0.1:18870",
+    "chat": "http://127.0.0.1:18871",
+    "chat_key_file": "%LOCALAPPDATA%\\Programs\\AES Studio Data\\chat-api-key.txt",
+    "dataset_key_file": "%LOCALAPPDATA%\\Programs\\AES Studio Data\\dataset-api-key.txt"
+  },
+  "engines": [
+    {
+      "id": "engine-api",
+      "name": "AES engine API",
+      "role": "Projects, datasets, training plans and image jobs",
+      "health_url": "http://127.0.0.1:18870/health",
+      "ports": [
+        18870
+      ],
+      "color": "#6B8EAD",
+      "uses_gpu": false,
+      "processes": [
+        {
+          "exe": "%AES_STUDIO_ROOT%\\venv\\Scripts\\python.exe",
+          "args": [
+            "-m",
+            "aiwf.engine_api",
+            "--port",
+            "18870"
+          ],
+          "cwd": "%AES_STUDIO_ROOT%",
+          "env": {
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "AES_STUDIO_USE_PROFILE_DATA": "1",
+            "AIWF_SDCPP_BINARY": "%AES_STUDIO_ROOT%\\dependencies\\stable-diffusion.cpp-cuda13\\bin\\sd-cli.exe",
+            "PYTHONDONTWRITEBYTECODE": "1"
+          },
+          "ready_url": "http://127.0.0.1:18870/health",
+          "ready_timeout_seconds": 60
+        }
+      ]
+    },
+    {
+      "id": "chat",
+      "name": "Chat engine",
+      "role": "External local LLM service",
+      "health_url": "http://127.0.0.1:18871/",
+      "ports": [
+        18871
+      ],
+      "color": "#5BB974",
+      "uses_gpu": true,
+      "processes": [],
+      "probe": false
+    },
+    {
+      "id": "datasets",
+      "name": "Dataset engine",
+      "role": "External Dataset Studio service",
+      "health_url": "http://127.0.0.1:18872/api/health",
+      "ports": [
+        18872
+      ],
+      "color": "#B146C2",
+      "uses_gpu": false,
+      "processes": [],
+      "probe": false
+    },
+    {
+      "id": "training",
+      "name": "Training engine",
+      "role": "External ReTrain service",
+      "health_url": "http://127.0.0.1:18873/api/retrain/datasets/import-capability",
+      "ports": [
+        18873
+      ],
+      "color": "#F7630C",
+      "uses_gpu": true,
+      "processes": [],
+      "probe": false
+    }
+  ]
+}

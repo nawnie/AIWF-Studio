@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import logging
+import os
+import re
+from pathlib import Path
+
+from aiwf.core.config.settings import RuntimeFlags
+from aiwf.core.domain.models import EmbeddingInfo
+
+logger = logging.getLogger(__name__)
+
+EMBEDDING_EXTENSIONS = {".pt", ".safetensors", ".bin"}
+
+
+def resolve_embedding_roots(flags: RuntimeFlags) -> list[Path]:
+    """Only the dedicated embeddings folder (subfolders included)."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+    model_roots = [flags.resolved_models_dir(), *flags.resolved_extra_model_dirs()]
+    for models_dir in model_roots:
+        candidates = []
+        if models_dir.name.lower() in {"embeddings", "embedding"}:
+            candidates.append(models_dir)
+        candidates.extend(models_dir / name for name in ("embeddings", "Embeddings"))
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            key = os.path.normcase(str(resolved))
+            if resolved.exists() and key not in seen:
+                seen.add(key)
+                roots.append(resolved)
+    return roots
+
+
+def scan_embeddings(flags: RuntimeFlags) -> list[EmbeddingInfo]:
+    seen: set[str] = set()
+    results: list[EmbeddingInfo] = []
+
+    for root in resolve_embedding_roots(flags):
+        try:
+            paths = sorted(root.rglob("*"))
+        except OSError:
+            continue
+        for path in paths:
+            if not path.is_file() or path.suffix.lower() not in EMBEDDING_EXTENSIONS:
+                continue
+            resolved = str(path.resolve())
+            dedup_key = os.path.normcase(resolved)
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            results.append(
+                EmbeddingInfo(
+                    id=path.stem,
+                    title=path.stem,
+                    filename=path.name,
+                    path=resolved,
+                )
+            )
+
+    results.sort(key=lambda item: item.title.lower())
+    logger.info("Found %d embedding(s)", len(results))
+    return results
+
+
+# Matches an embedding id as a whole token (not substring of a larger word).
+# Embedding names may contain -, _, digits (e.g. "AS-YoungV2"); we treat those as part of the token.
+_BOUNDARY = re.compile(r"(?i)(?<![A-Za-z0-9_-])({})(?![A-Za-z0-9_-])")
+
+
+def find_referenced_embeddings(
+    prompt: str | None, negative: str | None, catalog: list[EmbeddingInfo]
+) -> list[EmbeddingInfo]:
+    """Return catalog entries for embeddings referenced by bare name in the prompt texts.
+
+    Used for on-demand loading instead of pre-loading every embedding file at
+    checkpoint load time. Only embeddings the user actually types (or inserts via
+    the picker) into the prompt/negative are loaded into the text encoders.
+    """
+    if not catalog:
+        return []
+    text = f"{prompt or ''} {negative or ''}"
+    if not text.strip():
+        return []
+    found: list[EmbeddingInfo] = []
+    seen: set[str] = set()
+    for item in catalog:
+        pat = _BOUNDARY.pattern.format(re.escape(item.id))
+        if re.search(pat, text):
+            if item.id not in seen:
+                seen.add(item.id)
+                found.append(item)
+    return found

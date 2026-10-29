@@ -1,0 +1,137 @@
+{
+  "13": {
+    "inputs": {
+      "aspect_ratio": "1:1 (Square)",
+      "megapixels": 0.6,
+      "multiple": 8
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "Size (aspect ratio and megapixels are filled per job)"
+    }
+  },
+  "461": {
+    "inputs": {
+      "filename_prefix": "AIWF_Studio/qwen_image_2.1",
+      "format": "png",
+      "images": [
+        "475",
+        0
+      ],
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB"
+    },
+    "class_type": "SaveImageAdvanced",
+    "_meta": {
+      "title": "Save (AIWF Studio copies the result into its own output folder)"
+    }
+  },
+  "470": {
+    "inputs": {
+      "unet_name": "Qwen Image 2.1\\qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Qwen Image 2.1 diffusion model (int8)"
+    }
+  },
+  "471": {
+    "inputs": {
+      "prompt": "",
+      "negative_prompt": "worst quality",
+      "resolution": 800,
+      "clip": [
+        "472",
+        0
+      ],
+      "images": {}
+    },
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": {
+      "title": "Prompt (filled per job)"
+    }
+  },
+  "472": {
+    "inputs": {
+      "clip_name": "Qwen3-VL\\5.7B int8\\qwen3vl_8b_w4a8_heretic.safetensors",
+      "type": "qwen_image"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Qwen3-VL text encoder"
+    }
+  },
+  "473": {
+    "inputs": {
+      "vae_name": "Qwen Image 2.1\\qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Qwen Image 2.1 VAE"
+    }
+  },
+  "474": {
+    "inputs": {
+      "batch_size": 1,
+      "width": [
+        "13",
+        0
+      ],
+      "height": [
+        "13",
+        1
+      ]
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty latent"
+    }
+  },
+  "475": {
+    "inputs": {
+      "samples": [
+        "476",
+        0
+      ],
+      "vae": [
+        "473",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "Decode"
+    }
+  },
+  "476": {
+    "inputs": {
+      "seed": 0,
+      "steps": 30,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "470",
+        0
+      ],
+      "positive": [
+        "471",
+        0
+      ],
+      "negative": [
+        "471",
+        1
+      ],
+      "latent_image": [
+        "474",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "Sampler (seed filled per job)"
+    }
+  }
+}

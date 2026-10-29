@@ -1,0 +1,9 @@
+namespace AiwfDesktop
+{
+    // Home: GPU telemetry, engines with Start/Stop, and the current project
+    [default_interface]
+    runtimeclass HomePage : Microsoft.UI.Xaml.Controls.Page
+    {
+        HomePage();
+    }
+}

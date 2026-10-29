@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Create: choose an image backend and one of its available text-to-image models.
+  Jobs go through the engine API (POST /images, then polling). Finished images land in Studio's
+  output folder with their settings embedded, so the Datasets page can catalog them. The recent
+  strip is built in code from that folder.
+-->
+<Page
+    x:Class="AiwfDesktop.CreatePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AiwfDesktop"
+    NavigationCacheMode="Required">
+    <!-- Two panes side by side when the page is wide; below 800 layout units they stack in one scrolling
+         column (form, then result). CreatePage::ApplyLayout switches the column/row sizes in code. -->
+    <ScrollViewer x:Name="PageScroll" VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled">
+    <Grid x:Name="RootGrid" Padding="{StaticResource PagePadding}" ColumnSpacing="28">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="FormColumn" Width="340" />
+            <ColumnDefinition x:Name="ResultColumn" Width="*" />
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition x:Name="TopRow" Height="*" />
+            <RowDefinition x:Name="BottomRow" Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- left: what to make -->
+        <ScrollViewer x:Name="FormScroll">
+            <StackPanel Spacing="14" Padding="0,0,8,0">
+                <StackPanel Spacing="2">
+                    <TextBlock Text="Create" Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock Text="Describe an image, choose its shape, then create it on this PC. Draft and Standard use different GPU memory and detail levels."
+                               Style="{StaticResource BodyTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap" />
+                </StackPanel>
+
+                <InfoBar x:Name="EngineBar" IsOpen="False" IsClosable="False">
+                    <InfoBar.ActionButton>
+                        <Button Content="Start required services" Click="StartEngine_Click" />
+                    </InfoBar.ActionButton>
+                </InfoBar>
+
+                <ComboBox x:Name="ImageBackendPicker" Header="Image backend"
+                          SelectionChanged="ImageBackendPicker_SelectionChanged" HorizontalAlignment="Stretch">
+                    <ComboBoxItem Content="AIWF Python (Diffusers)" Tag="python" />
+                    <ComboBoxItem Content="C++ (stable-diffusion.cpp)" Tag="cpp" />
+                </ComboBox>
+                <ComboBox x:Name="ImageModelPicker" Header="Image model" PlaceholderText="Choose an available model"
+                          IsEnabled="False" SelectionChanged="ImageModelPicker_SelectionChanged" HorizontalAlignment="Stretch" />
+                <TextBlock x:Name="BackendStatusText" Text="Checking image backends..." Style="{StaticResource CaptionTextBlockStyle}"
+                           Opacity="0.75" TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="RefreshBackendsButton" Content="Refresh choices" Click="RefreshBackends_Click"
+                            IsEnabled="False" />
+                </StackPanel>
+
+                <TextBox x:Name="PromptBox" Header="Describe the image" AcceptsReturn="True" TextWrapping="Wrap"
+                         MinHeight="130" MaxLength="2000"
+                         PlaceholderText="A lighthouse on a cliff at dusk, warm light, long exposure sea" />
+
+                <ComboBox x:Name="AspectBox" Header="Shape" SelectedIndex="0" HorizontalAlignment="Stretch">
+                    <ComboBoxItem Content="Square (1:1)" Tag="1:1" />
+                    <ComboBoxItem Content="Landscape (16:9)" Tag="16:9" />
+                    <ComboBoxItem Content="Portrait (9:16)" Tag="9:16" />
+                    <ComboBoxItem Content="Photo (3:2)" Tag="3:2" />
+                    <ComboBoxItem Content="Portrait photo (2:3)" Tag="2:3" />
+                    <ComboBoxItem Content="Classic (4:3)" Tag="4:3" />
+                    <ComboBoxItem Content="Classic portrait (3:4)" Tag="3:4" />
+                    <ComboBoxItem Content="Ultrawide (21:9)" Tag="21:9" />
+                </ComboBox>
+
+                <RadioButtons x:Name="QualityBox" Header="Quality" SelectedIndex="0">
+                    <x:String>Draft (faster)</x:String>
+                    <x:String>Standard (more detail)</x:String>
+                </RadioButtons>
+
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="GenerateButton" Style="{StaticResource AccentButtonStyle}" Click="Generate_Click" MinWidth="140"
+                            AutomationProperties.Name="Create image">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="&#xE790;" FontSize="14" />
+                            <TextBlock Text="Create image" />
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="CancelButton" Content="Cancel" Click="Cancel_Click" Visibility="Collapsed" />
+                    <Button x:Name="DismissButton" Content="Dismiss tracking" Click="Dismiss_Click" Visibility="Collapsed"
+                            ToolTipService.ToolTip="Stop checking this job in Studio. The image engine continues working; use Cancel to request that the job stop." />
+                </StackPanel>
+
+                <StackPanel x:Name="JobPanel" Spacing="6" Visibility="Collapsed">
+                    <TextBlock Text="Cancel requests that the image job stop. Dismiss tracking only stops Studio from checking its progress; the engine may keep working." Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap" />
+                    <ProgressBar x:Name="JobProgress" IsIndeterminate="True" />
+                    <TextBlock x:Name="JobStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
+                </StackPanel>
+                <InfoBar x:Name="ErrorBar" Severity="Error" IsOpen="False" IsClosable="True" />
+                <Expander Header="Advanced" HorizontalAlignment="Stretch" IsExpanded="False"
+                          AutomationProperties.Name="Advanced image settings">
+                    <StackPanel Spacing="12">
+                        <NumberBox x:Name="SeedBox" Header="Seed (optional)" PlaceholderText="Random each time"
+                                   SpinButtonPlacementMode="Hidden" Minimum="0" ValidationMode="InvalidInputOverwritten" />
+                        <TextBlock Text="Leave Seed empty for a new variation each time. Reuse a seed to compare the same starting point."
+                                   Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Expander>
+
+                <Expander Header="More models and video (local ComfyUI)" HorizontalAlignment="Stretch">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="Requires your own running ComfyUI and compatible models and nodes. AES Studio does not install them. These are short preview workflows." TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
+                        <ComboBox x:Name="CreativePreset" Header="Workflow" SelectedIndex="0" HorizontalAlignment="Stretch" SelectionChanged="CreativePreset_SelectionChanged">
+                            <ComboBoxItem Content="Qwen Image 2.1 edit" Tag="qwen21-edit" />
+                            <ComboBoxItem Content="MOSS Image" Tag="moss-image" />
+                            <ComboBoxItem Content="Wan 2.2 5B image to video" Tag="wan22-i2v" />
+                            <ComboBoxItem Content="LTX 2.5 image to video (GGUF)" Tag="ltx25-i2v" />
+                        </ComboBox>
+                        <NumberBox x:Name="CreativePort" Header="Local ComfyUI port" Value="8188" Minimum="1" Maximum="65535" SmallChange="1" ValidationMode="InvalidInputOverwritten" />
+                        <Button x:Name="CreativeRefresh" Content="Find local model files" Click="CreativeRefresh_Click" />
+                        <TextBlock x:Name="CreativeAvailability" Text="Start ComfyUI, choose a workflow, then find local model files." TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
+                        <ComboBox x:Name="CreativeModel" Header="Model" PlaceholderText="Choose a compatible model" HorizontalAlignment="Stretch" />
+                        <ComboBox x:Name="CreativeEncoder" Header="Text encoder" PlaceholderText="Choose a compatible encoder" HorizontalAlignment="Stretch" />
+                        <ComboBox x:Name="CreativeVae" Header="Video or image VAE" PlaceholderText="Choose a compatible VAE" HorizontalAlignment="Stretch" />
+                        <ComboBox x:Name="CreativeAudioVae" Header="Audio VAE" PlaceholderText="Choose a compatible audio VAE" HorizontalAlignment="Stretch" Visibility="Collapsed" />
+                        <TextBlock Text="Choose components made for the selected model. Listing a file does not prove it is compatible." TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
+                        <TextBox x:Name="CreativePrompt" Header="Describe the result" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="90" MaxLength="2000" />
+                        <StackPanel x:Name="CreativeInputPanel" Spacing="4">
+                            <Button x:Name="CreativeChooseImage" Content="Choose reference image" Click="CreativeChooseImage_Click" />
+                            <TextBlock x:Name="CreativeImagePath" Text="No image selected" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
+                            <TextBlock Text="A copy is placed in ComfyUI's input folder." TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="CreativeRun" Content="Run workflow" Style="{StaticResource AccentButtonStyle}" Click="CreativeRun_Click" />
+                            <Button x:Name="CreativeCancel" Content="Cancel queued job" Click="CreativeCancel_Click" Visibility="Collapsed" />
+                        </StackPanel>
+                        <ProgressBar x:Name="CreativeProgress" IsIndeterminate="True" Visibility="Collapsed" />
+                        <TextBlock x:Name="CreativeStatus" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
+                        <TextBlock Text="AES can cancel queued jobs. Stop a running job in ComfyUI. Closing AES does not stop ComfyUI jobs." TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
+                        <Button x:Name="CreativeOpen" Content="Open result" Click="CreativeOpen_Click" IsEnabled="False" />
+                    </StackPanel>
+                </Expander>
+
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- right (or below, when stacked): the result and recent images -->
+        <Grid x:Name="ResultPane" Grid.Column="1" RowSpacing="12">
+            <Grid.RowDefinitions>
+                <RowDefinition x:Name="PreviewRow" Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="132" />
+            </Grid.RowDefinitions>
+            <Border Style="{StaticResource CardStyle}" Padding="8">
+                <Grid>
+                    <Image x:Name="Preview" Stretch="Uniform" AutomationProperties.Name="Generated image" />
+                    <StackPanel x:Name="PreviewEmpty" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center" MinWidth="200">
+                        <FontIcon Glyph="&#xEB9F;" FontSize="44" Opacity="0.45" />
+                        <TextBlock Text="Your images appear here" Style="{StaticResource BodyStrongTextBlockStyle}" HorizontalAlignment="Center"
+                                   TextAlignment="Center" Opacity="0.7" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+            <!-- what is shown (one line), then what you can do with it -->
+            <StackPanel Grid.Row="1" Spacing="8">
+                <TextBlock x:Name="PreviewInfo" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.75"
+                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" IsTextSelectionEnabled="True" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="OpenButton" Content="Open" Click="Open_Click" IsEnabled="False" />
+                    <Button x:Name="FolderButton" Content="Show in folder" Click="ShowInFolder_Click" IsEnabled="False" />
+                    <Button x:Name="ReuseButton" Content="Use these settings" Click="Reuse_Click" IsEnabled="False" />
+                </StackPanel>
+            </StackPanel>
+            <TextBlock Grid.Row="2" Text="Recent images" Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <ScrollViewer Grid.Row="3" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled">
+                <StackPanel x:Name="Recent" Orientation="Horizontal" Spacing="8" />
+            </ScrollViewer>
+        </Grid>
+    </Grid>
+    </ScrollViewer>
+</Page>

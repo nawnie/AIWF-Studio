@@ -1,0 +1,135 @@
+{
+  "schema": "aiwf-sdcpp-cuda13-build-receipt-v1",
+  "component": "stable-diffusion.cpp sd-cli optional CUDA companion",
+  "source": {
+    "repository": "https://github.com/leejet/stable-diffusion.cpp",
+    "commit": "6314af404aeb800ffa541d31c832487d7a58d190",
+    "submodules": {
+      "ggml": {
+        "repository": "https://github.com/leejet/ggml",
+        "commit": "eced84c86f8b012c752c016f7fe789adea168e1e"
+      },
+      "frontend": "not initialized or built",
+      "libwebp": "not initialized; SD_WEBP=OFF",
+      "libwebm": "not initialized; SD_WEBM=OFF"
+    },
+    "working_tree_clean": true
+  },
+  "toolchain": {
+    "platform": "Windows x64",
+    "configuration": "Release",
+    "target": "sd-cli",
+    "cmake": "4.4.4",
+    "ninja": "1.13.2",
+    "msvc": "19.44.35229.0",
+    "msvc_toolset": "14.44.35207",
+    "cuda_toolkit": "13.2.78",
+    "cuda_runtime_components": {
+      "cublas": "CUDA 13.2 toolkit package component 13.4.0.1; cublas64_13.dll file version 6.14.11.1340",
+      "cublasLt": "CUDA 13.2 toolkit package component 13.4.0.1; cublasLt64_13.dll file version 6.14.11.1340"
+    },
+    "build_command": "cmake --build <build-dir> --target sd-cli --parallel 4",
+    "build_flags": {
+      "cxx_flags_added": [
+        "/bigobj"
+      ],
+      "ggml_native": false,
+      "cpu_variant": "/arch:AVX2; GGML_AVX2; GGML_FMA; GGML_F16C; GGML_BMI2",
+      "cuda_architectures_requested": [
+        "75-real",
+        "80-real",
+        "86-real",
+        "89",
+        "120-real"
+      ],
+      "cuda_architectures_effective": [
+        "75-real",
+        "80-real",
+        "86-real",
+        "89",
+        "120a-real"
+      ],
+      "sd_cuda": true,
+      "sd_webp": false,
+      "sd_webm": false
+    },
+    "configure_warnings": [
+      "CMake CMP0194 warns that MSVC is not an assembler for ASM.",
+      "NCCL was not found; CMake warns that multi-GPU performance may be suboptimal."
+    ],
+    "build_warnings": [
+      "MSVC C4267 narrowing conversion in ggml/src/ggml-impl.h:762.",
+      "MSVC C4244 and C4267 narrowing conversions in thirdparty/zip.c:470 and :1069."
+    ],
+    "recovery": "The first isolated build stopped with MSVC C1128 in src/stable-diffusion.cpp. Adding /bigobj to the isolated CXX flags resolved it without source edits; the final build exited 0."
+  },
+  "observed_device_code": {
+    "sass_cubins": [
+      "sm_75",
+      "sm_80",
+      "sm_86",
+      "sm_89",
+      "sm_120a"
+    ],
+    "ptx_images": [
+      "sm_89.ptx"
+    ],
+    "inspection_tool": "CUDA cuobjdump 13.4 --list-elf and --list-ptx"
+  },
+  "payload": {
+    "install_root_relative_path": "dependencies/stable-diffusion.cpp-cuda13",
+    "files": [
+      {
+        "path": "dependencies/stable-diffusion.cpp-cuda13/bin/sd-cli.exe",
+        "size_bytes": 182785536,
+        "sha256": "2f29c738e9460788fa352fb7bc71ed51cf40ae497fe49c38dde8c6156bed9ee8"
+      },
+      {
+        "path": "dependencies/stable-diffusion.cpp-cuda13/bin/cublas64_13.dll",
+        "size_bytes": 51572848,
+        "sha256": "537d278122e2621d7202653cf873a9b8b872fac37122cb9d36246ded33c53e03"
+      },
+      {
+        "path": "dependencies/stable-diffusion.cpp-cuda13/bin/cublasLt64_13.dll",
+        "size_bytes": 455684208,
+        "sha256": "b37233a1e3516a41d27dcea49595fd1cbaff979b65c80da69935cb59d0d23f5b"
+      }
+    ],
+    "models_included": false
+  },
+  "verification": {
+    "pe_machine": "AMD64 (0x8664)",
+    "delay_imports": [],
+    "normal_import_walk": {
+      "sd-cli.exe": [
+        "cublas64_13.dll"
+      ],
+      "cublas64_13.dll": [
+        "cublasLt64_13.dll"
+      ],
+      "cublasLt64_13.dll": []
+    },
+    "cli_help_command": "sd-cli.exe --help",
+    "cli_help_environment_path": "<package-bin>; %SystemRoot%\\System32",
+    "cli_help_exit_code": 0,
+    "inference_or_model_load": false,
+    "gpu_execution_test": false
+  },
+  "requirements": {
+    "os": "Windows x64; Windows 10 22H2 or Windows 11 releases listed by the NVIDIA CUDA 13.2 Windows installation guide.",
+    "nvidia_driver": "CUDA 13.x minor-version compatibility floor is 580; newer drivers may be needed for newer features.",
+    "gpu_architectures": "CUDA-capable NVIDIA GPU. Direct SASS coverage is SM 7.5, 8.0, 8.6, 8.9, and architecture-specific 12.0a; PTX 8.9 may JIT on newer architectures with a compatible driver. No GPU compatibility or inference was tested.",
+    "cpu": "AVX2 x64 CPU required for the compiled CPU backend; FMA, F16C, and BMI2 paths are enabled.",
+    "msvc_runtime": "Microsoft Visual C++ v14 x64 Redistributable is a system prerequisite and is not bundled.",
+    "cuda_toolkit": "Not required at runtime; required CUDA 13 cuBLAS DLLs are bundled. NVIDIA display driver remains required."
+  },
+  "package_layout": {
+    "schema": "aiwf-sdcpp-cuda13-package-layout-v2",
+    "archive_member_prefix": "dependencies/stable-diffusion.cpp-cuda13/",
+    "checksum_manifest": "SHA256SUMS.txt",
+    "checksum_paths_relative_to": "component root",
+    "manifest_covers_all_other_component_files": true,
+    "repackage_only": true,
+    "binary_rebuilt": false
+  }
+}

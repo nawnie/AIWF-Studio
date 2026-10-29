@@ -1,0 +1,9 @@
+namespace AiwfDesktop
+{
+    // Projects: create, choose the one in focus, see its activity
+    [default_interface]
+    runtimeclass ProjectsPage : Microsoft.UI.Xaml.Controls.Page
+    {
+        ProjectsPage();
+    }
+}

@@ -1,0 +1,7 @@
+# Native compatibility metadata hashes these exact source bytes. Preserve them
+# across Git checkouts so a matching native build is not rejected solely due
+# to automatic line-ending conversion.
+* text=auto
+aiwf/** -text
+native/AIWF.Desktop/engine-api-preflight.py -text
+native/AIWF.Desktop/engine-api-requirements.txt -text

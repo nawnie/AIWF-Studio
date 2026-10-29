@@ -1,0 +1,1 @@
+"""Studio tab event handlers — thin Gradio callbacks over services."""

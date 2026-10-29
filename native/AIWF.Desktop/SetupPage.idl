@@ -1,0 +1,9 @@
+namespace AiwfDesktop
+{
+    // Setup: the guided first run (save locations, model locations, engines, review)
+    [default_interface]
+    runtimeclass SetupPage : Microsoft.UI.Xaml.Controls.Page
+    {
+        SetupPage();
+    }
+}
