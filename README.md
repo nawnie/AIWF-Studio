@@ -80,6 +80,10 @@ vulnerabilities. The complete optional Python inference backend has not yet
 been installed and tested. Its lock is for the native backend and does not
 include the legacy Gradio web interface.
 
+These source changes do not update an existing v25 installation. That preview
+still contains the older affected packages until it is replaced with a tested
+updated build.
+
 The optional inference lock still has reported advisories affecting packages
 including Transformers and Jupyter components. Some fixes require
 versions outside the backend's current compatibility range. Treat this backend
